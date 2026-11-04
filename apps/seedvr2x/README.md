@@ -325,10 +325,15 @@ different on 67 (preferred on 27, the regular 7B on 8), and it has the same memo
 seedvr2x is under the Apache License 2.0 ([LICENSE](LICENSE)). [NOTICE](NOTICE) and the library's
 ([core/NOTICE](../../core/NOTICE)) credit what it includes:
 
-- **SeedVR2's model code**, vendored in `core/seedvr2x/vendor/`: ByteDance Seed's
-  [SeedVR](https://github.com/ByteDance-Seed/SeedVR), as modified by
-  [numz's ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler),
-  both Apache-2.0. The files changed for seedvr2x say so under their original header.
+- **[SeedVR2](https://github.com/ByteDance-Seed/SeedVR)**, by ByteDance Seed (Apache-2.0): the
+  model, its weights and its code, vendored in `core/seedvr2x/vendor/` as numz's copy of it
+  (below).
+- **[ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)**, by
+  numz and its contributors (Apache-2.0): seedvr2x runs its code. The model layer is numz's copy
+  of ByteDance's, taken at commit `4490bd1` and changed where seedvr2x needs it, each change
+  marked under the file's original header; seedvr2x's VAE passes are adapted from numz's
+  modified copies of SeedVR's, and its VAE tiling from numz's own. It was also the reference all
+  of seedvr2x's measurements started from.
 - **The shot detector, TransNetV2** (Tomáš Souček, MIT,
   [soCzech/TransNetV2](https://github.com/soCzech/TransNetV2)): its official PyTorch model,
   vendored unchanged in `core/seedvr2x/transnetv2/` with its licence, and its official weights

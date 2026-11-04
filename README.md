@@ -78,7 +78,7 @@ seedvr2x downloads its own model files from Hugging Face,
 SHA-256. They are unofficial conversions, each made from its original (ByteDance's float32
 weights, TransNetV2's TensorFlow ones) by a script of [models/](models/) that pins its inputs
 and checks its output. Version 0.1.0 runs the float16 files, by default the sharp 7B,
-ByteDance's sharper version of the model.
+ByteDance's sharper version of the model, and the 7Bs in int8 (`--dit-model`).
 
 Beside them, the same 7Bs in smaller files (int8, fp8, GGUF, NVFP4), each made to lose as little
 as possible:
@@ -96,17 +96,22 @@ as possible:
 
 ## Roadmap
 
-- **In development: version 0.1.0,** the base version: the `seedvr2x` command for long videos,
-  on Linux, one GPU per job.
-- **Next:**
-  - **Still images:** the same command on a picture (`seedvr2x photo.png -o photo.4k.png`),
-    through the same models, tiling and colour correction.
-  - **An image server:** images over HTTP, the models loaded once and kept on the GPU; the
-    parameters in the request's headers, the image itself as the body, both ways.
-  - **The 7B in smaller files,** int8 first: seedvr2x running the int8, fp8, GGUF and NVFP4
-    files already published, the same 7B in 4.8 to 8.8 GB instead of 16.5, less of it moved
-    out of the card's memory.
+- **In development: version 0.1.0,** on Linux, one GPU per job:
+  - **The `seedvr2x` command** for long videos and for still pictures
+    (`seedvr2x photo.png -o photo.4k.png`), through the same models, tiling and colour
+    correction.
+  - **An image server:** pictures over HTTP, the models loaded once and kept on the GPU, in a
+    container.
+  - **The 7B in int8,** the 8.3 GB file instead of the float16's 16.5, less of it moved out of
+    the card's memory.
   - **ComfyUI nodes,** built on the same library, for ComfyUI's own workflows.
+- **Next, after 0.1.0:**
+  - **seedvr2x on its own:** 0.1.0's output is held bit for bit to numz's CLI, which proves it
+    runs the same model. After it, seedvr2x's own outputs become its reference, and the model
+    code changes wherever a measurement shows a gain, several pictures in one pass for the image
+    server first.
+  - **The 7B's other smaller files,** already published: fp8, GGUF and NVFP4, 4.8 to 8.8 GB
+    instead of 16.5.
 - **Later:**
   - **Windows itself:** the `seedvr2x` command on Windows, in version 0.2.0. Linux and WSL2 run
     it today.
@@ -132,7 +137,9 @@ seedvr2x stands on others' work:
 - **[SeedVR2](https://github.com/ByteDance-Seed/SeedVR)**, by ByteDance Seed: the model, its
   weights and its code (Apache-2.0), which seedvr2x runs.
 - **[ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)**, by
-  numz and its contributors: the model code as seedvr2x carries it (Apache-2.0), and the
+  numz and its contributors (Apache-2.0): seedvr2x runs its code. The model layer is numz's copy
+  of ByteDance's, taken at commit `4490bd1` and changed where seedvr2x needs it, each change
+  marked; seedvr2x's VAE passes and its VAE tiling are adapted from numz's. It was also the
   reference all of seedvr2x's measurements started from.
 - **[TransNetV2](https://github.com/soCzech/TransNetV2)**, by Tomáš Souček and Jakub Lokoč: the
   shot detector's model and weights (MIT).

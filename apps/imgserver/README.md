@@ -382,6 +382,16 @@ once.
 - Without a key, any client that reaches the server can use the GPU. The log warns of it at the
   start.
 
+## Credits
+
+- **[SeedVR2](https://github.com/ByteDance-Seed/SeedVR)**, by ByteDance Seed: the model, its
+  weights and its code (Apache-2.0).
+- **[ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)**, by
+  numz and its contributors (Apache-2.0): the server runs its code. The model layer is numz's
+  copy of ByteDance's, taken at commit `4490bd1` and changed where seedvr2x needs it, each
+  change marked; seedvr2x's VAE passes and its VAE tiling are adapted from numz's.
+- [core/NOTICE](../../core/NOTICE) credits the rest: TransNetV2, comfy-kitchen and the others.
+
 ## Licence
 
 The server is Apache-2.0 ([LICENSE](LICENSE), [NOTICE](NOTICE)); the image also carries the
