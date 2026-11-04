@@ -402,6 +402,35 @@ def smaller(asked: Asked) -> str:
     return f"; or {pull.smaller_way([each for each, _ in found], asked.model_dir)}"
 
 
+def smaller_line(asked: Asked, made: Made) -> str | None:
+    """The start's line of the smaller DiT files of the asked file (pull.smaller_files) that swap
+    fewer blocks than `made`, the plan of the asked file: each planned again for the same bound
+    and count as `make` does, and the line worded as the command line's (pull.smaller_line; a
+    picture is one latent, so blocks alone, no window: DESIGN.md, Weights, "The dynamic GGUF
+    before v0.1.0 too"). None where the plan swaps none, the file is in the smallest format, its
+    name is unknown, or no smaller file swaps fewer. The file is never changed by itself."""
+    swapped = made.plan.models.swapped
+    if not swapped or not asked.dit_file:
+        return None
+
+    def fewer(each: Architecture) -> str | None:
+        try:
+            other = _made(replace(asked, dit_model=each), asked.bound, asked.count)
+        except Refusal:
+            return None
+        return (
+            _blocks_said(other.plan.models.swapped) if other.plan.models.swapped < swapped else None
+        )
+
+    found = pull.smaller_planning(asked.dit_file, asked.dit_model, fewer)
+    return pull.smaller_line(_blocks_said(swapped), found) if found else None
+
+
+def _blocks_said(swapped: int) -> str:
+    """The blocks a plan swaps, as the line of the smaller files says them (stills.py's)."""
+    return f"{swapped} block{'' if swapped == 1 else 's'}"
+
+
 def _count(count: int) -> str:
     return "one picture" if count == 1 else f"{count} pictures"
 

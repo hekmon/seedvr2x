@@ -971,3 +971,88 @@ def test_serve_makes_the_card_only_once_it_listens(
     code = main.serve(options(tmp_path), None, ("127.0.0.1", port), factory, Metrics())
     assert code == 1
     assert seen == [503]
+
+
+# ---- The smaller DiT files the start's plan names ----------------------------------------------
+
+FULL_HD = (1920, 1080)
+NIGHT_INPUT = 1024 * 576  # 0.6 MP, the warm-up's inputs of the night runs
+
+
+def plan_lines(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cpu_models: model.Models,
+    caplog: pytest.LogCaptureFixture,
+    free_gib: float,
+    **given: Any,
+) -> tuple[list[str], services.Service]:
+    """The lines the start's plan logs at INFO (the card read, the plan made: no models loaded,
+    no warm-up) on a stand-in card with `free_gib` free, one picture at a time within 1920x1080
+    from 0.6 MP unless `given` says otherwise; with the service."""
+    dit_format = given.pop("dit_format", peaks.FP16)
+    machine = StandIn(cpu_models, free_bytes=round(free_gib * GIB), dit_format=dit_format)
+    machine.attention_name = peaks.SDPA
+    settings: dict[str, Any] = {"bound": FULL_HD, "input_pixels": NIGHT_INPUT, "count": 1}
+    settings.update(given)
+    with live(
+        monkeypatch, tmp_path, cpu_models, ready=False, machine=machine, **settings
+    ) as server:
+        server.service.check_files()
+        with caplog.at_level(logging.INFO, logger="imgserver.service"):
+            server.service.plan()
+        lines = [r.getMessage() for r in caplog.records if r.name == "imgserver.service"]
+        return lines, server.service
+
+
+def test_the_start_logs_the_smaller_files_that_swap_fewer_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cpu_models: model.Models,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too", the image server's start alike:
+    the fp16 plan on a card that makes it swap blocks logs the command line's line, blocks alone
+    (a picture is one latent), after the blocks swapped line, at INFO. The stand-in's file name is
+    no pinned one, so both 7Bs' files are named. The file the server runs is never changed."""
+    lines, service = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 12)
+    blocks = next(at for at, each in enumerate(lines) if each.startswith("plan: blocks swapped"))
+    assert lines[blocks + 1] == (
+        "plan: smaller DiT files plan this job better: this plan swaps 19 blocks; for the sharp 7B"
+        " (int8 0 blocks; the dynamic GGUF 0 blocks); for the 7B (int8 0 blocks; the dynamic GGUF"
+        " 0 blocks); --dit-model names them"
+    )
+    assert sum("smaller DiT files" in each for each in lines) == 1
+    assert service.options.dit == "w.safetensors"
+    assert service.made is not None and service.made.plan.dit_model == peaks.FP16
+
+
+def test_the_start_of_an_int8_dit_names_the_gguf_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cpu_models: model.Models,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    lines, _ = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 10, dit_format=peaks.INT8)
+    assert (
+        "plan: smaller DiT files plan this job better: this plan swaps 9 blocks; for the sharp 7B"
+        " (the dynamic GGUF 0 blocks); for the 7B (the dynamic GGUF 0 blocks); --dit-model names"
+        " them"
+    ) in lines
+
+
+def test_the_start_logs_nothing_of_smaller_files_for_the_smallest_format_or_a_plan_without_swaps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cpu_models: model.Models,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The dynamic GGUF is the smallest format, whatever it swaps (12 blocks on 6 GiB here); and a
+    plan that swaps none has nothing a smaller file would spare (fp16 whole on 24 GiB)."""
+    lines, _ = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 6, dit_format=peaks.GGUF_7B)
+    assert any(each.startswith("plan: blocks swapped: 12 ") for each in lines)
+    assert not any("smaller DiT files" in each for each in lines)
+    caplog.clear()
+    lines, _ = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 24)
+    assert any(each.startswith("plan: blocks swapped: none") for each in lines)
+    assert not any("smaller DiT files" in each for each in lines)

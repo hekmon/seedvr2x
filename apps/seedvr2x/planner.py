@@ -7,7 +7,8 @@ Its memory model, the bricks' (peaks.py; the constants named below are its): wha
 predicted to peak at on the GPU, in bytes. The DiT's and the VAE's passes by the fits of
 research/docs/planner-limits.md and research/docs/vram.md, measured on numz's CLI with the 7B
 fp16 (peaks.FP16), and the DiT of seedvr2x's int8 files and dynamic GGUF files by its own weights
-and the fp16 fit's other terms, provisional (peaks.INT8, peaks.GGUF_7B, the job's dit_model); a
+and the fp16 fit's other terms, those of int8 provisional (peaks.INT8) and the GGUF's measured
+(peaks.GGUF_7B, its buffers peaks.GGUF_BUFFERS on the RTX 5090, 2026-11-04; the job's dit_model); a
 tile by the peak measured on seedvr2x's own tiled passes (MEASURED), the fits serving the tiles
 cut off at the picture's edges at a size nobody measured. No VAE pass keeps anything of the shot
 on the GPU (shot.py, seedvr2x/tiling.py), and none is counted by its shot's length. Nor is

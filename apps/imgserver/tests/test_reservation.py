@@ -806,3 +806,66 @@ def test_a_refused_start_names_the_smaller_files_that_fit() -> None:
     # A start that fits is untouched: the same plan and reservation with or without a name.
     fits = two_in_full_hd(16, peaks.INT8, "seedvr2x_ema_7b_sharp_int8_convrot.safetensors")
     assert reservation.make(fits) == reservation.make(replace(fits, dit_file=""))
+
+
+# ---- The smaller DiT files the start's plan line names -------------------------------------------
+
+
+def one_in_full_hd(free_gib: float, dit: Architecture, name: str) -> Asked:
+    """One picture within 1920x1080 from 0.6 MP on `free_gib` GiB, the DiT file `name` in the
+    format dit (SDPA). The plan swaps blocks of fp16's 7B below about 20 GiB (23 at 10, 19 at 12,
+    5 at 18), of int8's 9 at 10 and none from 12, and none of the GGUF's from 10 (the plan, the
+    probe behind these tests)."""
+    return replace(two_in_full_hd(free_gib, dit, name), count=1)
+
+
+def line(asked: Asked) -> str | None:
+    return reservation.smaller_line(asked, reservation.make(asked))
+
+
+def test_the_start_says_the_smaller_files_that_swap_fewer_blocks() -> None:
+    # DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too": the image server's start says what
+    # the command line's plan says, a picture being one latent: blocks alone, no window.
+    sharp = "seedvr2x_ema_7b_sharp_fp16.safetensors"
+    assert line(one_in_full_hd(10, peaks.FP16, sharp)) == (
+        "smaller DiT files plan this job better: this plan swaps 23 blocks; int8 9 blocks;"
+        " the dynamic GGUF 0 blocks; --dit-model names them"
+    )
+    assert line(one_in_full_hd(12, peaks.FP16, sharp)) == (
+        "smaller DiT files plan this job better: this plan swaps 19 blocks; int8 0 blocks;"
+        " the dynamic GGUF 0 blocks; --dit-model names them"
+    )
+    # An int8 DiT is offered the GGUF alone.
+    assert line(
+        one_in_full_hd(10, peaks.INT8, "seedvr2x_ema_7b_sharp_int8_convrot.safetensors")
+    ) == (
+        "smaller DiT files plan this job better: this plan swaps 9 blocks; the dynamic GGUF 0"
+        " blocks; --dit-model names them"
+    )
+    # The regular 7B's file gets the regular 7B's files.
+    regular = line(one_in_full_hd(12, peaks.FP16, "seedvr2x_ema_7b_fp16.safetensors"))
+    assert regular is not None and "seedvr2x_ema_7b_sharp" not in regular
+    assert regular.startswith("smaller DiT files plan this job better: this plan swaps 19 blocks;")
+
+
+def test_the_start_says_nothing_where_no_smaller_file_swaps_fewer() -> None:
+    sharp = "seedvr2x_ema_7b_sharp_fp16.safetensors"
+    # The GGUF is the smallest format; the plan swaps none; the name is unknown; several pictures
+    # at once keep the DiT whole, so their plan swaps none.
+    assert line(one_in_full_hd(10, peaks.GGUF_7B_SHARP, "seedvr2x_ema_7b_sharp_dyn.gguf")) is None
+    assert line(one_in_full_hd(24, peaks.FP16, sharp)) is None
+    assert line(one_in_full_hd(12, peaks.FP16, "")) is None
+    assert (
+        line(two_in_full_hd(16, peaks.INT8, "seedvr2x_ema_7b_sharp_int8_convrot.safetensors"))
+        is None
+    )
+
+
+def test_an_unpinned_dit_name_gives_both_7bs_files_in_the_start_line() -> None:
+    # A file that is not a pinned one does not say which 7B it holds (pull.smaller_files): each
+    # 7B's files, in brackets, the sharp 7B's first.
+    assert line(one_in_full_hd(12, peaks.FP16, "w.safetensors")) == (
+        "smaller DiT files plan this job better: this plan swaps 19 blocks; for the sharp 7B"
+        " (int8 0 blocks; the dynamic GGUF 0 blocks); for the 7B (int8 0 blocks; the dynamic GGUF"
+        " 0 blocks); --dit-model names them"
+    )

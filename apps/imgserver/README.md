@@ -199,7 +199,9 @@ until the warm-up has passed. Its log then says, in order:
 1. the API key's source (never the key), or a warning that there is none, then the listening
    address's source (`--listen`, `SEEDVR2X_LISTEN` or the default);
 2. the model files checked by their SHA-256, pulled at the pinned revision where missing;
-3. the card and the plan for pictures within `--max-size`, in the CLI's words;
+3. the card and the plan for pictures within `--max-size`, in the CLI's words, with the CLI's
+   line of the smaller DiT files (int8, the dynamic GGUF) that would swap fewer blocks, where there
+   are any; the server never changes the file it was given;
 4. the models loaded, and the attention that runs (`flash_attn_2` or `sdpa`); then the
    reservation, what it holds (the models, the pictures at once and each one's share), the CUDA
    context beside it, and what fits in it: the pictures within `--max-size` at once;

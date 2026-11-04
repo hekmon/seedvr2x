@@ -323,7 +323,7 @@ class Service:
             options.model_dir is not None,
         )
         made = reservation.make(asked)
-        for line in still_plan.said(made.plan):
+        for line in still_plan.said(made.plan, smaller=reservation.smaller_line(asked, made)):
             logger.info("%s", line)
         self.made = made
         return made
