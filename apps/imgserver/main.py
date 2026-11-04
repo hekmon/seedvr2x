@@ -1,7 +1,8 @@
 """seedvr2x-imgserver, seedvr2x's image server (DESIGN.md, The image server): its options, its
 environment set before torch is imported, its log, and its life: it listens at once, checks its
 model files, reads the card, plans, loads the models, makes its reservation, warms up, then
-serves until SIGTERM or Ctrl-C."""
+serves until SIGTERM or Ctrl-C, or until a CUDA error (other than out of memory) fails it, which
+ends the process with FAILED_EXIT."""
 
 import argparse
 import logging
@@ -36,6 +37,15 @@ MAX_SIZE = (3840, 2160)
 MAX_INPUT = 50_000_000
 QUEUE = 8
 KEY_VARIABLE = "SEEDVR2X_API_KEY"
+# The exit code of a server that a CUDA error failed (DESIGN.md, /health): the process ends so
+# that a restart policy (Docker's --restart on-failure or unless-stopped, Kubernetes) starts it
+# again on a card in a state it trusts. 3 because the others are taken: 0 stopped, 1 a refused
+# start, 2 argparse's for a wrong option, 128+N a second signal; and a code of its own tells an
+# orchestrator's log, and a user, a failed card from a refused start, which no restart cures.
+FAILED_EXIT = 3
+# How often serve looks at the service's failed event beside the stop's: a signal handler may
+# set an Event but not wait on two; 0.2 s of delay costs nothing before an exit.
+WATCH = 0.2
 DIT = "seedvr2x_ema_7b_sharp_fp16.safetensors"
 VAE = "seedvr2x_ema_vae_fp16.safetensors"
 
@@ -353,6 +363,12 @@ def bring_up(running: Running, machine: "Callable[[], Machine] | None" = None) -
     service.warm_up()
 
 
+def wait_for_end(stop: "Stop", service: "Service") -> None:
+    """Returns once the stop was asked (SIGTERM, Ctrl-C) or the service failed."""
+    while not (stop.asked.is_set() or service.failed.is_set()):
+        stop.asked.wait(WATCH)
+
+
 def shut(running: Running) -> None:
     """The stop: no new picture, those waiting answered 503, those running finished and
     answered, then the listening socket closed."""
@@ -375,7 +391,8 @@ def serve(
 ) -> int:
     """The server's life on `options`, `machine` making the card's reads (service.Card, or the
     tests' stand-in): listening, the start, serving until SIGTERM or Ctrl-C, the stop. Exit 0
-    once stopped, 1 for a start refused."""
+    once stopped, 1 for a start refused, FAILED_EXIT once a CUDA error failed the server (in the
+    warm-up too), after the pictures running are answered."""
     import service as services
     from seedvr2x.errors import Refusal
 
@@ -396,13 +413,27 @@ def serve(
             raise KeyboardInterrupt
         running.service.ready()
         logger.info("ready: /health says ready")
-        stop.asked.wait()
+        wait_for_end(stop, running.service)
+        if running.service.failed.is_set():
+            code = FAILED_EXIT
+            logger.critical(
+                "the server failed (%s): the waiting pictures are answered 503; it exits with"
+                " code %d once the pictures running are answered, for a restart policy to start"
+                " it again",
+                running.service.failure,
+                FAILED_EXIT,
+            )
+            # The pictures waiting were turned away when the state went failed, and no new one is
+            # taken: this waits for those running.
+            assert running.service.admitted is not None
+            running.service.admitted.idle()
     except KeyboardInterrupt:
         if stop.during_start:
             logger.info("asked to stop while starting: nothing was served")
     except (Refusal, services.Failed) as error:
         logger.error("%s; the server stops", error)
-        code = 1
+        # A CUDA error in the warm-up is the card's, not a refusal that a restart would repeat.
+        code = FAILED_EXIT if isinstance(error, services.Failed) and error.fatal else 1
     except Exception as error:
         card = running.service.machine
         if card is None or (not card.fatal(error) and not isinstance(error, card.out_of_memory())):

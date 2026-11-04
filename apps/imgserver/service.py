@@ -273,6 +273,12 @@ class Service:
     _vae: threading.Lock = field(default_factory=threading.Lock)
     _dit: threading.Lock = field(default_factory=threading.Lock)
     _state: threading.Lock = field(default_factory=threading.Lock)
+    # Set where the state goes failed (a CUDA error other than out of memory): main.serve waits
+    # on it beside the stop, then ends the process with main.FAILED_EXIT, so that a restart
+    # policy acts (DESIGN.md, The image server, /health).
+    failed: threading.Event = field(default_factory=threading.Event)
+    # The error that set it, for main's last line.
+    failure: str = ""
 
     # ---- The start ------------------------------------------------------------------------
 
@@ -651,9 +657,11 @@ class Service:
                     self.state = State.FAILED
                 if self.admitted is not None:
                     self.admitted.stop()
+                self.failure = str(error)
+                self.failed.set()
                 logger.critical(
                     "%s: the GPU's state is untrusted, the server takes no picture any longer"
-                    " (/health says failed); restart it",
+                    " (/health says failed); it exits once the pictures running are answered",
                     error,
                 )
                 raise Failed(

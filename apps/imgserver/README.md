@@ -99,11 +99,14 @@ image's name.
   RTX 5090 (DESIGN.md, Still images): give the picture running time to finish with
   `docker run --stop-timeout 120` (in Compose, `stop_grace_period: 2m`). 120 s is a choice: the
   running pictures' time at the card's speed, and the queue's pictures are answered 503 at once.
-- **After a CUDA error the server stays up:** it answers 503 `failed` (on `/health` too) and takes
-  no picture until it is restarted, because a CUDA error leaves the GPU's state untrusted. It does
-  not exit, so Docker's `--restart` policies, which act on the exit alone, do not restart it:
-  restart it by hand (`docker restart`), or run it under an orchestrator that acts on health
-  (Kubernetes' liveness probe on `/health`, Compose with a watcher such as autoheal).
+- **After a CUDA error the container exits,** so that a restart policy acts. A CUDA error other
+  than out of memory leaves the GPU's state untrusted: the picture that failed is answered 500,
+  the waiting ones 503, `/health` says `failed` and no new picture is taken while the pictures
+  still running are answered, then the server exits with code 3 ([exit codes](#exit-codes)).
+  Docker restarts it with `docker run --restart on-failure` or `--restart unless-stopped` (in
+  Compose, `restart: on-failure` or `unless-stopped`), and Kubernetes restarts the container
+  under any `restartPolicy` but `Never`. Without a policy the container stays stopped. The
+  restart repeats the start, model check and warm-up included.
 
 To build the image from a checkout, from the repository's root:
 `docker build -f apps/imgserver/Dockerfile -t seedvr2x-imgserver .`. BuildKit reads
@@ -210,7 +213,7 @@ Each error carries seedvr2x's message as text.
 | 413 | A body over the limit, which follows `--max-input`. The body is not read. |
 | 422 | The body is empty; the picture refused (not a picture, damaged, raw, HDR, animated, transparent, over `--max-input`, too small for the size asked); or the output over `--max-size`. The message names the way out. |
 | 503 | The queue is full, or the server is starting or stopping, with `Retry-After` (15 s). After a CUDA error the server has failed and answers 503 without `Retry-After`: it takes no picture until it is restarted. |
-| 500 | A picture failed (out of memory, an output not finite); the server goes on. |
+| 500 | A picture failed (out of memory, an output not finite); the server goes on. A CUDA error other than out of memory answers 500 too, then the server exits ([exit codes](#exit-codes)). |
 
 ### `GET /health`
 
@@ -221,7 +224,7 @@ Plain text, no key needed.
 | `starting` | 503 | The models are loading, or the warm-up has not passed. |
 | `ready` | 200 | The server takes pictures. |
 | `stopping` | 503 | It was asked to stop: no new picture. |
-| `failed` | 503 | A CUDA error other than out of memory left the card's state untrusted; the server takes no picture and wants a restart. |
+| `failed` | 503 | A CUDA error other than out of memory left the card's state untrusted; the server takes no picture, answers the pictures running, then exits with code 3 ([exit codes](#exit-codes)). |
 
 ### `GET /metrics`
 
@@ -293,6 +296,16 @@ record in each output, says what it holds and why.
 SIGTERM or Ctrl-C: no new picture is taken, the pictures waiting are answered 503, the pictures
 running finish and are answered, then the server exits with code 0. A second signal ends it at
 once.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Stopped by SIGTERM or Ctrl-C, the pictures running finished and answered. |
+| 1 | A refused start ([The start](#the-start)): the log says why. Restarting does not cure it. |
+| 2 | A wrong option, as `--help` says. |
+| 3 | Failed by a CUDA error other than out of memory, in a request or in the warm-up: the pictures running were answered first. A restart policy starts it again. |
+| 128+N | A second signal N while stopping (143 for SIGTERM): the process ended at once. |
 
 ## Before you expose it
 

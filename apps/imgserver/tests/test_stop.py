@@ -1,7 +1,12 @@
 """Stopping the server (DESIGN.md, The image server, Stopping): no new request, the picture running
 finished and answered, the waiting ones answered 503, then the exit. In-process through main.shut,
 and out of process through SIGTERM to main.serve, which owns the signals (a process of its own
-because only a main thread may take them, and a second signal ends the process)."""
+because only a main thread may take them, and a second signal ends the process).
+
+And the server that a CUDA error failed (DESIGN.md, /health): the picture that failed answered 500,
+the waiting ones 503, /health failed meanwhile, then main.serve shuts the server and returns
+main.FAILED_EXIT: in-process (main.serve in a thread, the signals it takes left alone) and as a
+process, whose exit code is the container's."""
 
 import http.client
 import queue
@@ -14,17 +19,22 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from serving import Gate, live, png_of, until
+import serving
+from serving import Gate, Live, StandIn, live, png_of, until
+from test_still import stand_in_dit
 
 import main
 import service as services
-from seedvr2x import model
+from metrics import Metrics
+from seedvr2x import model, weights
 
 TESTS = Path(__file__).resolve().parent
 
 # main.serve on the stand-in machine of serving.py, as a process: the CPU models of the library's
-# tests, the driver asked nothing, and a pass that takes `argv[5]` seconds, announced as RUNNING on
-# stderr, for every picture after the warm-up's (the first). The server's log goes to stderr as
+# tests, the driver asked nothing, and a pass that takes `argv[4]` seconds, announced as RUNNING on
+# stderr, for every picture after the warm-up's first (the old tests' habit; it sleeps in the
+# warm-up too); with `argv[6]` "cuda", the first request after the warm-up's two pictures fails
+# with a CUDA error instead. The server's log goes to stderr as
 # bare messages, `listening on http://HOST:PORT` among them.
 DRIVER = r"""
 import logging
@@ -55,7 +65,12 @@ calls = []
 
 def slow():
     calls.append(1)
-    if len(calls) > 1:
+    if sys.argv[6] == "cuda":
+        # The warm-up's two pictures (landscape and portrait) pass; the first request fails.
+        if len(calls) > 2:
+            print("RUNNING", file=sys.stderr, flush=True)
+            raise RuntimeError("CUDA error: an illegal memory access was encountered")
+    elif len(calls) > 1:
         print("RUNNING", file=sys.stderr, flush=True)
         time.sleep(float(sys.argv[4]))
 
@@ -69,7 +84,7 @@ sys.exit(main.serve(options, None, ("127.0.0.1", 0), lambda: machine, Metrics())
 class Process:
     """The driver's process and its stderr, read line by line in a thread of its own."""
 
-    def __init__(self, seconds: float, tmp_path: Path) -> None:
+    def __init__(self, seconds: float, tmp_path: Path, mode: str = "slow") -> None:
         core_tests = TESTS.parents[2] / "core" / "tests"
         self.process = subprocess.Popen(
             [
@@ -81,6 +96,7 @@ class Process:
                 str(TESTS),
                 str(seconds),
                 str(tmp_path),
+                mode,
             ],
             stderr=subprocess.PIPE,
             text=True,
@@ -116,12 +132,12 @@ class Process:
 
 
 @pytest.fixture
-def driver(tmp_path: Path) -> Iterator[Callable[[float], Process]]:
+def driver(tmp_path: Path) -> Iterator[Callable[..., Process]]:
     """Starts the driver with a pass of the given seconds; every process left is killed."""
     started: list[Process] = []
 
-    def start(seconds: float) -> Process:
-        started.append(Process(seconds, tmp_path))
+    def start(seconds: float, mode: str = "slow") -> Process:
+        started.append(Process(seconds, tmp_path, mode))
         return started[-1]
 
     yield start
@@ -193,7 +209,7 @@ def test_a_picture_sent_while_stopping_is_turned_away(
 
 
 def test_sigterm_finishes_the_picture_running_and_exits_0(
-    driver: Callable[[float], Process],
+    driver: Callable[..., Process],
 ) -> None:
     process = driver(4.0)
     address = process.address()
@@ -208,7 +224,7 @@ def test_sigterm_finishes_the_picture_running_and_exits_0(
 
 
 def test_a_second_sigterm_while_stopping_ends_the_process_at_once(
-    driver: Callable[[float], Process],
+    driver: Callable[..., Process],
 ) -> None:
     process = driver(120.0)
     address = process.address()
@@ -222,3 +238,135 @@ def test_a_second_sigterm_while_stopping_ends_the_process_at_once(
         process.process.send_signal(signal.SIGTERM)
         assert process.process.wait(30) == 128 + signal.SIGTERM
     assert any("asked to stop again" in line for line in process.lines)
+
+
+# ---- A CUDA error --------------------------------------------------------------------------------
+
+
+def serving_in_a_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cpu_models: model.Models, **given: int
+) -> tuple[Live, threading.Thread, list[int]]:
+    """main.serve on the stand-in machine in a thread of its own, its signals left alone (only a
+    main thread may take them): the server it launched, ready, and the code it returns."""
+    monkeypatch.setattr(weights, "check_models", lambda *args: None)
+    stand_in_dit(monkeypatch)
+    machine = StandIn(cpu_models)
+    made: list[main.Running] = []
+    launch = main.launch
+
+    def recording(*args: object) -> main.Running:
+        made.append(launch(*args))  # type: ignore[arg-type]
+        return made[-1]
+
+    monkeypatch.setattr(main, "launch", recording)
+    monkeypatch.setattr(signal, "signal", lambda *args: None)
+    codes: list[int] = []
+    options = serving.options(tmp_path, **given)
+    thread = threading.Thread(
+        target=lambda: codes.append(
+            main.serve(options, None, ("127.0.0.1", 0), lambda: machine, Metrics())
+        ),
+        name="serve",
+    )
+    thread.start()
+    until(lambda: bool(made), "the server never listened")
+    server = Live(made[0], machine, thread, [])
+    until(lambda: server.service.state is services.State.READY, "the server never got ready", 120)
+    return server, thread, codes
+
+
+def test_a_cuda_error_answers_the_pictures_then_ends_the_server_with_the_failed_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cpu_models: model.Models,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Three pictures: A running, B running and failing with a CUDA error, C waiting. B is
+    answered 500, C 503, /health says failed and no new picture is taken while A is still
+    running, which holds the server up; once A is answered, serve shuts it and returns 3."""
+    caplog.set_level("INFO")
+    server, thread, codes = serving_in_a_thread(monkeypatch, tmp_path, cpu_models, count=2, queue=2)
+    release_a, release_b = threading.Event(), threading.Event()
+    entered = [threading.Event(), threading.Event()]
+    calls: list[int] = []
+    lock = threading.Lock()
+
+    def hook() -> None:
+        with lock:
+            calls.append(1)
+            mine = len(calls)
+        entered[mine - 1].set()
+        if mine == 1:
+            assert release_a.wait(60)
+        else:
+            assert release_b.wait(60)
+            raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    server.machine.fail = hook
+    admitted = server.service.admitted
+    assert admitted is not None
+    try:
+        with ThreadPoolExecutor(4) as pool:
+            a = pool.submit(server.upscale, png_of(40, 24, 1), 48, 1)
+            assert entered[0].wait(60)
+            b = pool.submit(server.upscale, png_of(40, 24, 2), 48, 2)
+            assert entered[1].wait(60)
+            c = pool.submit(server.upscale, png_of(40, 24, 3), 48, 3)
+            until(lambda: admitted.waiting == 1, "the third picture never waited")
+            release_b.set()
+            status, _, body = b.result(60)
+            assert status == 500 and "CUDA error" in body.decode()
+            status, headers, body = c.result(60)
+            assert status == 503 and "failed" in body.decode()
+            assert "retry-after" not in headers
+            assert server.service.failed.is_set()
+            # A still runs: the server is up, and says it has failed.
+            assert thread.is_alive()
+            status, _, body = server.request("GET", "/health")
+            assert (status, body.strip()) == (503, b"failed")
+            status, _, body = server.upscale(png_of(40, 24, 4), 48, 4)
+            assert status == 503 and "failed" in body.decode()
+            assert thread.is_alive()
+            release_a.set()
+            assert a.result(60)[0] == 200
+        thread.join(60)
+        assert not thread.is_alive(), "serve didn't return"
+    finally:
+        release_a.set()
+        release_b.set()
+        thread.join(60)
+    assert codes == [main.FAILED_EXIT] == [3]
+    assert "illegal memory access" in caplog.text
+    assert f"exits with code {main.FAILED_EXIT}" in caplog.text
+    with pytest.raises(ConnectionRefusedError):
+        http.client.HTTPConnection(*server.running.address, timeout=5).request("GET", "/health")
+
+
+def test_a_failed_server_with_no_picture_running_ends_at_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cpu_models: model.Models
+) -> None:
+    server, thread, codes = serving_in_a_thread(monkeypatch, tmp_path, cpu_models)
+
+    def broken() -> None:
+        raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    server.machine.fail = broken
+    assert server.upscale(png_of(40, 24), 48)[0] == 500
+    thread.join(60)
+    assert not thread.is_alive()
+    assert codes == [main.FAILED_EXIT]
+
+
+def test_a_cuda_error_exits_the_process_with_the_failed_code(
+    driver: Callable[..., Process],
+) -> None:
+    process = driver(0.0, "cuda")
+    address = process.address()
+    process.wait_for("ready: /health says ready")
+    assert post(address, png_of(40, 24)) == 500
+    assert process.process.wait(120) == main.FAILED_EXIT == 3
+    process.wait_for("stopped", 10)
+    text = "\n".join(process.lines)
+    assert "illegal memory access" in text
+    assert "the GPU's state is untrusted" in text
+    assert "exits with code 3" in text
