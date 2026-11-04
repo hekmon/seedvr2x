@@ -102,22 +102,23 @@ as possible:
     correction.
   - **An image server:** pictures over HTTP, the models loaded once and kept on the GPU, in a
     container.
-  - **The 7B in int8,** the 8.3 GB file instead of the float16's 16.5, less of it moved out of
-    the card's memory.
-  - **ComfyUI nodes,** built on the same library, for ComfyUI's own workflows.
+  - **The 7B in smaller files,** for smaller cards: int8, 8.3 GB, and a GGUF of 4.8 GB, instead
+    of the float16's 16.5, less of it held in the computer's memory and moved to the card.
 - **Next, after 0.1.0:**
+  - **ComfyUI nodes,** built on the same library, for ComfyUI's own workflows: begun, published
+    with version 0.2.0, on Linux, Windows and macOS.
   - **seedvr2x on its own:** 0.1.0's output is held bit for bit to numz's CLI, which proves it
     runs the same model. After it, seedvr2x's own outputs become its reference, and the model
     code changes wherever a measurement shows a gain, several pictures in one pass for the image
     server first.
-  - **The 7B's other smaller files,** already published: fp8, GGUF and NVFP4, 4.8 to 8.8 GB
-    instead of 16.5.
+  - **The 7B's other smaller files,** already published: fp8, NVFP4 and the other GGUF types,
+    4.8 to 8.8 GB instead of 16.5.
 - **Later:**
-  - **Windows itself:** the `seedvr2x` command on Windows, in version 0.2.0. Linux and WSL2 run
-    it today.
+  - **Windows and macOS:** the `seedvr2x` command on both in version 0.2.0, macOS on Apple's M
+    chips. Linux and WSL2 run it today.
   - **HDR sources,** their HDR10 metadata carried to the output.
-  - **Machines whose CPU and GPU share one memory:** Apple Silicon Macs, NVIDIA's DGX Spark and
-    RTX Spark PCs.
+  - **NVIDIA's machines whose CPU and GPU share one memory,** as a Mac's do: the DGX Spark and
+    the RTX Spark PCs.
 
 ## In this repository
 
