@@ -299,7 +299,11 @@ seedvr2x/                the repository
     smaller files of the 7B (the user, 2026-11-04), int8's 8.3 GB and the dynamic GGUF's
     4.8 GB, the model card's tiers, in every app ([Weights](#weights)). An 8 GB card stays out
     at 1080p today by the VAE's floor (8.27 GiB free), which no DiT file moves: how the other
-    two fit one is the measurement's to show.
+    two fit one is the measurement's to show. Emulated on the RTX 5090 under WSL2 (2026-11-04,
+    impl-gguf), where a run keeps 5 GiB of the card back from a driver that lends system memory
+    ([Allocator](#allocator)): the GGUF runs 1080p on 16 GB, 25 blocks swapped; 12 and 8 GB are
+    refused, the VAE's floor binding. The same cards on Linux, and native Windows' share kept
+    back, are the 96 GB card's and v0.2.0's to measure.
   - **The shot's pass moves to the library.** The sliding windows, their blend and the plan that
     sizes them, over frames in memory, are the CLI's today; used by two apps, they become
     bricks of `core/`, the CLI keeping its jobs, cuts, segments and resume, by a change of its
@@ -566,12 +570,15 @@ connect through files.
   way, at 1080p, at 720p and on a crop: the proof that seedvr2x runs numz's model. Since then:
   - the milestone-1 regression keeps its bit-for-bit check, on seedvr2x's own references: its
     output made once on main's code and checked equal to numz's in the same run, the last
-    comparison with numz; a change that moves the output's bits is allowed with a measured
-    reason, and remakes them, said in its commit;
+    comparison with numz (built on 2026-11-04, impl-gguf: on the RTX 5090 its 12 cases equal to
+    numz's; the references kept per card, the 96 GB card's made at its return, a card without
+    its own skipped and named); a change that moves the output's bits is allowed with a
+    measured reason, and remakes them, said in its commit;
   - this copy is seedvr2x's to change, each change still marked as the licence asks, and
     `tools/vendor.py` still showing the diff against numz and ByteDance;
-  - numz's padding mode, a mode of the tests alone, retires once the references are remade in
-    seedvr2x's own padding;
+  - numz's padding mode and the tests' other modes kept for numz's bits, its mirrored tail and
+    its noise drawn on the GPU, retired on 2026-11-04, the references made in seedvr2x's own
+    defaults;
   - what the link kept out is looked at again, each on its measurement: batching several
     pictures in one DiT pass, ByteDance's `repeat_concat_idx` restored
     ([The image server](#the-image-server)), a picture's resize from a contiguous input
@@ -648,7 +655,7 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
   seedvr2x's own runs show (a) an output as close to float16's as another seed, at 1080p and
   4K, (b) a run on every card seedvr2x supports, (c) no card slower than with float16; else
   float16 stays the default and int8 is an option. float16 stays one option away, and
-  milestone 1's regression against numz is held on it. The roadmap shows int8 under next
+  milestone 1's regression is held on it. The roadmap shows int8 under next
   until then. Its gain is memory: half the DiT's weights, so fewer blocks swapped; at 1080p
   the plans keep fp16's windows on every card, bounded by their tokens once every block is
   swapped (24 GB: 17 latents either way, 20 blocks swapped instead of 28). Its speed in a job
@@ -712,9 +719,10 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
     an int8 run refuse it, saying why, as no difference stays silent.
 - **The dynamic GGUF before v0.1.0 too** (the user, 2026-11-04, for the small cards ComfyUI's
   nodes serve): the model card's 4 GB tier, `seedvr2x_ema_7b_sharp_dyn.gguf` and the regular
-  7B's beside it (4.8 GB, a type per matrix among Q3_K to Q8_0), in every app, the CLI, the
-  image server and the nodes alike: a model file is a brick of the library, and a file the
-  nodes took and the CLI refused would stop a user on the way to it. Its gain is memory, the
+  7B's beside it (4.8 GB, each block matrix in Q3_K, Q4_K or Q5_K, chosen among Q3_K to Q8_0
+  when the files were made), in every app, the CLI, the image server and the nodes alike: a
+  model file is a brick of the library, and a file the nodes took and the CLI refused would
+  stop a user on the way to it. Its gain is memory, the
   host's above all: every block swapped, the DiT's weights take about 4.5 GiB of pinned host
   memory in place of float16's 15, and a swap moves under a third of float16's bytes. It saves
   no VRAM where the VAE's floor binds (an 8 GB card at 1080p), and runs a little slower than
@@ -730,8 +738,8 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
     bytes, not 16-bit ones; its buffers in the planner by measurement;
   - the file checked by its own header, as int8's, and both 7Bs' files pinned;
   - an option, never the default: where the card or the host's memory is short for float16,
-    the plan names the smaller files, in a line and in a refusal's way out, and never changes
-    the file by itself.
+    the plan names the smaller files, in a line and in a refusal's way out, the CLI's plan and
+    the image server's start alike (design, 2026-11-04), and never changes the file by itself.
 
   Held to GGUF's own arithmetic, not to numz's run (the user, 2026-11-04, the link to numz cut:
   [Vendored model code](#vendored-model-code)): its dequantisation equal, in float32, to
@@ -739,6 +747,21 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
   float16 as the model card measures it. numz's GGUF path, which the model card's validation
   ran (`models/VALIDATION.md`), decodes in float16: its output is compared once, for the
   record, not matched.
+
+  Built on 2026-11-04 (impl-gguf), on the RTX 5090:
+  - the dequantisation equal bit for bit, in float32, to llama.cpp's (gguf-py 0.19.0) on all
+    288 block matrices of both files, CUDA's to the CPU's; the blocks swapped give the bits of
+    the DiT loaded whole;
+  - its buffers measured, 72 MiB beside the output of a 12288x3072 matrix's multiply in
+    bfloat16 (8,280 rows), the planner's term; at 1080p every phase at or under its plan;
+  - at 1080p, one shot of 239 frames: the DiT 10 to 15% slower than float16's, the models'
+    load half as long; PSNR-Y to float16 at the same seed 40.19 dB (int8 50.87; two seeds of
+    float16 are 37.25 dB apart); a 4K picture from 1080p in 38 s against float16's 90, the
+    models read from a Windows drive;
+  - numz's run of the same file, on milestone 1's input at 720p: numz decodes in float16, 3
+    to 4 roundings where ggml rounds once, and its GGUF output is 44.72 dB from its float16,
+    seedvr2x's 45.69 dB from its own; the two GGUF outputs differ as the two float16 ones do
+    (37.3 dB), by the noise draw, the padding and the tail, not by the dequantisation.
 - **The sharp 7B is the default, on the user's eyes** (2026-10-07): on 75 windows of 4K and
   1080p crops they preferred it or saw no difference on 67 (it 27, the 7B 8), the grainy first
   film's skin no longer "almost reptilian". At 4K it invents less of the fine texture the eyes
@@ -759,7 +782,8 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
   picture's rows. The colour study's scores count the bars, all but ΔE00's lightness and
   colour parts ([colour.md](research/docs/colour.md#what-step-7-recommends)).
 - **The regular 7B stays the reference** milestone 1 is checked with: numz's 7B fp16 file, and
-  seedvr2x's equal to it.
+  seedvr2x's equal to it, until 2026-11-04; since then the regression's references are
+  seedvr2x's own output of it, made per card ([Vendored model code](#vendored-model-code)).
 - **Recognised by content.** A model file is checked by its own tensors, not by its name, which
   is what numz goes by (`src/core/model_configuration.py:718-720`): their names and shapes,
   pinned per architecture, and every tensor's dtype, read from the file's header without
@@ -1590,8 +1614,9 @@ The rule: the upscale must look like its source in any given player.
      - Columns, when the width isn't a multiple of 16, the same way (not measured: outputs are
        mostly 1920 or 3840 wide). It costs 24 rows at 1080p (1,104 for numz's 1,088, +1.5% of
        the tokens) and 32 at 720p.
-     - That ends bit-identity with numz on the default path. The milestone-1 regression runs
-       with numz's padding through a mode internal to the tests, and the new padding is checked
+     - That ends bit-identity with numz on the default path. The milestone-1 regression ran
+       with numz's padding through a mode internal to the tests until 2026-11-04 (retired with
+       the link to numz), and the new padding was checked
        bit-identical to numz with measurement's `NUM_PAD` patch, as milestone 2 checked the
        stitching. Done on 2026-10-09: bit-identical at 1080p (8 rows reflected), at 720p (16)
        and from a 956×530 input to 1912×1060 (12 rows and 8 columns). A target under 17 rows
@@ -1656,8 +1681,9 @@ The rule: the upscale must look like its source in any given player.
      the same on 3 of 4, no difference in any loop of the shot's last second. On the slow pan
      over a flat sky, the mirrored end picked, uncertainly: the detail it keeps could be noise
      or the water's reflection.
-   - As with step 0's padding, milestone 1's regression keeps numz's mirror through a mode of
-     the tests' own (`SEEDVR2X_TESTS_NUMZ_TAIL`). Checked on 2026-10-19 on a shot of 42 frames
+   - As with step 0's padding, milestone 1's regression kept numz's mirror through a mode of
+     the tests' own (`SEEDVR2X_TESTS_NUMZ_TAIL`, retired on 2026-11-04). Checked on 2026-10-19
+     on a shot of 42 frames
      at 1080p, all 42 frames: bit-identical to numz patched to repeat (measurement's
      `NUM_TAIL`), and in that mode to numz itself.
 2. **DiT** on windows:
@@ -1688,10 +1714,10 @@ The rule: the upscale must look like its source in any given player.
        on either: a regression stays held to its card's references. The draw takes 8.8 to 9.0 s
        and 0.99 GiB of system memory for 1,000 latents at 1080p, 12.2 to 12.6 s and 1.42 GiB for
        361 at 4K (a desktop's 16-core CPU), memory the plan counts already, and nothing of the
-       GPU; a job resumed on another card draws the same noise. Milestone 1's regression keeps
-       numz's draw on the GPU through a mode of the tests' own, as it keeps numz's padding, and
-       so does every GPU test held to a reference numz made; the other references were made
-       again (2026-10-16, on the RTX PRO 6000).
+       GPU; a job resumed on another card draws the same noise. Milestone 1's regression kept
+       numz's draw on the GPU through a mode of the tests' own, as it kept numz's padding, until
+       2026-11-04, when the modes retired and its references were made again in seedvr2x's own
+       defaults; the other references were made again on 2026-10-16, on the RTX PRO 6000.
    - each shot's generator is seeded with the seed plus the shot's first frame index in the
      source.
      - A shot starting at frame 0 gets the plain seed, as numz's single batch does.
