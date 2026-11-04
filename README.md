@@ -125,6 +125,7 @@ as possible:
 | Where | What |
 |---|---|
 | [apps/seedvr2x/](apps/seedvr2x/) | The `seedvr2x` command, its [README](apps/seedvr2x/README.md) and [manual](apps/seedvr2x/MANUAL.md) |
+| [apps/imgserver/](apps/imgserver/) | The image server: pictures over HTTP, the models kept on the GPU, in a container; its [README](apps/imgserver/README.md) |
 | [core/](core/) | The library the apps assemble: SeedVR2's model and each step of an upscale |
 | [models/](models/) | The scripts that make the model files |
 | [research/](research/) | The measurements behind every decision, with the scripts that made them |
