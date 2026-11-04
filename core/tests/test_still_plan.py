@@ -26,7 +26,7 @@ from seedvr2x.vendor.models.dit_7b.window import (
     make_720Pwindows_bysize,
     make_shifted_720Pwindows_bysize,
 )
-from seedvr2x.weights import Architecture
+from seedvr2x.weights import DIT_3B, Architecture
 
 # pyright: reportPrivateUsage=false
 
@@ -612,6 +612,45 @@ def test_int8_needs_less_and_sdpa_more() -> None:
     assert refused.value.phase == "dit"
 
 
+@pytest.mark.parametrize("gguf", [peaks.GGUF_7B, peaks.GGUF_7B_SHARP], ids=["7b", "sharp"])
+def test_the_gguf_dit_is_planned_by_its_own_blocks(gguf: Architecture) -> None:
+    # The dynamic GGUF file's DiT, accepted (peaks.DITS): its weights 4.43 GiB where fp16's take
+    # 15.35 and int8's 7.76, so fewer blocks swapped and less pinned than either on the same card.
+    fp16 = made(EIGHT_K, card(24))
+    int8 = made(EIGHT_K, card(24), dit_model=peaks.INT8)
+    held = made(EIGHT_K, card(24), dit_model=gguf)
+    assert held.models.swapped < int8.models.swapped < fp16.models.swapped
+    assert held.pinned < int8.pinned < fp16.pinned
+    assert made(EIGHT_K, card(96), dit_model=gguf).dit_peak < made(EIGHT_K, card(96)).dit_peak
+    # Its blocks differ (a type per matrix): what is pinned is the sum of the blocks that leave,
+    # each page-rounded, the last ones by their own bytes, not as many of the largest.
+    sizes = peaks.block_sizes(gguf)
+    assert len(set(sizes)) > 1 and sizes[0] != sizes[-1]
+    everything = ModelPlan(36, 0, 0, vae_in_dit=False)
+    some = ModelPlan(3, None, None, vae_in_dit=True)
+    pinned = still_plan._pinned  # pyright: ignore[reportPrivateUsage]
+
+    def pages(*parts: int) -> int:
+        return sum(-(-part // mmap.PAGESIZE) * mmap.PAGESIZE for part in parts)
+
+    assert pinned(some, gguf) == pages(*sizes[-3:]) < 3 * pages(max(sizes))
+    assert pinned(everything, gguf) == pages(*sizes, peaks.DIT_OTHER, peaks.VAE_WEIGHTS)
+    assert f"{pinned(everything, gguf) / GIB:.2f}" == "4.90"
+    # Every block swapped on a card the DiT could not otherwise fit, 8 GB at 4K: 27 swapped.
+    small = made(FOUR_K, card(8), dit_model=gguf)
+    assert small.models.swapped == 27 and small.models.vae_in_dit is False
+    # The plan says what the file is and what its buffers are counted as.
+    text = "\n".join(still_plan.said(made(FOUR_K, card(24), dit_model=gguf)))
+    assert (
+        "DiT: its weights in seedvr2x's dynamic GGUF, 4.43 GiB, under a third of fp16's; a"
+        f" window's memory counted as fp16's plus {peaks.GGUF_BUFFERS / GIB:.2f} GiB for the"
+        " dequantisation's buffers; --dit-model names the file"
+    ) in text
+    # Another architecture is still refused, in words that name the GGUF files.
+    with pytest.raises(ValueError, match="for its fp16, int8 and dynamic GGUF files"):
+        made(EIGHT_K, card(24), dit_model=DIT_3B)
+
+
 def test_the_colour_correction_term_is_counted_when_the_decode_splits() -> None:
     # A picture's decode is closed before its colour correction starts (still.upscale), so their
     # working memory is never alive at once: the decode's peak is the larger of the pass and the
@@ -1017,6 +1056,21 @@ def test_said_without_a_target_gives_the_plan_in_the_planners_words() -> None:
         "system memory: " in text and f"pinned for {plan.models.swapped} blocks and the VAE" in text
     )
     assert "picture:" not in text and "decode: " not in text.replace("in the decode: ", "")
+
+
+def test_said_puts_the_smaller_files_line_after_the_blocks_swapped() -> None:
+    # The line of the smaller DiT files that plan the job better (the command line's stills.py makes
+    # it, as the planner's smaller_swaps does for a video) comes after the blocks swapped line, as
+    # the planner's; with none given the lines are the plan's alone.
+    plan = made(EIGHT_K, card(24), 64 * GIB)
+    plain = still_plan.said(plan)
+    line = "smaller DiT files plan this job better: this plan swaps 27 blocks; int8 0 blocks"
+    lines = still_plan.said(plan, smaller=line)
+    at = next(
+        number for number, each in enumerate(lines) if each.startswith("plan: blocks swapped")
+    )
+    assert lines[at + 1] == f"plan: {line}"
+    assert [each for each in lines if each != f"plan: {line}"] == plain
 
 
 def test_said_with_a_target_gives_the_pictures_passes_and_their_peaks() -> None:

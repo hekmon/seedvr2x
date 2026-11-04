@@ -33,7 +33,7 @@ dependencies = [
 seedvr2x = "main:main"
 
 [dependency-groups]
-dev = ["pyright[nodejs]", "pytest", "ruff"]
+dev = ["gguf==0.19.0", "pyright[nodejs]", "pytest", "ruff"]
 
 # setuptools, not uv's backend, which packages folders only: the CLI is flat, its modules at the
 # app's root with no package folder (DESIGN.md, Repository and apps, step 2). Each is listed, and

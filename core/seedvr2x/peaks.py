@@ -78,17 +78,24 @@ DIT_ATTENTION = {FLASH_ATTN_2: (0, 1.0), SDPA: (round(0.141 * GIB), 1.0469)}
 # 0.47 GiB: 28.15 to 27.68 GiB (Memory planner, Per-phase peaks; vram.md, Practical rules).
 VAE_WEIGHTS = 501_306_880
 
-# The DiT seedvr2x runs, the 7B, in either of its files' formats (weights.ACCEPTED): FP16, the
-# format the fits were measured in, and INT8, seedvr2x's int8 files. Each figure of a format's
-# weights by the model's own constants, its files' headers' (seedvr2x/weights.py, which imports
-# no torch; the placement moves the weights by the same): its blocks, 36 in both, and a block's
-# parameters in bytes, all alike, 0.4220 GiB in fp16, the 36 holding 15.19 of the DiT's 15.35 GiB
-# (DESIGN.md, Memory planner, Host RAM), and 0.2113 GiB in int8, 7.61 of its 7.76. The module's
-# BLOCK and DIT_OTHER are fp16's; block_bytes and other_bytes give either format's. SLOTS: the
-# buffers on the GPU its swapped blocks stream through (DESIGN.md, BlockSwap, rewritten).
+# The DiT seedvr2x runs, the 7B, in any of its files' formats (weights.ACCEPTED): FP16, the
+# format the fits were measured in, INT8, seedvr2x's int8 files, and the dynamic GGUF files, the
+# regular 7B's and the sharp one's (GGUF_7B, GGUF_7B_SHARP). Each figure of a format's weights by
+# the model's own constants, its files' headers' (seedvr2x/weights.py, which imports no torch; the
+# placement moves the weights by the same): its blocks, 36 in all, and a block's parameters in
+# bytes. In fp16 and int8 the 36 are alike, 0.4220 GiB in fp16, the 36 holding 15.19 of the DiT's
+# 15.35 GiB (DESIGN.md, Memory planner, Host RAM), and 0.2113 GiB in int8, 7.61 of its 7.76. In a
+# dynamic GGUF file they differ, from 0.105 to 0.121 GiB: a type per matrix, so a block's bytes
+# are its own (block_sizes), the 36 holding 4.28 of the DiT's 4.43 GiB. The module's
+# BLOCK and DIT_OTHER are fp16's; block_bytes, block_sizes and other_bytes give any format's.
+# SLOTS: the buffers on the GPU its swapped blocks stream through (DESIGN.md, BlockSwap,
+# rewritten), each as large as the largest block swapped (slot_bytes: blockswap.Placement's
+# block_bytes).
 FP16 = weights.DIT_7B
 INT8 = weights.DIT_7B_INT8
-DITS = (FP16, INT8)
+GGUF_7B = weights.DIT_7B_DYN
+GGUF_7B_SHARP = weights.DIT_7B_SHARP_DYN
+DITS = (FP16, INT8, GGUF_7B, GGUF_7B_SHARP)
 DIT = FP16
 BLOCKS = len(FP16.blocks)
 BLOCK = FP16.blocks[0]
@@ -158,10 +165,67 @@ INT8_BUFFERS = (
 )
 
 
+# The DiT in seedvr2x's dynamic GGUF files (GGUF_7B; DESIGN.md, Weights, "The dynamic GGUF before
+# v0.1.0 too"): its peak is the fp16 fit's with its weights' bytes in the place of fp16's
+# (loaded), exact, and one term, GGUF_BUFFERS. The activations are the fp16 fit's: between the
+# linears the tensors are the same, in the pipeline's bfloat16, a linear's output the same size,
+# and the attention in 16 bits as in fp16 (GGUF_PER_TOKEN, GGUF_PER_WINDOW).
+GGUF_PER_TOKEN = PER_TOKEN
+GGUF_PER_WINDOW = PER_WINDOW
+# What a GGUF linear holds beside its output while it runs (seedvr2x/kquant.py: GGUFLinear
+# dequantises each matrix straight into bfloat16 just before its multiply and frees it after):
+# the matrix in bfloat16, the largest of the 7B's, 3,072 x 12,288 values. The dequantisation's
+# temporaries, one chunk of kquant.BLOCKS blocks in float32 and the step's intermediates, are
+# freed before the multiply's output is allocated, so they add nothing at the peak. Measured on
+# the RTX 5090 (2026-11-04, tests/test_kquant.py's GPU test
+# test_a_linear_s_memory_beside_its_output_is_printed, Q3_K, Q4_K and Q5_K alike): 12,288 x 3,072
+# matrix, a linear of 8,280 rows (a 1080p latent) in bfloat16, 75,522,048 bytes beside the output
+# at the peak, the bfloat16 matrix (75,497,472) plus 24,576. A 1080p job of 239 frames with the
+# sharp GGUF (one window of 17 latents at most, FA2) peaked 0.13 GiB under the plan made with the
+# earlier, provisional term (the matrix plus 52 MB of temporaries, 0.12 GiB). A literal here, since
+# seedvr2x/kquant.py imports torch (tests/test_peaks.py holds the matrix equal to its size).
+GGUF_MATRIX = 3072 * 12288 * 2
+GGUF_BUFFERS = 75_522_048
+
+
+def block_sizes(dit_model: weights.Architecture) -> tuple[int, ...]:
+    """Each block's parameters in bytes in one of the DiT's formats (DITS), in the DiT's order: 36
+    figures of 453,133,312 in fp16, of 226,862,080 in int8, from 112,509,952 to 129,909,760 in a
+    dynamic GGUF file. ValueError for another architecture."""
+    return _format(dit_model).blocks
+
+
 def block_bytes(dit_model: weights.Architecture) -> int:
-    """A block's parameters in bytes in one of the DiT's formats (DITS): 453,133,312 in fp16,
-    226,862,080 in int8, every block alike. ValueError for another architecture."""
-    return _format(dit_model).blocks[0]
+    """The largest block's parameters in bytes in one of the DiT's formats (DITS): 453,133,312 in
+    fp16, 226,862,080 in int8, every block alike; 129,909,760 in a dynamic GGUF file, where blocks
+    differ (block_sizes). ValueError for another architecture."""
+    return max(block_sizes(dit_model))
+
+
+def leaving_blocks(dit_model: weights.Architecture, count: int) -> tuple[int, ...]:
+    """The bytes of the DiT's last `count` blocks, those that leave the GPU in some phase (the
+    swapped ones come last, then those a VAE phase sends away: blockswap.dit_parts), in the DiT's
+    order. ValueError for another architecture."""
+    sizes = block_sizes(dit_model)
+    return sizes[len(sizes) - count :]
+
+
+def slot_bytes(dit_model: weights.Architecture, swapped: int) -> int:
+    """The bytes of one slot of the GPU with the last `swapped` blocks swapped: the largest of
+    them, as blockswap.Placement.block_bytes has it (0 with none swapped). ValueError for another
+    architecture."""
+    return max(leaving_blocks(dit_model, swapped), default=0)
+
+
+def swapped_saving(dit_model: weights.Architecture, swapped: int) -> int:
+    """What the last `swapped` blocks swapped take off the DiT's phase, in bytes: their own bytes
+    less the SLOTS slots they stream through, each the largest of them (slot_bytes). In fp16 and
+    int8, where the blocks are alike, one block's bytes for each beyond the SLOTS (0 for one and
+    two); in a dynamic GGUF file the same sum less what the slots' size adds, so two swapped
+    blocks of unequal sizes save a little less than nothing. ValueError for another
+    architecture."""
+    left = leaving_blocks(dit_model, swapped)
+    return sum(left) - min(swapped, SLOTS) * max(left, default=0)
 
 
 def other_bytes(dit_model: weights.Architecture) -> int:
@@ -172,7 +236,8 @@ def other_bytes(dit_model: weights.Architecture) -> int:
 
 def weights_bytes(dit_model: weights.Architecture) -> int:
     """The DiT's parameters in bytes in one of its formats (DITS), by its files' headers: 15.35
-    GiB in fp16, 7.76 in int8. ValueError for another architecture."""
+    GiB in fp16, 7.76 in int8, 4.43 in a dynamic GGUF file. ValueError for another
+    architecture."""
     found = _format(dit_model)
     return sum(found.blocks) + found.other
 
@@ -180,15 +245,18 @@ def weights_bytes(dit_model: weights.Architecture) -> int:
 def loaded(dit_model: weights.Architecture) -> int:
     """What the loaded DiT holds on the GPU before a forward in one of its formats (DITS), the
     VAE's weights included, in bytes: DIT_LOADED, the fp16 fit's constant, its weights' bytes
-    exchanged for the format's own (weights_bytes): 15.871 GiB in fp16, 8.285 in int8.
-    ValueError for another architecture."""
+    exchanged for the format's own (weights_bytes): 15.871 GiB in fp16, 8.285 in int8, 4.95 in a
+    dynamic GGUF file. ValueError for another architecture."""
     return DIT_LOADED - weights_bytes(FP16) + weights_bytes(dit_model)
 
 
 def _format(dit_model: weights.Architecture) -> weights.Architecture:
     """dit_model when it is one of the DiT's formats (DITS); ValueError for another."""
     if dit_model not in DITS:
-        raise ValueError(f"{dit_model.name}: the DiT's figures are for {FP16.name} in fp16 or int8")
+        raise ValueError(
+            f"{dit_model.name}: the DiT's figures are for {FP16.name} in fp16, in int8 or in the"
+            " dynamic GGUF files"
+        )
     return dit_model
 
 
@@ -420,10 +488,13 @@ def dit_peak(
     frames, `swapped` of the DiT's blocks swapped, the VAE's weights on the GPU meanwhile unless
     vae_in_dit is False, by the fit of the attention backend the run takes (DIT_ATTENTION;
     ValueError for another name), the DiT in the format of its file (dit_model, one of DITS;
-    ValueError for another): in int8, its weights' bytes and the INT8_* terms (provisional).
+    ValueError for another): in int8, its weights' bytes and the INT8_* terms (provisional); in a
+    dynamic GGUF file, its weights' bytes and GGUF_BUFFERS (measured).
 
     A swapped block takes its BLOCK off the peak, but for the SLOTS on the GPU (DESIGN.md,
-    BlockSwap, rewritten), so that one or two swapped blocks save nothing: measured on seedvr2x,
+    BlockSwap, rewritten), so that one or two swapped blocks save nothing (swapped_saving: in a
+    GGUF file, whose blocks differ, the slots are the largest swapped block's size): measured on
+    seedvr2x,
     one window of 1 latent at 1080p, the peak with S blocks swapped is the peak with none less
     BLOCK x max(S - 2, 0), to 0.001 GiB (17.016 GiB with none, 16.595 with 3, 12.796 with 12,
     2.668 with 36; milestone 3, 2026-10-11, as tests/test_placement.py measures it). numz's own
@@ -451,9 +522,8 @@ def dit_least(
     constant, factor = DIT_ATTENTION[attention]
     int8 = _format(dit_model) == INT8
     per_token = (INT8_PER_TOKEN if int8 else PER_TOKEN) * factor * tokens(padded, latents)
-    buffers = INT8_BUFFERS if int8 else 0
-    block = block_bytes(dit_model)
-    least = loaded(dit_model) + constant + buffers + per_token - block * max(0, swapped - SLOTS)
+    buffers = INT8_BUFFERS if int8 else GGUF_BUFFERS if dit_model.layout == weights.GGUF else 0
+    least = loaded(dit_model) + constant + buffers + per_token - swapped_saving(dit_model, swapped)
     return least if vae_in_dit else least - VAE_WEIGHTS
 
 
@@ -471,12 +541,13 @@ def dit_on_gpu(resident: int | None, swapped: int, dit_model: weights.Architectu
     fixed = BLOCKS - swapped
     if not 0 <= swapped <= BLOCKS or not (resident is None or 0 <= resident <= fixed):
         raise ValueError(f"{resident} blocks resident, {swapped} swapped, of the DiT's {BLOCKS}")
-    block, other = block_bytes(dit_model), other_bytes(dit_model)
+    sizes, other = block_sizes(dit_model), other_bytes(dit_model)
     if resident is None:
-        return DIT_BUFFERS + other + block * (fixed + min(swapped, SLOTS))
+        slots = min(swapped, SLOTS) * slot_bytes(dit_model, swapped)
+        return DIT_BUFFERS + other + sum(sizes[:fixed]) + slots
     if resident == 0:
         return DIT_BUFFERS
-    return DIT_BUFFERS + other + block * resident
+    return DIT_BUFFERS + other + sum(sizes[:resident])
 
 
 @cache

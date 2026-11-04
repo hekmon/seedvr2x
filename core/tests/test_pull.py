@@ -188,14 +188,17 @@ INTO_MODEL_DIR = "or leave out --model-dir, which takes it from Hugging Face's c
 
 def test_pins_recorded() -> None:
     # The model conversation's record of the upload (2026-10-08), the int8 files' as
-    # models/seedvr2_int8.py pins their SHA-256 (OUTPUTS); test_pins_are_the_revisions holds them
-    # to the revision itself. Each in its role.
+    # models/seedvr2_int8.py pins their SHA-256 (OUTPUTS), the dynamic GGUF files' those of their
+    # lines of SHA256SUMS at REVISION (2026-11-04); test_pins_are_the_revisions holds them to the
+    # revision itself. Each in its role.
     assert (pull.REPO, pull.REVISION) == ("hekmon/seedvr2x", REVISION)
     assert {name: (pin.size, pin.sha256[:8], pin.role) for name, pin in pull.PINNED.items()} == {
         "seedvr2x_ema_7b_fp16.safetensors": (16_479_335_080, "071cab5e", "dit"),
         "seedvr2x_ema_7b_sharp_fp16.safetensors": (16_479_335_088, "5eb47fde", "dit"),
         "seedvr2x_ema_7b_int8_convrot.safetensors": (8_333_648_992, "7eb2c784", "dit"),
         "seedvr2x_ema_7b_sharp_int8_convrot.safetensors": (8_333_649_000, "d83aeaa4", "dit"),
+        "seedvr2x_ema_7b_dyn.gguf": (4_757_055_264, "f8c0c50d", "dit"),
+        "seedvr2x_ema_7b_sharp_dyn.gguf": (4_757_129_024, "90ba80c8", "dit"),
         "seedvr2x_ema_vae_fp16.safetensors": (501_325_454, "b9c6ebf0", "vae"),
         "transnetv2.safetensors": (30_482_632, "bb8c8388", "detector"),
     }
@@ -205,6 +208,105 @@ def test_pins_recorded() -> None:
         2335,
         "57cf5a7b",
         None,
+    )
+
+
+def test_the_smaller_files_of_a_dit_file_are_its_formats_below() -> None:
+    # DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too": a refusal for memory names the
+    # smaller pinned files (pull.smaller_files). A pinned file's 7B is known (MODEL_OF, held to
+    # PINNED here): it gets its own 7B's files, unmarked. Any other file (numz's, a renamed one)
+    # is never guessed at from its name: both 7Bs' files, each marked with its model. fp16 has
+    # two smaller files a 7B, int8 one, a GGUF none.
+    dits = {name for name, pin in pull.PINNED.items() if pin.role == "dit"}
+    assert set(pull.MODEL_OF) == dits
+    assert {name for name, model in pull.MODEL_OF.items() if model == pull.SHARP} == {
+        name for name in dits if "sharp" in name
+    }
+    sharp = [
+        ("int8", "seedvr2x_ema_7b_sharp_int8_convrot.safetensors", weights.DIT_7B_INT8),
+        ("the dynamic GGUF", "seedvr2x_ema_7b_sharp_dyn.gguf", weights.DIT_7B_SHARP_DYN),
+    ]
+    regular = [
+        ("int8", "seedvr2x_ema_7b_int8_convrot.safetensors", weights.DIT_7B_INT8),
+        ("the dynamic GGUF", "seedvr2x_ema_7b_dyn.gguf", weights.DIT_7B_DYN),
+    ]
+    for name, expected in (
+        ("seedvr2x_ema_7b_sharp_fp16.safetensors", sharp),
+        ("seedvr2x_ema_7b_fp16.safetensors", regular),
+    ):
+        found = pull.smaller_files(name, weights.DIT_7B)
+        assert [(one.label, one.name, one.architecture) for one in found] == expected, name
+        assert [one.size for one in found] == [pull.PINNED[one.name].size for one in found]
+        assert {one.model for one in found} == {None}
+    # An int8 file gets the GGUF of its own 7B; a GGUF nothing.
+    assert [one.name for one in pull.smaller_files(sharp[0][1], weights.DIT_7B_INT8)] == [
+        "seedvr2x_ema_7b_sharp_dyn.gguf"
+    ]
+    assert [one.name for one in pull.smaller_files(regular[0][1], weights.DIT_7B_INT8)] == [
+        "seedvr2x_ema_7b_dyn.gguf"
+    ]
+    for name in ("seedvr2x_ema_7b_dyn.gguf", "seedvr2x_ema_7b_sharp_dyn.gguf", "x"):
+        assert pull.smaller_files(name, weights.DIT_7B_DYN) == []
+        assert pull.smaller_files(name, weights.DIT_7B_SHARP_DYN) == []
+    assert pull.smaller_files("seedvr2x_ema_7b_fp16.safetensors", weights.DIT_3B) == []
+    # Other files, whatever their names say: both 7Bs, the sharp one first, each marked.
+    for name in ("seedvr2_ema_7b_fp16.safetensors", "seedvr2_ema_7b_sharp_fp16.safetensors", "x"):
+        found = pull.smaller_files(name, weights.DIT_7B)
+        assert [(one.model, one.name) for one in found] == [
+            (pull.SHARP, sharp[0][1]),
+            (pull.SHARP, sharp[1][1]),
+            (pull.REGULAR, regular[0][1]),
+            (pull.REGULAR, regular[1][1]),
+        ]
+        assert [one.name for one in pull.smaller_files(name, weights.DIT_7B_INT8)] == [
+            sharp[1][1],
+            regular[1][1],
+        ]
+    # Planned with: those the callable makes something of, in the order of their size.
+    planned = pull.smaller_planning(
+        "seedvr2_ema_7b_fp16.safetensors",
+        weights.DIT_7B,
+        lambda each: each.name if each == weights.DIT_7B_SHARP_DYN else None,
+    )
+    assert [(one.model, one.label, made) for one, made in planned] == [
+        (pull.SHARP, "the dynamic GGUF", weights.DIT_7B_SHARP_DYN.name)
+    ]
+    assert pull.smaller_planning("x", weights.DIT_7B, lambda each: None) == []
+    int8_sharp = "int8 (--dit-model seedvr2x_ema_7b_sharp_int8_convrot.safetensors, 8.3 GB)"
+    gguf_sharp = "the dynamic GGUF (--dit-model seedvr2x_ema_7b_sharp_dyn.gguf, 4.8 GB)"
+    int8_regular = "int8 (--dit-model seedvr2x_ema_7b_int8_convrot.safetensors, 8.3 GB)"
+    gguf_regular = "the dynamic GGUF (--dit-model seedvr2x_ema_7b_dyn.gguf, 4.8 GB)"
+    way = "a smaller DiT file that plans this job: "
+    assert pull.smaller_way([one for one, _ in planned]) == f"{way}for the sharp 7B, {gguf_sharp}"
+    assert (
+        pull.smaller_way(
+            pull.smaller_files("seedvr2x_ema_7b_sharp_fp16.safetensors", weights.DIT_7B)
+        )
+        == f"{way}{int8_sharp} or {gguf_sharp}"
+    )
+    # The plan's line of those that plan the job better lists them the same way, with the
+    # figures of the plan and of each file.
+    assert pull.smaller_line(
+        "11 blocks with windows of 10 latents",
+        [
+            (one, "19 blocks, windows of 17")
+            for one in pull.smaller_files(sharp[0][1], weights.DIT_7B)
+        ],
+    ) == (
+        "smaller DiT files plan this job better: this plan swaps 11 blocks with windows of 10"
+        " latents; int8 19 blocks, windows of 17; the dynamic GGUF 19 blocks, windows of 17;"
+        " --dit-model names them"
+    )
+    assert pull.smaller_line(
+        "3 blocks", [(one, "0 blocks") for one in pull.smaller_files("x", weights.DIT_7B)]
+    ) == (
+        "smaller DiT files plan this job better: this plan swaps 3 blocks; for the sharp 7B"
+        " (int8 0 blocks; the dynamic GGUF 0 blocks); for the 7B (int8 0 blocks; the dynamic GGUF"
+        " 0 blocks); --dit-model names them"
+    )
+    assert pull.smaller_way(pull.smaller_files("x", weights.DIT_7B)) == (
+        f"{way}for the sharp 7B, {int8_sharp} or {gguf_sharp};"
+        f" for the 7B, {int8_regular} or {gguf_regular}"
     )
 
 
@@ -477,7 +579,8 @@ def test_a_long_hash_is_named_before_it_starts(
 # What --dit-model takes without --model-dir, as a refusal lists them: seedvr2x's own DiTs.
 DITS = (
     "seedvr2x_ema_7b_fp16.safetensors, seedvr2x_ema_7b_sharp_fp16.safetensors,"
-    " seedvr2x_ema_7b_int8_convrot.safetensors or seedvr2x_ema_7b_sharp_int8_convrot.safetensors"
+    " seedvr2x_ema_7b_int8_convrot.safetensors, seedvr2x_ema_7b_sharp_int8_convrot.safetensors,"
+    " seedvr2x_ema_7b_dyn.gguf or seedvr2x_ema_7b_sharp_dyn.gguf"
 )
 
 
@@ -1092,7 +1195,8 @@ def test_pins_are_the_revisions(tmp_path: Path) -> None:
         assert found["sizes"][name] == pin.size, name
 
 
-# The four v1 files the opt-in pull fetches: the int8 files, 16.7 GB more, not among them.
+# The four v1 files the opt-in pull fetches: the int8 files, 16.7 GB more, and the dynamic GGUF
+# files, 9.5 GB more, not among them.
 V1_FILES = (
     "seedvr2x_ema_7b_fp16.safetensors",
     "seedvr2x_ema_7b_sharp_fp16.safetensors",

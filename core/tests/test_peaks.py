@@ -8,7 +8,7 @@ shapes are counted."""
 
 import pytest
 
-from seedvr2x import peaks, tilegrid
+from seedvr2x import peaks, tilegrid, weights
 from seedvr2x.frames import output_size, padded_size
 from seedvr2x.passes import Tiles
 from seedvr2x.peaks import GIB
@@ -252,14 +252,141 @@ def test_the_int8_dit_s_figures() -> None:
             OURS_1080, HD, tiles, resident, dit_model=int8
         )
     # Another architecture has no figures here.
-    from seedvr2x import weights
-
     for call in (
         lambda: peaks.dit_peak(OURS_1080, 1, dit_model=weights.DIT_3B),
         lambda: peaks.dit_on_gpu(None, 0, weights.VAE),
     ):
         with pytest.raises(ValueError, match="the DiT's figures are for"):
             call()
+
+
+def test_the_gguf_dit_s_figures() -> None:
+    # The DiT in seedvr2x's dynamic GGUF files: its weights by their headers (weights.DIT_7B_DYN
+    # and the sharp one), a type per matrix, so a block's bytes its own (113,689,600 to
+    # 129,909,760 in the regular 7B's), its other parameters fp16's; loaded, the fp16 fit's
+    # constant with its weights' bytes exchanged for these, 4.95 GiB for 15.871. Its window's
+    # peak: fp16's with those weights and GGUF_BUFFERS (measured), on either attention backend.
+    fp16 = peaks.FP16
+    assert peaks.DITS == (fp16, peaks.INT8, peaks.GGUF_7B, peaks.GGUF_7B_SHARP)
+    for gguf, blocks_gib, weights_gib in (
+        (peaks.GGUF_7B, "4.2753", "4.430"),
+        (peaks.GGUF_7B_SHARP, "4.2754", "4.430"),
+    ):
+        sizes = peaks.block_sizes(gguf)
+        assert len(sizes) == 36 and len(set(sizes)) > 1 and sizes == gguf.blocks
+        assert peaks.block_bytes(gguf) == max(sizes) == 129_909_760
+        assert peaks.other_bytes(gguf) == peaks.DIT_OTHER
+        assert f"{gib(sum(sizes)):.4f}" == blocks_gib
+        assert f"{gib(peaks.weights_bytes(gguf)):.3f}" == weights_gib
+        saved = peaks.weights_bytes(fp16) - peaks.weights_bytes(gguf)
+        assert peaks.loaded(gguf) == peaks.DIT_LOADED - saved
+        assert f"{gib(peaks.loaded(gguf)):.2f}" == "4.95"
+        for padded, latents in ((OURS_1080, 1), (OURS_1080, 20), (OURS_4K, 7)):
+            for attention in (peaks.FLASH_ATTN_2, peaks.SDPA):
+                plain = peaks.dit_peak(padded, latents, attention=attention)
+                held = peaks.dit_peak(padded, latents, attention=attention, dit_model=gguf)
+                assert held == plain - saved + peaks.GGUF_BUFFERS
+        assert peaks.GGUF_MATRIX == 3072 * 12288 * 2
+        assert peaks.GGUF_BUFFERS == peaks.GGUF_MATRIX + 24_576 == 75_522_048
+        # The VAE away takes its weights off, as in every format.
+        whole = peaks.dit_peak(OURS_1080, 12, dit_model=gguf)
+        assert whole - peaks.dit_peak(OURS_1080, 12, vae_in_dit=False, dit_model=gguf) == (
+            peaks.VAE_WEIGHTS
+        )
+        least = peaks.dit_least(OURS_1080, 12, 5, True, peaks.FLASH_ATTN_2, gguf)
+        assert least <= peaks.dit_peak(OURS_1080, 12, 5, dit_model=gguf)
+        # Swapped blocks are the last ones, the slots each the largest of them (the placement's
+        # block_bytes): the peak falls by their own bytes less the slots'.
+        for swapped in range(37):
+            last = sizes[len(sizes) - swapped :]
+            slot = max(last, default=0)
+            assert peaks.slot_bytes(gguf, swapped) == slot
+            assert peaks.leaving_blocks(gguf, swapped) == last
+            taken = sum(last) - min(swapped, 2) * slot
+            assert peaks.swapped_saving(gguf, swapped) == taken
+            assert whole - peaks.dit_peak(OURS_1080, 12, swapped, dit_model=gguf) == taken
+        # Unequal blocks: one swapped block saves nothing, two a little less than nothing (two
+        # slots of the larger), three their own bytes less two slots of the largest.
+        assert peaks.swapped_saving(gguf, 1) == 0
+        assert peaks.swapped_saving(gguf, 2) == sizes[-1] + sizes[-2] - 2 * sizes[-2] < 0
+        assert peaks.swapped_saving(gguf, 3) == sum(sizes[-3:]) - 2 * sizes[-3] > 0
+        assert peaks.swapped_saving(gguf, 36) == sum(sizes) - 2 * max(sizes)
+    # Another architecture has no figures here.
+    with pytest.raises(ValueError, match=r"the DiT's figures are for.*dynamic GGUF"):
+        peaks.block_sizes(weights.DIT_3B)
+
+
+def test_fp16_and_int8_blocks_are_alike_so_nothing_of_their_figures_moves() -> None:
+    # block_bytes was blocks[0]: now the largest, the same figure where blocks are alike; the
+    # slots' saving the old term, block x (swapped beyond the slots), for every count; and what a
+    # VAE phase finds on the GPU the old three cases. The unequal-blocks arithmetic reduces to
+    # these exactly (integers).
+    for dit in (peaks.FP16, peaks.INT8):
+        block, sizes = dit.blocks[0], peaks.block_sizes(dit)
+        assert set(sizes) == {block} and peaks.block_bytes(dit) == block
+        for swapped in range(37):
+            assert peaks.swapped_saving(dit, swapped) == block * max(0, swapped - peaks.SLOTS)
+            assert peaks.slot_bytes(dit, swapped) == (block if swapped else 0)
+            assert peaks.leaving_blocks(dit, swapped) == (block,) * swapped
+            fixed = 36 - swapped
+            assert peaks.dit_on_gpu(None, swapped, dit) == (
+                peaks.DIT_BUFFERS + peaks.DIT_OTHER + block * (fixed + min(swapped, 2))
+            )
+            for resident in sorted({0, 1, fixed // 2, fixed} & set(range(fixed + 1))):
+                want = peaks.DIT_BUFFERS + (
+                    0 if resident == 0 else peaks.DIT_OTHER + block * resident
+                )
+                assert peaks.dit_on_gpu(resident, swapped, dit) == want
+
+
+def test_dit_on_gpu_with_unequal_blocks_is_the_placements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # blockswap.Placement's own count (device_bytes) on a DiT of 36 blocks of unequal sizes, as a
+    # dynamic GGUF file's are (a type per matrix): the kept blocks each its own size, the slots
+    # the largest swapped block's, for every count of swapped blocks and every residency the
+    # loader accepts. The architecture is the GGUF 7B's with sizes small enough to build, made
+    # one of the DiT's formats for the test.
+    import dataclasses
+
+    import torch
+
+    from seedvr2x import blockswap
+
+    class Host(blockswap.Cuda):
+        def host(self, size: int) -> blockswap.HostCopy:
+            return blockswap.HostCopy(size, pin=False)
+
+    sizes = tuple(512 * (1 + (index * 7) % 5) for index in range(peaks.BLOCKS))
+    assert len(set(sizes)) == 5
+    small = dataclasses.replace(peaks.GGUF_7B, blocks=sizes, other=1024)
+    monkeypatch.setattr(peaks, "DITS", (*peaks.DITS, small))
+
+    class Block(torch.nn.Module):
+        def __init__(self, size: int) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(
+                torch.zeros(size, dtype=torch.uint8), requires_grad=False
+            )
+
+    class Model(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.vid_in = torch.nn.Parameter(
+                torch.zeros(1024, dtype=torch.uint8), requires_grad=False
+            )
+            self.blocks = torch.nn.ModuleList(Block(size) for size in sizes)
+
+    device = torch.device("cpu")
+    for swapped in (0, 1, 2, 3, 20, 35, 36):
+        fixed = peaks.BLOCKS - swapped
+        model = Model().requires_grad_(False)
+        parts = blockswap.host(model, blockswap.dit_parts(peaks.BLOCKS, 0, True), Host(device))
+        placement = blockswap.Placement(model, device, swapped, parts=parts, backend=Host(device))
+        assert placement.block_bytes == peaks.slot_bytes(small, swapped)
+        for resident in (None, *sorted({0, 1, fixed // 2, fixed} & set(range(fixed + 1)))):
+            ours = peaks.dit_on_gpu(resident, swapped, small) - peaks.DIT_BUFFERS
+            assert ours == placement.device_bytes(resident), (swapped, resident)
 
 
 def largest(padded: tuple[int, int], tiles: Tiles) -> tuple[int, int]:

@@ -2250,7 +2250,7 @@ def _pinned(plan: Plan, dit_model: Architecture) -> int:
     weights when they leave the DiT's phase; the DiT's in the format of its file (dit_model).
     In fp16, 15.19 GiB for the 36 blocks, 15.35 with the other parameters, 15.81 with the VAE
     (measured, milestone 3, 2026-10-11); in int8, by its headers, 7.61, 7.76 and 8.23."""
-    parts = [peaks.block_bytes(dit_model)] * _leaving(plan)
+    parts = list(peaks.leaving_blocks(dit_model, _leaving(plan)))
     parts += [peaks.other_bytes(dit_model)] if 0 in _residents(plan) else []
     parts += [] if plan.vae_in_dit else [peaks.VAE_WEIGHTS]
     return sum(-(-part // mmap.PAGESIZE) * mmap.PAGESIZE for part in parts)

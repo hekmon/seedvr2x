@@ -31,12 +31,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from test_gguf_file import Spec, body, entry, write_gguf
 
-from seedvr2x import weights
+from seedvr2x import gguf_file, weights
 from seedvr2x.weights import (
     DIT_3B,
     DIT_7B,
+    DIT_7B_DYN,
     DIT_7B_INT8,
+    DIT_7B_SHARP_DYN,
     VAE,
     Architecture,
     ModelError,
@@ -52,9 +55,10 @@ BYTES = {"F16": 2, "BF16": 2, "F32": 4, "F8_E4M3": 1, "I8": 1, "U8": 1, "I64": 8
 # What every refusal of a readable file given as the DiT or the VAE ends with, and as the shot
 # detector.
 V1 = (
-    "seedvr2x v1 runs SeedVR2's 7B DiT, regular or sharp, in fp16 or in int8 (seedvr2x's int8"
-    " files, W8A8 with comfy-kitchen's rotation), with its VAE in fp16; phase 2 brings the two"
-    " 7Bs' other smaller files"
+    "seedvr2x v1 runs SeedVR2's 7B DiT, regular or sharp, in fp16, in int8 (seedvr2x's int8"
+    " files, W8A8 with comfy-kitchen's rotation) or in seedvr2x's dynamic GGUF files (its block"
+    " matrices in Q3_K, Q4_K and Q5_K), with its VAE in fp16; phase 2 brings the two 7Bs' other"
+    " smaller files"
 )
 SHOTS = "seedvr2x detects shots with TransNetV2 in fp32, as its own transnetv2.safetensors holds it"
 TAILS: dict[weights.Role, str] = {"dit": V1, "vae": V1, "detector": SHOTS}
@@ -268,7 +272,7 @@ def test_int8_digest() -> None:
     assert weights.MATRIX.pattern == MATRIX.pattern
     assert len(INT8_MARKER) == 72 and json.loads(INT8_MARKER) == weights.MARKER
     assert DIT_7B_INT8.config == DIT_7B.config == "configs_7b"
-    assert weights.ACCEPTED["dit"] == (DIT_7B, DIT_7B_INT8)
+    assert weights.ACCEPTED["dit"] == (DIT_7B, DIT_7B_INT8, DIT_7B_DYN, DIT_7B_SHARP_DYN)
 
 
 def test_int8_bytes_are_its_headers() -> None:
@@ -408,6 +412,283 @@ def test_transnetv2_accepted(tmp_path: Path, metadata: dict[str, str] | None) ->
     assert weights.describe(path) == "TransNetV2 in fp32"
     renamed = write(tmp_path / "seedvr2x_ema_vae_fp16.safetensors", transnetv2(), metadata)
     assert weights.check(renamed, "detector") is weights.TRANSNETV2
+
+
+# seedvr2x's dynamic GGUF files (DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too"): the
+# test's own reading of each architecture's `types`, apart from the library's (weights.GGUF_ORDER,
+# GGUF_TYPES): a block's 8 matrices in this order, each digit a ggml type.
+MATRIX_ORDER = (
+    "attn.proj_qkv.vid",
+    "attn.proj_qkv.txt",
+    "attn.proj_out.vid",
+    "attn.proj_out.txt",
+    "mlp.vid.proj_in",
+    "mlp.vid.proj_out",
+    "mlp.txt.proj_in",
+    "mlp.txt.proj_out",
+)
+GGML = {"3": "Q3_K", "4": "Q4_K", "5": "Q5_K"}
+DYNAMIC = [DIT_7B_DYN, DIT_7B_SHARP_DYN]
+DYNAMIC_IDS = ["7b", "sharp"]
+
+
+def gguf_specs(
+    architecture: Architecture | None = None, matrices: str | None = None, model: str = "7b"
+) -> list[Spec]:
+    """The vendored model's tensors as a GGUF file lists them: F16, but for the block matrices,
+    those of `architecture` in its types (the test's own reading of `types`), or all `matrices`
+    when given, a ggml type's name."""
+    specs: list[Spec] = []
+    for name, shape in vendored(model).items():
+        layer = name.removesuffix(".weight")
+        kind = "F16"
+        if name.endswith(".weight") and MATRIX.fullmatch(layer):
+            if matrices is not None:
+                kind = matrices
+            elif architecture is not None:
+                block, _, module = layer.removeprefix("blocks.").partition(".")
+                kind = GGML[architecture.types[int(block)][MATRIX_ORDER.index(module)]]
+        specs.append((name, kind, shape))
+    return specs
+
+
+def dynamic_file(path: Path, architecture: Architecture) -> Path:
+    """The 7B in the dynamic GGUF layout of this architecture, synthetic: a sparse file, 4.76 GB
+    on paper, its header as the real files' (version 3, the default alignment)."""
+    return write_gguf(path, gguf_specs(architecture), [entry("general.architecture", 8, "seedvr")])
+
+
+def test_dynamic_pins() -> None:
+    # The types pinned: 36 blocks of 8 digits, 3, 4 or 5, the files' counts (17 Q3_K, 203 and 204
+    # Q4_K, 68 and 67 Q5_K), the two files differing on 5 matrices; their names and shapes DIT_7B's.
+    for architecture, counts in ((DIT_7B_DYN, (17, 203, 68)), (DIT_7B_SHARP_DYN, (17, 204, 67))):
+        assert len(architecture.types) == 36 and all(len(each) == 8 for each in architecture.types)
+        digits = "".join(architecture.types)
+        assert (digits.count("3"), digits.count("4"), digits.count("5")) == counts
+        assert set(digits) == {"3", "4", "5"} and len(digits) == 288
+        assert architecture.tensors == DIT_7B.tensors == 1128
+        assert architecture.digest == DIT_7B.digest and architecture.config == "configs_7b"
+        assert architecture.layout == weights.GGUF == "gguf"
+        assert architecture.matrix_types() == ["Q3_K", "Q4_K", "Q5_K"]
+        assert len(architecture.blocks) == 36
+    regular, sharp = "".join(DIT_7B_DYN.types), "".join(DIT_7B_SHARP_DYN.types)
+    assert sum(1 for a, b in zip(regular, sharp, strict=True) if a != b) == 5
+    assert weights.GGUF_ORDER == MATRIX_ORDER and weights.GGUF_TYPES == GGML
+    assert DIT_7B_DYN.name == "SeedVR2's 7B DiT"
+    assert DIT_7B_SHARP_DYN.name == "SeedVR2's sharp 7B DiT"
+
+
+@pytest.mark.parametrize("architecture", DYNAMIC, ids=DYNAMIC_IDS)
+def test_dynamic_bytes_are_its_headers(architecture: Architecture) -> None:
+    # A block's and the other parameters' bytes as a file of these types holds them (ggml's block
+    # sizes: Q3_K 110 bytes to 256 values, Q4_K 144, Q5_K 176, F16 2 a value), the RoPE buffers
+    # left out as the others': weights.py's figures, which the real files' headers gave too
+    # (test_dynamic_real_headers).
+    blocks = dict.fromkeys(range(36), 0)
+    other = 0
+    for name, kind, shape in gguf_specs(architecture):
+        if ".rope." in name:
+            continue
+        values, size = gguf_file.BLOCKS[kind]
+        match = re.match(r"blocks\.(\d+)\.", name)
+        if match is None:
+            other += math.prod(shape) // values * size
+        else:
+            blocks[int(match[1])] += math.prod(shape) // values * size
+    assert tuple(blocks.values()) == architecture.blocks and other == architecture.other
+    assert len(set(architecture.blocks)) > 1  # they differ from block to block
+    # Under a third of the fp16 file's, a swap moves less than that.
+    assert sum(architecture.blocks) < sum(DIT_7B.blocks) / 3
+    assert sum(architecture.blocks) == (
+        4_590_563_328 if architecture is DIT_7B_DYN else 4_590_637_056
+    )
+
+
+@pytest.mark.parametrize("architecture", DYNAMIC, ids=DYNAMIC_IDS)
+def test_dynamic_dtype_of(architecture: Architecture) -> None:
+    # Each tensor's pinned type, by name, equal to the test's own reading for the 1,128: the
+    # matrices' weights in their types, every other tensor, a matrix's bias included, F16.
+    for name, kind, _ in gguf_specs(architecture):
+        assert architecture.dtype_of(name) == kind, name
+    assert architecture.dtype_of("blocks.0.mlp.vid.proj_in.bias") == "F16"
+    assert architecture.dtype_of("vid_in.proj.weight") == "F16"
+    assert (
+        architecture.dtype_of("blocks.35.attn.proj_qkv.vid.weight")
+        == (GGML[architecture.types[35][0]])
+    )
+    # The safetensors architectures know no GGUF type.
+    assert DIT_7B.dtype_of("blocks.0.attn.proj_qkv.vid.weight") == "F16"
+    assert DIT_7B_INT8.dtype_of("blocks.0.attn.proj_qkv.vid.weight") == "I8"
+
+
+@pytest.mark.parametrize("architecture", DYNAMIC, ids=DYNAMIC_IDS)
+@pytest.mark.parametrize("name", ["seedvr2x_ema_7b_dyn.gguf", "renamed.gguf", "x.safetensors"])
+def test_dynamic_accepted(tmp_path: Path, architecture: Architecture, name: str) -> None:
+    # Known by its tensors, names, shapes and the ggml type of each, whatever the file is called:
+    # the regular 7B's file the regular's, the sharp 7B's the sharp's.
+    path = dynamic_file(tmp_path / name, architecture)
+    found = weights.check(path, "dit")
+    assert found is architecture and found.config == "configs_7b"
+    said = (
+        f"{architecture.name} in seedvr2x's dynamic GGUF, its block matrices in Q3_K, Q4_K and Q5_K"
+    )
+    assert weights.describe(path) == weights.in_words(found) == said
+    # Read as any model file, its tensors' offsets where the data is.
+    tensors = weights._read(path)  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(tensors, dict) and len(tensors) == 1128
+    header = gguf_file.read(path)
+    assert [info.at for info in tensors.values()] == [each.offset for each in header.tensors]
+    assert tensors["blocks.0.attn.proj_qkv.vid.weight"].dtype == GGML[architecture.types[0][0]]
+    assert tensors["blocks.0.attn.proj_qkv.vid.weight"].shape == (9216, 3072)
+    # Given as the VAE or as the shot detector, it says what it is.
+    assert refused(path, "vae") == f"{path}: {said}, given as the VAE (--vae-model): {V1}"
+    assert refused(path, "detector").startswith(f"{path}: {said}, given as the shot detector")
+
+
+def test_dynamic_files_told_apart(tmp_path: Path) -> None:
+    # The two share every name and shape and differ on 5 matrices' types: a file of the regular's
+    # types but one of the sharp's is neither.
+    regular, sharp = "".join(DIT_7B_DYN.types), "".join(DIT_7B_SHARP_DYN.types)
+    index = next(i for i in range(288) if regular[i] != sharp[i])
+    specs = gguf_specs(DIT_7B_DYN)
+    matrices = [
+        i for i, (name, _, _) in enumerate(specs) if MATRIX.fullmatch(name[: -len(".weight")])
+    ]
+    assert len(matrices) == 288
+    name, _, shape = specs[matrices[index]]
+    assert name.startswith(f"blocks.{index // 8}.")
+    specs[matrices[index]] = (name, GGML[sharp[index]], shape)
+    path = write_gguf(tmp_path / "x.gguf", specs)
+    what = refused(path, "dit")
+    assert "not one of seedvr2x's dynamic files" in what and weights.describe(path) in what
+
+
+def test_dynamic_check_models(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    dit = dynamic_file(tmp_path / "seedvr2x_ema_7b_sharp_dyn.gguf", DIT_7B_SHARP_DYN)
+    vae = write(tmp_path / "ema_vae_fp16.safetensors", as_dtype("vae", "F16"))
+    with caplog.at_level(logging.INFO):
+        weights.check_models(dit, vae)
+    said = "SeedVR2's sharp 7B DiT in seedvr2x's dynamic GGUF, its block matrices in Q3_K, Q4_K"
+    assert f"DiT {dit.name}: {said} and Q5_K" in caplog.messages
+
+
+def test_other_ggml_types_refused(tmp_path: Path) -> None:
+    # A GGUF file of the 7B's own tensors in other types is not one of seedvr2x's: said by what it
+    # is, by content, before torch. numz's Q4_K_M and seedvr2x's static Q4_K and Q8_0 files are
+    # such (phase 2 brings them), and so is a file of fp16 in GGUF.
+    base = gguf_specs(DIT_7B_DYN)
+    first = next(i for i, (name, kind, _) in enumerate(base) if kind == "Q4_K")
+    changed = list(base)
+    changed[first] = (base[first][0], "Q5_K", base[first][2])
+    cases = {
+        "one-matrix-changed": (changed, "Q4_K (202), Q5_K (69) and Q3_K (17)"),
+        "all-q4_k": (gguf_specs(matrices="Q4_K"), "Q4_K (288)"),
+        "all-q8_0": (gguf_specs(matrices="Q8_0"), "Q8_0 (288)"),
+        "all-q6_k": (gguf_specs(matrices="Q6_K"), "Q6_K (288)"),
+        "all-f16": (gguf_specs(), "F16 (288)"),
+    }
+    for name, (specs, kinds) in cases.items():
+        path = write_gguf(tmp_path / f"{name}.gguf", specs)
+        what = (
+            f"a GGUF file of SeedVR2's 7B DiT, its block matrices in {kinds},"
+            " not one of seedvr2x's dynamic files"
+        )
+        assert weights.describe(path) == what
+        assert refused(path, "dit") == f"{path}: {what}: {V1}"
+        assert refused(path, "vae") == f"{path}: {what}, given as the VAE (--vae-model): {V1}"
+        assert refused(path, "detector") == f"{path}: {what}, given as the shot detector: {SHOTS}"
+
+
+def test_gguf_of_other_tensors_refused(tmp_path: Path) -> None:
+    # The 3B's tensors in Q8_0 (numz's), a DiT's names with one shape changed, tensors of no model.
+    quantised: list[Spec] = [
+        (
+            name,
+            "Q8_0"
+            if name.startswith("blocks.") and name.endswith(".weight") and len(shape) == 2
+            else "F16",
+            shape,
+        )
+        for name, shape in vendored("3b").items()
+    ]
+    three = write_gguf(tmp_path / "three.gguf", quantised)
+    what = weights.describe(three)
+    assert what.startswith("a GGUF file of SeedVR2's 3B DiT, its block matrices in Q8_0 (")
+    assert "dynamic" not in what
+    assert refused(three, "dit") == f"{three}: {what}: {V1}"
+    reshaped = [
+        (name, kind, (3072, 4096) if name == "txt_in.weight" else shape)
+        for name, kind, shape in gguf_specs(DIT_7B_DYN)
+    ]
+    path = write_gguf(tmp_path / "reshaped.gguf", reshaped)
+    assert weights.describe(path) == (
+        "a GGUF file of SeedVR2's 7B DiT by its blocks and width, with other tensors than its own"
+        " (1,128 tensors: 840 F16, 203 Q4_K, 68 Q5_K, 17 Q3_K)"
+    )
+    path = write_gguf(tmp_path / "other.gguf", [("x.weight", "F32", (8,)), ("y", "Q4_0", (2, 32))])
+    what = f"a GGUF file of 2 tensors (1 F32, 1 Q4_0), {NONE_OF_THEM}"
+    assert weights.describe(path) == what
+    for role in ("dit", "vae", "detector"):
+        assert refused(path, role) == f"{path}: {what}: {TAILS[role]}"
+    path = write_gguf(tmp_path / "none.gguf", [])
+    assert weights.describe(path) == f"a GGUF file of no tensors, {NONE_OF_THEM}"
+    # 1,128 F16 tensors under DIT_7B's names are DIT_7B's in safetensors, not in GGUF.
+    path = write_gguf(tmp_path / "f16.gguf", gguf_specs())
+    assert weights.describe(path).endswith("not one of seedvr2x's dynamic files")
+
+
+def test_gguf_versions_and_types_refused(tmp_path: Path) -> None:
+    # A GGUF file seedvr2x doesn't read is said so, as what it is, with V1's tail.
+    specs = gguf_specs(DIT_7B_DYN)
+    for version in (2, 1):
+        path = write_gguf(tmp_path / f"v{version}.gguf", specs[:3], version=version)
+        what = f"a GGUF file of version {version}, where seedvr2x reads 3"
+        assert weights.describe(path) == what
+        assert refused(path, "dit") == f"{path}: {what}: {V1}"
+    # An id ggml removed (4, Q4_2): the second tensor's type is the u32 before its offset, 12
+    # bytes from the end of the header's body.
+    path = tmp_path / "t.gguf"
+    raw = bytearray(write_gguf(path, specs[:2]).read_bytes())
+    end = len(body(specs[:2]))
+    raw[end - 12 : end - 8] = (4).to_bytes(4, "little")
+    path.write_bytes(bytes(raw))
+    what = f"a GGUF file where {specs[1][0]} is of an unknown ggml type 4"
+    assert refused(path, "dit") == f"{path}: {what}: {V1}"
+
+
+def test_gguf_cut_or_damaged_refused(tmp_path: Path) -> None:
+    # The data cut: the size said, the download fetched again. The header cut inside. An offset
+    # inside another tensor's data: a damaged file.
+    path = dynamic_file(tmp_path / "seedvr2x_ema_7b_dyn.gguf", DIT_7B_DYN)
+    header = gguf_file.read(path)
+    full = path.stat().st_size
+    os.truncate(path, header.data_start + 1_000_000)
+    assert refused(path, "dit") == (
+        f"{path}: cut short, {header.data_start + 1_000_000:,} of {full:,} bytes; fetch it again"
+    )
+    os.truncate(path, 5_000)
+    said = refused(path, "dit")
+    assert said.startswith(f"{path}: cut short inside its header, ") and said.endswith(
+        "fetch it again"
+    )
+    specs = gguf_specs(DIT_7B_DYN)[:3]
+    path = write_gguf(tmp_path / "overlap.gguf", specs, offsets=[0, 32, 64])
+    assert refused(path, "dit").startswith(f"{path}: a damaged GGUF file: ")
+    with pytest.raises(ModelError, match="a damaged GGUF file"):
+        weights.describe(path)
+
+
+def test_gguf_header_read_without_torch(tmp_path: Path) -> None:
+    path = dynamic_file(tmp_path / "seedvr2x_ema_7b_dyn.gguf", DIT_7B_DYN)
+    code = (
+        "import sys\nfrom pathlib import Path\nfrom seedvr2x import weights\n"
+        "assert weights.check(Path(sys.argv[1]), 'dit') is weights.DIT_7B_DYN\n"
+        "assert 'torch' not in sys.modules and 'gguf' not in sys.modules, 'imported'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(path)], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_renamed_files_recognised_by_content(tmp_path: Path) -> None:
@@ -708,9 +989,9 @@ def test_refused_saying_what(
 
 
 def test_other_formats(tmp_path: Path) -> None:
-    # Known by their first bytes: GGUF's signature, a zip (torch.save's format), a pickle (its
-    # earlier one); random bytes are neither. GGUF's version, then its tensor count: the 3B's
-    # 635 = 0x027B puts safetensors' brace at byte 8.
+    # Known by their first bytes: a zip (torch.save's format), a pickle (its earlier one); random
+    # bytes are neither. A GGUF file is told by its signature first and read as one (below): its
+    # version, then its tensor count, the 3B's 635 = 0x027B putting safetensors' brace at byte 8.
     for name, tensors in (("seedvr2_ema_7b-Q4_K_M.gguf", 1128), ("seedvr2_ema_3b-Q8_0.gguf", 635)):
         header = b"GGUF" + (3).to_bytes(4, "little") + tensors.to_bytes(8, "little") + bytes(8)
         (tmp_path / name).write_bytes(header)
@@ -725,13 +1006,7 @@ def test_other_formats(tmp_path: Path) -> None:
         "a PyTorch checkpoint ({}), as ByteDance's fp32 masters (.pth) are; seedvr2x reads"
         " safetensors files, which the repository's models/ scripts make from them"
     )
-    gguf = (
-        "a GGUF file (quantised weights, as numz's Q4_K_M and seedvr2x's own Q8_0, Q4_K and"
-        " dynamic files)"
-    )
     expected = {
-        "seedvr2_ema_7b-Q4_K_M.gguf": gguf,
-        "seedvr2_ema_3b-Q8_0.gguf": gguf,
         "seedvr2_ema_7b.pth": checkpoint.format("zip"),
         "ema_vae.pth": checkpoint.format("pickle"),
         "noise.safetensors": "neither safetensors, GGUF nor a PyTorch checkpoint",
@@ -741,6 +1016,19 @@ def test_other_formats(tmp_path: Path) -> None:
         assert weights.describe(path) == what
         for role in ("dit", "vae", "detector"):
             assert refused(path, role) == f"{path}: {what}: {TAILS[role]}"
+    # The two GGUF stubs claim tensors their 24 bytes cannot hold: a file cut short, said so, with
+    # the advice of a download cut short and none of V1's tail.
+    for name, tensors in (("seedvr2_ema_7b-Q4_K_M.gguf", 1128), ("seedvr2_ema_3b-Q8_0.gguf", 635)):
+        path = tmp_path / name
+        said = (
+            f"{path}: cut short inside its header, {tensors:,} tensors claimed and 0 bytes left;"
+            f" {weights.AGAIN}"
+        )
+        for role in ("dit", "vae", "detector"):
+            assert refused(path, role) == said
+        with pytest.raises(ModelError) as error:
+            weights.describe(path)
+        assert str(error.value) == said
 
 
 def test_missing(tmp_path: Path) -> None:
@@ -804,8 +1092,9 @@ def test_too_short_to_tell(tmp_path: Path) -> None:
         with pytest.raises(ModelError) as error:
             weights.describe(path)
         assert str(error.value) == said
+    # From 9 bytes on a GGUF file is read as one: its version, here 0.
     path.write_bytes(b"GGUF" + bytes(5))
-    assert weights.describe(path).startswith("a GGUF file")
+    assert weights.describe(path) == "a GGUF file of version 0, where seedvr2x reads 3"
     path.write_bytes(random.Random(0).randbytes(9))
     assert weights.describe(path) == "neither safetensors, GGUF nor a PyTorch checkpoint"
     path.write_bytes((1_000).to_bytes(8, "little") + b"{")
@@ -1115,7 +1404,16 @@ REAL: list[tuple[str, weights.Role, str | None]] = [
     *(
         (f"seedvr2x_ema_7b{sharp}_{kind}.gguf", "dit", GGUF)
         for sharp in ("", "_sharp")
-        for kind in ("Q8_0", "Q4_K", "Q4_K_imatrix", "dyn")
+        for kind in ("Q8_0", "Q4_K", "Q4_K_imatrix")
+    ),
+    # seedvr2x's dynamic files, read by their header.
+    ("seedvr2x_ema_7b_dyn.gguf", "dit", None),
+    ("seedvr2x_ema_7b_sharp_dyn.gguf", "dit", None),
+    (
+        "seedvr2x_ema_7b_sharp_dyn.gguf",
+        "vae",
+        "SeedVR2's sharp 7B DiT in seedvr2x's dynamic GGUF, its block matrices in Q3_K, Q4_K and"
+        " Q5_K, given as the VAE",
     ),
     ("transnetv2.safetensors", "detector", None),
     ("transnetv2.safetensors", "dit", "TransNetV2 in fp32, given as the DiT (--dit-model)"),
@@ -1149,3 +1447,45 @@ def test_real_files(name: str, role: weights.Role, refusal: str | None) -> None:
         message = refused(path, role)
         assert message.startswith(f"{path}: ") and refusal in message
         assert message.endswith(TAILS[role])
+
+
+REAL_DYNAMIC = [
+    ("seedvr2x_ema_7b_dyn.gguf", DIT_7B_DYN),
+    ("seedvr2x_ema_7b_sharp_dyn.gguf", DIT_7B_SHARP_DYN),
+]
+
+
+@pytest.mark.parametrize(("name", "architecture"), REAL_DYNAMIC, ids=DYNAMIC_IDS)
+def test_dynamic_real_headers(name: str, architecture: Architecture) -> None:
+    # The pins are the files' own headers: every tensor's type, each block's bytes and the bytes
+    # outside the blocks, read here once more from the header and held to weights.py's literals.
+    if not MODELS or not (Path(MODELS) / name).is_file():
+        pytest.skip(f"{name}: needs SEEDVR2X_MODEL_DIR")
+    path = Path(MODELS) / name
+    assert weights.check(path, "dit") is architecture
+    header = gguf_file.read(path)
+    assert len(header.tensors) == architecture.tensors
+    blocks = dict.fromkeys(range(36), 0)
+    other = 0
+    digits = ["" for _ in range(36)]
+    byname = {each.name: each for each in header.tensors}
+    for each in header.tensors:
+        layer = each.name.removesuffix(".weight")
+        if each.name.endswith(".weight") and MATRIX.fullmatch(layer):
+            assert each.type in ("Q3_K", "Q4_K", "Q5_K")
+        else:
+            assert each.type == "F16", each.name
+        if ".rope." in each.name:
+            continue
+        match = re.match(r"blocks\.(\d+)\.", each.name)
+        if match is None:
+            other += each.nbytes
+        else:
+            blocks[int(match[1])] += each.nbytes
+    for index in range(36):
+        digits[index] = "".join(
+            {v: k for k, v in GGML.items()}[byname[f"blocks.{index}.{module}.weight"].type]
+            for module in MATRIX_ORDER
+        )
+    assert tuple(digits) == architecture.types
+    assert tuple(blocks.values()) == architecture.blocks and other == architecture.other

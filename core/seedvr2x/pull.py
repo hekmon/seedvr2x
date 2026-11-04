@@ -19,13 +19,13 @@ import shlex
 import shutil
 import sys
 import time
-from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePath
 
-from seedvr2x import files
+from seedvr2x import files, weights
 from seedvr2x.clock import spent, taking, wall
-from seedvr2x.weights import ModelError, Role
+from seedvr2x.weights import Architecture, ModelError, Role
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,15 @@ PINNED: dict[str, Pin] = {
     ),
     "seedvr2x_ema_7b_sharp_int8_convrot.safetensors": Pin(
         8_333_649_000, "d83aeaa4687b43755658d85eadcf2e28bb10b70c0196798b303171cf9a16de43", "dit"
+    ),
+    # The two 7Bs' dynamic GGUF files (DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too"),
+    # pinned the same way on 2026-11-04, each SHA-256 its line of SHA256SUMS at REVISION and each
+    # size the file's: downloaded only when --dit-model names one.
+    "seedvr2x_ema_7b_dyn.gguf": Pin(
+        4_757_055_264, "f8c0c50d233dad8a26fb82d5eda4072c2ad935100e842b3fee953994849a487d", "dit"
+    ),
+    "seedvr2x_ema_7b_sharp_dyn.gguf": Pin(
+        4_757_129_024, "90ba80c85e25ee08162882be58c0e05f1b4fc19c8dd9837b6f87c0efc4fad779", "dit"
     ),
     "seedvr2x_ema_vae_fp16.safetensors": Pin(
         501_325_454, "b9c6ebf0b14107be595825f476b9f89029a067d5b13e9db39c1351a608265468", "vae"
@@ -528,6 +537,125 @@ def advice(model_files: ModelFiles) -> dict[Role, str]:
         if name is not None and PINNED[name].role == role:
             found[role] = _again(name, file.path, model_files.cache)
     return found
+
+
+@dataclass(frozen=True)
+class Smaller:
+    """A smaller file of a 7B than the one the job runs (smaller_files): what it is called,
+    `label`; the pinned file, `name`, and its size in bytes; the format the planner counts it by,
+    `architecture` (peaks.DITS); and `model`, "the sharp 7B" or "the 7B" where the job's file is
+    not a pinned one and so does not say which 7B it holds, else None."""
+
+    label: str
+    name: str
+    size: int
+    architecture: Architecture
+    model: str | None = None
+
+
+SHARP, REGULAR = "the sharp 7B", "the 7B"
+# Which 7B each of seedvr2x's pinned DiT files holds (DESIGN.md, Weights): the tensors of the fp16
+# and int8 files tell the two apart in no way, so it is stated here, and tests/test_pull.py holds
+# the table to PINNED's DiT files.
+MODEL_OF = {
+    "seedvr2x_ema_7b_fp16.safetensors": REGULAR,
+    "seedvr2x_ema_7b_sharp_fp16.safetensors": SHARP,
+    "seedvr2x_ema_7b_int8_convrot.safetensors": REGULAR,
+    "seedvr2x_ema_7b_sharp_int8_convrot.safetensors": SHARP,
+    "seedvr2x_ema_7b_dyn.gguf": REGULAR,
+    "seedvr2x_ema_7b_sharp_dyn.gguf": SHARP,
+}
+# The smaller files of each 7B, in the order of their size (DESIGN.md, Weights, "The dynamic GGUF
+# before v0.1.0 too": "where the card or the host's memory is short for float16, the plan names
+# the smaller files"): the int8 file and the dynamic GGUF.
+_SMALLER = {
+    model: tuple(
+        Smaller(label, name, PINNED[name].size, architecture) for label, name, architecture in named
+    )
+    for model, named in {
+        REGULAR: (
+            ("int8", "seedvr2x_ema_7b_int8_convrot.safetensors", weights.DIT_7B_INT8),
+            ("the dynamic GGUF", "seedvr2x_ema_7b_dyn.gguf", weights.DIT_7B_DYN),
+        ),
+        SHARP: (
+            ("int8", "seedvr2x_ema_7b_sharp_int8_convrot.safetensors", weights.DIT_7B_INT8),
+            ("the dynamic GGUF", "seedvr2x_ema_7b_sharp_dyn.gguf", weights.DIT_7B_SHARP_DYN),
+        ),
+    }.items()
+}
+
+
+def smaller_files(name: str, dit_model: Architecture) -> list[Smaller]:
+    """The pinned files smaller than the DiT file `name`, which is in the format dit_model: for
+    fp16 its int8 file and its dynamic GGUF, for int8 the GGUF, for a GGUF none. A pinned file
+    (MODEL_OF) gets those of its own 7B. Any other file, numz's or a renamed one, does not say
+    which 7B it holds, and is never guessed from its name: the sharp 7B's files and the 7B's
+    both, each marked with its model (Smaller.model)."""
+    held = MODEL_OF.get(name)
+    models = [(held, None)] if held is not None else [(SHARP, SHARP), (REGULAR, REGULAR)]
+    if dit_model == weights.DIT_7B:
+        keep = 0
+    elif dit_model == weights.DIT_7B_INT8:
+        keep = 1
+    else:
+        return []
+    return [replace(one, model=said) for model, said in models for one in _SMALLER[model][keep:]]
+
+
+def smaller_planning[T](
+    name: str, dit_model: Architecture, plans: Callable[[Architecture], T | None]
+) -> list[tuple[Smaller, T]]:
+    """The smaller files (smaller_files) the job plans with, each with what `plans` makes of its
+    format, in the order of their size; `plans` returns None for a format the job doesn't plan
+    with (the planner's refusal, caught there). Planning imports no torch and is cheap."""
+    found: list[tuple[Smaller, T]] = []
+    for each in smaller_files(name, dit_model):
+        made = plans(each.architecture)
+        if made is not None:
+            found.append((each, made))
+    return found
+
+
+def smaller_way(found: Sequence[Smaller], model_dir: bool = False) -> str:
+    """The way out a refusal for memory adds when the DiT is not in the smallest format and a
+    smaller file plans the job (smaller_planning), for the command line, which gives the option:
+    "a smaller DiT file that plans this job: int8 (--dit-model F, 8.3 GB) or the dynamic GGUF
+    (--dit-model G, 4.8 GB)"; for a file that is not a pinned one, each 7B's files after "for the
+    sharp 7B," and "for the 7B,", separated by semicolons. Where the run was given --model-dir
+    (`model_dir`), the way out says so once, after "this job": the pinned files are named, but
+    only a file put in that directory is read there, nothing being fetched. The job's file is
+    never changed by itself."""
+    groups: dict[str | None, list[str]] = {}
+    for one in found:
+        groups.setdefault(one.model, []).append(
+            f"{one.label} (--dit-model {one.name}, {_size(one.size)})"
+        )
+    said = [
+        (f"for {model}, " if model else "") + " or ".join(each) for model, each in groups.items()
+    ]
+    here = ", put in --model-dir" if model_dir else ""
+    return f"a smaller DiT file that plans this job{here}: " + "; ".join(said)
+
+
+def smaller_line(this: str, found: Sequence[tuple[Smaller, str]]) -> str:
+    """The plan's line of the smaller DiT files that plan the job better than the plan's own
+    (smaller_planning's pairs, each file with what its plan makes of the job, said): "smaller DiT
+    files plan this job better: this plan swaps 11 blocks with windows of 10 latents; int8 19
+    blocks, windows of 17; the dynamic GGUF 17 blocks, windows of 19; --dit-model names them".
+    `this` is what the plan itself makes, said the same way. For a file that is not a pinned one,
+    each 7B's files after "for the sharp 7B" and "for the 7B", in brackets, separated by
+    semicolons. The file is never changed by itself."""
+    groups: dict[str | None, list[str]] = {}
+    for one, said in found:
+        groups.setdefault(one.model, []).append(f"{one.label} {said}")
+    listed = "; ".join(
+        f"for {model} ({'; '.join(each)})" if model else "; ".join(each)
+        for model, each in groups.items()
+    )
+    return (
+        f"smaller DiT files plan this job better: this plan swaps {this}; {listed};"
+        " --dit-model names them"
+    )
 
 
 def check_pin(

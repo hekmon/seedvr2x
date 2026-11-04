@@ -378,8 +378,9 @@ def test_a_job_whose_first_pass_runs_again_fetches_the_detector_alone(
             "--dit-model",
             "seedvr2_ema_7b_fp16.safetensors",
             "seedvr2x_ema_7b_fp16.safetensors, seedvr2x_ema_7b_sharp_fp16.safetensors,"
-            " seedvr2x_ema_7b_int8_convrot.safetensors or"
-            " seedvr2x_ema_7b_sharp_int8_convrot.safetensors",
+            " seedvr2x_ema_7b_int8_convrot.safetensors,"
+            " seedvr2x_ema_7b_sharp_int8_convrot.safetensors,"
+            " seedvr2x_ema_7b_dyn.gguf or seedvr2x_ema_7b_sharp_dyn.gguf",
         ),
         ("--vae-model", "ema_vae_fp16.safetensors", "seedvr2x_ema_vae_fp16.safetensors"),
     ],

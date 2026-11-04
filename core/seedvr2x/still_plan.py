@@ -252,7 +252,9 @@ def plan(
             f"attention {attention!r}: the DiT's fit is {peaks.FLASH_ATTN_2}'s or {peaks.SDPA}'s"
         )
     if dit_model not in peaks.DITS:
-        raise ValueError(f"{dit_model.name}: the DiT's figures are for its fp16 and int8 files")
+        raise ValueError(
+            f"{dit_model.name}: the DiT's figures are for its fp16, int8 and dynamic GGUF files"
+        )
     reading = free if isinstance(free, Reading) else Reading(free, None, free, False)
     job = _Job(
         bound,
@@ -1336,7 +1338,7 @@ def _pinned(models: ModelPlan, dit_model: Architecture) -> int:
     the planner's _pinned counts them: each block of the DiT that is swapped or that a VAE phase
     doesn't keep; the DiT's other parameters when a VAE phase keeps nothing of it; the VAE's
     weights when they leave the DiT's phase; the DiT in the format of its file."""
-    parts = [peaks.block_bytes(dit_model)] * _leaving(models)
+    parts = list(peaks.leaving_blocks(dit_model, _leaving(models)))
     parts += [peaks.other_bytes(dit_model)] if 0 in _both(models) else []
     parts += [] if models.vae_in_dit else [peaks.VAE_WEIGHTS]
     return sum(-(-part // mmap.PAGESIZE) * mmap.PAGESIZE for part in parts)
@@ -1495,14 +1497,18 @@ def _planned(job: _Job) -> StillPlan:
 _ATTENTION_SAID = {peaks.FLASH_ATTN_2: "FlashAttention 2", peaks.SDPA: "PyTorch's SDPA"}
 
 
-def said(plan: StillPlan, target: tuple[int, int] | None = None) -> list[str]:
+def said(
+    plan: StillPlan, target: tuple[int, int] | None = None, smaller: str | None = None
+) -> list[str]:
     """The plan as --plan prints it and a run logs it, a line per choice in plain words, each
     opening with what it says, "plan: memory: ...", as the planner's lines do (planner.said):
     the memory (what was read, the margin or the reserve held, the budget, the tight reserve when
     taken), the picture's size, the attention backend and the DiT's format, the blocks swapped and
     where the VAE is in the DiT's phase with the DiT's peak, what of the DiT stays on the GPU in
     each VAE phase, the system memory; and with `target` (frames.target_size's), the picture's
-    encode and decode, untiled or in tiles with the grid and the predicted peaks."""
+    encode and decode, untiled or in tiles with the grid and the predicted peaks. `smaller`: the
+    line of the smaller DiT files that plan the picture better (stills.py), put after the blocks
+    swapped; None says none."""
     frame = _most(plan.bound, plan.picture)
     height, width = frame
     tokens = f"{peaks.tokens(frame, 1):,} tokens, one latent"
@@ -1530,6 +1536,14 @@ def said(plan: StillPlan, target: tuple[int, int] | None = None) -> list[str]:
             f" fp16's; a window's memory counted as fp16's plus {_gib(peaks.INT8_BUFFERS)} GiB for"
             " int8's buffers until int8's own is measured; --dit-model names the file"
         )
+    elif plan.dit_model in (peaks.GGUF_7B, peaks.GGUF_7B_SHARP):
+        weights_gib = _gib(peaks.weights_bytes(plan.dit_model))
+        lines.append(
+            f"DiT: its weights in seedvr2x's dynamic GGUF, {weights_gib} GiB, under a third of"
+            " fp16's; a window's memory counted as fp16's plus"
+            f" {_gib(peaks.GGUF_BUFFERS)} GiB for the dequantisation's buffers;"
+            " --dit-model names the file"
+        )
     models = plan.models
     if plan.pins.swap_blocks is not None:
         why = "pinned by --swap-blocks"
@@ -1546,6 +1560,8 @@ def said(plan: StillPlan, target: tuple[int, int] | None = None) -> list[str]:
         )
     else:
         lines.append(f"blocks swapped: none, {why}; --swap-blocks N swaps some")
+    if smaller is not None:
+        lines.append(smaller)
     if models.vae_in_dit:
         lines.append("the VAE: on the GPU in the DiT's phase, the DiT fitting beside it")
     else:

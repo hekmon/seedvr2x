@@ -14,6 +14,7 @@ The swap on a real card, the DiT's bits and the figures: tests/test_placement.py
 
 import gc
 import hashlib
+import io
 import itertools
 import json
 import os
@@ -23,6 +24,7 @@ import time
 import weakref
 from collections import deque
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -31,9 +33,11 @@ import pytest
 import torch
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
+from test_gguf_file import Spec, entry, header, placed
+from test_kquant import blocks as kquant_blocks
 from torch import Tensor
 
-from seedvr2x import blockswap, int8, model, weights
+from seedvr2x import blockswap, gguf_file, int8, kquant, model, weights
 from seedvr2x.blockswap import OTHER, HostMemoryError, Part, Placement, dit_parts
 from seedvr2x.passes import ModelPlan
 from seedvr2x.weights import SLOTS
@@ -1017,6 +1021,530 @@ def test_a_real_int8_dit_s_blocks_swap_and_change_no_bit() -> None:
             got, got_peak = windows(models)
             assert got == digests, said
             expected = peak - rounding - max(swapped - SLOTS, 0) * block
+            assert abs(got_peak - expected) < SLACK, (said, got_peak / 2**30, expected / 2**30)
+            placement.enter("encode", 0)
+            assert abs(allocated(device) - away) < SLACK, said
+            placement.close()
+    finally:
+        models.runner.dit = models.runner.vae = None
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
+# ---- The dynamic GGUF's blocks ---------------------------------------------------------------
+
+# The toy's matrices have 256 inputs and outputs: a row is one ggml block, so a block's weight is
+# (256, the type's block bytes) uint8, 28,160, 36,864 or 45,056 bytes for Q3_K, Q4_K and Q5_K (each
+# on ALIGN), and its bias 512: three sizes of block, as the dynamic files' differ.
+GGUF_WIDTH = 256
+GGUF_KINDS = ("Q3_K", "Q4_K", "Q5_K")
+
+
+def gguf_part_bytes(qtype: str) -> int:
+    """A toy block's part in bytes: its matrix's quantised bytes and its float16 bias, on ALIGN."""
+    return GGUF_WIDTH * kquant.BLOCK_BYTES[qtype] + GGUF_WIDTH * 2
+
+
+class GgufBlock(torch.nn.Module):
+    """A toy block of seedvr2x's dynamic GGUF files: a kquant.GGUFLinear, its quantised bytes
+    (uint8) and float16 bias, and a table, a buffer. Its forward queues one kernel, the linear on
+    the memory its parameters were views of when it was queued, as a GPU's kernel holds its
+    addresses. `fill`: random blocks with sane scales (test_kquant.blocks) in the weight, False
+    for a model built to be loaded."""
+
+    def __init__(self, name: str, sim: Sim, qtype: str, fill: bool = True) -> None:
+        super().__init__()
+        self.name, self.sim = name, sim
+        self.mix = kquant.GGUFLinear(GGUF_WIDTH, GGUF_WIDTH, qtype)
+        self.table: Tensor
+        self.register_buffer("table", torch.zeros(GGUF_WIDTH), persistent=False)
+        if fill:
+            seed = sum(map(ord, name))
+            generator = torch.Generator().manual_seed(seed)
+            self.mix.weight.data = kquant_blocks(qtype, GGUF_WIDTH, seed).reshape(GGUF_WIDTH, -1)
+            assert self.mix.bias is not None
+            self.mix.bias.data = (torch.randn(GGUF_WIDTH, generator=generator) * 0.5).to(
+                torch.float16
+            )
+            self.table = torch.randn(GGUF_WIDTH, generator=generator)
+
+    def forward(self, x: Tensor) -> Tensor:
+        out = torch.empty_like(x)
+        weight, qtype, table = self.mix.weight.data, self.mix.qtype, self.table
+        assert self.mix.bias is not None
+        bias = self.mix.bias.data
+
+        def run() -> None:
+            y = kquant.linear(x, weight, bias, qtype, torch.bfloat16).float()
+            out.copy_(torch.tanh(y) + table)
+
+        self.sim.kernel(self.name, run, [weight, bias])
+        return out
+
+
+class GgufToy(torch.nn.Module):
+    """A toy DiT of GGUF blocks of different types, with float16 parameters before them and after
+    (`scale`, 100 values, 200 bytes, so that the file pads before its first matrix; `tail`, 3)."""
+
+    def __init__(self, blocks: int, sim: Sim, fill: bool = True) -> None:
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.zeros(100, dtype=torch.float16))
+        self.blocks = torch.nn.ModuleList(
+            GgufBlock(f"blocks.{i}", sim, GGUF_KINDS[2 * i % 3], fill) for i in range(blocks)
+        )
+        self.tail = torch.nn.Parameter(torch.zeros(3, dtype=torch.float16))
+        if fill:
+            generator = torch.Generator().manual_seed(blocks)
+            self.scale.data = torch.randn(100, generator=generator).to(torch.float16)
+            self.tail.data = torch.randn(3, generator=generator).to(torch.float16)
+
+    def forward(self, x: Tensor) -> Tensor:
+        # Before the blocks: their kernels are queued, so that what they return is only written
+        # once the simulator runs them.
+        x = x * (1 + self.scale.float().sum() * 1e-3) + self.tail.float().sum()
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
+def gguf_toy(blocks: int, sim: Sim) -> GgufToy:
+    return GgufToy(blocks, sim).requires_grad_(False).eval()
+
+
+def gguf_run(model: GgufToy, sim: Sim, forwards: int = 2) -> list[Tensor]:
+    outputs: list[Tensor] = []
+    for index in range(forwards):
+        torch.manual_seed(3000 + index)
+        out = model(torch.randn(5, GGUF_WIDTH))
+        sim.settle()
+        outputs.append(out.clone())
+    return outputs
+
+
+def write_gguf(path: Path, source: GgufToy) -> Path:
+    """The toy's GGUF file, as seedvr2x's are laid out: a header (version 3, a metadata entry, each
+    tensor of the model under its name, a matrix in its ggml type, its shape PyTorch's), padding
+    to 32, each tensor's data at its aligned offset, 0xEE in the padding between and after, so
+    that the hash must read it."""
+    specs: list[Spec] = []
+    data: dict[str, bytes] = {}
+    for key, value in source.state_dict().items():
+        layer = key.rpartition(".")[0]
+        if value.dtype == torch.uint8:
+            qtype = cast("kquant.GGUFLinear", source.get_submodule(layer)).qtype
+            specs.append((key, qtype, (GGUF_WIDTH, GGUF_WIDTH)))
+        else:
+            specs.append((key, "F16", tuple(value.shape)))
+        data[key] = bytes(value.contiguous().view(torch.uint8).numpy().tobytes())
+    head = header(specs, [entry("general.architecture", 8, "toy")])
+    offsets, length = placed(specs)
+    raw = bytearray(b"\xee" * (len(head) + length))
+    raw[: len(head)] = head
+    for (key, _, _), offset in zip(specs, offsets, strict=True):
+        raw[len(head) + offset : len(head) + offset + len(data[key])] = data[key]
+    path.write_bytes(raw)
+    return path
+
+
+@pytest.mark.parametrize("prefetch", [False, True])
+@pytest.mark.parametrize("policy", ["side-first", "compute-first", "random-1"])
+def test_gguf_blocks_of_unequal_sizes_swap_as_any_others(policy: str, prefetch: bool) -> None:
+    # The quantised bytes of the blocks moved as any parameters: every count of swapped blocks
+    # gives the bits of none swapped. The blocks differ in size (a type a block): a slot is the
+    # largest swapped block's, the blocks that stay each their own size.
+    blocks = 5
+    plain = Sim(policy)
+    expected = gguf_run(gguf_toy(blocks, plain), plain)
+    sizes = [gguf_part_bytes(GGUF_KINDS[2 * i % 3]) for i in range(blocks)]
+    assert len(set(sizes)) == 3
+    other = (100 + 3) * 2
+    for swapped in range(blocks + 1):
+        sim = Sim(policy)
+        model = gguf_toy(blocks, sim)
+        placement = Placement(model, CPU, swapped, prefetch, backend=sim)
+        placement.enter("dit")
+        assert same(gguf_run(model, sim), expected), swapped
+        last = sizes[blocks - swapped :]
+        assert placement.block_bytes == max(last, default=0)
+        slots = min(SLOTS, swapped) * placement.block_bytes
+        assert sim.live() == slots
+        assert placement.device_bytes() == sum(sizes[: blocks - swapped]) + other + slots
+        if swapped:
+            dtypes = [field.dtype for field in placement._streaming[0].fields]  # pyright: ignore[reportPrivateUsage]
+            assert dtypes == [torch.uint8, torch.float16]
+
+
+def test_a_gguf_file_is_read_into_its_parts_and_hashed_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # model._load_weights and blockswap.read over a GGUF file: the quantised matrices read as the
+    # uint8 bytes the file holds, (rows, bytes of a row), the float16 ones as they are, into the
+    # parts' host copies for the blocks a plan swaps and onto the device for the rest; every byte
+    # of the file hashed once in its order, the header, the padding between and after the tensors
+    # included, so that the SHA-256 is hashlib's of the whole file.
+    sim = Sim()
+    monkeypatch.setattr(blockswap, "Cuda", lambda device: sim)
+    source = gguf_toy(4, sim)
+    path = write_gguf(tmp_path / "toy.gguf", source)
+    found = gguf_file.read(path)
+    gaps = [
+        (a.offset + a.nbytes, b.offset)
+        for a, b in itertools.pairwise(found.tensors)
+        if a.offset + a.nbytes < b.offset
+    ]
+    assert gaps
+    whole = path.read_bytes()
+    assert whole[found.tensors[0].offset + found.tensors[0].nbytes] == 0xEE
+
+    spans: list[tuple[int, int]] = []
+    real = blockswap._Tee.hashed  # pyright: ignore[reportPrivateUsage]
+
+    def recorded(tee: Any, piece: memoryview) -> None:
+        spans.append((tee.raw.tell() - len(piece), tee.raw.tell()))
+        real(tee, piece)
+
+    monkeypatch.setattr(blockswap._Tee, "hashed", recorded)  # pyright: ignore[reportPrivateUsage]
+    with torch.device("meta"):
+        target = GgufToy(4, sim, fill=False)
+    given: list[tuple[str, os.stat_result]] = []
+    parts = model._load_weights(  # pyright: ignore[reportPrivateUsage]
+        target,
+        path,
+        CPU,
+        None,
+        dit_parts(4, 1, other=False),
+        hashed=lambda digest, status: given.append((digest, status)),
+    )
+    monkeypatch.undo()
+    assert sorted(parts) == ["blocks.1", "blocks.2", "blocks.3"]
+    assert len(given) == 1 and given[0][0] == hashlib.sha256(whole).hexdigest()
+    assert (given[0][1].st_ino, given[0][1].st_size) == (path.stat().st_ino, len(whole))
+    # Each byte once, in the file's order, end to end.
+    assert spans[0][0] == 0 and spans[-1][1] == len(whole)
+    assert all(end == start for (_, end), (start, _) in itertools.pairwise(spans))
+    for key, value in source.state_dict().items():
+        loaded = target.state_dict()[key]
+        assert loaded.dtype == value.dtype and torch.equal(loaded, value), key
+    assert target.get_parameter("blocks.2.mix.weight").dtype == torch.uint8
+    assert target.get_parameter("blocks.2.mix.weight").shape == (GGUF_WIDTH, 144 * 1)
+    host = parts["blocks.1"].host.bytes
+    for parameter in target.get_submodule("blocks.1").parameters():
+        assert overlap(parameter.data, host)
+    assert not mappings(path)
+    # The same tensors read without the hash, and the parts' fields in the model's order.
+    plain, plain_parts = blockswap.read(
+        GgufToy(4, sim, fill=False), path, CPU, None, dit_parts(4, 1, other=False), sim
+    )
+    assert list(plain) == list(source.state_dict())
+    assert sorted(plain_parts) == sorted(parts)
+    assert [field.dtype for field in parts["blocks.1"].fields] == [torch.uint8, torch.float16]
+    # The block's matrix and its bias, a part of the toy's three sizes.
+    assert [part.size for part in parts.values()] == [
+        gguf_part_bytes(GGUF_KINDS[2 * i % 3]) for i in (1, 2, 3)
+    ]
+
+
+def test_a_gguf_file_cut_short_is_refused_in_safetensors_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # As test_a_file_cut_short_is_refused_as_it_hashes_too: the same refusal, with the bytes held
+    # and the bytes the header claims, whether the file was cut before the load or changes under
+    # it; nothing hashed is given, the hash thread ended.
+    sim = Sim()
+    source = gguf_toy(3, sim)
+    path = write_gguf(tmp_path / "toy.gguf", source)
+    info = gguf_file.read(path)
+    last = max(each.offset + each.nbytes for each in info.tensors)
+    given: list[str] = []
+
+    def read_it() -> None:
+        blockswap.read(
+            torch.nn.Module(),
+            path,
+            CPU,
+            None,
+            None,
+            hashed=lambda digest, status: given.append(digest),
+        )
+
+    with path.open("r+b") as file:
+        file.truncate(last - 10)
+    with pytest.raises(weights.ModelError) as error:
+        read_it()
+    assert str(error.value) == (
+        f"{path}: cut short as it loaded, {last - 10:,} of {last:,} bytes; {weights.AGAIN}"
+    )
+    # Cut inside the header: said as cut short as it loaded, with the way out.
+    with path.open("r+b") as file:
+        file.truncate(100)
+    with pytest.raises(weights.ModelError, match=f"^{path}: cut short as it loaded") as error:
+        read_it()
+    assert str(error.value).endswith(f"; {weights.AGAIN}")
+    # Cut after the header was read: the tensors' read meets the end of the file.
+    path = write_gguf(tmp_path / "again.gguf", source)
+    size = path.stat().st_size
+    header_of = gguf_file.header_of
+
+    def then_cut(file: Any, length: int) -> Any:
+        found = header_of(file, length)
+        with path.open("r+b") as other:
+            other.truncate(last - 10)
+        return found
+
+    monkeypatch.setattr(gguf_file, "header_of", then_cut)
+    with pytest.raises(weights.ModelError) as error:
+        blockswap.read(
+            torch.nn.Module(),
+            path,
+            CPU,
+            None,
+            None,
+            hashed=lambda digest, status: given.append(digest),
+        )
+    assert str(error.value) == (
+        f"{path}: cut short as it loaded, {last - 10:,} of {size:,} bytes; {weights.AGAIN}"
+    )
+    assert not given
+    assert not [t for t in threading.enumerate() if t.name.startswith("seedvr2x-sha256")]
+
+
+def test_a_gguf_header_is_parsed_from_the_bytes_that_are_hashed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The offsets the tensors are read at come from the header's bytes the SHA-256 covers, as a
+    # safetensors file's: the header parsed on the file to learn where the data starts, then its
+    # bytes read through the tee (hashed) and parsed again, in memory. A header that reads
+    # differently the second time is a file changed as it loaded, refused.
+    sim = Sim()
+    source = gguf_toy(3, sim)
+    path = write_gguf(tmp_path / "toy.gguf", source)
+    whole = path.read_bytes()
+    info = gguf_file.read(path)
+    real = gguf_file.header_of
+    calls: list[Any] = []
+
+    def recorded(file: Any, length: int) -> Any:
+        calls.append(file)
+        return real(file, length)
+
+    monkeypatch.setattr(gguf_file, "header_of", recorded)
+    given: list[str] = []
+    blockswap.read(
+        GgufToy(3, sim, fill=False),
+        path,
+        CPU,
+        None,
+        None,
+        sim,
+        hashed=lambda digest, status: given.append(digest),
+    )
+    assert len(calls) == 2 and isinstance(calls[1], io.BytesIO)
+    assert calls[1].getvalue() == whole[: info.data_start]
+    assert given == [hashlib.sha256(whole).hexdigest()]
+
+    # The second reading differs (a tensor under another name, as a file changed under the load
+    # would give): refused, nothing hashed given, the hash thread ended.
+    def then_another(file: Any, length: int) -> Any:
+        found = real(file, length)
+        if not isinstance(file, io.BytesIO):
+            return found
+        first = replace(found.tensors[0], name="other")
+        return replace(found, tensors=(first, *found.tensors[1:]))
+
+    monkeypatch.setattr(gguf_file, "header_of", then_another)
+    given.clear()
+    with pytest.raises(weights.ModelError) as error:
+        blockswap.read(
+            torch.nn.Module(),
+            path,
+            CPU,
+            None,
+            None,
+            hashed=lambda digest, status: given.append(digest),
+        )
+    assert str(error.value) == (
+        f"{path}: changed as it loaded, its header read twice differently; {weights.AGAIN}"
+    )
+
+    # Or one that no longer parses.
+    def then_damaged(file: Any, length: int) -> Any:
+        if isinstance(file, io.BytesIO):
+            raise gguf_file.GgufError("damaged", kind="damaged")
+        return real(file, length)
+
+    monkeypatch.setattr(gguf_file, "header_of", then_damaged)
+    with pytest.raises(weights.ModelError, match="changed as it loaded"):
+        blockswap.read(torch.nn.Module(), path, CPU, None, None)
+    assert not given
+    assert not [t for t in threading.enumerate() if t.name.startswith("seedvr2x-sha256")]
+
+
+def test_a_quantised_gguf_tensor_of_no_rows_is_refused_in_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # weights.check pins the matrices' shapes, so a checked file never has one; read without the
+    # check, a quantised matrix of 0 rows is a refusal, not a division by zero.
+    sim = Sim()
+    path = write_gguf(tmp_path / "toy.gguf", gguf_toy(2, sim))
+    real = gguf_file.header_of
+
+    def empty(file: Any, length: int) -> Any:
+        found = real(file, length)
+        at = next(i for i, each in enumerate(found.tensors) if each.type != "F16")
+        none = replace(found.tensors[at], shape=(0, GGUF_WIDTH), nbytes=0)
+        return replace(found, tensors=(*found.tensors[:at], none, *found.tensors[at + 1 :]))
+
+    monkeypatch.setattr(gguf_file, "header_of", empty)
+    with pytest.raises(weights.ModelError, match="with no rows"):
+        blockswap.read(torch.nn.Module(), path, CPU, None, None)
+
+
+@pytest.mark.parametrize(
+    "architecture", [weights.DIT_7B_DYN, weights.DIT_7B_SHARP_DYN], ids=["7b", "sharp"]
+)
+def test_a_gguf_dit_s_blocks_are_weights_py_s(architecture: weights.Architecture) -> None:
+    # The 7B swapped to GGUF on the meta device with the architecture's own types (model.
+    # _swap_gguf, 288 matrices): each block's parameters, the quantised matrices' bytes and the
+    # float16 ones, are the bytes weights.py pins for it, and the parts the placement makes of
+    # them (each parameter on ALIGN) the same: the planner's figures (peaks.block_sizes) are the
+    # placement's.
+    import seedvr2x.vendor
+    from seedvr2x.vendor.common.config import create_object, load_config
+
+    vendor = Path(seedvr2x.vendor.__file__).parent
+    config: Any = load_config(str(vendor / "configs_7b" / "main.yaml"))
+    with torch.device("meta"):
+        dit = create_object(config.dit.model)
+    model._swap_gguf(dit, architecture)  # pyright: ignore[reportPrivateUsage]
+    sizes = dict.fromkeys(range(len(dit.blocks)), 0)
+    parts = dict.fromkeys(range(len(dit.blocks)), 0)
+    other = 0
+    for key, parameter in dit.named_parameters():
+        match = blockswap._BLOCK.match(key)  # pyright: ignore[reportPrivateUsage]
+        # The files hold the model's other parameters in float16; the meta model's are float32.
+        nbytes = parameter.numel() * (1 if parameter.dtype == torch.uint8 else 2)
+        if match is None:
+            other += nbytes
+        else:
+            sizes[int(match[1])] += nbytes
+            parts[int(match[1])] += blockswap._aligned(nbytes)  # pyright: ignore[reportPrivateUsage]
+    assert tuple(sizes.values()) == architecture.blocks and other == architecture.other
+    # The parts lay each parameter on ALIGN: a few small ones, 1,024 bytes a block, over (blockswap
+    # says under 16 KiB), which the planner's figures leave to its margins as fp16's.
+    for part, raw in zip(parts.values(), architecture.blocks, strict=True):
+        assert 0 <= part - raw <= 16 << 10
+    for key, parameter in dit.named_parameters():
+        layer, _, leaf = key.rpartition(".")
+        if weights.MATRIX.fullmatch(layer) and leaf == "weight":
+            assert parameter.dtype == torch.uint8 and architecture.dtype_of(key) in (
+                "Q3_K",
+                "Q4_K",
+                "Q5_K",
+            )
+        else:
+            assert parameter.dtype != torch.uint8, key
+    # The planner's slot is the largest block's.
+    from seedvr2x import peaks
+
+    assert 0 <= max(parts.values()) - peaks.block_bytes(architecture) <= 16 << 10
+
+
+# seedvr2x's dynamic GGUF files, the sharp 7B's and the 7B's, the first in SEEDVR2X_MODEL_DIR taken.
+GGUF_DITS = ("seedvr2x_ema_7b_sharp_dyn.gguf", "seedvr2x_ema_7b_dyn.gguf")
+
+
+@pytest.mark.parametrize("name", ["seedvr2x_ema_7b_dyn.gguf", "seedvr2x_ema_7b_sharp_dyn.gguf"])
+def test_a_real_gguf_file_s_hash_is_its_pin_and_its_tensors_ggufs(name: str) -> None:
+    # The dynamic files themselves, where the test's model directory has them (4.8 GB read on
+    # the CPU): the read's SHA-256 the file's pin (pull.PINNED), hashed with the tensors as one
+    # read, and every tensor the bytes of gguf-py's reader (llama.cpp's own, the tests'
+    # reference): the F16 ones as float16, the quantised ones as the uint8 rows of ggml's blocks.
+    directory = os.environ.get("SEEDVR2X_MODEL_DIR")
+    if not directory or not (Path(directory) / name).is_file():
+        pytest.skip(f"needs SEEDVR2X_MODEL_DIR holding {name}")
+    gguf = pytest.importorskip("gguf", reason="the gguf package is the reference")
+    import numpy as np
+
+    from seedvr2x import pull
+
+    path = Path(directory) / name
+    state, parts, digest, _ = hashing(torch.nn.Module(), path, None)
+    assert digest == pull.PINNED[name].sha256 and not parts
+    reader = gguf.GGUFReader(path)
+    assert len(state) == len(reader.tensors) == 1128
+    for tensor in reader.tensors:
+        got = state[tensor.name]
+        want = torch.from_numpy(np.array(tensor.data))
+        assert got.dtype == want.dtype and got.shape == want.shape, tensor.name
+        assert torch.equal(got, want), tensor.name
+
+
+@pytest.mark.gpu
+def test_a_real_gguf_dit_s_blocks_swap_and_change_no_bit() -> None:
+    # test_a_real_int8_dit_s_blocks_swap_and_change_no_bit on seedvr2x's dynamic GGUF file: the
+    # DiT loaded whole, then every parameter to a pinned host copy and 0, 3, 12 and 36 blocks
+    # swapped, without the prefetch and with it, the windows' bits those of the DiT loaded whole;
+    # its peak the last swapped blocks' own bytes less, but the two slots, each the largest of
+    # them (peaks.swapped_saving: the blocks differ, 113,689,600 to 129,909,760 bytes), from the
+    # whole load's less its allocator's rounding (below); the device holding the placement's
+    # bytes as each enters. Needs CUDA with the GGUF DiT and a window beside it (10 GiB free),
+    # SEEDVR2X_MODEL_DIR holding a dynamic GGUF file and the VAE, and 5 GiB of host memory to pin.
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from test_placement import MODELS, SLACK, VAES, allocated, found, windows
+
+    if not MODELS:
+        pytest.skip("needs SEEDVR2X_MODEL_DIR")
+    from seedvr2x import peaks
+
+    device = torch.device("cuda:0")
+    path = found(GGUF_DITS)
+    architecture = weights.check(path, "dit")
+    models = model.load_models(path, found(VAES), device)
+    try:
+        dit = models.runner.dit
+        assert sum(isinstance(module, kquant.GGUFLinear) for module in dit.modules()) == 288
+        digests, peak = windows(models)
+        whole = allocated(device)
+        parts = blockswap.host(
+            dit, dit_parts(len(dit.blocks), 0, other=True), blockswap.Cuda(device)
+        )
+        torch.cuda.empty_cache()
+        away = allocated(device)
+        pinned = sum(part.host.bytes.numel() for part in parts.values())
+        # Loaded whole, the DiT holds more than its parameters' bytes, which a placement's packed
+        # parts don't: torch's allocator gives a request of 10 MiB or more a block rounded up to
+        # 2 MiB (c10/cuda/CUDACachingAllocator.cpp at v2.14.1: kMinLargeAlloc, kRoundLarge), as
+        # the int8 file's 27 MiB matrices take 28 (the int8 gate above).
+        # The GGUF file's matrices are 5.3 to 26 MB, many under the 10 MiB past which a request
+        # is rounded alone: what the whole load holds beyond the parameters is at most the
+        # rounding each one would take alone, never less than none. Measured on the RTX 5090
+        # (2026-11-04, the sharp file): 66.7 MiB, where each matrix rounded alone would be 291.8.
+        # The placements' peaks are held to the whole load's without it.
+        mib = 2**20
+        counted = 0
+        for parameter in dit.parameters():
+            size = parameter.numel() * parameter.element_size()
+            if size > 10 * mib:
+                counted += -(-size // (2 * mib)) * 2 * mib - size
+        rounding = whole - away - pinned
+        assert 0 <= rounding <= counted + 8 * mib, (rounding / mib, counted / mib)
+        for swapped, prefetch in [
+            (0, False),
+            (3, False),
+            (3, True),
+            (12, True),
+            (36, False),
+            (36, True),
+        ]:
+            said = f"{swapped} swapped, prefetch {prefetch}"
+            placement = Placement(dit, device, swapped, prefetch, parts=parts)
+            placement.enter("dit")
+            assert abs(allocated(device) - away - placement.device_bytes()) < SLACK, said
+            assert abs(placement.block_bytes - peaks.slot_bytes(architecture, swapped)) < 16 << 10
+            got, got_peak = windows(models)
+            assert got == digests, said
+            expected = peak - rounding - peaks.swapped_saving(architecture, swapped)
             assert abs(got_peak - expected) < SLACK, (said, got_peak / 2**30, expected / 2**30)
             placement.enter("encode", 0)
             assert abs(allocated(device) - away) < SLACK, said

@@ -36,6 +36,15 @@ quantizer and dequantization (comfy_kitchen/backends/cuda/ops/int8_linear.cu and
 cutlass_gemm_int8.cu), in PyTorch; no comfy-kitchen code runs in seedvr2x. That file says what
 it follows and where it differs.
 
+It also includes, written in seedvr2x/kquant.py from llama.cpp's source (ggml-org/llama.cpp,
+https://github.com/ggml-org/llama.cpp, tag v0.8.0, commit 8642541), Copyright (c) 2023-2026 The
+ggml authors, under the MIT License: the K-quant block formats of Q3_K, Q4_K and Q5_K
+(ggml/src/ggml-common.h: block_q3_K, block_q4_K, block_q5_K) and their dequantisation
+(ggml/src/ggml-quants.c: dequantize_row_q3_K, dequantize_row_q4_K, dequantize_row_q5_K and
+get_scale_min_k4), in PyTorch; no llama.cpp code runs in seedvr2x. That file says what it
+follows. llama.cpp's gguf-py package (gguf, MIT) is the reference its tests compare with, and no
+dependency of the library.
+
 It also includes TransNetV2's official PyTorch model, seedvr2x/transnetv2/transnetv2_pytorch.py,
 copied unchanged from TransNetV2 (https://github.com/soCzech/TransNetV2, commit 85cef72,
 inference-pytorch/transnetv2_pytorch.py): TransNetV2, Copyright (c) 2020 Tomáš Souček, under the

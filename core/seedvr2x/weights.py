@@ -3,12 +3,14 @@ header is read and checked before anything else runs, without torch, so that a w
 refused in a second, saying what it is, rather than failing after the first pass or running
 unchecked.
 
-v1 runs SeedVR2's 7B DiT, the regular or the sharp one, every tensor in fp16 or in seedvr2x's int8
+v1 runs SeedVR2's 7B DiT, the regular or the sharp one, every tensor in fp16, in seedvr2x's int8
 files (INT8 W8A8, comfy-kitchen's layout with its rotation: DESIGN.md, Weights, "int8 before
-v0.1.0 is tagged"), with its VAE in fp16, and detects shots with TransNetV2 in fp32 (DESIGN.md,
-Input, Shot detection). A safetensors file is known by its header, read without the safetensors
-library: the header's length, then the header, never the tensors' data but for an int8 file's
-markers, 72 bytes for each of its 288 quantised layers, which say the layout its values are in."""
+v0.1.0 is tagged") or in its dynamic GGUF files (a ggml type a block matrix: DESIGN.md, Weights,
+"The dynamic GGUF before v0.1.0 too"), with its VAE in fp16, and detects shots with TransNetV2 in
+fp32 (DESIGN.md, Input, Shot detection). A safetensors file is known by its header, read without
+the safetensors library: the header's length, then the header, never the tensors' data but for an
+int8 file's markers, 72 bytes for each of its 288 quantised layers, which say the layout its values
+are in. A GGUF file's header is read by seedvr2x/gguf_file.py, none of its data."""
 
 import hashlib
 import json
@@ -19,9 +21,11 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, cast
+from typing import BinaryIO, Literal, cast
 
+from seedvr2x import gguf_file
 from seedvr2x.errors import Refusal
+from seedvr2x.gguf_file import GgufError
 
 logger = logging.getLogger(__name__)
 
@@ -61,17 +65,29 @@ class Architecture:
     # How the file holds the block matrices (MATRIX), None where every tensor is in dtype: INT8,
     # comfy-kitchen's INT8 layout with its rotation (seedvr2x/int8.py).
     layout: str | None = None
+    # In the GGUF layout, each block's 8 matrices' ggml types, as a string of GGUF_ORDER's 8
+    # digits a block (3, 4 or 5: GGUF_TYPES): the pin of the types, which the inventory's names and
+    # shapes don't tell. Empty for another layout.
+    types: tuple[str, ...] = ()
 
     def dtype_of(self, name: str) -> str:
         """The dtype seedvr2x runs the tensor of this name in: in the INT8 layout, a block
-        matrix's weight I8, its scale F32 and its marker U8; a BatchNorm counter I64; any other
-        tensor the architecture's dtype."""
+        matrix's weight I8, its scale F32 and its marker U8; in the GGUF layout, a block matrix's
+        weight in the ggml type `types` pins for it (Q3_K, Q4_K or Q5_K); a BatchNorm counter
+        I64; any other tensor the architecture's dtype."""
         if name.endswith(COUNTER):
             return "I64"
         layer, _, leaf = name.rpartition(".")
         if self.layout == INT8 and MATRIX.fullmatch(layer) and leaf in INT8_LEAVES:
             return INT8_LEAVES[leaf]
+        if self.layout == GGUF and leaf == "weight" and MATRIX.fullmatch(layer):
+            index, _, module = layer.removeprefix("blocks.").partition(".")
+            return GGUF_TYPES[self.types[int(index)][GGUF_ORDER.index(module)]]
         return self.dtype
+
+    def matrix_types(self) -> list[str]:
+        """The ggml types of a GGUF layout's block matrices, each once, in name order."""
+        return sorted({GGUF_TYPES[each] for block in self.types for each in block})
 
 
 # The 288 attention and MLP matrices of the 7B's blocks, 8 a block, by their modules' names: the
@@ -90,6 +106,25 @@ MARK = ".comfy_quant"
 MARKER = {"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": GROUP}
 # How such a file's values are said: what it is, and how it multiplies.
 INT8_SAID = "in int8, W8A8 with comfy-kitchen's rotation"
+GGUF_SAID = "in seedvr2x's dynamic GGUF"
+
+
+# seedvr2x's dynamic GGUF files (DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too"): the
+# 1,128 tensors of the fp16 7B under the same names and shapes, each of the 288 block matrices'
+# `<layer>.weight` quantised by ggml to a type of its own, every other tensor F16. GGUF_ORDER is
+# the order of a block's 8 matrices in Architecture.types, GGUF_TYPES its digits' ggml types.
+GGUF = "gguf"
+GGUF_ORDER = (
+    "attn.proj_qkv.vid",
+    "attn.proj_qkv.txt",
+    "attn.proj_out.vid",
+    "attn.proj_out.txt",
+    "mlp.vid.proj_in",
+    "mlp.vid.proj_out",
+    "mlp.txt.proj_in",
+    "mlp.txt.proj_out",
+)
+GGUF_TYPES = {"3": "Q3_K", "4": "Q4_K", "5": "Q5_K"}
 
 
 # A BatchNorm layer's count of the batches it trained on, num_batches_tracked, I64 in PyTorch's
@@ -131,6 +166,189 @@ DIT_7B_INT8 = Architecture(
     other=166_416_512,
     layout=INT8,
 )
+# The 7B in seedvr2x's dynamic GGUF file (seedvr2x_ema_7b_dyn.gguf), the regular 7B's: GGUF
+# version 3, alignment 32, the 1,128 tensors of DIT_7B under its digest, 840 F16 and the 288 block
+# matrices Q3_K (17), Q4_K (203) or Q5_K (68), `types` giving each one's; read from the file's own
+# header (4,757,055,264 bytes) on 2026-11-04 by seedvr2x/gguf_file.py, and agreeing with gguf-py
+# 0.19.0's GGUFReader. Each of its 36 blocks' bytes as the file holds them, the matrices' quantised
+# blocks and the 22 other parameters in F16 (they differ from block to block and file to file),
+# 4,590,563,328 bytes in all (4.28 GiB), the RoPE buffers (20 bytes a block, no parameters) left
+# out as in the others; and 166,416,512 bytes outside the blocks, the fp16 file's.
+DIT_7B_DYN = Architecture(
+    "SeedVR2's 7B DiT",
+    1128,
+    "960321767ecf7a1aeee79faefb0dcfb00acf66d205170ab813fff5bd3d1f3b2f",
+    "configs_7b",
+    blocks=(
+        113_689_600,
+        124_896_256,
+        123_716_608,
+        124_896_256,
+        124_896_256,
+        124_896_256,
+        124_896_256,
+        124_896_256,
+        124_896_256,
+        124_896_256,
+        124_896_256,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        128_730_112,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        124_896_256,
+        117_449_728,
+    ),
+    other=166_416_512,
+    layout=GGUF,
+    types=(
+        "44543343",
+        "44554443",
+        "44544443",
+        "44554434",
+        "44554443",
+        "44554443",
+        "44554443",
+        "44554443",
+        "44554443",
+        "44554443",
+        "44554443",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44544444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554443",
+        "44534433",
+    ),
+)
+
+# The same in the sharp 7B's file (seedvr2x_ema_7b_sharp_dyn.gguf, 4,757,129,024 bytes): the
+# same tensors and the same figures but for the types of 5 matrices (17 Q3_K, 204 Q4_K, 67 Q5_K),
+# read from its header the same day; its blocks 4,590,637,056 bytes in all. The two are told apart
+# by the types they pin, as the regular and the sharp 7B in fp16 cannot be: they have the same
+# tensors.
+DIT_7B_SHARP_DYN = Architecture(
+    "SeedVR2's sharp 7B DiT",
+    1128,
+    "960321767ecf7a1aeee79faefb0dcfb00acf66d205170ab813fff5bd3d1f3b2f",
+    "configs_7b",
+    blocks=(
+        112_509_952,
+        121_136_128,
+        123_716_608,
+        124_896_256,
+        124_896_256,
+        124_896_256,
+        124_896_256,
+        124_896_256,
+        124_896_256,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        124_896_256,
+        128_730_112,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        129_909_760,
+        124_896_256,
+        117_449_728,
+    ),
+    other=166_416_512,
+    layout=GGUF,
+    types=(
+        "44443343",
+        "34554443",
+        "44544443",
+        "44554434",
+        "44554443",
+        "44554443",
+        "44554443",
+        "44554443",
+        "44554443",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554443",
+        "44544444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554444",
+        "44554443",
+        "44534433",
+    ),
+)
+
 # The 3B: 32 blocks, the first 10 of 317,266,944 bytes (0.295 GiB, their text and video halves
 # apart), the other 22 of 158,633,472 (0.148 GiB, shared), 6.21 of its 6.32 GiB.
 DIT_3B = Architecture(
@@ -151,23 +369,25 @@ TRANSNETV2 = Architecture(
     None,
     "F32",
 )
-ARCHITECTURES = (DIT_7B, DIT_7B_INT8, DIT_3B, VAE, TRANSNETV2)
+ARCHITECTURES = (DIT_7B, DIT_7B_INT8, DIT_7B_DYN, DIT_7B_SHARP_DYN, DIT_3B, VAE, TRANSNETV2)
 
 # What v1 runs in each role (DESIGN.md, Weights): the 7B DiT, the regular and the sharp one alike
-# (one architecture, the same tensors), every tensor in F16 or in the INT8 layout, and the VAE,
+# (one architecture, the same tensors), every tensor in F16, in the INT8 layout or, in the dynamic
+# GGUF files (one architecture each, told by their types), F16 but for the block matrices; the VAE,
 # every tensor in F16; and TransNetV2, the shot detector, as its official weights are converted,
 # every tensor F32 but its counters (DESIGN.md, Input, Shot detection).
 ACCEPTED: dict[Role, tuple[Architecture, ...]] = {
-    "dit": (DIT_7B, DIT_7B_INT8),
+    "dit": (DIT_7B, DIT_7B_INT8, DIT_7B_DYN, DIT_7B_SHARP_DYN),
     "vae": (VAE,),
     "detector": (TRANSNETV2,),
 }
 # The end of every refusal of a readable file given as the DiT or the VAE, the 3B's included:
 # phase 2 brings the two 7Bs' other smaller files, and no 3B (DESIGN.md, Weights, Phase 2).
 V1 = (
-    "seedvr2x v1 runs SeedVR2's 7B DiT, regular or sharp, in fp16 or in int8 (seedvr2x's int8"
-    " files, W8A8 with comfy-kitchen's rotation), with its VAE in fp16; phase 2 brings the two"
-    " 7Bs' other smaller files"
+    "seedvr2x v1 runs SeedVR2's 7B DiT, regular or sharp, in fp16, in int8 (seedvr2x's int8"
+    " files, W8A8 with comfy-kitchen's rotation) or in seedvr2x's dynamic GGUF files (its block"
+    " matrices in Q3_K, Q4_K and Q5_K), with its VAE in fp16; phase 2 brings the two 7Bs' other"
+    " smaller files"
 )
 # The same, of a file given as the shot detector.
 SHOTS = "seedvr2x detects shots with TransNetV2 in fp32, as its own transnetv2.safetensors holds it"
@@ -200,11 +420,17 @@ class TensorInfo:
     """A tensor as a safetensors header declares it: its dtype, by safetensors' name (F16, BF16,
     F8_E4M3...), and its shape; and read from a file, where its data starts, from the file's
     start, in bytes (the INT8 layout's markers are read there: _unmarked), which no comparison of
-    two tensors counts."""
+    two tensors counts. A GGUF file's tensors are given the same way, the dtype ggml's type name
+    (F16, Q4_K...), the shape PyTorch's (GGUF lists dimensions the other way round)."""
 
     dtype: str
     shape: tuple[int, ...]
     at: int | None = field(default=None, compare=False)
+
+
+class GgufTensors(dict[str, TensorInfo]):
+    """The tensors of a GGUF file (_read), told from a safetensors file's, whose dtypes can read
+    the same (F16): a GGUF file of 1,128 F16 tensors isn't DIT_7B."""
 
 
 # Bytes per value of the dtypes safetensors names, those whose data sizes are checked; any other
@@ -261,9 +487,12 @@ def check(path: Path, role: Role) -> Architecture:
 
 def in_words(architecture: Architecture) -> str:
     """What a file of this architecture, in the dtypes seedvr2x runs it in, is, in words: "SeedVR2's
-    7B DiT in fp16", "SeedVR2's 7B DiT in int8, W8A8 with comfy-kitchen's rotation"."""
+    7B DiT in fp16", "SeedVR2's 7B DiT in int8, W8A8 with comfy-kitchen's rotation", "SeedVR2's
+    sharp 7B DiT in seedvr2x's dynamic GGUF, its block matrices in Q3_K, Q4_K and Q5_K"."""
     if architecture.layout == INT8:
         return f"{architecture.name} {INT8_SAID}"
+    if architecture.layout == GGUF:
+        return f"{architecture.name} {GGUF_SAID}, {_matrices(architecture.matrix_types())}"
     return f"{architecture.name} in {PRECISIONS[architecture.dtype]}"
 
 
@@ -327,12 +556,24 @@ def inventory(tensors: Mapping[str, TensorInfo]) -> str:
 
 
 def _architecture(tensors: Mapping[str, TensorInfo]) -> Architecture | None:
-    """The architecture whose tensors these are, exactly, by name and shape; else None."""
-    candidates = [each for each in ARCHITECTURES if each.tensors == len(tensors)]
+    """The architecture whose tensors these are, exactly, by name and shape; else None. A GGUF
+    file's are one of the GGUF layout's, whose types they must be as well (the dynamic files share
+    DIT_7B's names and shapes and differ by the ggml type of some matrices: DIT_7B_DYN's types
+    are not DIT_7B_SHARP_DYN's, nor those of a file quantised otherwise); a safetensors file's
+    never are."""
+    gguf = isinstance(tensors, GgufTensors)
+    candidates = [
+        each
+        for each in ARCHITECTURES
+        if each.tensors == len(tensors) and (each.layout == GGUF) == gguf
+    ]
     if not candidates:
         return None
     digest = inventory(tensors)
-    return next((each for each in candidates if each.digest == digest), None)
+    named = [each for each in candidates if each.digest == digest]
+    if gguf:
+        return next((each for each in named if _as_run(tensors, each)), None)
+    return next(iter(named), None)
 
 
 def _as_run(tensors: Mapping[str, TensorInfo], architecture: Architecture) -> bool:
@@ -384,10 +625,10 @@ def _role(tensors: Mapping[str, TensorInfo], found: Architecture | None) -> Role
 
 def _read(path: Path) -> dict[str, TensorInfo] | str:
     """The tensors of the safetensors file at path, as its header declares them, validated as the
-    safetensors library validates a file (_parse); or what a file of another format is, in words
-    (_other). Reads the fewest bytes: the header's length (8), then the header, never the data.
-    Raises ModelError when the file is missing, not a regular file, empty, cut short or
-    damaged."""
+    safetensors library validates a file (_parse); of the GGUF file at path (_gguf: GgufTensors);
+    or what a file of another format is, in words (_other). Reads the fewest bytes: the header's
+    length (8), then the header, never the data. Raises ModelError when the file is missing, not a
+    regular file, empty, cut short or damaged."""
     if not path.is_file():
         if os.path.lexists(path):
             raise ModelError(f"{path}: not a regular file")
@@ -419,7 +660,9 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
             # pickle's (0x80 0x02) or a zip's ("PK" 3 4: 67,324,752 bytes, within the limit)
             # does.
             start = file.read(9)
-            if start.startswith(b"GGUF") or start[8:] != b"{":
+            if start.startswith(b"GGUF"):
+                return _gguf(path, file, size)
+            if start[8:] != b"{":
                 return _other(start)
             length = int.from_bytes(start[:8], "little")
             if length == 0 or length > HEADER_LIMIT:
@@ -444,16 +687,29 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
     return tensors
 
 
+def _gguf(path: Path, file: BinaryIO, size: int) -> GgufTensors | str:
+    """The tensors of the GGUF file open as file, size bytes long, as its header declares them
+    (seedvr2x/gguf_file.py, which checks its offsets and its size), each dtype ggml's type name and
+    each `at` where its bytes begin; or what the file is, in words, when it is a GGUF file
+    seedvr2x doesn't read (a version other than 3, a tensor of a ggml type it doesn't know). Raises
+    ModelError when the header is cut short (the file is fetched again) or damaged."""
+    try:
+        header = gguf_file.header_of(file, size)
+    except GgufError as error:
+        if error.kind == "cut":
+            raise ModelError(f"{path}: {error}; {AGAIN}") from None
+        if error.kind in ("version", "type"):
+            return str(error)
+        raise ModelError(f"{path}: a damaged GGUF file: {error}") from None
+    return GgufTensors(
+        {each.name: TensorInfo(each.type, each.shape, each.offset) for each in header.tensors}
+    )
+
+
 def _other(start: bytes) -> str:
-    """What a file that isn't safetensors is, by its first bytes (start): GGUF's signature,
-    "GGUF" (ggml's docs/gguf.md); a zip's, "PK" 3 4, torch.save's format from PyTorch 1.6; or a
-    pickle's protocol 2 to 5 (pickle's PROTO opcode, 0x80, then the protocol), torch.save's
-    format before it."""
-    if start.startswith(b"GGUF"):
-        return (
-            "a GGUF file (quantised weights, as numz's Q4_K_M and seedvr2x's own Q8_0, Q4_K and"
-            " dynamic files)"
-        )
+    """What a file that isn't safetensors or GGUF is, by its first bytes (start): a zip's, "PK"
+    3 4, torch.save's format from PyTorch 1.6; or a pickle's protocol 2 to 5 (pickle's PROTO
+    opcode, 0x80, then the protocol), torch.save's format before it."""
     if start.startswith(b"PK\x03\x04"):
         kind = "zip"
     elif start[:1] == b"\x80" and start[1:2] in (b"\x02", b"\x03", b"\x04", b"\x05"):
@@ -564,6 +820,8 @@ def _what(tensors: Mapping[str, TensorInfo], found: Architecture | None) -> str:
     """What a safetensors file of these tensors is, in words; found, the architecture they are
     exactly, if any."""
     dtypes = Counter(info.dtype for info in tensors.values())
+    if isinstance(tensors, GgufTensors):
+        return _what_gguf(tensors, found, dtypes)
     if found is not None and found.layout == INT8:
         if _as_run(tensors, found):
             return in_words(found)
@@ -584,6 +842,52 @@ def _what(tensors: Mapping[str, TensorInfo], found: Architecture | None) -> str:
         return f"a safetensors file of no tensors, {NONE_OF_THEM}"
     tensor_count = _count(len(tensors), "tensor")
     return f"a safetensors file of {tensor_count} ({_counts(dtypes)}), {NONE_OF_THEM}"
+
+
+def _what_gguf(
+    tensors: Mapping[str, TensorInfo], found: Architecture | None, dtypes: Counter[str]
+) -> str:
+    """What a GGUF file of these tensors is, in words; found, the dynamic architecture they are
+    exactly, names, shapes and types, if any. A DiT of SeedVR2's tensors says how its block
+    matrices are quantised, by type and count, and that it is none of seedvr2x's files."""
+    if found is not None:
+        return in_words(found)
+    dit = _dit(tensors)
+    if dit is None:
+        if not tensors:
+            return f"a GGUF file of no tensors, {NONE_OF_THEM}"
+        return (
+            f"a GGUF file of {_count(len(tensors), 'tensor')} ({_counts(dtypes)}), {NONE_OF_THEM}"
+        )
+    known = DITS.get(dit)
+    if known is None or inventory(tensors) != known.digest:
+        name = known.name if known else f"a DiT of {dit[0]} blocks, {dit[1]} wide"
+        other = (
+            f"{name} by its blocks and width, with other tensors than its own" if known else name
+        )
+        return f"a GGUF file of {other} ({_count(len(tensors), 'tensor')}: {_counts(dtypes)})"
+    # SeedVR2's own tensors, by name and shape: the block matrices' types are what differs from
+    # seedvr2x's files.
+    matrices = Counter(
+        info.dtype
+        for each, info in tensors.items()
+        if BLOCK.match(each) and each.endswith(".weight") and len(info.shape) == 2
+    )
+    ranked = sorted(matrices.items(), key=lambda item: (-item[1], item[0]))
+    said = _matrices([f"{dtype} ({count:,})" for dtype, count in ranked])
+    return f"a GGUF file of {known.name}, {said}" + (
+        ", not one of seedvr2x's dynamic files" if known is DIT_7B else ""
+    )
+
+
+def _matrices(kinds: list[str]) -> str:
+    """ "its block matrices in Q4_K", "... in Q3_K, Q4_K and Q5_K": the kinds, each said once."""
+    head, last = kinds[:-1], kinds[-1]
+    return (
+        f"its block matrices in {', '.join(head)} and {last}"
+        if head
+        else f"its block matrices in {last}"
+    )
 
 
 def _precision(dtypes: Counter[str]) -> str:

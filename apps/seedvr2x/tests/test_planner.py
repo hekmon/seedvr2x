@@ -55,9 +55,19 @@ def test_constants() -> None:
     assert (peaks.BLOCKS, peaks.SLOTS) == (36, 2)
     # The blocks, the slots and the DiT's other parameters are the model's own constants
     # (seedvr2x/weights.py), the 7B's, the one DiT seedvr2x runs, in fp16 (peaks.DIT, the
-    # module's BLOCK) or in int8; a block is one size in each, which the planner counts the 36 by.
+    # module's BLOCK), in int8 or in the dynamic GGUF files; a block is one size in fp16 and int8,
+    # which the planner counts the 36 by, and its own in a GGUF file (peaks.block_sizes).
     assert peaks.DIT is peaks.FP16 is weights.DIT_7B
-    assert peaks.DITS == weights.ACCEPTED["dit"] == (weights.DIT_7B, weights.DIT_7B_INT8)
+    assert (
+        peaks.DITS
+        == weights.ACCEPTED["dit"]
+        == (
+            weights.DIT_7B,
+            weights.DIT_7B_INT8,
+            weights.DIT_7B_DYN,
+            weights.DIT_7B_SHARP_DYN,
+        )
+    )
     assert peaks.DIT.blocks == (peaks.BLOCK,) * peaks.BLOCKS
     assert peaks.INT8.blocks == (peaks.block_bytes(peaks.INT8),) * peaks.BLOCKS
     assert (peaks.SLOTS, peaks.DIT_OTHER) == (weights.SLOTS, weights.DIT_7B.other)
@@ -2665,7 +2675,7 @@ def test_pinned_is_the_loaders() -> None:
         other = blockswap.OTHER in parts
         assert leaving(plan) == blocks, plan
         for dit_model in peaks.DITS:
-            expected = blocks * paged(peaks.block_bytes(dit_model))
+            expected = sum(paged(size) for size in peaks.leaving_blocks(dit_model, blocks))
             expected += other * paged(peaks.DIT_OTHER)
             expected += 0 if plan.vae_in_dit else paged(peaks.VAE_WEIGHTS)
             assert pinned(plan, dit_model) == expected, plan

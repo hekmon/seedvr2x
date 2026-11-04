@@ -36,7 +36,7 @@ import weakref
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from io import BufferedReader
+from io import BufferedReader, BytesIO
 from math import prod
 from pathlib import Path
 from typing import Any, NoReturn, cast
@@ -44,8 +44,9 @@ from typing import Any, NoReturn, cast
 import torch
 from torch import Tensor
 
-from seedvr2x import memory
+from seedvr2x import gguf_file, memory
 from seedvr2x.errors import Refusal
+from seedvr2x.gguf_file import GgufError
 from seedvr2x.passes import Phase
 from seedvr2x.weights import AGAIN, SLOTS, ModelError
 
@@ -65,7 +66,9 @@ _BLOCK = re.compile(r"blocks\.(\d+)\.")
 # an int8 file I8 and F32 besides, the block matrices and their scales, and U8, their markers,
 # which the loader doesn't read (weights.check; model.load_models); the other names of
 # weights.DTYPE_BYTES, the unsigned ones over 8 bits and fp8's two, which no such file holds, are
-# refused there rather than read untested.
+# refused there rather than read untested. A GGUF file's tensors are named by ggml's types
+# (gguf_file.TYPES), the same names for the plain ones (F16, F32...); its quantised ones, in
+# blocks of bytes, are read as U8 (_gguf_tensors).
 _DTYPES: dict[str, torch.dtype] = {
     "F16": torch.float16,
     "BF16": torch.bfloat16,
@@ -390,14 +393,15 @@ def read(
     skip: Callable[[str], bool] | None = None,
     hashed: Callable[[str, os.stat_result], None] | None = None,
 ) -> tuple[dict[str, Tensor], dict[str, Part]]:
-    """The tensors of the safetensors checkpoint at path, for model.load_state_dict(assign=True),
-    on device, every floating one cast to dtype if given, there, as numz casts a model loaded
-    whole; but the parameters part_of names a part for, if it is given: those go to their part's
-    host copy, pinned, and never to the device whole (DESIGN.md, BlockSwap, rewritten: the
-    loader); and none of those skip says True of, if it is given, which aren't kept: an int8
-    file's markers, which no model holds (model.load_models). Returns the tensors and the parts,
-    by name, each to adopt the model once loaded. Raises HostMemoryError before anything is
-    pinned when the host has too little memory available.
+    """The tensors of the safetensors or GGUF checkpoint at path (told by its signature; a GGUF
+    file's quantised matrices as the uint8 bytes of ggml's blocks, _gguf_tensors), for
+    model.load_state_dict(assign=True), on device, every floating one cast to dtype if given,
+    there, as numz casts a model loaded whole; but the parameters part_of names a part for, if
+    it is given: those go to their part's host copy, pinned, and never to the device whole
+    (DESIGN.md, BlockSwap, rewritten: the loader); and none of those skip says True of, if it is
+    given, which aren't kept: an int8 file's markers, which no model holds (model.load_models).
+    Returns the tensors and the parts, by name, each to adopt the model once loaded. Raises
+    HostMemoryError before anything is pinned when the host has too little memory available.
 
     With `hashed`, every byte of the file is hashed as it is read, in the file's order, the
     header and the tensors skipped included (_Tee), and hashed is called at the end with the
@@ -435,6 +439,11 @@ def read(
     return state, parts
 
 
+# A tensor as a file lays it out: torch's dtype and shape as the model holds it, and where its
+# bytes begin and end, in bytes from the layout's base.
+_Entry = tuple[torch.dtype, tuple[int, ...], int, int]
+
+
 def _read(
     tee: _Tee,
     model: torch.nn.Module,
@@ -446,35 +455,18 @@ def _read(
     backend: Cuda,
     skip: Callable[[str], bool] | None,
 ) -> tuple[dict[str, Tensor], dict[str, Part]]:
-    """read's tensors and parts, read through tee."""
+    """read's tensors and parts, read through tee. The file is a GGUF file or a safetensors one,
+    told by its first 8 bytes; either way its tensors are read in the order of their bytes, each
+    at its offset, and every byte between them hashed where the file is."""
     fill = tee.fill
-    # The file's layout, as safetensors lays it: the header's length, the header, the data,
-    # each tensor at its offsets from the header's end. weights.check has validated it.
-    size = bytearray(8)
-    fill(memoryview(size), 0)
-    length = int.from_bytes(size, "little")
-    text = bytearray(length)
-    fill(memoryview(text), 8)
-    header = cast("dict[str, Any]", json.loads(text))
-    header.pop("__metadata__", None)
-    tensors: dict[str, tuple[torch.dtype, tuple[int, ...], int, int]] = {}
-    # By their offsets: the order the bytes are in, whatever the header's. The tensors skipped
-    # are read past (_Tee.skip), hashed where the file is.
-    for key, entry in sorted(header.items(), key=lambda item: item[1]["data_offsets"][0]):
-        if skip is not None and skip(key):
-            continue
-        if entry["dtype"] not in _DTYPES:
-            raise RuntimeError(f"{path.name}: {key} is {entry['dtype']}, which isn't read")
-        found, shape = _DTYPES[entry["dtype"]], tuple(cast("list[int]", entry["shape"]))
-        start, end = cast("tuple[int, int]", tuple(entry["data_offsets"]))
-        if end - start != found.itemsize * prod(shape):
-            raise RuntimeError(
-                f"{path.name}: {key} takes {end - start} bytes, not {found.itemsize * prod(shape)}"
-            )
-        tensors[key] = (found, shape, start, end)
-    # The file's whole size by its header, the tensors skipped counted.
-    ends = (cast("list[int]", entry["data_offsets"])[1] for entry in header.values())
-    whole = 8 + length + max(ends, default=0)
+    first = bytearray(8)
+    fill(memoryview(first), 0)
+    # A safetensors file starts with its header's length, which "GGUF" read as one (1.18 GB)
+    # would put over weights.HEADER_LIMIT.
+    if bytes(first[: len(gguf_file.MAGIC)]) == gguf_file.MAGIC:
+        tensors, base, whole = _gguf_tensors(tee, path, skip, bytes(first))
+    else:
+        tensors, base, whole = _safetensors_tensors(tee, path, skip, first)
     layouts: dict[str, dict[str, tuple[torch.dtype, tuple[int, ...]]]] = {}
     for key, (found, shape, _, _) in tensors.items():
         name = part_of(key) if part_of is not None and key in parameters else None
@@ -506,7 +498,7 @@ def _read(
         else:
             # The staging buffer, whose last tensor's bytes may still be hashing.
             target, reused = staging[: end - start], True
-        fill(memoryview(target.numpy()), 8 + length + start, whole, reused)
+        fill(memoryview(target.numpy()), base + start, whole, reused)
         if placed is not None and not recast:
             continue
         # A copy on the CPU too, where to() alone gives the buffer's own memory, which the
@@ -523,6 +515,104 @@ def _read(
     # The tensors skipped after the last one read, up to the data's end.
     tee.skip(whole, whole)
     return state, parts
+
+
+def _safetensors_tensors(
+    tee: _Tee, path: Path, skip: Callable[[str], bool] | None, first: bytearray
+) -> tuple[dict[str, _Entry], int, int]:
+    """The tensors to read of the safetensors file at path, by name, in the order of their bytes;
+    where its data starts (the base of their offsets: 8 and the header's length); and the file's
+    whole size by its header, the tensors skip leaves out counted. `first` is the file's first 8
+    bytes, read through tee already; the header is read through it, hashed with the rest.
+    weights.check has validated the file."""
+    fill = tee.fill
+    # The file's layout, as safetensors lays it: the header's length, the header, the data,
+    # each tensor at its offsets from the header's end.
+    length = int.from_bytes(first, "little")
+    text = bytearray(length)
+    fill(memoryview(text), 8)
+    header = cast("dict[str, Any]", json.loads(text))
+    header.pop("__metadata__", None)
+    tensors: dict[str, _Entry] = {}
+    # By their offsets: the order the bytes are in, whatever the header's. The tensors skipped
+    # are read past (_Tee.skip), hashed where the file is.
+    for key, entry in sorted(header.items(), key=lambda item: item[1]["data_offsets"][0]):
+        if skip is not None and skip(key):
+            continue
+        if entry["dtype"] not in _DTYPES:
+            raise RuntimeError(f"{path.name}: {key} is {entry['dtype']}, which isn't read")
+        found, shape = _DTYPES[entry["dtype"]], tuple(cast("list[int]", entry["shape"]))
+        start, end = cast("tuple[int, int]", tuple(entry["data_offsets"]))
+        if end - start != found.itemsize * prod(shape):
+            raise RuntimeError(
+                f"{path.name}: {key} takes {end - start} bytes, not {found.itemsize * prod(shape)}"
+            )
+        tensors[key] = (found, shape, start, end)
+    # The file's whole size by its header, the tensors skipped counted.
+    ends = (cast("list[int]", entry["data_offsets"])[1] for entry in header.values())
+    return tensors, 8 + length, 8 + length + max(ends, default=0)
+
+
+def _gguf_tensors(
+    tee: _Tee, path: Path, skip: Callable[[str], bool] | None, first: bytes
+) -> tuple[dict[str, _Entry], int, int]:
+    """The tensors to read of the GGUF file at path, by name, in the order of their bytes; 0, the
+    base of their offsets, which are absolute (gguf_file); and the file's size. `first`: the
+    file's first 8 bytes, read through tee already. The header is parsed by gguf_file on the file
+    itself to learn where its data starts (74,272 bytes, and the padding to the first tensor),
+    those bytes are read again through tee, hashed with the rest, and parsed again from the very
+    bytes hashed, so that the offsets the tensors are read at are those of the bytes the SHA-256
+    covers, as a safetensors file's header is. A file whose header read twice differs changed
+    as it loaded, and is refused.
+
+    A plain type (F16...) is read as torch's dtype of that name, in its shape. A quantised one is
+    read as the bytes the file holds, uint8 (rows, bytes of a row): the weight of a
+    kquant.GGUFLinear, which the placement moves as it moves any parameter. A file cut short since
+    weights.check passed it is refused in safetensors' words (_Tee.cut)."""
+    size = os.fstat(tee.raw.fileno()).st_size
+    try:
+        learned = gguf_file.header_of(tee.raw, size)
+    except GgufError as error:
+        if error.kind == "cut":
+            detail = str(error).removeprefix("cut short")
+            raise ModelError(f"{path}: cut short as it loaded{detail}; {AGAIN}") from None
+        raise ModelError(f"{path}: a damaged GGUF file: {error}") from None
+    # The header's bytes, from the 8th to where the data starts (padding included), read through
+    # tee from where it is; the data's start is bounded by gguf_file's limits.
+    tee.raw.seek(tee.position)
+    bytes_of = bytearray(learned.data_start - len(first))
+    tee.fill(memoryview(bytes_of), len(first))
+    try:
+        header = gguf_file.header_of(BytesIO(first + bytes_of), size)
+    except GgufError:
+        header = None
+    # What the offsets and the sizes below come from; the metadata is not read here.
+    if header is None or (header.data_start, header.tensors) != (
+        learned.data_start,
+        learned.tensors,
+    ):
+        raise ModelError(
+            f"{path}: changed as it loaded, its header read twice differently; {AGAIN}"
+        )
+    tensors: dict[str, _Entry] = {}
+    for each in sorted(header.tensors, key=lambda tensor: tensor.offset):
+        if skip is not None and skip(each.name):
+            continue
+        if each.type in _DTYPES:
+            found, shape = _DTYPES[each.type], each.shape
+            if each.nbytes != found.itemsize * prod(shape):
+                raise RuntimeError(f"{path.name}: {each.name} takes {each.nbytes} bytes")
+        elif len(each.shape) == 2:
+            # weights.check pins the shapes of the 7B's matrices, so a quantised tensor of no rows
+            # never gets here from a checked file; a refusal in words all the same, not a
+            # ZeroDivisionError, for a file read without the check (blockswap.read's own callers).
+            if each.shape[0] == 0:
+                raise ModelError(f"{path}: {each.name} is {each.type} with no rows; {AGAIN}")
+            found, shape = torch.uint8, (each.shape[0], each.nbytes // each.shape[0])
+        else:
+            raise RuntimeError(f"{path.name}: {each.name} is {each.type}, which isn't read")
+        tensors[each.name] = (found, shape, each.offset, each.offset + each.nbytes)
+    return tensors, 0, size
 
 
 def host(

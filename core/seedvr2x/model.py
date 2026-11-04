@@ -29,7 +29,7 @@ from torchvision.transforms import Compose, InterpolationMode, Lambda, Normalize
 from torchvision.transforms import functional as TVF
 from tqdm import tqdm
 
-from seedvr2x import blockswap, int8, memory, weights
+from seedvr2x import blockswap, int8, kquant, memory, weights
 from seedvr2x.blockswap import Part, Placement
 from seedvr2x.frames import BLACK, padding
 from seedvr2x.passes import Compilation, ModelPlan, Phase
@@ -173,7 +173,8 @@ def load_models(
     """Build and load the DiT in the file at dit_file and the VAE in the file at vae_file, as
     pull.resolve found them, in --model-dir or in Hugging Face's cache, each checked first
     (weights.check, ModelError): the DiT is built from the config of what its file is, and from
-    an int8 file its block matrices as int8.Int8Linear, multiplied in int8 (seedvr2x/int8.py). A
+    an int8 file its block matrices as int8.Int8Linear, multiplied in int8 (seedvr2x/int8.py), from
+    a dynamic GGUF file as kquant.GGUFLinear, dequantised before each multiply. A
     file hashed this run (hashes) must still be the one hashed (Hashes.unchanged, ModelError),
     before anything is built and right after its own load. With hashes, each file is hashed as it
     is read, once, and its SHA-256 proved or given at the end of its own load (Hashes.proved): a
@@ -277,6 +278,11 @@ def load_models(
         # the model's: never read.
         _swap_int8(dit)
         skip = _marker
+    elif dit_architecture.layout == weights.GGUF:
+        # A dynamic GGUF file's block matrices as quantised bytes: a GGUFLinear in each
+        # nn.Linear's place, of the ggml type the architecture pins for it, on the meta device
+        # before the load, as int8's. Nothing in the file is skipped.
+        _swap_gguf(dit, dit_architecture)
     dit_parts = _load_weights(
         *(dit, dit_file, device, None, _dit_parts(model_plan, len(dit.blocks)), skip),
         hashed=hashed(dit_file),
@@ -356,8 +362,9 @@ def _dit_parts(model_plan: ModelPlan | None, blocks: int) -> Callable[[str], str
     return blockswap.dit_parts(blocks, stay, other) if stay < blocks or other else None
 
 
-# The DiT's block matrices in an int8 file (weights.MATRIX), 8 a block.
+# The DiT's block matrices in an int8 or a GGUF file (weights.MATRIX), 8 a block.
 INT8_MATRICES = 288
+GGUF_MATRICES = 288
 
 
 def _swap_int8(dit: torch.nn.Module) -> None:
@@ -367,6 +374,21 @@ def _swap_int8(dit: torch.nn.Module) -> None:
     swapped = int8.swap(dit)
     if len(swapped) != INT8_MATRICES:
         raise RuntimeError(f"{len(swapped)} block matrices swapped to int8, not {INT8_MATRICES}")
+
+
+def _swap_gguf(dit: torch.nn.Module, architecture: weights.Architecture) -> None:
+    """A kquant.GGUFLinear in the place of each of the 7B's 288 block matrices, of the ggml type
+    the architecture pins for it (weights.Architecture.dtype_of), built on the meta device
+    (kquant.swap); RuntimeError for another count, a model the GGUF file's tensors aren't for,
+    which weights.check has refused already."""
+    types = {
+        f"blocks.{index}.{module}": weights.GGUF_TYPES[kind]
+        for index, each in enumerate(architecture.types)
+        for module, kind in zip(weights.GGUF_ORDER, each, strict=True)
+    }
+    swapped = kquant.swap(dit, types)
+    if len(swapped) != GGUF_MATRICES:
+        raise RuntimeError(f"{len(swapped)} block matrices swapped to GGUF, not {GGUF_MATRICES}")
 
 
 def _marker(key: str) -> bool:
@@ -385,7 +407,7 @@ def _load_weights(
     *,
     hashed: Callable[[str, os.stat_result], None] | None = None,
 ) -> dict[str, Part]:
-    """Load a safetensors checkpoint into a model built on the meta device, as numz does
+    """Load a safetensors or GGUF checkpoint into a model built on the meta device, as numz does
     (src/core/model_loader.py:547-616, 777-835): the file's dtypes, or every floating tensor cast
     to dtype; then the buffers the checkpoint doesn't hold, still on meta, filled with zeros.
     With part_of, the parameters it names a part for go to that part's pinned host copy, not to

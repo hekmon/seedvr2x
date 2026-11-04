@@ -22,6 +22,10 @@ This product includes code adapted from:
 - comfy-kitchen, Copyright (c) 2025 Comfy Org, under the Apache License, Version 2.0: its
   regular Hadamard rotation, rebuilt in models/ck_check.py, models/seedvr2_int8.py and
   models/gpu/ck_patch.py.
+- llama.cpp (ggml-org), Copyright (c) 2023-2026 The ggml authors, under the MIT License: the
+  K-quant block formats and dequantisation of the dynamic GGUF (ggml-common.h,
+  ggml-quants.c), written in core/seedvr2x/kquant.py; models/seedvr2_gguf_dyn.py calls its
+  quantizer.
 - DISTS (DISTS_pytorch), Copyright (c) 2020 Keyan Ding, under the MIT License: its score,
   computed from given features in research/scripts/fr_metrics.py.
 - TransNetV2, Copyright (c) 2020 Tomáš Souček, under the MIT License: predict_frames' windows,
