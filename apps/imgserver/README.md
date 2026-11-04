@@ -35,8 +35,9 @@ size and, if it wants, a seed. Everything else is fixed when the server starts.
 - **Disk space:** about 17 GB for the models, downloaded once into Hugging Face's cache at the
   first start (or read from a directory you give).
 - **For the image: Docker, and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)**
-  on the host, which gives the container the driver. The image holds no driver and no CUDA
-  toolkit; PyTorch's wheels bring CUDA's libraries.
+  on the host, which gives the container the driver; register its runtime with Docker
+  (`sudo nvidia-ctk runtime configure --runtime=docker`, then restart Docker). The image holds
+  no driver and no CUDA toolkit; PyTorch's wheels bring CUDA's libraries.
 - **From the repository:** [uv](https://docs.astral.sh/uv/), which installs Python 3.13 and the
   locked dependencies.
 - No ffmpeg: the server reads and writes pictures with Pillow and seedvr2x's own writers.
@@ -61,7 +62,7 @@ directory instead.
 ### The image
 
 ```
-docker run --rm --gpus all \
+docker run --rm --runtime nvidia --gpus all \
   --stop-timeout 120 \
   -p 127.0.0.1:8390:8390 \
   -v hf-cache:/data/huggingface \
@@ -79,7 +80,8 @@ image's name.
 - **Another address or port** is the variable's to change, and the publishing's to follow:
 
   ```
-  docker run --rm --gpus all -e SEEDVR2X_LISTEN=0.0.0.0:9000 -p 127.0.0.1:9000:9000 \
+  docker run --rm --runtime nvidia --gpus all \
+    -e SEEDVR2X_LISTEN=0.0.0.0:9000 -p 127.0.0.1:9000:9000 \
     ghcr.io/hekmon/seedvr2x-imgserver
   ```
 
@@ -96,7 +98,7 @@ image's name.
      directory alone, downloads off.
 
      ```
-     docker run --rm --gpus all --stop-timeout 120 -p 127.0.0.1:8390:8390 \
+     docker run --rm --runtime nvidia --gpus all --stop-timeout 120 -p 127.0.0.1:8390:8390 \
        -v ~/.cache/huggingface/hub:/data/huggingface/hub:ro -e HF_HUB_OFFLINE=1 \
        -e SEEDVR2X_API_KEY=a-long-random-string \
        ghcr.io/hekmon/seedvr2x-imgserver
@@ -115,7 +117,7 @@ image's name.
 - **A model directory instead,** mounted read-only, holding the DiT and the VAE files:
 
   ```
-  docker run --rm --gpus all -p 127.0.0.1:8390:8390 \
+  docker run --rm --runtime nvidia --gpus all -p 127.0.0.1:8390:8390 \
     -v /path/to/models:/models:ro \
     -e SEEDVR2X_API_KEY=a-long-random-string \
     ghcr.io/hekmon/seedvr2x-imgserver --model-dir /models
