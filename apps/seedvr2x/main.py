@@ -4162,10 +4162,9 @@ def _vouch_models(model_files: "ModelFiles", recorded: dict[str, Any]) -> None:
 def _changed_in_place(path: Path, digest: str) -> Callable[[str], str]:
     """The refusal of a model file vouched for by the job's record, by its size and modification
     time, whose load read another SHA-256 than the record's, found: the file changed with its size
-    and time kept, which another job's settings would hold. PROVISIONAL (impl-oneread, 2026-11-04:
-    DESIGN.md, Pause and resume, decided on 2026-11-03, says the file is refused at the end of its
-    load and gives no words). A file of seedvr2x's own is refused in its pin's words instead
-    (pull.check_pin)."""
+    and time kept, which another job's settings would hold (DESIGN.md, Pause and resume, decided
+    on 2026-11-03: the file is refused at the end of its load). A file of seedvr2x's own is
+    refused in its pin's words instead (pull.check_pin)."""
 
     def refusal(found: str) -> str:
         return (

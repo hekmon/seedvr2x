@@ -280,11 +280,10 @@ def dit_parts(blocks: int, stay: int, other: bool) -> Callable[[str], str | None
 # The bytes read at a time into a tensor's memory, each piece then hashed on the hash thread while
 # the next is read (_Tee): the wait for the last piece's hash, before a reused buffer is read into
 # again, about 3 ms at hashlib's 2.7 GB/s on the Ryzen 9 9950X3D beside the RTX 5090, where WSL2's
-# 9p reads at 170 to 250 MB/s whatever the piece (DESIGN.md, Still images, Model files).
-# PROVISIONAL (impl-oneread, 2026-11-04: DESIGN.md leaves the size open; on that machine the
-# DiT's 16.5 GB read and hashed from the Windows drive in 66.6 s, 71.6 s with the hash in turn on
-# the read's thread, and 3.93 GB of it from Linux's disk in 1.7 s, 2.5 s in turn, 3.5 s hashed
-# whole then read as before).
+# 9p reads at 170 to 250 MB/s whatever the piece. Measured there (DESIGN.md, Still images, Model
+# files): the DiT's 16.5 GB read and hashed from the Windows drive in 66.6 s, the read the bound;
+# 3.93 GB of it from Linux's disk in 1.7 s, the hash the bound, 2.5 s hashed in turn on the
+# read's own thread.
 PIECE = 8 << 20
 
 
