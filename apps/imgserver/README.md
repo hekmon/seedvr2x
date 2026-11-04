@@ -73,9 +73,21 @@ The image is published for linux/amd64 when a release is tagged: `ghcr.io/hekmon
 tagged with the version (`0.1.0`), its major and minor (`0.1`) and `latest`. Options go after the
 image's name.
 
-- **The server listens on 0.0.0.0:8390 inside the container,** which port publishing needs.
-  Publish it on 127.0.0.1 as above unless a reverse proxy is in front ([Before you expose
-  it](#before-you-expose-it)).
+- **The server listens on 0.0.0.0:8390 inside the container,** which port publishing needs: the
+  image sets `SEEDVR2X_LISTEN=0.0.0.0:8390`. Publish it on 127.0.0.1 as above unless a reverse
+  proxy is in front ([Before you expose it](#before-you-expose-it)).
+- **Another address or port** is the variable's to change, and the publishing's to follow:
+
+  ```
+  docker run --rm --gpus all -e SEEDVR2X_LISTEN=0.0.0.0:9000 -p 127.0.0.1:9000:9000 \
+    ghcr.io/hekmon/seedvr2x-imgserver
+  ```
+
+  `--listen` after the image's name does the same and wins over the variable. The image's
+  `ENTRYPOINT` is the bare command with no address, and options append to it: an address in the
+  image's `CMD` would be dropped by any option given, and the server would listen on the
+  container's own 127.0.0.1, which publishing can't reach. The address must be one the
+  container's network answers: 0.0.0.0, not 127.0.0.1.
 - **The models stay outside the image.** The volume `hf-cache` holds Hugging Face's cache
   (`HF_HOME=/data/huggingface`): the first start fills it, the next ones read it. A bind mount
   must be writable by the image's user (UID 10001).
@@ -91,9 +103,10 @@ image's name.
 - **Closed networks:** `-e HF_HUB_OFFLINE=1` forbids any download; the models are then in the
   cache volume already, or in `--model-dir`.
 - **The user is not root** (UID 10001), and owns its home and the cache directory only.
-- **The health check** asks `/health` on port 8390 every 30 seconds, with a start period of 10
-  minutes for the start's model check and loading. A container given another port in `--listen`
-  needs its own check.
+- **The health check** asks `/health` every 30 seconds, with a start period of 10 minutes for the
+  start's model check and loading. It reads the port from `SEEDVR2X_LISTEN` (the part after the
+  last colon) on the container's own 127.0.0.1, so a port set with the variable stays healthy;
+  one set with `--listen` alone is not seen by the check: use the variable.
 - **Stopping:** `docker stop` sends SIGTERM, which stops the server cleanly ([below](#stopping)),
   but Docker kills the container after 10 seconds by default, and a 4K picture takes 14 s on the
   RTX 5090 (DESIGN.md, Still images): give the picture running time to finish with
@@ -120,7 +133,7 @@ so build with `docker buildx build` (or `DOCKER_BUILDKIT=1 docker build`, with b
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--listen HOST:PORT` | `127.0.0.1:8390` | Where it listens. The image sets `0.0.0.0:8390`. |
+| `--listen HOST:PORT` | `127.0.0.1:8390` | Where it listens. `SEEDVR2X_LISTEN` sets it too (the option wins, the log says which gave it, and a wrong variable is a refused start naming it); the image sets the variable to `0.0.0.0:8390`. |
 | `--max-size WxH` | `3840x2160` | The largest output, in either orientation (even sides of 32 px at least). The reservation holds `--max-concurrent` pictures of it. |
 | `--max-input PIXELS` | `50,000,000` | The largest picture taken, in pixels as stored. It is copied and resized on the GPU, so the reservation holds it. A body larger than this size allows is answered 413 before it is read. |
 | `--max-concurrent N` | `1` | The pictures upscaled at once. More than one needs the whole DiT on the card ([several pictures at once](#several-pictures-at-once)). |
@@ -142,7 +155,8 @@ refuses them.
 The server listens at once, so that a probe or a client finds it. `/health` says `starting` (503)
 until the warm-up has passed. Its log then says, in order:
 
-1. the API key's source (never the key), or a warning that there is none;
+1. the API key's source (never the key), or a warning that there is none, then the listening
+   address's source (`--listen`, `SEEDVR2X_LISTEN` or the default);
 2. the model files checked by their SHA-256, pulled at the pinned revision where missing;
 3. the card and the plan for pictures within `--max-size`, in the CLI's words;
 4. the models loaded, and the attention that runs (`flash_attn_2` or `sdpa`); then the
@@ -153,7 +167,7 @@ until the warm-up has passed. Its log then says, in order:
 6. `ready: /health says ready`.
 
 **A refused start** exits with code 1 and says why: no CUDA device, a card without bfloat16, an
-empty API key, a port already taken, a model file missing or wrong, or a reservation the card
+empty API key, a `SEEDVR2X_LISTEN` that is not HOST:PORT, a port already taken, a model file missing or wrong, or a reservation the card
 can't free, which names the most pictures at the size asked, and the largest size at that count,
 that would fit. Lower `--max-size`, `--max-input` or `--max-concurrent`.
 

@@ -1,8 +1,10 @@
 """The server's start-up (main.py; DESIGN.md, The image server, Its start): the options and their
 defaults, --max-size, --listen and --max-input parsed or refused, the pins refused beside more
 than one picture at a time, the API key (--api-key over SEEDVR2X_API_KEY, the source logged and
-the key never, an empty one refused, none warned of), and the environment set before torch is
-imported (the allocator's setting, Hugging Face's telemetry, torch's C++ log level).
+the key never, an empty one refused, none warned of), the listening address (--listen over
+SEEDVR2X_LISTEN over the default, the source logged, a wrong variable refused naming it) and the
+Dockerfile's lines that depend on it (read as text, no build), and the environment set before
+torch is imported (the allocator's setting, Hugging Face's telemetry, torch's C++ log level).
 
 `main.main` runs with `main.serve` replaced by a recorder, so that the start goes no further
 than the options it hands on, with no GPU; one test runs the real `serve` with a card that
@@ -33,6 +35,7 @@ WATCHED = (
     "HF_HUB_DISABLE_TELEMETRY",
     "TORCH_CPP_LOG_LEVEL",
     main.KEY_VARIABLE,
+    main.LISTEN_VARIABLE,
     *memory.VARIABLES,
 )
 
@@ -77,7 +80,8 @@ def run(*argv: str) -> int:
 
 def test_the_defaults() -> None:
     args = main.parser().parse_args([])
-    assert args.listen == ("127.0.0.1", 8390)
+    # None: main._address chooses among the option, the variable and the default.
+    assert args.listen is None
     assert args.max_size == (3840, 2160)
     assert args.max_input == 50_000_000
     assert args.max_concurrent == 1
@@ -534,3 +538,156 @@ def test_main_sets_the_environment_before_it_hands_on(served: list[Served]) -> N
     assert os.environ[memory.VARIABLES[0]] == memory.EXPANDABLE
     assert os.environ["TORCH_CPP_LOG_LEVEL"] == "ERROR"
     assert run("-v") == 0
+
+
+# ---- The listening address ------------------------------------------------------------
+
+
+def test_the_default_address_when_neither_is_given(
+    served: list[Served], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    assert run() == 0
+    assert served[0].listen == ("127.0.0.1", 8390)
+    assert "listening address: the default" in caplog.text
+
+
+def test_the_variable_is_read_without_the_option(
+    monkeypatch: pytest.MonkeyPatch, served: list[Served], caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv(main.LISTEN_VARIABLE, "0.0.0.0:9000")
+    caplog.set_level(logging.INFO)
+    assert run() == 0
+    assert served[0].listen == ("0.0.0.0", 9000)
+    assert "listening address from SEEDVR2X_LISTEN" in caplog.text
+    assert "from --listen" not in caplog.text
+
+
+def test_the_option_wins_over_the_address_variable(
+    monkeypatch: pytest.MonkeyPatch, served: list[Served], caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv(main.LISTEN_VARIABLE, "0.0.0.0:9000")
+    caplog.set_level(logging.INFO)
+    assert run("--listen", "127.0.0.1:7000") == 0
+    assert served[0].listen == ("127.0.0.1", 7000)
+    assert "listening address from --listen" in caplog.text
+    assert "from SEEDVR2X_LISTEN" not in caplog.text
+
+
+def test_a_wrong_option_is_refused_by_argparse_whatever_the_variable(
+    monkeypatch: pytest.MonkeyPatch, served: list[Served]
+) -> None:
+    monkeypatch.setenv(main.LISTEN_VARIABLE, "0.0.0.0:9000")
+    with pytest.raises(SystemExit) as error:
+        run("--listen", "nowhere")
+    assert error.value.code == 2
+    assert served == []
+
+
+@pytest.mark.parametrize(
+    ("text", "listen"),
+    [
+        ("127.0.0.1:8390", ("127.0.0.1", 8390)),
+        ("0.0.0.0:80", ("0.0.0.0", 80)),
+        ("localhost:9000", ("localhost", 9000)),
+        ("[::1]:8390", ("::1", 8390)),
+        (":8390", ("127.0.0.1", 8390)),
+    ],
+)
+def test_the_variable_is_parsed_by_the_options_rule(
+    text: str, listen: tuple[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(main.LISTEN_VARIABLE, text)
+    assert main._address(None) == listen
+
+
+@pytest.mark.parametrize(
+    "text", ["localhost", "8390", "127.0.0.1:0", "127.0.0.1:65536", "host:abc", "host:", "", "h:-1"]
+)
+def test_a_wrong_variable_is_refused_naming_it(
+    text: str,
+    monkeypatch: pytest.MonkeyPatch,
+    served: list[Served],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv(main.LISTEN_VARIABLE, text)
+    caplog.set_level(logging.INFO)
+    with pytest.raises(SystemExit) as error:
+        run()
+    assert error.value.code == 1
+    assert served == []
+    assert main.LISTEN_VARIABLE in caplog.text
+    assert "HOST:PORT" in caplog.text
+
+
+def test_the_option_given_a_wrong_variable_is_not_read(
+    monkeypatch: pytest.MonkeyPatch, served: list[Served]
+) -> None:
+    monkeypatch.setenv(main.LISTEN_VARIABLE, "not an address")
+    assert run("--listen", "0.0.0.0:9000") == 0
+    assert served[0].listen == ("0.0.0.0", 9000)
+
+
+# ---- The Dockerfile's address ------------------------------------------------------------
+
+DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
+
+
+def instructions() -> dict[str, list[str]]:
+    """The Dockerfile's instructions by keyword, each with its continued lines joined (comments
+    dropped): read as text, no build."""
+    found: dict[str, list[str]] = {}
+    pending = ""
+    for line in DOCKERFILE.read_text().splitlines():
+        if not pending and (not line.strip() or line.lstrip().startswith("#")):
+            continue
+        pending += line.rstrip("\\").strip() + " " if line.endswith("\\") else line.strip()
+        if not line.endswith("\\"):
+            keyword, _, rest = pending.partition(" ")
+            found.setdefault(keyword.upper(), []).append(rest.strip())
+            pending = ""
+    return found
+
+
+def test_the_image_sets_the_address_by_the_variable() -> None:
+    environment = " ".join(instructions()["ENV"])
+    assert f"{main.LISTEN_VARIABLE}=0.0.0.0:{main.PORT}" in environment
+    assert instructions()["EXPOSE"] == [str(main.PORT)]
+
+
+def test_the_entrypoint_is_the_bare_command_and_cmd_is_empty() -> None:
+    # An address in CMD would be dropped by any option given to docker run.
+    assert instructions()["ENTRYPOINT"] == ['["seedvr2x-imgserver"]']
+    assert instructions()["CMD"] == ["[]"]
+
+
+def test_the_variable_the_dockerfile_sets_is_an_address_the_server_takes() -> None:
+    (value,) = [
+        part.split("=", 1)[1]
+        for part in " ".join(instructions()["ENV"]).split()
+        if part.startswith(f"{main.LISTEN_VARIABLE}=")
+    ]
+    assert main._listen(value) == ("0.0.0.0", main.PORT)
+
+
+@pytest.mark.parametrize(
+    ("listen", "port"),
+    [(None, "8390"), ("0.0.0.0:8390", "8390"), ("0.0.0.0:9000", "9000"), ("[::]:9001", "9001")],
+)
+def test_the_healthcheck_asks_the_port_the_variable_gives(
+    listen: str | None, port: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ast
+    import urllib.request
+
+    (check,) = instructions()["HEALTHCHECK"]
+    command: list[str] = ast.literal_eval(check[check.index("CMD") + 3 :].strip())
+    assert command[:2] == ["python", "-c"]
+    asked: list[str] = []
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout: asked.append(url))
+    if listen is None:
+        monkeypatch.delenv(main.LISTEN_VARIABLE, raising=False)
+    else:
+        monkeypatch.setenv(main.LISTEN_VARIABLE, listen)
+    exec(compile(command[2], "healthcheck", "exec"), {})
+    assert asked == [f"http://127.0.0.1:{port}/health"]

@@ -37,6 +37,10 @@ MAX_SIZE = (3840, 2160)
 MAX_INPUT = 50_000_000
 QUEUE = 8
 KEY_VARIABLE = "SEEDVR2X_API_KEY"
+# The listening address as a variable, for a container: the image sets it to 0.0.0.0:8390 and its
+# ENTRYPOINT is the bare command, so that an option given to `docker run` appends and never takes
+# the address's place (apps/imgserver/Dockerfile).
+LISTEN_VARIABLE = "SEEDVR2X_LISTEN"
 # The exit code of a server that a CUDA error failed (DESIGN.md, /health): the process ends so
 # that a restart policy (Docker's --restart on-failure or unless-stopped, Kubernetes) starts it
 # again on a card in a state it trusts. 3 because the others are taken: 0 stopped, 1 a refused
@@ -100,9 +104,9 @@ def parser() -> argparse.ArgumentParser:
     found.add_argument(
         "--listen",
         type=_listen,
-        default=(HOST, PORT),
         metavar="HOST:PORT",
-        help=f"where it listens, {HOST}:{PORT} by default; 0.0.0.0:{PORT} in a container",
+        help=f"where it listens, {HOST}:{PORT} by default; {LISTEN_VARIABLE} sets it too, and the"
+        f" image sets it to 0.0.0.0:{PORT}; the option wins over the variable",
     )
     found.add_argument(
         "--max-size",
@@ -244,6 +248,26 @@ def _key(given: str | None) -> str | None:
     return key
 
 
+def _address(given: tuple[str, int] | None) -> tuple[str, int]:
+    """The listening address, --listen winning over SEEDVR2X_LISTEN, which is read by --listen's
+    own rule (`_listen`), over the default; its source logged. SystemExit for a variable that
+    isn't HOST:PORT, naming it (an empty one too, as an empty key is refused)."""
+    if given is not None:
+        logger.info("listening address from --listen")
+        return given
+    text = os.environ.get(LISTEN_VARIABLE)
+    if text is None:
+        logger.info("listening address: the default (--listen or %s sets it)", LISTEN_VARIABLE)
+        return HOST, PORT
+    try:
+        found = _listen(text)
+    except argparse.ArgumentTypeError as error:
+        logger.error("the listening address from %s is wrong: %s", LISTEN_VARIABLE, error)
+        raise SystemExit(1) from None
+    logger.info("listening address from %s", LISTEN_VARIABLE)
+    return found
+
+
 class Stop:
     """SIGTERM and Ctrl-C: the first stops the server as it should, its pictures running
     finished; a second ends the process at once."""
@@ -266,6 +290,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _logging(args.verbose)
     _environment(args.verbose)
     key = _key(args.api_key)
+    listen = _address(args.listen)
 
     # The server's modules import the library, and torch with it: after the allocator is set.
     import service as services
@@ -302,7 +327,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.vae_model,
         pins,
     )
-    return serve(options, key, args.listen, services.Card, Metrics())
+    return serve(options, key, listen, services.Card, Metrics())
 
 
 @dataclass

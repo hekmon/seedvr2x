@@ -52,7 +52,8 @@ USER seedvr2x
 ENV PATH="/app/apps/imgserver/.venv/bin:$PATH" \
     HOME=/home/seedvr2x \
     HF_HOME=/data/huggingface \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    SEEDVR2X_LISTEN=0.0.0.0:8390
 
 VOLUME /data/huggingface
 EXPOSE 8390
@@ -60,14 +61,20 @@ EXPOSE 8390
 # /health answers 200 once the warm-up has passed and 503 before (starting) and after (stopping,
 # failed). The start takes minutes: the model files' check reads the DiT's 16.5 GB (about 84 s on
 # an RTX 5090's disk) and loading took 77 s there (DESIGN.md, Still images), so the start period
-# is 10 minutes. Python's urllib: the image has no curl. A server given another port with
-# --listen needs its own check.
+# is 10 minutes. Python's urllib: the image has no curl. The port is the one SEEDVR2X_LISTEN
+# gives (the part after its last colon, as --listen reads it), on the container's own 127.0.0.1,
+# which a server listening on 0.0.0.0 answers: a container given another port stays healthy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10m --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8390/health', timeout=4)"]
+    CMD ["python", "-c", "import os, urllib.request; port = os.environ.get('SEEDVR2X_LISTEN', ':8390').rpartition(':')[2]; urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=4)"]
 
-# Listening on all interfaces, which port publishing needs; publish the port on 127.0.0.1 unless a
-# reverse proxy is in front (the README). Options append: docker run IMAGE --model-dir /models.
-ENTRYPOINT ["seedvr2x-imgserver", "--listen", "0.0.0.0:8390"]
+# Listening on all interfaces, which port publishing needs, through SEEDVR2X_LISTEN above; publish
+# the port on 127.0.0.1 unless a reverse proxy is in front (the README). The ENTRYPOINT is the bare
+# command and CMD empty: options given to `docker run IMAGE --model-dir /models` append to the
+# ENTRYPOINT. An address in CMD would be dropped by any option given, since options replace CMD,
+# and the server would then listen on the container's own 127.0.0.1, which port publishing can't
+# reach. Another address: -e SEEDVR2X_LISTEN=0.0.0.0:9000 (or --listen after the image's name,
+# which wins over the variable).
+ENTRYPOINT ["seedvr2x-imgserver"]
 CMD []
 
 LABEL org.opencontainers.image.title="seedvr2x-imgserver" \
