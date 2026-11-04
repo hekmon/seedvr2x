@@ -710,10 +710,25 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
   host's above all: every block swapped, the DiT's weights take about 4.5 GiB of pinned host
   memory in place of float16's 15, and a swap moves under a third of float16's bytes. It saves
   no VRAM where the VAE's floor binds (an 8 GB card at 1080p), and runs a little slower than
-  float16 (the model card). The rest is the build's: the file checked by its own header, as
-  int8's, each matrix dequantised on the card where it is used, the dequantisation held on the
-  CPU to ggml's own, its buffers in the planner by measurement, seedvr2x's own runs checked
-  against the model card's figures. It is an option, never the default.
+  float16 (the model card). First-class from v0.1.0, as float16 and int8 are (the user,
+  2026-11-04: most users on consumer cards will take this tier): in the plan matrix, the GPU
+  tests, the release's checks on the 96 GB card and on emulated cards, its figures measured,
+  never provisional, and in the READMEs. Decided for its build (the user, 2026-11-04):
+  - seedvr2x's own code: the file's reader and the dequantisation written from GGUF's format
+    and ggml's arithmetic (llama.cpp, MIT, credited in `core/NOTICE`), not adapted from numz's
+    copy of city96's; the `gguf` package, llama.cpp's own, is the tests' reference only;
+  - each matrix dequantised on the card just before its multiply and freed after it: SeedVR2
+    samples in one step, so once per window, and a block kept on the card holds its quantised
+    bytes, not 16-bit ones; its buffers in the planner by measurement;
+  - the file checked by its own header, as int8's, and both 7Bs' files pinned;
+  - an option, never the default: where the card or the host's memory is short for float16,
+    the plan names the smaller files, in a line and in a refusal's way out, and never changes
+    the file by itself.
+
+  Under the link to numz until v0.1.0 ([Vendored model code](#vendored-model-code)), its output
+  is held to numz's run of the same file, which is how the model card's validation ran it
+  (numz's GGUF loader, `models/VALIDATION.md`): bit for bit where the arithmetic allows, else
+  the difference shown, its cause named, and the output within the model card's figures.
 - **The sharp 7B is the default, on the user's eyes** (2026-10-07): on 75 windows of 4K and
   1080p crops they preferred it or saw no difference on 67 (it 27, the 7B 8), the grainy first
   film's skin no longer "almost reptilian". At 4K it invents less of the fine texture the eyes
