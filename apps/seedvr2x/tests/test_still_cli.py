@@ -158,14 +158,20 @@ GPU_DIT, GPU_VAE = "seedvr2x_ema_7b_sharp_fp16.safetensors", "seedvr2x_ema_vae_f
 # The cases, the picture's size (height, width), the resolution it is upscaled to (x2) and the
 # tiles pinned (encode, decode; None: the plan's own):
 # - 720p, untiled in both passes by the plan;
+# - 1080p, the plan's own passes, whatever it chooses (untiled on the RTX 5090 since 1b96b25,
+#   one frame's figures: 21.39 GiB allocated against the decode's 21.52 predicted, impl-gate's
+#   probe, 2026-11-04);
 # - 1080p, both passes tiled: pinned to the tiles the plan chose when it counted the video
 #   slice's VAE figures (an encode tile of 1728, a decode tile of 1024 at 20 GiB). On one frame's
 #   figures (peaks.ONE_FRAME_UNTILED, 1b96b25) the plan takes 1080p untiled in 24 GiB, so the case
 #   pins its tiles, the plan still placing the models around them.
 GPU_CASES: dict[str, tuple[tuple[int, int], int, tuple[int, int] | None]] = {
     "720p-untiled": ((360, 640), 720, None),
+    "1080p-plan": ((540, 960), 1080, None),
     "1080p-tiled": ((540, 960), 1080, (1728, 1024)),
 }
+# The cases whose passes are the plan's own, untiled or tiled as it chooses.
+GPU_PLANS = {"1080p-plan"}
 # The test plans as if this much of the card's free memory (the smaller of main._free_memory and
 # NVML's) were taken by someone else: the card here drives a desktop as well.
 GPU_SPARE = 4 * GIB
@@ -258,7 +264,7 @@ def test_a_picture_is_a_shot_of_one_frame_on_the_gpu(
     )
     if pinned is not None:
         assert tiles.encode is not None and tiles.decode is not None, "the case tiles both passes"
-    elif tiles.encode is not None or tiles.decode is not None:
+    elif case not in GPU_PLANS and (tiles.encode is not None or tiles.decode is not None):
         pytest.skip(f"the memory free plans {tiles}, not the untiled passes this case holds")
 
     torch.cuda.set_per_process_memory_fraction(

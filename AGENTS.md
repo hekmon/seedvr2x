@@ -584,9 +584,9 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
 - The command line's still path (`stills.py`, `main.py`'s branch by content): `tests/
   test_still_cli.py` holds `still.upscale` bit for bit to `shot.py`'s pass over a shot of one
   frame, tiled and corrected, and under `-m gpu` on CUDA with the sharp 7B and the VAE from
-  `SEEDVR2X_MODEL_DIR`, untiled at 720p and both passes tiled at 1080p, placed by the plan for
-  one picture in the card's free memory less 4 GiB left to the desktop (the smaller of the
-  driver's and NVML's readings); a picture told by its content whatever its name, a video named
+  `SEEDVR2X_MODEL_DIR`, untiled at 720p, the plan's own at 1080p, and both passes tiled at 1080p
+  pinned to 1728 and 1024 px, the models placed by the plan for one picture in the card's free
+  memory less 4 GiB left to the desktop (the smaller of the driver's and NVML's readings); a picture told by its content whatever its name, a video named
   `.png` sent to the video path; every option of the parser taken or refused on a still (a new
   one unclassified fails), each refusal; `-o`'s rules and a write that fails leaving nothing;
   `--plan` alone saying the plan, loading and writing nothing, and hashing no model file for the
