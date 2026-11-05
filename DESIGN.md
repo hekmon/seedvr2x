@@ -330,7 +330,12 @@ seedvr2x/                the repository
     the RAM kept, the placement per run), `words.py` (the nodes' words for each refusal), the
     example workflows and a README; its tests against a stand-in for ComfyUI's few calls, in
     the CLI's environment. Not a uv project of its own, unlike the other apps: the nodes run
-    in ComfyUI's environment.
+    in ComfyUI's environment. They are written to ComfyUI's V3 schema (`comfy_api.latest`,
+    `io.ComfyNode`, `comfy_entrypoint`; the user, 2026-11-05): ComfyUI's own nodes use it, and
+    its documentation says new node features come to it alone, the older dictionaries
+    (`NODE_CLASS_MAPPINGS`) still loading. `comfy_api.latest` is marked unstable in v0.44.0,
+    which is one more reason for the list of versions tested (below). The nodes' ids are kept
+    once published: a saved workflow names them.
   - **The model files from Hugging Face's cache**, as the CLI and the image server take them, or
     from a directory given; not ComfyUI's `models/` folders, where its own SeedVR2 files sit and
     its loaders would list seedvr2x's. A user who goes on to the CLI finds the files there
