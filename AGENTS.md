@@ -307,7 +307,10 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   named in a refusal for memory (with `--model-dir` said once) and in the plan where they swap
   fewer blocks or run a longer window, and the file never
   changed by itself, for a video and for a picture; the image server's `tests/test_reservation.py`
-  and `test_service.py` the same way out in a refused start, and a start that then takes the file.
+  and `test_service.py` the same way out in a refused start, a start that then takes the file,
+  and the start's line of the smaller files (`reservation.smaller_line`, the CLI's words, blocks
+  alone) at INFO after its blocks-swapped line, and none where the plan swaps none or runs the
+  dynamic GGUF already.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
   `test_pull_cli.py` holds what the command line does over it.
