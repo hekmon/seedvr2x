@@ -10,9 +10,10 @@ point. [DESIGN.md](../../DESIGN.md) holds every decision in full, and
 
 What surprises a newcomer most:
 
-- **It takes one video file, and nothing else:** no directory of segments or of frames. Every
-  cut is seedvr2x's own, or yours through a cut list
-  ([the two workflows](#the-two-workflows)).
+- **It takes one video file, or one picture, and nothing else:** no directory of segments or of
+  frames. Every cut of a video is seedvr2x's own, or yours through a cut list ([the two
+  workflows](#the-two-workflows)); a picture is upscaled whole, to a PNG or a lossless WebP
+  ([still pictures](#still-pictures)).
 - **It has no batch size,** and none of the options that go with one in other SeedVR2 tools
   ([the pipeline](#the-pipeline-for-seedvr2-users-coming-from-numz)).
 - **It reads the whole source before it upscales anything.** That first pass counts the
@@ -54,6 +55,8 @@ What surprises a newcomer most:
 - [Several runs of a shot: `--quality`](#several-runs-of-a-shot---quality)
 - [Lossless delivery](#lossless-delivery)
 - [The finished file](#the-finished-file)
+- [Still pictures](#still-pictures)
+- [The record in each output](#the-record-in-each-output)
 - [Disk use](#disk-use)
 - [GPU memory](#gpu-memory)
 - [Small cards](#small-cards)
@@ -311,8 +314,8 @@ memory allows.
 
 | numz option | seedvr2x |
 |---|---|
-| `input` (a video, an image or a directory) | one video file only: images aren't supported in version 0.1.0, and a directory is refused, with the three ways to join its segments back into one file ([the two workflows](#the-two-workflows)) |
-| `--output` | `-o`, required: a `.mkv` path gives the finished file, another video suffix being refused; any other path is a directory of output segments, new or empty, or an unfinished job's, which the same command resumes ([the two workflows](#the-two-workflows)); there is no default `output/` directory |
+| `input` (a video, an image or a directory) | one video file, or one picture (PNG, JPEG, WebP, TIFF, BMP or a GIF of one frame), told by its content ([still pictures](#still-pictures)); a directory is refused, with the three ways to join its segments back into one file ([the two workflows](#the-two-workflows)) |
+| `--output` | `-o`, required: a `.mkv` path gives the finished file, another video suffix being refused; any other path is a directory of output segments, new or empty, or an unfinished job's, which the same command resumes ([the two workflows](#the-two-workflows)); for a picture, a new `.png` or `.webp` file; there is no default `output/` directory |
 | `--batch_size`, `--temporal_overlap`, `--prepend_frames`, `--uniform_batch_size` | gone: shots, windows and the mixing of shared latents replace them, sized by the planner; `--window` caps the windows, in latents: a batch of 4n + 1 frames is a window of n + 1 latents, so `--batch_size 49` is `--window 13` |
 | `--chunk_size`, `--cache_dit`, `--cache_vae` | gone: one process for the whole job, streaming |
 | `--vae_encode_tiled`, `--vae_decode_tiled`, `--vae_encode_tile_overlap`, `--vae_decode_tile_overlap` | no switch: each pass is tiled when its untiled run doesn't fit the card, in the largest tiles that do, with an overlap fixed at 64 px (numz's default is 128); `--encode-tile 0` and `--decode-tile 0` pin an untiled pass ([GPU memory](#fixing-a-choice-yourself)) |
@@ -330,7 +333,7 @@ memory allows.
 | `--tile_debug` | gone: in place of numz's picture of the tiles, the plan's lines say each pass's tiles, their size, overlap and count ([the plan, line by line](#the-plan-line-by-line)) |
 | `--compile_backend`, `--compile_mode`, `--compile_fullgraph`, `--compile_dynamic`, `--compile_dynamo_cache_size_limit`, `--compile_dynamo_recompile_limit` | gone: `--compile` takes no tuning. It keeps numz's settings (inductor in its default mode, not full-graph, static shapes), with inductor's deterministic mode kept on and the recompile limits raised to hold every shape the job meets, numz's 128 being too few at 4K ([compiling the VAE](#compiling-the-vae---compile)) |
 | `--debug` | `-v`, `--verbose` ([the lines](#the-lines)) |
-| `--output_format`, `--video_backend`, `--10bit` | `--format`: FFV1 masters (`yuv420p10le` by default, `gbrp16le`) or 16-bit PNG |
+| `--output_format`, `--video_backend`, `--10bit` | `--format`: FFV1 masters (`yuv420p10le` by default, `gbrp16le`) or 16-bit PNG; for a picture, a 16-bit PNG, an 8-bit one (`png8`) or a lossless WebP |
 | `--dit_model`, `--model_dir` | `--dit-model` and `--model-dir`, the sharp 7B by default; version 0.1.0 runs the two 7Bs in float16, and in int8 and in the dynamic GGUF from seedvr2x's own files, any 3B, fp8 or other GGUF file refused; the files come from seedvr2x's own Hugging Face repository, pinned; no model file is ever deleted |
 | `--cuda_device` | one device per process |
 
@@ -354,7 +357,8 @@ master to make first. They differ only at the end.
 
 A video suffix other than `.mkv` (`.mp4`, `.mov`, `.m4v`, `.avi`, `.webm`, `.ts`, `.m2ts`,
 `.mts`, `.mxf`, `.nut`, `.mpg`) is refused as `-o`, and so is the source itself; `.mkv` is
-refused with `--format png`, whose frames go to a directory.
+refused with `--format png`, whose frames go to a directory. `.png` and `.webp` name a picture's
+output, and are refused for a video.
 
 **Output segments follow sptenc's rule.** The cuts give the segments, then each segment
 shorter than the minimum (5 seconds by default, `--min-segment`) is merged into its shorter
@@ -480,8 +484,8 @@ at 0.2, with no decode, 76 and 24. The list of its 960×540 copy, which this man
 ```
 
 - A line per cut: the frame the new shot starts at, counted from 0; the detector's peak
-  probability, which it gives the frame before; and the cut frame's time from the file's
-  start, rounded up to the millisecond (here at 24000/1001 frames per second).
+  probability, which it gives the frame before; and the cut frame's time from the file's start,
+  rounded up to the millisecond (here at 24 frames per second).
 - A possible cut is a commented line. Uncomment it to keep it; delete a line to drop a cut;
   add a line to cut somewhere else.
 - seedvr2x reads the frame number alone: the first frame of each shot except the first, one
@@ -489,9 +493,9 @@ at 0.2, with no decode, 76 and 24. The list of its 960×540 copy, which this man
   needs nothing more. Times aren't read: only a frame number is exact.
 - The probability is cut to 3 decimals, never rounded up: a cut that shows 0.300 reached the
   threshold.
-- A list is refused, naming the line, for a first field that isn't a whole number, a cut at
-  frame 0, cuts that don't increase, or a cut past the source's last frame. An empty list is
-  one shot.
+- A list is refused for a first field that isn't a whole number, naming the line, and for a cut
+  at frame 0, cuts that don't increase, or a cut past the source's last frame, naming the frame.
+  An empty list is one shot.
 - Where the source has frames missing, frame numbers count their filled places too
   ([missing frames](#missing-frames)), and the list's header says so.
 
@@ -542,8 +546,10 @@ models of the same architecture, memory and time:
   fringes, less flicker. At ×2 to 1080p the metrics barely tell the two apart
   ([colour.md](../../research/docs/colour.md#step-6-the-sharp-7b-for-the-eyes)). Despite its
   name, it adds no more fine texture than the regular one there, on average.
-- **The regular 7B is the reference** every check of seedvr2x is made against, numz's own
-  runs among them. `--dit-model seedvr2x_ema_7b_fp16.safetensors` runs it.
+- **The regular 7B is the reference** every check of seedvr2x is made against. seedvr2x's output
+  of it was numz's CLI's, bit for bit, on 2026-11-04, padded as numz pads; since then seedvr2x's
+  own outputs, in its own padding, are the references.
+  `--dit-model seedvr2x_ema_7b_fp16.safetensors` runs it.
 - **At other upscale factors** than ×2, the sharp 7B's lead isn't settled. The metrics side
   with it at ×1.5 (3 clips of 3) and mostly at ×3, and are mixed at ×4, where one clip is
   3.5 dB further from the original; no eyes have looked yet.
@@ -568,13 +574,15 @@ closest 4 GB file to float16 ([VALIDATION.md](../../models/VALIDATION.md)).
 - **What it saves.** Memory, the host's above all. With every block swapped, the DiT's weights
   take about 4.5 GiB of pinned system memory in place of float16's 15, and a swap moves under a
   third of float16's bytes. It saves no VRAM where the VAE's floor binds (an 8 GB card at
-  1080p), and runs a little slower than float16 (the model card).
+  1080p). Measured on an RTX 5090 at 1080p, the DiT runs 10 to 15% slower than in float16, and
+  the models load in half the time, read from a Windows drive under WSL2.
 - **How it runs.** seedvr2x reads the file and dequantises it with its own code, written from
   GGUF's format and ggml's arithmetic (llama.cpp, MIT): each matrix is dequantised on the card
-  just before its multiply, equal in float32 to llama.cpp's own (its `gguf` package). The file is
-  recognised by its tensors and their types, read from its header before anything runs, and the
-  log says what it is: `DiT seedvr2x_ema_7b_sharp_dyn.gguf: SeedVR2's sharp 7B DiT in seedvr2x's
-  dynamic GGUF, its block matrices in Q3_K, Q4_K and Q5_K`.
+  just before its multiply, in float32, equal bit for bit to llama.cpp's own (its `gguf`
+  package) on all 288 block matrices of both files. The file is recognised by its tensors and
+  their types, read from its header before anything runs, and the log says what it is: `DiT
+  seedvr2x_ema_7b_sharp_dyn.gguf: SeedVR2's sharp 7B DiT in seedvr2x's dynamic GGUF, its block
+  matrices in Q3_K, Q4_K and Q5_K`.
 - **Only an option.** The sharp 7B in float16 stays the default, and seedvr2x never changes the
   file by itself. Where float16 is short of the card's or the host's memory, the plan names the
   smaller files ([small cards](#small-cards)).
@@ -761,6 +769,9 @@ step:
   measurements on short samples, not for whole films.
 - **`png`:** 16-bit PNG files, a directory per segment, frames numbered from `000000.png`.
 
+`png8`, an 8-bit PNG, is a picture's alone ([still pictures](#still-pictures)); a video refuses
+it.
+
 The FFV1 masters have every frame a keyframe, a checksum per slice, and the source's exact
 frame rate. The 4:2:0 master's colour is reduced with a bilinear filter, measured against
 four sharper ones: the lowest colour error on every one of 8 clips
@@ -894,9 +905,9 @@ run leaves no join writing. Your `--segment-cmd` is the exception: it ends at it
 its file discarded.
 
 **Then the job is finished, and says so.** The manifest beside the file is its record. The same
-command again makes nothing: it compares the model files and the source with that record by
-size and modification time, reads neither where both match, and says so within seconds (3 s on
-an RTX 5090, where checking the three model files takes about 85 s):
+command again makes nothing: it compares the model files and the source with that record by size
+and modification time, reads neither where both match, and says so within seconds (3 s on an RTX
+5090, where a start with work left reads the model files for over a minute as they load):
 
 ```
 03:38:54 clip.1080p.mkv: finished already, its 45 frames
@@ -914,6 +925,92 @@ work directory beside the file, about twice the master, and the other streams tw
 they are compared. The plan's `disk:` line says it at the start ([disk use](#disk-use)). Without
 the room the run stops before the join, saying how much more it needs, every segment kept, and
 the same command assembles later.
+
+## Still pictures
+
+The same command upscales a still picture. The source is told by its content, never by its name,
+and a picture takes its own path, with the video's models, tiling and colour correction and none
+of a job's machinery: no shots, no work directory, nothing to resume.
+
+```
+uv run seedvr2x photo.jpg --resolution 2160 -o photo.2160p.png
+```
+
+- **What is read:** PNG (RGB, palette or grey, at 8 or 16 bits), JPEG, WebP, TIFF, BMP and a GIF
+  of one frame, with no ffmpeg, which a picture neither needs nor checks. Grey and palette
+  pictures are expanded exactly to RGB for the model, and a grey picture comes back grey in a
+  PNG, as three equal planes in a WebP, which has no grey mode. An alpha plane opaque at every
+  pixel is dropped, said in one line, nothing of the picture changing. An MPO, a camera's stereo
+  pair or a photo with an HDR gain map, is read as its first image, a warning saying what is
+  left out.
+- **What is refused,** each with its reason: a picture of several frames (an animated GIF, APNG
+  or WebP, JPEGs one after another, a TIFF's pages), with the ffmpeg command that makes a video
+  of it (for a TIFF's pages, save each as a file of its own); a camera's raw file (DNG, NEF, CR2
+  and the like), to develop first; a 16-bit TIFF, with the command that makes a 16-bit PNG of
+  it; a picture with any pixel not opaque, whose hidden colours the model would redraw; CMYK and
+  the other modes; a PNG whose cICP chunk says an HDR transfer (PQ or HLG); a picture over
+  178,956,970 pixels, twice Pillow's limit against decompression bombs, where it refuses to
+  decode, with the command that makes a smaller one (a picture between the two is read, said in
+  one line); a damaged file. JPEG XL, AVIF and HEIC aren't read in version 0.1.0 ([refused
+  sources](#refused-sources)).
+- **The output:** `-o` names a new `.png` file, 16 bits, all the model made, or 8 bits with
+  `--format png8`, rounded to the nearest code; or a new `.webp` file, lossless and 8 bits,
+  which takes no `--format`: 28 and 42% smaller than the 8-bit PNG in the two cases measured, a
+  grainy picture and a smooth one. A WebP refuses a source stored at 16 bits, and one with a
+  cICP, cHRM or gAMA chunk and no profile, before any model loads, and an output side over
+  16,383 px, its limit, once the picture is upscaled; each refusal names `.png`. Another
+  extension is refused, with the command that converts the PNG, and so are a directory, the
+  source itself, a file already there and a missing directory: nothing is replaced. The file is
+  written whole.
+- **Colour, orientation and metadata:** the stored values are processed, never converted, as a
+  video's are. The source's ICC profile is carried unchanged, and, in a PNG, the source's colour
+  chunks (cICP, cHRM, gAMA, sRGB) as they are, a WebP holding the profile alone; a picture with
+  neither is sRGB, as viewers take it. A picture stored turned (an EXIF orientation) is upscaled
+  as stored, then turned upright, exactly, and written with no orientation. Nothing else of the
+  source's metadata is carried, no camera, date or place; the file holds seedvr2x's record ([the
+  record in each output](#the-record-in-each-output)).
+- **Size:** `--resolution` is the short side, 1080 by default as for a video, and a size given
+  is taken as asked, smaller than the picture included. Where the default makes the output
+  smaller than its source, a line says so and names the `--resolution` that keeps its size: a 12
+  MP photo, 4032×3024, comes out 1440×1080 by default.
+- **The model on one picture:** it is encoded alone, as a shot's first frame is, its noise drawn
+  from `--seed` ([seeds](#seeds-and-reproducibility)).
+- **The plan:** one latent, so no window: the blocks swapped and the VAE's tiles are its
+  choices, printed at every run, with the smaller DiT files' line where one would swap fewer
+  blocks ([small cards](#small-cards)). `--plan` alone, with no file, prints it and stops,
+  loading and writing nothing. `--encode-tile`, `--decode-tile` and `--swap-blocks` pin it, as
+  for a video.
+- **The options a picture takes:** `-o`, `--format` (`png` or `png8`), `--model-dir`,
+  `--dit-model`, `--vae-model`, `--resolution`, `--plan` alone, `--seed`, `--color-correction`,
+  `--input-sar`, the three pins and `-v`. Every other is refused, saying why, never ignored: a
+  picture has no shots, segments, frame rate, windows, job to resume or time to stop in.
+- **The model files** are checked as a video's are, by their load
+  ([README](README.md#model-files)). Many pictures go faster through the [image
+  server](../imgserver/README.md), which loads the models once and keeps them on the GPU.
+
+## The record in each output
+
+Every master, finished file and picture carries seedvr2x's record of what made it, which holds
+nothing of the source's but its size: the app and its version, the source's size and the
+output's, the short side asked and the sample aspect used, the DiT's and the VAE's files by name
+with their SHA-256, the seed, the colour correction, the tiles and the attention kernel, and for
+a video its window cap, `--quality`, `--compile` and its cuts (the threshold they were detected
+at, or, for a list given with `--cuts`, the SHA-256 of its cuts written one frame number a line,
+not of the file). That is what changes the output's bits, so an output can be made again from
+it, on the same GPU and libraries. It is always written, with no option to leave it out, and
+holds nothing personal: no path, no date, no machine. Beside it is the mark platforms read to
+label a picture made or enhanced with a generative AI model, IPTC's digital source type
+`compositeWithTrainedAlgorithmicMedia`.
+
+- **A video:** tags on the video stream, named `seedvr2x_…` (Matroska writes them in upper
+  case), on the masters and on the stream `--segment-cmd` reads, and on the finished `.mkv`,
+  written by the assembly from the job whatever the segments carry. A job planned again on a
+  resume says so (`replanned`). The masters' frames, packets and checksums are the same with or
+  without them. A directory of PNG frames carries none: its manifest holds the record. The
+  source's own video tags aren't carried, its language and title aside: they describe an encode
+  that the redraw replaces.
+- **A picture:** one XMP packet, in a PNG's `iTXt` chunk or a WebP's XMP chunk, and in a PNG the
+  standard `Software` text too, for the tools that read no XMP.
 
 ## Disk use
 
@@ -969,7 +1066,8 @@ each part takes and the ways out (make room, another disk, a lower `--quality`, 
 memory for the scratch), its first pass kept; `--plan` only warns. The input copies aren't
 counted: their size follows the content.
 
-**Once:** 17 GB of model files in Hugging Face's cache ([README](README.md#model-files)).
+**Once:** 17 GB of model files in Hugging Face's cache, the default's: the int8 DiT is 8.3 GB in
+place of 16.5, the dynamic GGUF 4.8 ([README](README.md#model-files)).
 
 ## GPU memory
 
@@ -1006,7 +1104,8 @@ A shot goes through three phases, and each has its own peak
 - **The DiT's peak follows the window's length:** 15.9 GiB for the two models' weights on the
   card (the DiT's alone are 15.35 GiB), plus about 1 GiB per latent at 1080p and four times that
   per latent at 4K. This is where a card's memory turns into quality: a longer window means
-  fewer joins in a long shot.
+  fewer joins in a long shot. Those are float16's weights: the int8 files hold the DiT's in 7.76
+  GiB, the dynamic GGUF in 4.43 ([the model](#the-model)).
 - **The VAE's peak follows the frame's size, not the shot's length,** since it works through
   the frames 4 at a time and keeps nothing of the shot on the GPU: about 19 GiB to encode and
   35 GiB to decode at 1080p, and four times as much at 4K, about 134 GiB for the decode. No card
@@ -1014,8 +1113,9 @@ A shot goes through three phases, and each has its own peak
 
 ### The plan
 
-seedvr2x makes one plan per job, after the first pass and before the models load, and prints
-it at every run, a line per choice ([reading a run](#reading-a-run)).
+seedvr2x makes one plan per job, after the first pass and before the models load, and prints it
+at every run, a line per choice ([reading a run](#reading-a-run)). A picture has a plan of its
+own, of one latent ([still pictures](#still-pictures)).
 
 - **From the memory free at the start,** less a margin of 0.6 GiB left to the desktop and other
   programs: the budget. What counts is what is free, not the card's size: a card that drives a
@@ -1125,15 +1225,17 @@ more of the rest of the machine.
   all 36, 15.81 with the DiT's other parameters and the VAE when the plan keeps the two models
   apart. A swapped block is copied to the GPU from pinned memory, which the system can't page
   out: 57 GB/s, against 18–25 from ordinary memory. Nothing is copied back, since the weights
-  never change.
+  never change. Those are float16's figures: the int8 files halve them (0.21 GiB a block, 7.61
+  with all 36), and the dynamic GGUF takes under a third (4.28 GiB with all 36).
 - **A tiled shot's scratch,** up to its allowance in system memory: 12.7 MB per 1080p frame,
   50.5 MB per 4K frame. The allowance is half of what the host has left once the pinned copies
   and the shot are counted, and no more than the longest tiled shot needs; past it, a shot's
   scratch goes whole to a file on the job's disk. Where the host's memory can't be read, said in
   a warning, it is the longest shot's whole scratch, 8 GiB at most.
 - **The process itself:** 2.3 to 2.5 GiB once the weights are loaded, flat whatever the job's
-  length. The weights are read straight into place, never mapped: a load peaks at 1.1 GiB with
-  nothing pinned, 7.5 with 6.38 GiB pinned, 16.3 with the 36 blocks'.
+  length. The weights are read straight into place, never mapped, and hashed as they are read
+  (the check of the model files): a load peaks at 1.1 GiB with nothing pinned, 7.5 with 6.38 GiB
+  pinned, 16.3 with the 36 blocks'.
 
 The plan counts all of this against the host's available memory, a container's limit
 included. A job it can't fit, or whose copies the host won't pin, is refused before the run,
@@ -1144,7 +1246,7 @@ counted from what is free at the start, not from the card's size. 4K takes 22.40
 
 **What to expect:**
 
-- A 16 GB card can't hold the DiT's 15.35 GiB of weights: it swaps every block.
+- A 16 GB card can't hold the float16 DiT's 15.35 GiB of weights: it swaps every block.
 - Below 48 GB, a 1080p decode only fits tiled; at 4K every card tiles it, the 96 GB one
   included.
 - These cards also compute more slowly: an RTX 5080 has 84 compute units (SMs) where the
@@ -1153,8 +1255,8 @@ counted from what is free at the start, not from the card's size. 4K takes 22.40
 - The smaller model files lighten the swapping: int8 and the dynamic GGUF
   ([README](README.md#which-file-to-use)), the others with version 0.2.0.
 
-**The smaller files, named by the plan.** Where float16 is short, the plan names the smaller
-files of the same 7B, never taking one by itself:
+**The smaller files, named by the plan.** Where float16 or int8 is short, the plan names the
+smaller files of the same 7B (for an int8 file, the dynamic GGUF), never taking one by itself:
 
 - In a refusal for memory (the card's or the host's), after its words, the files that would plan
   the job, with their option and size, and only those that do. Where you gave `--model-dir`, it
@@ -1250,11 +1352,14 @@ its start:
   frames being maybe not those of a run with more room.
 - **One seedvr2x per card:** each plans from what is free when it starts, and the other's
   growth would stop it.
-- **The model cache on Linux's own disk,** where it has room (`HF_HOME` or `HF_HUB_CACHE`
-  pointing into WSL2's own file system): each start's check reads the 16.5 GB DiT whole, and its
-  load reads it again, and a Windows drive's mount is the slow way in, as it is for a tiled
-  pass's scratch file and the compile cache. Not measured for the models themselves. The
-  trade-off is the room: 17 GB inside WSL2's virtual disk.
+- **The model files on Linux's own disk,** where it has room (`HF_HOME` or `HF_HUB_CACHE`
+  pointing into WSL2's own file system, or `--model-dir` a directory there). Each start's load
+  reads every model file once, checking its SHA-256 as it reads, and WSL2 reads a Windows drive
+  through 9p at 170 to 250 MB/s, where Windows itself reads the same file at 4 to 9 GB/s: the
+  DiT's 16.5 GB take about 70 s to read and hash from a Windows drive, against about 7 s from
+  Linux's disk, where the hash is the bound. The mount is the slow way in for a tiled pass's
+  scratch file and the compile cache too. The trade-off is the room: 17 GB inside WSL2's virtual
+  disk.
 
 ## Why zscale is required
 
@@ -1313,6 +1418,7 @@ ERROR SolLevante_HDR10_r2020_ST2084_UHD_24fps_1000nit.mov: HDR, transfer smpte20
 | **RGB tagged limited range** | Rare, and most likely a wrong tag: either reading could be wrong. | Correct the tag, or convert the file. |
 | **A full-range `yuvj` format tagged limited range** | A contradiction: `yuvj` is full range by definition. | Correct the tag, or convert the file. |
 | **A directory** | The source is the only input ([the two workflows](#the-two-workflows)). | Give the file the segments came from, or join them back into one. |
+| **An image file seedvr2x doesn't read as a picture:** JPEG XL, AVIF, HEIC, EXR and the like | ffmpeg would run it as a video of one frame. seedvr2x reads PNG, JPEG, WebP, TIFF, BMP and a GIF of one frame as pictures ([still pictures](#still-pictures)), and refuses any other image format. | Make a PNG of it with a tool that reads it; the message gives an ffmpeg command, for where your ffmpeg decodes it. |
 
 The pixel formats read: planar YUV 4:2:0, 4:2:2 and 4:4:4 at 8 to 16 bits; 4:1:1, 4:1:0 and
 4:4:0 at 8 bits; the full-range `yuvj` 4:2:0, 4:2:2 and 4:4:4; planar RGB at 8 to 16 bits; and
@@ -1392,8 +1498,8 @@ WARNING film.mkv: 3 frames missing after frame 1233: its timestamps step from 51
   often are. ffmpeg's `idet` looks at every frame during the first pass, and seedvr2x warns
   when it finds 10% of them or more combed. The run goes on: the frames are read as they are,
   combing and all. For a clean upscale, inverse-telecine or deinterlace the source first.
-  Measured: at most 2.1% of frames on 35 real progressive sources, against 88% on a telecined
-  DVD.
+  Measured: at most 2.1% of frames on the first 6,000 of 36 real progressive sources, against
+  88% on a telecined DVD.
 - **Missing tags,** guessed, said in one warning (`untagged, guessed: matrix bt709 (from
   1920x1080), limited range, chroma sited left`):
   - the matrix: BT.709 when the width is 1280 or more or the height above 576, else BT.601.
@@ -1427,16 +1533,18 @@ One rule decides all of it: the upscale must look like its source, in any player
 - **Size.** `--resolution` is the output's short side, a portrait source's too, 1080 by default:
   numz's default, kept, and a size every card the planner aims at runs (from 8.3 GiB free, where
   4K takes 22.4). A 1080p source given the default comes out at its own size, redrawn rather
-  than enlarged. On two 1080p Blu-ray sources at their own size, judged by eye, a live-action
-  film couldn't be told from its source; on an anime episode, small faces in motion looked
-  redrawn and moving credits' kanji showed artefacts. A clean source leaves a same-size redraw
-  little to repair: the model is made for old or damaged ones. The model works on frames padded
-  to multiples of 16, and the padding is trimmed: the output is the size asked. seedvr2x pads
-  with rows mirrored from the picture, then black ones, where numz pads with black alone, which
-  costs the bottom 16 rows of its output 3–10 dB
+  than enlarged; a larger source comes out smaller by default, and a line says so, naming the
+  `--resolution` that keeps its size. On two 1080p Blu-ray sources at their own size, judged by
+  eye, a live-action film couldn't be told from its source; on an anime episode, small faces in
+  motion looked redrawn and moving credits' kanji showed artefacts. A clean source leaves a
+  same-size redraw little to repair: the model is made for old or damaged ones. The model works
+  on frames padded to multiples of 16, and the padding is trimmed: the output is the size asked.
+  seedvr2x pads with rows mirrored from the picture, then black ones, where numz pads with black
+  alone, which costs the bottom 16 rows of its output 3–10 dB
   ([numerics.md](../../research/docs/numerics.md#reflectblack16)).
-- **PNG** carries the primaries and transfer too, as the chunks ffmpeg's PNG encoder writes
-  from the tags, and none for an untagged source.
+- **A video's PNG frames** carry the primaries and transfer too, as the chunks ffmpeg's PNG
+  encoder writes from the tags, and none for an untagged source. A picture keeps its own profile
+  and colour chunks ([still pictures](#still-pictures)).
 
 ## Resume
 
@@ -1468,6 +1576,13 @@ stays beside it, `film.1080p.mkv: finished already, its 45 frames`
 record by size and modification time, and hashes only one that differs. A run stopped after
 the file was put in place, and before its work directory went, says
 `film.1080p.mkv: assembled already, …` and finishes the clean-up.
+
+**A job with work left knows its model files the same way.** At its start, nothing reads a file
+whose size and modification time are those its record holds beside its SHA-256: its load reads
+it once, hashing every byte as it goes, and refuses it before any unit if the bytes are others,
+the record as it was. A file whose size or time differs is hashed at the start, saying for about
+how long, and again by its load. A job with only its assembly left reads no model file its
+record vouches for.
 
 **A directory holds one job.** The same command is that job; anything else is another job,
 and is refused with the list of what differs, each line giving the recorded value and the new
@@ -1675,11 +1790,12 @@ uv run seedvr2x film.mkv -o film.1080p.mkv --until 07:30
   file, the assembly is the job's last unit, estimated from the masters' size at the rate the
   output's disk writes at: cautiously (55 s estimated where 7.2 s ran).
 - **How early it may stop** is set by the longest unit, which `--plan` names with its time.
-- **What each start costs,** a resume's included, before its first unit: the model files' check
-  (about 85 s on an RTX 5090 through WSL2), the source's (36 s for a 7.5 GB file; a finished
-  job reads neither), the models' load (about 80 s), the calibration (a minute or two), and with
-  `--compile` its compilation ([compiling the VAE](#compiling-the-vae---compile)). A night starts
-  its first unit a few minutes after the command.
+- **What each start costs,** a resume's included, before its first unit: the source's check (36
+  s for a 7.5 GB file; a finished job doesn't read it), the models' load, which checks the model
+  files as it reads them (about 70 to 80 s on an RTX 5090 from a Windows drive through WSL2),
+  the calibration (a minute or two), and with `--compile` its compilation ([compiling the
+  VAE](#compiling-the-vae---compile)). A night starts its first unit a few minutes after the
+  command.
 - **A time already past** once the first pass is done stops the job before the models load,
   its first pass kept.
 - **With `--plan`,** it says whether the job, run now, ends by then, and if not, the unit it
@@ -1846,9 +1962,11 @@ A master is the product, and a lossless file can be damaged without anything say
   line (`12 checked, by their frame counts alone`). A finished file made with a command has
   none either: `verify` counts its frames against the manifest beside it.
 
-The same care goes to what the job reads: the model files are checked by size and SHA-256
-before every run ([README](README.md#model-files)), and the input copies frame by frame
-([the input copies](#the-input-copies)).
+The same care goes to what the job reads: each of seedvr2x's model files is held to its pinned
+size before it loads and to its pinned SHA-256 as its load reads it, once, a file that isn't the
+one expected refused before any unit, and any other file is hashed at a new job's start
+([README](README.md#model-files)); and the input copies frame by frame ([the input
+copies](#the-input-copies)).
 
 ## Seeds and reproducibility
 
@@ -1868,6 +1986,8 @@ before every run ([README](README.md#model-files)), and the input copies frame b
 - **The largest seed depends on the source's length:** the seed plus the last shot's first
   frame plus 1,000,000 must stay under 2^32. A seed out of range is refused before the model
   loads, with the bound for that source.
+- **A picture** draws its noise from the seed itself, and its encode from the seed plus
+  1,000,000: its seed goes from 0 to 4,293,967,295.
 - **What changes the output's bits:** another seed, another plan, another environment (the
   GPU, PyTorch, ffmpeg, the attention backend). **What doesn't:** stopping and resuming, and
   how many blocks are swapped.
@@ -1880,11 +2000,12 @@ it.
 ## Reading a run
 
 Most of seedvr2x is learnt by watching it run: each run says what it checks, what it plans and
-why, and how long it has left. This section reads a real one, from seedvr2x 0.1.0 on an RTX
-5090, a 32 GB card driving a Windows desktop, under WSL2, with FlashAttention 2. Another program
-held 13 GiB of the card, which left the plan little room. The source is a short clip, 45 frames
-of 960×540 at 24000/1001 frames per second with a FLAC audio track and a cover picture,
-upscaled to a finished file at 1080p; then the same command is run again:
+why, and how long it has left. This section reads a real one, from a build of seedvr2x shortly
+before 0.1.0, on an RTX 5090, a 32 GB card driving a Windows desktop, under WSL2, with
+FlashAttention 2. Another program held 13 GiB of the card, which left the plan little room. The
+source is a short clip, 45 frames of 960×540 at 24000/1001 frames per second with a FLAC audio
+track and a cover picture, upscaled to a finished file at 1080p; then the same command is run
+again:
 
 ```
 uv run seedvr2x clip.mkv -o clip.1080p.mkv
@@ -1892,8 +2013,11 @@ uv run seedvr2x clip.mkv -o clip.1080p.mkv
 
 Here paths are shown as in the default cache, and a few lines that repeat another's form are
 left out; the plan's card line is shown as 0.1.0 prints it: the run printed the driver's own
-figure in it too, which 0.1.0 prints only under `--verbose`. Nothing else is changed. A longer
-job prints the same lines, more of them.
+figure in it too, which 0.1.0 prints only under `--verbose`. Two things of 0.1.0 differ from
+this run and are said where they stand: the model files' check, which 0.1.0 makes as the models
+load (below), and the plan's line naming the smaller DiT files where one would swap fewer
+blocks, which 0.1.0 prints after the blocks swapped ([small cards](#small-cards)). A longer job
+prints the same lines, more of them.
 
 ### The lines
 
@@ -1944,12 +2068,15 @@ bar shows either way.
 - **The source's other streams** are copied once ahead, for a finished file only: what the file
   can't take is found before the night's work, not at its end ([the finished
   file](#the-finished-file)).
-- **The model files** are found, recognised by their tensors, then hashed: a run with anything
-  left to make reads the 16.5 GB DiT whole to check its SHA-256, saying first for about how
-  long, here 82.6 s of the three files' 85 s, from a Windows disk seen through WSL2; 7 s from
-  the 96 GB card's local disk. The VAE's and the detector's take seconds. The first run
-  downloads them instead (`not in the cache, downloading 16.5 GB from hekmon/seedvr2x at
-  c14a2bc4`).
+- **The model files** are found and recognised by their tensors, and a pinned file's size is
+  held to its pin. This run's build then read the 16.5 GB DiT whole to check its SHA-256, 82.6 s
+  from a Windows drive, before loading it. Since 2026-11-04 nothing of seedvr2x's pinned files
+  is read ahead: the line says `its size as seedvr2x pins it, hekmon/seedvr2x at c14a2bc4; its
+  SHA-256 checked as it loads`, and the load hashes every byte as it reads it, once, saying `its
+  size and SHA-256 as seedvr2x pins them` at its end, or refusing the file there. A file
+  seedvr2x doesn't pin, on a new job, or a resume's file changed since its record, is still
+  hashed at the start, the line saying first for about how long. The first run downloads them
+  instead (`not in the cache, downloading 16.5 GB from hekmon/seedvr2x at c14a2bc4`).
 - **The two warnings** are [WSL2's](#under-wsl2): a Linux driver gives instead one line saying
   it refuses what the card can't hold.
 - **The first pass** says what it reads first, then decodes every frame, scores it for cuts, and
@@ -1960,7 +2087,8 @@ bar shows either way.
 
 ### The plan, line by line
 
-This run's plan, its card line as 0.1.0 prints it:
+This run's plan, its card line as 0.1.0 prints it (0.1.0 adds the smaller DiT files' line after
+the blocks swapped, where one would swap fewer: [small cards](#small-cards)):
 
 ```
 03:35:43 plan: card: NVIDIA GeForce RTX 5090, 14.91 GiB free on the whole card by NVML: the run is held to the card's own memory, its driver giving more than the card has
@@ -2130,7 +2258,7 @@ The same command again, the job finished:
 ```
 
 The model files and the source have the size and the time the record holds, so nothing is read
-or hashed: 3 s, where checking the model files took 85 s.
+or hashed: 3 s, where hashing the model files took 85 s at the first run's start.
 
 `seedvr2x verify` then checks every frame against the checksums written beside the file; on
 another finished file, the 73 frames of the bird of [the example](#an-example-sol-levante):
@@ -2149,9 +2277,9 @@ this manual is.
 
 | Option | What it does |
 |---|---|
-| `input` | The source, one video file. |
-| `-o`, `--output OUTPUT` | A `.mkv` path: the finished file, its job in `OUTPUT.work` until it is whole ([the finished file](#the-finished-file)). Another video suffix (`.mp4`, `.mov`…) is refused. Anything else: a directory of output segments, new or empty, or an unfinished job's, which the command resumes ([the two workflows](#the-two-workflows)). |
-| `--format {gbrp16le,yuv420p10le,png}` | The output's format, `yuv420p10le` by default ([the formats](#the-formats)). |
+| `input` | The source: one video file, or one picture (PNG, JPEG, WebP, TIFF, BMP or a GIF of one frame), told by its content, never by its name ([still pictures](#still-pictures)). |
+| `-o`, `--output OUTPUT` | A `.mkv` path: the finished file, its job in `OUTPUT.work` until it is whole ([the finished file](#the-finished-file)). Another video suffix (`.mp4`, `.mov`…) is refused. Anything else: a directory of output segments, new or empty, or an unfinished job's, which the command resumes ([the two workflows](#the-two-workflows)). A picture's: a new `.png` or `.webp` file, nothing replaced; a video refuses both. |
+| `--format {gbrp16le,yuv420p10le,png,png8}` | The output's format, `yuv420p10le` by default ([the formats](#the-formats)). A picture's `.png` is 16-bit, `png8` 8-bit; a `.webp` takes none. |
 | `--segment-cmd CMD` | Your encoder's command, run once per output segment, `{out}` the file it writes ([`--segment-cmd`](#--segment-cmd-your-encoder-during-the-run)). Refused with `--format png`. |
 | `--resolution RESOLUTION` | The output's short side in pixels, 1080 by default. |
 | `--min-segment SECONDS` | Output segments last this long at least, 5 by default; 0 keeps every cut. |
@@ -2162,7 +2290,7 @@ this manual is.
 |---|---|
 | `--cuts FILE` | A cut list, in place of the detector ([the cut list](#the-cut-list)). |
 | `--cut-threshold P` | The shot detector's threshold, above 0 and at most 1; 0.3 by default. Refused with `--cuts`. |
-| `--plan FILE` | Plan the job and stop before the upscale: the first pass, the cut list written to FILE with its two playlists, the models loaded for the calibration, the plan and the times printed ([reading a run](#reading-a-run)). |
+| `--plan [FILE]` | Plan the job and stop before the upscale: the first pass, the cut list written to FILE with its two playlists, the models loaded for the calibration, the plan and the times printed ([reading a run](#reading-a-run)). A video needs FILE; for a picture, `--plan` alone, with no file: its plan, nothing loaded or written. |
 
 **The model and the picture**
 
@@ -2194,6 +2322,10 @@ this manual is.
 
 Each is taken exactly or refused; without them, the planner chooses.
 
+A picture takes `-o`, `--format`, the model files' three, `--resolution`, `--plan` alone,
+`--seed`, `--color-correction`, `--input-sar`, the three pins above and `-v`, and refuses every
+other option, saying why ([still pictures](#still-pictures)).
+
 **Running**
 
 | Option | What it does |
@@ -2219,6 +2351,8 @@ CUDA's own `CUDA_VISIBLE_DEVICES` chooses which, and separate jobs run on separa
 | 75 | Stopped by `--until`, to be run again. |
 | 130 | Stopped by Ctrl-C. |
 | 143 | Stopped by SIGTERM, at once. |
+
+A picture's run takes the same codes: 0 once its file is written, or its plan said by `--plan`.
 
 ## The files of a job
 
@@ -2260,12 +2394,14 @@ above, until the file is whole. Then `film.1080p.mkv`, `film.1080p.mkv.crc32` (n
 which the same command knows the job is finished. A work directory that holds anything else is
 left as it is, with its manifest, and named.
 
+A picture keeps none of these: its output is the one file `-o` names.
+
 ## Environment variables
 
 | Variable | Effect |
 |---|---|
 | `HF_HOME`, `HF_HUB_CACHE` | Where Hugging Face's cache is: `HF_HUB_CACHE`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub`. The model files go there. |
-| `HF_HUB_OFFLINE=1` | Keeps the network out: the model files are taken from the cache, and a missing one is refused. |
+| `HF_HUB_OFFLINE=1` | Keeps the network out: the model files are taken from the cache, and a missing one is refused. `TRANSFORMERS_OFFLINE` does the same where `HF_HUB_OFFLINE` is unset. |
 | `HF_HUB_DISABLE_TELEMETRY` | Set to `1` by seedvr2x unless you have set it. |
 | `TORCH_CPP_LOG_LEVEL` | PyTorch's lines from its C++ code: set to `ERROR` by seedvr2x unless `--verbose` is given, so that they stay out of the default output; a value of your own is kept ([the lines](#the-lines)). |
 | `TORCHINDUCTOR_CACHE_DIR` | PyTorch's compile cache: under `--compile`, replaced by the job's own `compile-cache/` ([compiling the VAE](#compiling-the-vae---compile)). |
