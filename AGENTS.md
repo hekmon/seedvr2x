@@ -29,6 +29,9 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
                          shot's pass, encode, windows and decode, on models already loaded
     picture.py png.py webp.py still.py still_plan.py     a still picture: read, written as PNG
                          or lossless WebP, upscaled on models already loaded, its plan for a bound
+    clip.py              a clip of one shot's frames in memory, upscaled on models already loaded,
+                         its plan (shot_plan's, the output and the windows and scratch kept in
+                         system memory counted)
     record.py            seedvr2x's record in each output: its fields and the AI mark, a picture's
                          XMP packet, a video's stream tags
     frames.py passes.py peaks.py files.py clock.py errors.py     what the bricks share (errors.py:
@@ -369,6 +372,24 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   hold the plan the card alone gives where the host is short, no pinned copy counted, a job the
   host refused planned, `held=False` changing no plan (the plan matrix's 5,120 cases too), and
   `_vae_kept` and `_dit_kept` returning nothing for weights held.
+- A clip of frames in memory (`seedvr2x/clip.py`; DESIGN.md, Repository and apps, the nodes), on
+  the CPU: `core/tests/test_clip.py` holds it on `cpu_models`' VAE in bfloat16 and `test_still.py`'s
+  stand-in DiT: the output's shape and dtype and the input left as it was, the clip's seeds (a
+  shot at frame 0), the phases entered in order and nothing loaded, 1, 2 and 3 windows, the steps
+  told in order with their counts, a step raising an `Exception` or a `BaseException` at each stage
+  leaving no decode open, none of the decode's slices alive (the traceback's frames cleared;
+  `Watched`) and nothing for `test_held.strays` to find, the refusals (not `(T, H, W, 3)`
+  float32, no frame, `NonFinite` from an encode, a window or a decode), the correction against
+  the clip's own frames, the scratch in `tiling.InMemory` and no file. The plan
+  (`clip.plan`, `shot_plan.plan`'s `in_memory`): the output array taken off the host and a host
+  short of it refused saying so, a tiled pass's allowance the whole scratch, the windows counted
+  all together at the DiT's last window and the latent beside the merge (`host_moments`'
+  `in_memory`), and `in_memory=False`
+  changing no plan (the plan matrix's cases too). `apps/seedvr2x/tests/test_clip_cli.py` holds
+  `clip.upscale` bit for bit to the shot's pass as the command line runs it (`encode_shot`,
+  `sample_windows`, `merge_windows`, `decode_shot` with `shot.py`'s `Correction` reading the same
+  frames), in 1 to 3 windows, each tiled pass alone and both, corrected and not, and under
+  `-m gpu` on CUDA with the sharp 7B in two windows.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
   `test_pull_cli.py` holds what the command line does over it.

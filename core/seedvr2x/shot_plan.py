@@ -131,11 +131,20 @@ class Pins:
 MOMENTS = ("encode", "check", "windows", "merge", "decode")
 
 
-def host_moments(padded: tuple[int, int], latents: int, cap: int | None) -> dict[str, int]:
+def host_moments(
+    padded: tuple[int, int], latents: int, cap: int | None, in_memory: bool = False
+) -> dict[str, int]:
     """What the run holds in system memory of a shot of `latents` latents of padded frames, in
     bytes, at each of its moments (MOMENTS), its windows capped at `cap` latents (None: one
     window). The GPU keeps nothing of a shot between its units (units.py,
     shot_pass.sample_windows): it waits here, and its noise is drawn here.
+
+    in_memory: the shot's windows are kept in system memory until its decode, none written to a
+    file (clip.py, the library's entry for a clip of frames in memory): at the last window the
+    latent and the noise are there beside all the windows, not the longest alone; and the latent
+    is still alive through the merge (the clip's upscale holds it until its windows are merged),
+    which the command line's run has given up by then. The default, False, is the command line's
+    run.
 
     By the tensors' sizes: a latent is (H / 8, W / 8, 16) in bfloat16, half a byte a padded
     pixel, 1.01 MiB at 1080p, padded to 1104x1920, and 4.01 MiB at 4K, padded to 2192x3840. The
@@ -152,12 +161,13 @@ def host_moments(padded: tuple[int, int], latents: int, cap: int | None) -> dict
     - "merge", the decode's start: the windows, read back from their files, and what merging
       them makes (shot_pass.merge_windows): nothing for one window, which is the merged latent; else
       the merged latent, allocated once (L), and at a join the two products and the sum of the
-      latents mixed (MIXING x SHARED), given up before the next join;
+      latents mixed (MIXING x SHARED), given up before the next join; with in_memory the latent
+      too, alive beside them (clip.upscale): L more;
     - "decode", through the decode: the merged latent, L.
-    The latent and the noise are gone before the merge (run._sample), and the windows after it:
-    the moments follow one another, and a shot holds the largest, never their sum. One shot at
-    a time: a segment's shots are sampled, then decoded, each one's tensors given up before the
-    next one's (run.run_job).
+    The latent and the noise are gone before the merge (run._sample; in_memory: the noise
+    alone), and the windows after it: the moments follow one another, and a shot holds the
+    largest, never their sum. One shot at a time: a segment's shots are sampled, then decoded,
+    each one's tensors given up before the next one's (run.run_job).
 
     The largest is the windows', 3 L for a shot in one window, 1.5 bytes a padded pixel and a
     latent; the check for a shot of 1 latent; and the merge where a shot's n windows are
@@ -186,8 +196,8 @@ def host_moments(padded: tuple[int, int], latents: int, cap: int | None) -> dict
     return {
         "encode": 2 * shot,
         "check": shot + latent + CHECK_MASKS * latent // LATENT_VALUE,
-        "windows": 2 * shot + latent * max(windows),
-        "merge": latent * (kept + merging),
+        "windows": 2 * shot + latent * (kept if in_memory else max(windows)),
+        "merge": latent * (kept + merging + (latents if in_memory else 0)),
         "decode": shot,
     }
 
@@ -345,6 +355,9 @@ class _Job:
     dit_model: Architecture = peaks.FP16
     # The weights' pinned copies exist already (plan's held): none is counted against the host.
     held: bool = False
+    # The shot's windows and a tiled pass's scratch are kept in system memory whole, never in a
+    # file (plan's in_memory).
+    in_memory: bool = False
 
     @property
     def margin(self) -> int:
@@ -388,6 +401,7 @@ def plan(
     compile_fixed: bool = False,
     dit_model: Architecture = peaks.FP16,
     held: bool = False,
+    in_memory: bool = False,
 ) -> tuple[Plan, Peaks]:
     """The plan of a job of `shots` resized to target (frames.target_size), in the GPU memory it may
     count on, less its margin, and what it is predicted to take; refused (PlanError) when a pin
@@ -495,6 +509,13 @@ def plan(
     shrunk (_dit_kept), whatever the host leaves. A host short of the process's own memory, a
     shot's or a scratch's still refuses the plan or shortens its window. Not a word of the
     plan's record: the weights' place is no part of what a plan shapes. The default, False, plans
+    as before.
+
+    in_memory: the run keeps a shot's windows and a tiled pass's scratch in system memory, whole,
+    where the command line's go to files (clip.py): the windows counted all together at the
+    DiT's phase's end (host_moments), and the scratch's allowance the whole scratch
+    (_allowance), so that a host that can't hold it refuses the plan, or shortens its window,
+    as any host short of memory does. Not a word of the plan's record. The default, False, plans
     as before."""
     if recorded is not None:
         compile_vae, compile_fixed = recorded.compile_vae, True
@@ -513,14 +534,21 @@ def plan(
                 compile_fixed=True,
                 dit_model=dit_model,
                 held=held,
+                in_memory=in_memory,
             )
         except PlanError as refused:
             raise _compile_refusal(
                 refused,
                 (free, target, shots, pins, host_available),
-                dict(split=split, attention=attention, dit_model=dit_model, held=held),
+                dict(
+                    split=split,
+                    attention=attention,
+                    dit_model=dit_model,
+                    held=held,
+                    in_memory=in_memory,
+                ),
             ) from None
-    job = _job(free, target, shots, split, attention, compile_vae, dit_model, held)
+    job = _job(free, target, shots, split, attention, compile_vae, dit_model, held, in_memory)
     if pins.swap_blocks is not None and pins.swap_blocks > peaks.BLOCKS:
         swap = Setting("swap_blocks", str(pins.swap_blocks))
         raise PinRefused(
@@ -626,8 +654,8 @@ def _compile_refusal(
     (DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in", decided on 2026-10-29): the same
     command without --compile and, for a tile pinned, the pin within the shapes that the planner
     takes (the untiled pass if it is within them, else the largest tile that fits). `job` is plan's
-    free, target, shots, pins and host_available, `options` its split, attention, dit_model and
-    held.
+    free, target, shots, pins and host_available, `options` its split, attention, dit_model,
+    held and in_memory.
     A job no plain plan fits is refused as it was, whatever --compile asked: the plain plan's
     refusal.
 
@@ -983,6 +1011,7 @@ def _job(
     compile_vae: bool = False,
     dit_model: Architecture = peaks.FP16,
     held: bool = False,
+    in_memory: bool = False,
 ) -> _Job:
     if not shots:
         raise ValueError("a job without a shot")
@@ -1004,6 +1033,7 @@ def _job(
         compile_vae,
         dit_model,
         held,
+        in_memory,
     )
 
 
@@ -1777,12 +1807,12 @@ def _shot_held(job: _Job, plan: Plan) -> tuple[int, str, int]:
     in windows of 20, and 10.47 at 4K in windows of 5. Until 2026-10-12 the check read the
     latent whole, 1.75 bytes a padded pixel and a latent, and a merge copied the shot at each
     join: 3.45 GiB for that shot at 1080p and 14.36 at 4K (shot_pass.finite, shot_pass._merge)."""
-    return _most_held(job.padded, job.lengths, plan.window)
+    return _most_held(job.padded, job.lengths, plan.window, job.in_memory)
 
 
 @cache
 def _most_held(
-    padded: tuple[int, int], lengths: tuple[int, ...], cap: int | None
+    padded: tuple[int, int], lengths: tuple[int, ...], cap: int | None, in_memory: bool = False
 ) -> tuple[int, str, int]:
     """(bytes, moment, latents): what the run holds in system memory of the shot that holds the
     most among shots of `lengths` latents (ascending) under a cap, the moment it does and that
@@ -1794,14 +1824,18 @@ def _most_held(
     No shot holds more than 3 latents' worth a latent and MIXING x SHARED more (its latent and
     noise beside a window no longer than itself; its windows, which share SHARED latents and
     are 2 x SHARED + 1 long at least, with the merged latent and a join's mix): the shots are
-    read from the longest down, until none left can hold more than the most found."""
+    read from the longest down, until none left can hold more than the most found. With in_memory
+    (host_moments) the windows are kept whole, which a shot holds 4 latents' worth a latent at
+    the most, and MIXING x SHARED more at the merge: its latent, its noise (or the merged
+    latent), and the windows, L + SHARED x (n - 1) latents, which are 5 latents long at least
+    and so fewer than 2 L."""
     height, width = padded
     latent = LATENT_CHANNELS * LATENT_VALUE * (height // LATENT_SIDE) * (width // LATENT_SIDE)
     most = (0, MOMENTS[0], lengths[-1])
     for latents in reversed(lengths):
-        if latent * (3 * latents + MIXING * SHARED) <= most[0]:
+        if latent * ((4 if in_memory else 3) * latents + MIXING * SHARED) <= most[0]:
             break
-        moments = host_moments(padded, latents, cap)
+        moments = host_moments(padded, latents, cap, in_memory)
         moment = max(MOMENTS, key=lambda moment: moments[moment])
         # The encode's end and the decode never hold the most: a shot's windows hold a window
         # more than the first, which holds twice the second (host_moments). No sentence says
@@ -1834,8 +1868,13 @@ def _allowance(job: _Job, plan: Plan, host_available: int | None) -> int:
     refused for the system memory the process, its pinned copies and its longest shot take
     (_unfit), never for an allowance: half of what they leave is more than the process leaves
     of it where they leave under 4.8 GiB. And with what the host has available unknown (None),
-    the longest tiled shot's scratch, ALLOWANCE_UNKNOWN_HOST at most."""
+    the longest tiled shot's scratch, ALLOWANCE_UNKNOWN_HOST at most.
+
+    With the job's in_memory (plan) there is no file to go to: the allowance is the whole scratch,
+    whatever the host has, and the host's memory is judged with it (_unfit)."""
     kept = _kept(job, plan)
+    if job.in_memory:
+        return kept
     if host_available is None:
         return min(kept, ALLOWANCE_UNKNOWN_HOST)
     left = host_available - _pinned(plan, job.dit_model, job.held) - _shot_held(job, plan)[0]
