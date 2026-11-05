@@ -207,8 +207,8 @@ until the warm-up has passed. Its log then says, in order:
    and, for seedvr2x's own, its size held to its pin: `its SHA-256 checked as it loads`;
 3. the card's name and the plan for pictures within `--max-size`, in the CLI's words, a `plan:`
    line per choice; after the blocks swapped, where the plan swaps some, the file is not the
-   dynamic GGUF already and a smaller file would swap fewer, the CLI's line of those files,
-   `plan: smaller DiT files plan this job better: this plan swaps N blocks; int8 N blocks; the
+   dynamic GGUF already and a smaller file would swap fewer, its line of those files,
+   `plan: smaller DiT files plan this bound better: this plan swaps N blocks; int8 N blocks; the
    dynamic GGUF N blocks; --dit-model names them` (blocks alone: a picture is one latent, with
    no window). The server never changes the file it was given;
 4. the models loaded, each of seedvr2x's files read once, its SHA-256 proved at the end of its

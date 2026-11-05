@@ -261,8 +261,11 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
 
 ## Tests
 
-- `pytest` (as in [Checks](#checks)) runs on the CPU, needs no model and is quick. Tests that
-  need ffmpeg skip without a build seedvr2x accepts (see [Environment](#environment)).
+- `pytest` (as in [Checks](#checks)) runs on the CPU and needs no model. The four projects took
+  42 minutes on 2026-11-05 on a desktop, nothing else running: the library 7, the CLI 28, the
+  image server 5, the nodes 1. While working, run the test files of what changed; the whole
+  suite once at the end. Tests that need ffmpeg skip without a build seedvr2x accepts (see
+  [Environment](#environment)).
 - `pytest -m gpu` runs the tests that need CUDA, never selected by default; run it in each
   directory.
 - **Where a test file sits.** `tests/test_x.py` is in the directory of the package it tests:
