@@ -19,7 +19,7 @@ tiling.decode_tiled of that latent, each slice dropped as it comes.
            bfloat16, fed in the VAE's slices: the grid is 1 x 2, a whole T x T tile and one of
            T x 192;
          - a tile cut off at the picture's edge: the frames through seedvr2x's own transform and
-           padding (shot.encoder_inputs), 1080p padded to 1104 x 1920 in tiles of 1152 to 1856
+           padding (shot_pass.encoder_inputs), 1080p padded to 1104 x 1920 in tiles of 1152 to 1856
            px, 720p to 752 x 1280 in tiles of 768 to 1216: the grid is 1 x 2, its largest tile
            the padded rows by T.
          One JSON line per tile, sizes in bytes, appended to --out and written at once; every
@@ -47,9 +47,14 @@ with its paths written in, on seedvr2x at e6450d8 with the VAE passes that 2adce
 before that commit; `table` gives that section's tables from its lines. `run` as it stands
 here has not run on a GPU: its measuring code is that driver's, moved. The passes it calls are
 the same in the seedvr2x this file came with (runtime/model.py's VAE passes, tilegrid.py's grid,
-tiling.py's two passes, shot.py's encoder inputs, job.py's padding). The allocator is
+tiling.py's two passes, shot_pass.py's encoder inputs, frames.py's padding). The allocator is
 cudaMallocAsync unless the environment names one (PYTORCH_CUDA_ALLOC_CONF), set before torch is
 imported: the one those peaks were measured under, and seedvr2x's own on a driver that refuses.
+
+Brought up to the library on 2026-11-05: the shot's pass moved there on 2026-11-04, so that the
+encoder's inputs come from seedvr2x/shot_pass.py (encoder_inputs, unchanged by the move). The
+tiled passes still take the command line's scratch.Scratch, handed to tiling.py as before, with an
+allowance of 2**40 bytes: always in system memory.
 
 Usage (seedvr2x's venv python for run and plan; run under the GPU's lock, ffmpeg and ffprobe in
 the PATH):
@@ -110,10 +115,9 @@ def run(args: argparse.Namespace) -> int:
 
     import numpy as np
     import torch
-    import shot
     from scratch import Scratch
 
-    from seedvr2x import model, tiling
+    from seedvr2x import model, shot_pass, tiling
     from seedvr2x.frames import padded_length, padded_size
     from seedvr2x.passes import Tiles
 
@@ -319,7 +323,7 @@ def run(args: argparse.Namespace) -> int:
             return
 
         def encode():
-            inputs = shot.encoder_inputs(models, reader(frames), count, target)
+            inputs = shot_pass.encoder_inputs(models, reader(frames), count, target)
             scratch = Scratch(None, allowance)
             return tiling.encode_tiled(models, inputs, padded_length(count), tiles, scratch)
 

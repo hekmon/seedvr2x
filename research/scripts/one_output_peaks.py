@@ -20,12 +20,12 @@ the tiles cut off at the picture's edge (1080p padded to 1104 x 1920, 720p to 75
 Beyond tile_peaks.py, `run` takes:
   --steps STEP,...   only those steps, in that order. STEP is square-T, cutoff-1080p-T,
          cutoff-720p-T, untiled-1080p or untiled-2160p. An untiled step is the untiled encode and
-         decode as a run calls them (shot.encode_shot and shot.decode_shot without tiles):
-         model.encode_stream of shot.encoder_inputs, then model.decode_stream of its latent. Each
-         untiled pass is measured only where the planner's own fit for it (peaks._fit: the
-         larger of the untiled and the small tiles' fits at the padded frame's area) leaves
-         --reserve GiB of the free memory; else it is skipped and said. Without --steps, the
-         order of tile_peaks.py: every square, then every cut-off tile.
+         decode as a run calls them (shot_pass.encode_shot and shot_pass.decode_shot without
+         tiles): model.encode_stream of shot_pass.encoder_inputs, then model.decode_stream of its
+         latent. Each untiled pass is measured only where the planner's own fit for it
+         (peaks._fit: the larger of the untiled and the small tiles' fits at the padded frame's
+         area) leaves --reserve GiB of the free memory; else it is skipped and said. Without
+         --steps, the order of tile_peaks.py: every square, then every cut-off tile.
   untiled-2160p moves the DiT's weights to the CPU before its passes; put it last in its
          process. The untiled 4K encode's fit is 75.27 GiB and the 96 GB card has 78.45 GiB free
          once the two models are loaded: with the DiT away 93.68 GiB are free. The peaks count
@@ -82,6 +82,10 @@ the code without it, each in a tree of its own):
       --measured measured.json --logs runs/*.log
 Begin every process with square-512, a warm-up that is also the check of run-to-run determinism
 (2026-10-11's table took it as its process's first pass).
+
+Brought up to the library on 2026-11-05 as tile_peaks.py is: the encoder's inputs come from
+seedvr2x/shot_pass.py (encoder_inputs, unchanged by the shot's move there on 2026-11-04), and the
+tiled passes still take the command line's scratch.Scratch, always in system memory.
 """
 
 import argparse
@@ -174,11 +178,10 @@ def run(args: argparse.Namespace) -> int:
     import numpy as np
     import torch
 
-    import shot
     from scratch import Scratch
 
     import seedvr2x
-    from seedvr2x import model, tiling
+    from seedvr2x import model, shot_pass, tiling
     from seedvr2x.frames import padded_length, padded_size
     from seedvr2x.passes import Tiles
     from seedvr2x.vendor.models.video_vae_v3.modules import causal_inflation_lib as cil
@@ -460,7 +463,7 @@ def run(args: argparse.Namespace) -> int:
             return
 
         def encode():
-            inputs = shot.encoder_inputs(models, reader(frames), count, target)
+            inputs = shot_pass.encoder_inputs(models, reader(frames), count, target)
             scratch = Scratch(None, allowance)
             return tiling.encode_tiled(models, inputs, padded_length(count), tiles, scratch)
 
@@ -503,7 +506,7 @@ def run(args: argparse.Namespace) -> int:
             }
 
         def encode():
-            inputs = shot.encoder_inputs(models, reader(frames), count, target)
+            inputs = shot_pass.encoder_inputs(models, reader(frames), count, target)
             return model.encode_stream(models, inputs, padded_length(count))
 
         def decode(latent):

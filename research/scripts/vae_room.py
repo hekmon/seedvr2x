@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The VAE's room (seedvr2x, milestone 3): what a VAE pass needs between its peak and the memory
 free, and what cures it. seedvr2x's planner holds every VAE pass a room further under its budget
-(planner.py, VAE_ROOM), because passes packed to the margin ran out of memory at one large
+(shot_plan.py, VAE_ROOM), because passes packed to the margin ran out of memory at one large
 request while the allocator's pool held more than was asked. This script runs seedvr2x's own
 command line on cards emulated by vram_cap.py's ballast, in a process where the planner's room
 (and ENCODE_EXTRA) is set as a study needs before the plan is made, with a cure applied by a patch
@@ -92,7 +92,13 @@ The cures (--cure), each a patch of this process:
 Several at once: their names joined by `+` (output+slice).
 
 Run with the python of seedvr2x's environment, planner_matrix.py beside this file, under the
-GPU's lock (queue takes it). Sizes in bytes in the records, GiB (2**30) in the tables."""
+GPU's lock (queue takes it). Sizes in bytes in the records, GiB (2**30) in the tables.
+
+Brought up to the library on 2026-11-05: the plan moved there on 2026-11-04, so that the room
+(VAE_ROOM, _ROOM_HELD, _vae_peak, _vae_need, Peaks.need) is set in seedvr2x/shot_plan.py, which
+reads it, as well as in the command line's planner.py, which prints it; the shot's steps are
+still patched through run.py's names (encode_shot, decode_shot), which run.py imports from
+seedvr2x/shot_pass.py."""
 
 import argparse
 import ctypes
@@ -755,12 +761,20 @@ def set_planner(planner, args: argparse.Namespace) -> dict[str, int]:
     planner's) and ENCODE_EXTRA (--encode-extra; seedvr2x/peaks.py's), in GiB. With --room-encode
     or --room-decode, a room by the pass: the two functions the planner judges a VAE pass by,
     _vae_need and Peaks.need, then take the pass's own room where they take VAE_ROOM. The rooms in
-    force, in bytes, by phase."""
-    planner.VAE_ROOM = round(args.room * GIB)
-    if hasattr(planner, "_ROOM_HELD"):
+    force, in bytes, by phase.
+
+    The names are set where they are read: the plan moved to the library on 2026-11-04
+    (seedvr2x/shot_plan.py, which imports VAE_ROOM by value and reads _ROOM_HELD, _vae_peak and
+    _vae_need from its own globals), so that a name set on the command line's planner.py alone
+    would change nothing of the plan. planner.VAE_ROOM is set too: the command's plan line
+    (planner.said) prints the room from it."""
+    from seedvr2x import shot_plan
+
+    planner.VAE_ROOM = shot_plan.VAE_ROOM = round(args.room * GIB)
+    if hasattr(shot_plan, "_ROOM_HELD"):
         # A refusal's words for the room, made when the module was imported, where it has them.
-        planner._ROOM_HELD = (
-            f", {planner.VAE_ROOM / GIB:.2f} of them the room a VAE pass is held to"
+        shot_plan._ROOM_HELD = (
+            f", {shot_plan.VAE_ROOM / GIB:.2f} of them the room a VAE pass is held to"
         )
     from seedvr2x import peaks
 
@@ -772,18 +786,18 @@ def set_planner(planner, args: argparse.Namespace) -> dict[str, int]:
         def nothing(*given, **named):
             return 0
 
-        # The library's two functions the planner judges the DiT by (planner._dit_need and
+        # The library's two functions the planner judges the DiT by (shot_plan._dit_need and
         # _holds call peaks.dit_peak and peaks.dit_least through the module).
         for name in ("dit_peak", "dit_least"):
             if not hasattr(peaks, name):
                 raise SystemExit(f"vae_room: peaks.py has no {name}: --dit-unjudged is stale")
             setattr(peaks, name, nothing)
-    rooms = {"encode": planner.VAE_ROOM, "decode": planner.VAE_ROOM}
+    rooms = {"encode": shot_plan.VAE_ROOM, "decode": shot_plan.VAE_ROOM}
     for phase, given in (("encode", args.room_encode), ("decode", args.room_decode)):
         if given is not None:
             rooms[phase] = round(given * GIB)
-    if rooms["encode"] != planner.VAE_ROOM or rooms["decode"] != planner.VAE_ROOM:
-        peak = planner._vae_peak
+    if rooms["encode"] != shot_plan.VAE_ROOM or rooms["decode"] != shot_plan.VAE_ROOM:
+        peak = shot_plan._vae_peak
 
         def need(job, phase, tiles, resident, swapped):
             return peak(job, phase, tiles, resident, swapped) + rooms[phase]
@@ -791,8 +805,8 @@ def set_planner(planner, args: argparse.Namespace) -> dict[str, int]:
         def judged(self, phase):
             return self.peak(phase) + (0 if phase == "dit" else rooms[phase])
 
-        planner._vae_need = need
-        planner.Peaks.need = judged
+        shot_plan._vae_need = need
+        shot_plan.Peaks.need = judged
     return rooms
 
 
@@ -1271,6 +1285,7 @@ def planned(args: argparse.Namespace) -> int:
     import planner
 
     from seedvr2x import tilegrid
+    from seedvr2x.frames import padded_size
     from seedvr2x.peaks import MEASURED
 
     rooms = set_planner(planner, args)
@@ -1295,7 +1310,7 @@ def planned(args: argparse.Namespace) -> int:
             print(f"{spec} room {args.room}: REFUSED: {error}")
             continue
         found = peaks.record()
-        padded = planner._padded(target, False)
+        padded = padded_size(target)  # planner._padded(target, False) until 6988ff7 retired it
         passes = []
         for phase, tiles, resident in (
             ("encode", plan.encode_tiles, plan.resident_encode),

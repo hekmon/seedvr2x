@@ -100,6 +100,10 @@ and slow a desktop on it):
   timeout 900 python hold_probe.py --dit DIT --vae VAE --allocator native --under 1.0 \
       --steps 8,r:8,under=0.5,8,12,6 --reference ref.json --out ladder.jsonl
 (under `timeout`: a step far past the card may run very long under such a driver)
+
+Brought up to the library on 2026-11-05: the shot's pass moved there on 2026-11-04, so that the
+encoder's inputs come from seedvr2x/shot_pass.py (encoder_inputs, unchanged by the move). The
+tiled passes still take the command line's scratch.Scratch, in system memory as before.
 """
 
 import argparse
@@ -152,10 +156,9 @@ def main() -> int:
     import torch
 
     import main as cli  # the CLI's module, flat at apps/seedvr2x/
-    import shot
     from scratch import Scratch
 
-    from seedvr2x import blockswap, memory, model, tiling
+    from seedvr2x import blockswap, memory, model, shot_pass, tiling
     from seedvr2x.frames import padded_length, padded_size
     from seedvr2x.passes import Tiles
 
@@ -435,7 +438,7 @@ def main() -> int:
         scratch = Scratch(None, 2**40)
         torch.cuda.reset_peak_memory_stats(device)
         with torch.no_grad():
-            inputs = shot.encoder_inputs(models, read, frames, target)
+            inputs = shot_pass.encoder_inputs(models, read, frames, target)
             latent = tiling.encode_tiled(
                 models, inputs, padded_length(frames), Tiles(tile), scratch
             )
