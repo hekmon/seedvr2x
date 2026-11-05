@@ -40,7 +40,8 @@ size and, if it wants, a seed. Everything else is fixed when the server starts.
   no driver and no CUDA toolkit; PyTorch's wheels bring CUDA's libraries.
 - **From the repository:** [uv](https://docs.astral.sh/uv/), which installs Python 3.13 and the
   locked dependencies.
-- No ffmpeg: the server reads and writes pictures with Pillow and seedvr2x's own writers.
+- No ffmpeg: the server reads pictures with Pillow (a 16-bit colour PNG with TorchCodec's
+  decoder, which needs no FFmpeg) and writes them with seedvr2x's own writers.
 - FlashAttention 2 is optional and not in the image: the server uses it when installed, else
   PyTorch's SDPA, and its log says which runs.
 
@@ -126,10 +127,11 @@ image's name.
 - **Closed networks:** `-e HF_HUB_OFFLINE=1` forbids any download; the models are then in the
   cache volume already, or in `--model-dir`.
 - **The user is not root** (UID 10001), and owns its home and the cache directory only.
-- **The health check** asks `/health` every 30 seconds, with a start period of 10 minutes for the
-  start's model check and loading. It reads the port from `SEEDVR2X_LISTEN` (the part after the
-  last colon) on the container's own 127.0.0.1, so a port set with the variable stays healthy;
-  one set with `--listen` alone is not seen by the check: use the variable.
+- **The health check** asks `/health` every 30 seconds, with a start period of 10 minutes for
+  the start's loading of the models, which checks them as it reads them, and its warm-up. It
+  reads the port from `SEEDVR2X_LISTEN` (the part after the last colon) on the container's own
+  127.0.0.1, so a port set with the variable stays healthy; one set with `--listen` alone is not
+  seen by the check: use the variable.
 - **Stopping:** `docker stop` sends SIGTERM, which stops the server cleanly ([below](#stopping)),
   but Docker kills the container after 10 seconds by default, and a 4K picture takes 14 s on the
   RTX 5090 (DESIGN.md, Still images): give the picture running time to finish with
@@ -142,7 +144,7 @@ image's name.
   Docker restarts it with `docker run --restart on-failure` or `--restart unless-stopped` (in
   Compose, `restart: on-failure` or `unless-stopped`), and Kubernetes restarts the container
   under any `restartPolicy` but `Never`. Without a policy the container stays stopped. The
-  restart repeats the start, model check and warm-up included.
+  restart repeats the start, the models' loading and the warm-up included.
 
 To build the image from a checkout, from the repository's root:
 `docker build -f apps/imgserver/Dockerfile -t seedvr2x-imgserver .`. BuildKit reads
@@ -186,10 +188,12 @@ the server never changes the file by itself.
 | `seedvr2x_ema_7b_sharp_int8_convrot.safetensors`, `seedvr2x_ema_7b_int8_convrot.safetensors` | 8.3 GB | Half the DiT's weights, multiplied in 8 bits. |
 | `seedvr2x_ema_7b_sharp_dyn.gguf`, `seedvr2x_ema_7b_dyn.gguf` | 4.8 GB | Under a third of float16's weights, a type per block matrix among Q3_K, Q4_K and Q5_K (the dynamic GGUF): with every block swapped, the DiT's weights take about 4.5 GiB of pinned system memory in place of float16's 15, and a swap moves under a third of float16's bytes. |
 
-The dynamic GGUF saves no VRAM where the VAE's floor binds (an 8 GB card at 1080p), and runs a
-little slower than float16. Where the card or the host's memory is short for float16, the start's
-refusal names the smaller files that would fit the same `--max-size`, `--max-concurrent` and
-`--max-input` (with `--model-dir` given, saying that the file goes there); the choice stays yours.
+The dynamic GGUF saves no VRAM where the VAE's floor binds (an 8 GB card at 1080p); its DiT runs
+10 to 15% slower than float16's (a video at 1080p on an RTX 5090). Where the card or the host's
+memory is short for float16 or int8, the start names the smaller files: in its refusal, those
+that would fit the same `--max-size`, `--max-concurrent` and `--max-input` (with `--model-dir`
+given, saying that the file goes there), and in its plan, those that would swap fewer blocks
+([the start](#the-start)); the choice stays yours.
 
 ## The start
 
@@ -197,35 +201,47 @@ The server listens at once, so that a probe or a client finds it. `/health` says
 until the warm-up has passed. Its log then says, in order:
 
 1. the API key's source (never the key), or a warning that there is none, then the listening
-   address's source (`--listen`, `SEEDVR2X_LISTEN` or the default);
-2. the model files checked by their SHA-256, pulled at the pinned revision where missing;
-3. the card and the plan for pictures within `--max-size`, in the CLI's words, with the CLI's
-   line of the smaller DiT files (int8, the dynamic GGUF) that would swap fewer blocks, where there
-   are any; the server never changes the file it was given;
-4. the models loaded, and the attention that runs (`flash_attn_2` or `sdpa`); then the
-   reservation, what it holds (the models, the pictures at once and each one's share), the CUDA
-   context beside it, and what fits in it: the pictures within `--max-size` at once;
+   address's source (`--listen`, `SEEDVR2X_LISTEN` or the default), and `listening on
+   http://HOST:PORT, /health says starting`;
+2. the model files, pulled at the pinned revision where missing, each recognised by its header
+   and, for seedvr2x's own, its size held to its pin: `its SHA-256 checked as it loads`;
+3. the card's name and the plan for pictures within `--max-size`, in the CLI's words, a `plan:`
+   line per choice; after the blocks swapped, where the plan swaps some, the file is not the
+   dynamic GGUF already and a smaller file would swap fewer, the CLI's line of those files,
+   `plan: smaller DiT files plan this job better: this plan swaps N blocks; int8 N blocks; the
+   dynamic GGUF N blocks; --dit-model names them` (blocks alone: a picture is one latent, with
+   no window). The server never changes the file it was given;
+4. the models loaded, each of seedvr2x's files read once, its SHA-256 proved at the end of its
+   load (a file of other bytes is a refused start), and the attention that runs (`flash_attn_2`
+   or `sdpa`); then the reservation, what it holds (the models, the pictures at once and each
+   one's share), the CUDA context beside it, and what fits in it: the pictures within
+   `--max-size` at once;
 5. the warm-up, `--max-concurrent` pictures at `--max-size` at once, which proves the plan on the
    card before the first request, and the peak of memory it reached;
 6. `ready: /health says ready`.
 
 **A refused start** exits with code 1 and says why: no CUDA device, a card without bfloat16, an
-empty API key, a `SEEDVR2X_LISTEN` that is not HOST:PORT, a port already taken, a model file missing or wrong, or a reservation the card
-can't free, which names the most pictures at the size asked, and the largest size at that count,
-that would fit. Lower `--max-size`, `--max-input` or `--max-concurrent`.
+empty API key, a `SEEDVR2X_LISTEN` that is not HOST:PORT, a port already taken, pins given with
+`--max-concurrent` above 1, a `--max-input` over the 178,956,970 pixels Pillow reads, a model
+file missing or wrong, or a reservation the card can't free, which names the most pictures at
+the size asked, and the largest size at that count, that would fit. Lower `--max-size`,
+`--max-input` or `--max-concurrent`.
 
-The start's duration has not been timed. Its two long parts, measured for one picture on an RTX
-5090 (DESIGN.md, Still images), are the check of the DiT file (about 84 s) and the loading (77 s).
+The server's start has not been timed. Its long part is the models' loading, which reads each
+file once and checks it as it reads: the command's start for one picture took 75 s on an RTX
+5090, the models read from a Windows drive (DESIGN.md, Still images), the read of the DiT's 16.5
+GB being the bound.
 
 ## The API
 
 ### `POST /upscale`
 
-The body is the picture's bytes, with a `Content-Length` (a chunked body is refused). The format is
-told by the picture's content, never by `Content-Type`: PNG, JPEG, WebP, TIFF, BMP and a GIF of one
-frame, with the rules of the [command line's pictures](../seedvr2x/README.md). An animated picture,
-a camera's raw file, an HDR picture, a 16-bit TIFF or a picture with transparency is refused (422),
-the answer saying the way out.
+The body is the picture's bytes, with a `Content-Length` (a chunked body is refused). The format
+is told by the picture's content, never by `Content-Type`: PNG, JPEG, WebP, TIFF, BMP and a GIF
+of one frame, with the rules of the [command line's
+pictures](../seedvr2x/MANUAL.md#still-pictures). An animated picture, a camera's raw file, an
+HDR picture, a 16-bit TIFF or a picture with transparency is refused (422), the answer saying
+the way out.
 
 | Request header | |
 |---|---|
@@ -253,7 +269,8 @@ The picture is written upright whatever its orientation tag, and carries none.
 | `Server-Timing` | `queue` (the wait for the GPU) and `upscale`, in milliseconds. |
 
 A 4K picture from 1080p took 14 s to upscale on an RTX 5090 with the desktop live (DESIGN.md,
-Still images). Throughput under load has not been measured yet.
+Still images). Throughput under load is measured only roughly so far ([several pictures at
+once](#several-pictures-at-once)).
 
 ### `OPTIONS /upscale`
 
@@ -290,7 +307,7 @@ Each error carries seedvr2x's message as text.
 | 411 | No `Content-Length`, or a chunked body. |
 | 413 | A body over the limit, which follows `--max-input`. The body is not read. |
 | 422 | The body is empty; the picture refused (not a picture, damaged, raw, HDR, animated, transparent, over `--max-input`, too small for the size asked); or the output over `--max-size`. The message names the way out. A body that is not a picture the server reads also carries `Accept-Post`, the formats it takes. |
-| 503 | The queue is full, or the server is starting or stopping, with `Retry-After` (15 s). After a CUDA error the server has failed and answers 503 without `Retry-After`: it takes no picture until it is restarted. |
+| 503 | The queue is full, the server holds as many connections as it takes, or it is starting or stopping, with `Retry-After` (15 s). After a CUDA error the server has failed and answers 503 without `Retry-After`: it takes no picture until it is restarted. |
 | 500 | A picture failed (out of memory, an output not finite); the server goes on. A CUDA error other than out of memory answers 500 too, then the server exits ([exit codes](#exit-codes)). |
 
 ### `GET /health`
@@ -348,14 +365,20 @@ http://127.0.0.1:8390/health` and `/metrics` show the server's state.
 
 ## Several pictures at once
 
-`--max-concurrent` is 1 by default. What running several at once gains is not known yet: it is to
-be measured at 1, 2 and 4 at once on small, medium and large pictures before a default is set
-(DESIGN.md, The image server), and no figure for it is in this document.
+`--max-concurrent` is 1 by default. What running several at once gains has been measured only
+roughly: on an RTX 5090 with its desktop live, 12 pictures of 720p and 1080p from 4 clients went
+through at 40.3 a minute one at a time with the int8 DiT, and 42.8 two at once (38.5 with the
+float16 DiT one at a time, which can't run two on 32 GB; DESIGN.md, The image server). 1, 2 and
+4 at once are measured on the 96 GB card before a default is set.
 
-More than one picture at a time needs the whole DiT on the card: a card that has to swap the DiT's
-blocks runs one at a time, and the start refuses more. A picture starts on the GPU when its
-predicted peak fits what is left of the reservation, so smaller pictures may run more at once than
-the count; the others wait in the queue, then get 503.
+More than one picture at a time needs the whole DiT on the card: a card that has to swap the
+DiT's blocks runs one at a time, and the start refuses more. A picture is admitted when fewer
+than `--max-concurrent` run and its predicted peak fits what is left of the reservation, in the
+order the pictures came: a large one may wait for room under the count, and a smaller one never
+passes it. The others wait in the queue, up to `--queue`; past it a new picture gets 503. Of the
+pictures admitted, two at most compute on the GPU at a time, one in each model: the VAE's causal
+convolutions keep a pass's state in the model itself, so it takes one picture at a time, and the
+others wait between the models.
 
 ## The record in each output
 
