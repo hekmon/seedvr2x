@@ -34,6 +34,8 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
                          system memory counted)
     record.py            seedvr2x's record in each output: its fields and the AI mark, a picture's
                          XMP packet, a video's stream tags
+    probe.py             the environment probe: the kernels a DiT file needs checked on the device
+                         against the CPU, cached on disk by a fingerprint of the environment
     frames.py passes.py peaks.py files.py clock.py errors.py     what the bricks share (errors.py:
                          a refusal's message worded by each app, and the plan's refusals by kind)
     vendor/              model layer, vendored from numz (below)
@@ -688,6 +690,18 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   checksums: what compares masters (the milestone-1 regression's `tools/compare.py`, the
   segments' SHA-256 and sizes, each against its own file's record) compares frames, or a file
   with its own record.
+- The environment probe (`seedvr2x/probe.py`, DESIGN.md, Repository and apps, "ComfyUI's process is
+  not seedvr2x's"): `tests/test_env_probe.py` holds, on the CPU, the fingerprint's parts from stand-ins
+  for torch's and NVML's readings (Linux's library, Windows' two names, macOS none), the cache
+  directory of each platform, the cache (written, vouching, run again for each part changed with
+  the other environment kept, a check added for another layout, a damaged or unreadable file
+  ignored and written again, the write atomic, the margin's field kept), each check on the CPU
+  device for the three layouts, and a kernel made wrong on purpose per check, refused with its
+  facts, the refusal cached and refusing at once on the next run, a kernel that raises a failed
+  check and an out-of-memory error uncached; importing the module imports no torch. The
+  matrix product's and the attention's tolerances are PROVISIONAL (probe.py); `pytest -m gpu`
+  prints every error against its tolerance on CUDA for each layout. The allocator's margin is not
+  built: the cache has the field, null.
 - A still picture (DESIGN.md, Still images), on the CPU, in `core/tests/`: `tests/test_picture.py`
   holds `seedvr2x/picture.py` to files it makes, bytes in: every format and mode read (PNG in
   RGB, palette, grey at 1 to 16 bits, 16-bit RGB by TorchCodec's decoder, alpha; JPEG, WebP,
