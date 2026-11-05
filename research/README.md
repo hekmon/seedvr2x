@@ -36,7 +36,7 @@ is the 3B fp8 model ([cli-flags.md](docs/cli-flags.md#models)).
 
 ## Contents
 
-The scripts that drive seedvr2x's own code import it as the split of 2026-11-02 lays it out, the library at `core/seedvr2x/` and the command at `apps/seedvr2x/`, and run with `apps/seedvr2x/.venv/bin/python`. Those that take a copy of another tree (`--copy`, `--code`: floor.py, whole_floor.py, vae_room.py) take one made after the split: a measurement made before it is re-run with the script from its own commit.
+The scripts that drive seedvr2x's own code import it as the split of 2026-11-02 lays it out, the library at `core/seedvr2x/` and the command at `apps/seedvr2x/`, and run with `apps/seedvr2x/.venv/bin/python`. Those that take a copy of another tree (`--copy`, `--code`: floor.py, whole_floor.py, vae_room.py) take one made after the split: a measurement made before it is re-run with the script from its own commit. The shot's pass and its plan moved to the library on 2026-11-04 (`seedvr2x/shots.py`, `shot_plan.py`, `shot_pass.py`; the command's `plan.py` gone, the pass taking its tiled store and its colour reference as arguments): a script that uses them from the command runs with the code of its measurement's commit, and one run again on later code is brought up to it by the change that runs it.
 
 | Path | What |
 |---|---|
