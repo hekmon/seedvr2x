@@ -3,7 +3,8 @@
 A [SeedVR2](https://github.com/ByteDance-Seed/SeedVR) video upscaler for long runs: whole
 episodes and films, on one GPU, as a job that stops and resumes. It takes one video file and
 gives back its upscale as a lossless, correctly tagged master, or as a finished file with the
-source's audio and subtitles.
+source's audio and subtitles. The same command upscales a still picture too ([a picture in, a
+picture out](#a-picture-in-a-picture-out)).
 
 > **Version 0.1.0.** [DESIGN.md](../../DESIGN.md) is the specification, and this README and the
 > [manual](MANUAL.md) describe version 1 as it is built. What comes in later versions is listed
@@ -22,7 +23,9 @@ cutting it into pieces, fitting the GPU's memory: the parts where a long run is 
 - **A lossless master.** FFV1, 10-bit 4:2:0 by default, written from the model's float frames
   with no 8-bit step, tagged so that it looks like its source in any player, each frame with a
   checksum. seedvr2x has no encoder options: you compress the master your own way, afterwards,
-  or during the run with your own command (`--segment-cmd`).
+  or during the run with your own command (`--segment-cmd`). Every master, finished file and
+  picture carries seedvr2x's record: what made it (the version, the model files, the seed, the
+  tiles) and a mark that it was made with a generative AI model, always written.
 - **Colours corrected against the source.** The model shifts colours. seedvr2x's own
   correction, `split`, takes the source's coarse colour and brightness and keeps the model's
   detail: a lower colour error than numz's `lab` at every scale, and less flicker
@@ -77,11 +80,12 @@ Both start from the source, one video file, and differ only at the end.
   what leaves the card, 2.3–2.5 GiB for the process, and a tiled shot's scratch up to an
   allowance ([small cards](MANUAL.md#small-cards)). A host short of it gets a plan that fits,
   or a refusal naming what it needs.
-- **ffmpeg and ffprobe 7.1 or later** on `PATH`, built with zscale (libzimg), idet and FFV1.
-  seedvr2x checks the build at startup and refuses to run without them, saying what is missing.
-  The builds of [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) will do, and so will
-  Ubuntu's ffmpeg package from 25.04 on (24.04's is 6.1). Why zscale and nothing else:
-  [the manual](MANUAL.md#why-zscale-is-required).
+- **ffmpeg and ffprobe 7.1 or later** on `PATH`, built with zscale (libzimg), idet and FFV1, for
+  a video: seedvr2x checks the build at a video's start and refuses to run without them, saying
+  what is missing. A picture needs neither. The builds of
+  [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) will do, and so will Ubuntu's
+  ffmpeg package from 25.04 on (24.04's is 6.1). Why zscale and nothing else: [the
+  manual](MANUAL.md#why-zscale-is-required).
 - **[uv](https://docs.astral.sh/uv/)**, which installs Python 3.13 and the locked dependencies,
   PyTorch's CUDA 13.0 build among them.
 - **Disk space**: 17 GB for the model files, downloaded once, and room for the output. A
@@ -214,10 +218,30 @@ uv run seedvr2x film.mkv -o film.segments
 uv run seedvr2x verify film.segments && sptenc encode film.segments film.1080p.mkv -f film.mkv
 ```
 
-Any `-o` that isn't a video file's name is a directory (`.mp4`, `.mov` and the like are
-refused): it gets the output segments, FFV1 masters of 5 seconds or more each
-(`--min-segment`), their checksums, and `manifest.json`, the job's record. `seedvr2x verify`
-decodes every frame and checks it against its checksum before sptenc trusts the directory.
+Any `-o` that isn't a video file's name is a directory (`.mp4`, `.mov` and the like are refused,
+and so are `.png` and `.webp`, a picture's outputs): it gets the output segments, FFV1 masters
+of 5 seconds or more each (`--min-segment`), their checksums, and `manifest.json`, the job's
+record. `seedvr2x verify` decodes every frame and checks it against its checksum before sptenc
+trusts the directory.
+
+### A picture in, a picture out
+
+```
+uv run seedvr2x photo.jpg --resolution 2160 -o photo.2160p.png
+```
+
+The same command upscales a still picture, told by its content, never by its name: PNG, JPEG,
+WebP, TIFF, BMP or a GIF of one frame. It goes through the same models, tiling and colour
+correction, needs no ffmpeg and makes no job: no work directory, nothing to resume. `-o` is a
+new `.png` file, 16 bits, all the model made (`--format png8` for 8 bits), or a new `.webp`
+file, lossless, 8 bits; nothing is replaced. The output is turned upright and keeps the source's
+colour profile and tags, and nothing else of its metadata but seedvr2x's record. `--resolution`
+is the short side, 1080 by default as for a video: where that makes the output smaller than its
+source, a line says so and names the size that keeps it. `--plan` alone, with no file (`-o`
+still given), says the picture's plan on your card and stops, loading nothing. The options a
+picture has no use for (`--quality`, `--cuts`, `--segment-cmd`, `--until` and the like) are
+refused, saying why ([the manual](MANUAL.md#still-pictures)). Many pictures go to the [image
+server](../imgserver/README.md), which loads the models once.
 
 ### Looking before running
 
@@ -261,16 +285,19 @@ A run downloads only the files it uses, one by one, never the repository whole (
 | `seedvr2x_ema_7b_sharp_dyn.gguf` | 4.8 GB | only with `--dit-model seedvr2x_ema_7b_sharp_dyn.gguf`: the sharp 7B in the dynamic GGUF |
 | `seedvr2x_ema_7b_dyn.gguf` | 4.8 GB | only with `--dit-model seedvr2x_ema_7b_dyn.gguf`: the regular 7B in the dynamic GGUF |
 | `seedvr2x_ema_vae_fp16.safetensors` | 0.5 GB | always: the VAE, which turns frames into the model's input and back |
-| `transnetv2.safetensors` | 30 MB | unless `--cuts` gives the cuts: the shot detector |
+| `transnetv2.safetensors` | 30 MB | unless `--cuts` gives the cuts, and never for a picture: the shot detector |
 
 - **Where they go.** Into Hugging Face's cache, each file once: `~/.cache/huggingface/hub`, or
   `$HF_HOME/hub`, or the directory `HF_HUB_CACHE` names, to put it on another disk. The log
   names it. Before a download, the free space of its disk is checked against every file left
   to download, so that a run short of room is refused before its first 16.5 GB.
-- **Checked before every run.** Each file is checked by its pinned size and SHA-256 before it
-  loads, so a version of seedvr2x always runs the same bytes. A file that fails is refused,
-  with both sizes or both hashes and how to fetch it again; seedvr2x never deletes a model
-  file.
+- **Checked as they load.** Each of seedvr2x's files is checked by its pinned size before it
+  loads, and by its SHA-256 as it loads: the load reads the file once, hashing every byte as it
+  goes, so a version of seedvr2x always runs the same bytes and no file is read twice. A file of
+  another size is refused at once, one of other bytes at the end of its load, before any shot or
+  picture is upscaled, with both sizes or both hashes and how to fetch it again; seedvr2x never
+  deletes a model file. A job that resumes knows its files by the size and modification time its
+  record holds, and reads an unchanged one only in its load.
 - **Offline.** `HF_HUB_OFFLINE=1` keeps the network out: the files are taken from the cache.
   The same files downloaded another way, at another revision of the repository (`hf download`
   without `--revision`), are taken from the cache as they are.
@@ -302,11 +329,12 @@ different on 67 (preferred on 27, the regular 7B on 8), and it has the same memo
   float16 ([VALIDATION.md](../../models/VALIDATION.md)). A type per block matrix (Q3_K, Q4_K or
   Q5_K), the other tensors in float16. With every block swapped, the DiT's weights take about
   4.5 GiB of pinned system memory in place of float16's 15, and a swap moves under a third of
-  float16's bytes. It saves no VRAM where the VAE's floor binds (an 8 GB card at 1080p), and
-  runs a little slower than float16 (the model card). seedvr2x reads the file and dequantises
-  each matrix on the card just before its multiply, with its own code, equal in float32 to
-  llama.cpp's. Its memory and speed are measured on the RTX 5090 before v0.1.0 is tagged; until
-  then the plan counts a window's memory as float16's, plus the dequantisation's buffers.
+  float16's bytes. It saves no VRAM where the VAE's floor binds (an 8 GB card at 1080p).
+  seedvr2x reads the file and dequantises each matrix on the card just before its multiply, with
+  its own code, in float32, equal bit for bit to llama.cpp's own (its `gguf` package) on all 288
+  block matrices of both files. Measured on the RTX 5090 at 1080p: the DiT 10 to 15% slower than
+  in float16, the models' load half as long (read from a Windows drive under WSL2), and a
+  window's memory float16's plus 0.07 GiB for the dequantisation.
 - **Only an option.** The sharp 7B in float16 stays the default, and seedvr2x never changes the
   file by itself: where float16 is short of the card's or the host's memory, the plan names the
   smaller files, in a line and in the refusal's way out ([the manual](MANUAL.md#small-cards)).
@@ -330,8 +358,10 @@ different on 67 (preferred on 27, the regular 7B on 8), and it has the same memo
 - [MANUAL.md](MANUAL.md), for users: the terms in plain words, colour correction, the pipeline
   for SeedVR2 users coming from numz's CLI, how shots are found, what the model does to a
   picture, several runs of a shot (`--quality`), the finished file, disk and memory, the refused
-  sources and what to do with each, resume and `--until`, integrity, a real run read line by
-  line, and every option.
+  sources and what to do with each, still pictures, resume and `--until`, integrity, a real run
+  read line by line, and every option.
+- [The image server's README](../imgserver/README.md): pictures over HTTP, the models loaded
+  once and kept on the GPU, in a container.
 - [DESIGN.md](../../DESIGN.md): what is built and why, with the measurement behind each decision.
 - [AGENTS.md](../../AGENTS.md): how to work on the code.
 - [../../research/](../../research/): the measurements.
@@ -379,13 +409,15 @@ file is made from, and what was changed.
 
 ## Status
 
-Version 0.1.0 is version 1 of [DESIGN.md](../../DESIGN.md), built and held by the tests on an RTX
-5090, and on a 96 GB card until 2026-10-23: every item built since was checked on the RTX 5090
-alone, the 96 GB card being away for repair, and v0.1.0 waits for its checks on it. Built: the
-first pass and its shot detector, the pipeline per shot with its windows, `--quality`, the
+Version 0.1.0 is version 1 of [DESIGN.md](../../DESIGN.md), built and held by the tests on an
+RTX 5090, and on a 96 GB card until 2026-10-23: every item built since was checked on the RTX
+5090 alone, the 96 GB card being away for repair, and v0.1.0 waits for its checks on it. Built:
+the first pass and its shot detector, the pipeline per shot with its windows, `--quality`, the
 colour correction, the memory planner with BlockSwap and VAE tiling, the time estimates and
 `--until`, resume and `--accept-env-change`, the lossless masters and their checksums, the
-finished file's assembly and its record beside it, `--segment-cmd`, `--compile` (the VAE alone),
-and `seedvr2x verify`.
+finished file's assembly and its manifest beside it, `--segment-cmd`, `--compile` (the VAE
+alone), `seedvr2x verify`, still pictures (PNG or lossless WebP), the int8 and dynamic GGUF
+files of both 7Bs, and seedvr2x's record in every output. The [image
+server](../imgserver/README.md) is built beside the command, on the same library.
 
 What comes next: [the roadmap](../../README.md#roadmap).
