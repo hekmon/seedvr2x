@@ -55,13 +55,18 @@ class Refused(Exception):
 
 def say(setting: Setting) -> str:
     """The nodes' words for a setting a library refusal names (errors.Say): the input by its label,
-    its value, and that it is on this node. A tile the library pins at 0 is untiled, which the
-    input says with plans.UNTILED_TILE."""
+    its value in the unit its value node sets it in, and that it is on this node. A tile the
+    library pins at 0 is the whole image at once (seedvr2x Tile's switch), a window in latents is
+    said in frames (seedvr2x Window Length's unit)."""
     name, value = setting.name, setting.value
     if name in ("window", "swap_blocks", "encode_tile", "decode_tile"):
         label = plans.LABELS[name]
         if name.endswith("_tile") and value == "0":
-            value = f"{plans.UNTILED_TILE} (no tiles)"
+            return f"{label} set to the whole image at once on this node"
+        if name.endswith("_tile") and value:
+            value = f"{value} px"
+        elif name == "window" and value.isdigit():
+            value = f"{plans.window_frames(int(value))} frames"
         return f"{label} {value} on this node" if value else f"{label} on this node"
     if name == "resolution":
         return f"resolution {value} on this node" if value else "resolution on this node"

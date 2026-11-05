@@ -214,26 +214,21 @@ def execute(node: type[io.ComfyNode], unique_id: str | None = "1", **inputs: Any
 
 def inputs(settings: plans.Settings, *, video: bool = False) -> dict[str, Any]:
     """The inputs an upscale node is given for settings (the library's pins, None: left to the
-    plan): the widgets' values, and a number the plan makes only where it is pinned, as a value
-    wired in (an unwired optional input is not given); a tile pinned untiled is the input's
-    value past the largest tile, the colour correction a BOOLEAN."""
-
-    def tile(pin: int) -> int:
-        return plans.UNTILED_TILE if pin == 0 else pin
-
+    plan): the widgets' values, and a pin only where it is set, as a value node connected to its
+    socket gives it, in the library's units (an unconnected optional input is not given); the
+    colour correction a BOOLEAN."""
     found: dict[str, Any] = {
         "attention": plans.AUTO if settings.attention is None else settings.attention,
         "color_correction": settings.split,
         "seed": settings.seed,
     }
-    if settings.encode_tile is not None:
-        found["encode_tile"] = tile(settings.encode_tile)
-    if settings.decode_tile is not None:
-        found["decode_tile"] = tile(settings.decode_tile)
-    if settings.swap_blocks is not None:
-        found["swap_blocks"] = settings.swap_blocks
-    if video and settings.window is not None:
-        found["window"] = settings.window
+    pins = {
+        "encode_tile": settings.encode_tile,
+        "decode_tile": settings.decode_tile,
+        "swap_blocks": settings.swap_blocks,
+        "window": settings.window if video else None,
+    }
+    found.update({name: pin for name, pin in pins.items() if pin is not None})
     return found
 
 

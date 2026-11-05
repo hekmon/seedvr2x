@@ -190,11 +190,14 @@ def test_every_refusal_is_worded_without_an_option_of_the_command_line(name: str
 
 def test_a_setting_is_named_as_the_widget_the_user_sees() -> None:
     say = words.say
-    assert say(Setting("window", "6")) == "window length 6 on this node"
+    # Each in the unit its value node sets it in: a window in frames (6 latents, 21 frames).
+    assert say(Setting("window", "6")) == "window length 21 frames on this node"
     assert say(Setting("swap_blocks", "30")) == "blocks swapped 30 on this node"
-    assert say(Setting("decode_tile", "512")) == "decode tile 512 on this node"
-    # The library's pin of the untiled pass, 0, is the input's value past the largest tile.
-    assert say(Setting("encode_tile", "0")) == "encode tile 2112 (no tiles) on this node"
+    assert say(Setting("decode_tile", "512")) == "decode tile 512 px on this node"
+    # The library's pin of the untiled pass, 0, is seedvr2x Tile's whole image at once.
+    assert say(Setting("encode_tile", "0")) == (
+        "encode tile set to the whole image at once on this node"
+    )
     assert say(Setting("resolution", "720")) == "resolution 720 on this node"
     assert say(Setting("resolution")) == "resolution on this node"
     assert say(Setting("dit_model", "seedvr2x_ema_7b_sharp_int8_convrot.safetensors")) == (
@@ -207,7 +210,8 @@ def test_a_pin_that_is_no_pin_names_the_widget_on_the_node() -> None:
     text = str(words.refusal(picture(24 * GIB, swap_blocks=99)))
     assert text.startswith("blocks swapped 99 on this node: the DiT has 36 blocks")
     covers = str(words.refusal(picture(24 * GIB, decode_tile=4096)))
-    assert "decode tile 4096 on this node" in covers and "decode tile 2112 (no tiles)" in covers
+    assert "decode tile 4096 px on this node" in covers
+    assert "decode tile set to the whole image at once on this node" in covers
 
 
 def test_a_memory_refusal_names_the_smaller_files_that_plan_it_and_the_resolution() -> None:

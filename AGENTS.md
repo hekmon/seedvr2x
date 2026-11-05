@@ -70,9 +70,10 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          environment; a package ComfyUI imports from its custom_nodes (relative
                          imports, any folder name)
   __init__.py nodes.py   V3 registration (`comfy_entrypoint`, a ComfyExtension; `io.ComfyNode`,
-                         `io.Schema`); the three nodes (Models, Upscale Image, Upscale Video: the
-                         settings are the upscale nodes' widgets, the plan's numbers their
-                         optional inputs, no Tuning node) and ComfyUI's
+                         `io.Schema`); the nodes (Models, Upscale Image, Upscale Video, and the
+                         value nodes Tile, Blocks Swapped and Window Length: the settings are the
+                         upscale nodes' widgets, the plan's numbers their optional sockets of
+                         seedvr2x's own types, no Tuning node) and ComfyUI's
                          calls (progress, Cancel, the plan said on the node, plan only); the one
                          module that imports `comfy_api` (unstable)
   models.py plans.py     the files, the models kept in pinned memory and the one registration
@@ -906,13 +907,16 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   as text with what each auto became and the host memory beside the host's, the attention,
   colour correction and seed, the probe, a clip as one shot run by one function; `tests/test_plans.py`
   the DiT files' names, the inputs (the pictures first, then the models, the widgets, then the
-  plan's numbers as optional INT sockets with no widget and no value standing for auto, on the
-  planner's grid of tiles, blocks and windows, the untiled value; every input and output with a
+  plan's numbers as optional sockets of seedvr2x's own types, no value standing for auto, each
+  type given by its value node alone: Tile, Blocks Swapped and Window Length on the planner's
+  grid of tiles, blocks and windows, the whole image at once, a window set in frames on the
+  model's grid and given in latents, a number off the grid refused queued or linked, a value no
+  value node gives refused at the upscale node's start; every input and output with a
   label and a tooltip, none in the library's terms; the colour correction a BOOLEAN, split or
   none, the seed's fixed control; the Models node's model, folder and RAM tooltips; a value the
   prompt holds or a link gives refused in the nodes' words at queue time and at the node's
   start, an unwired one not given), the settings' pins
-  reaching the plan exactly, the text's lines, the V3 registration (the entrypoint, the three
+  reaching the plan exactly, the text's lines, the V3 registration (the entrypoint, the six
   ids, names, inputs, outputs and hidden id), `nodes.py` the one user of `comfy_api`;
   `tests/test_keeping.py` keep in RAM auto/on/off against ComfyUI's cap (its MAX_PINNED_MEMORY
   or its rule), what is said, the first file's memory freed before the second is pinned,
@@ -934,7 +938,7 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   linked into its `custom_nodes`, then `CUDA_VISIBLE_DEVICES= python main.py --cpu
   --quick-test-for-ci` in its environment with `PYTHONPATH` at `core/`, which lists the nodes
   among the custom nodes imported with no error, and a script that imports ComfyUI's `nodes`
-  as the server does, awaits `init_external_custom_nodes` and checks the three ids registered from
+  as the server does, awaits `init_external_custom_nodes` and checks the six ids registered from
   the extension with their schemas (`GET_NODE_INFO_V1`) and run on the executor's locked clone.
 - The image server's container (DESIGN.md, The image server, The Docker image):
   `apps/imgserver/Dockerfile`, built from the repository's root (`docker build -f

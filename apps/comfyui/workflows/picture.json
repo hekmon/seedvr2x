@@ -101,19 +101,19 @@
         },
         {
           "name": "encode_tile",
-          "type": "INT",
+          "type": "SEEDVR2X_TILE",
           "shape": 7,
           "link": null
         },
         {
           "name": "decode_tile",
-          "type": "INT",
+          "type": "SEEDVR2X_TILE",
           "shape": 7,
           "link": null
         },
         {
           "name": "swap_blocks",
-          "type": "INT",
+          "type": "SEEDVR2X_BLOCKS_SWAPPED",
           "shape": 7,
           "link": null
         }

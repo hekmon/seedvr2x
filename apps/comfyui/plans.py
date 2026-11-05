@@ -49,22 +49,38 @@ DEFAULT_DIT = "seedvr2x_ema_7b_sharp_fp16.safetensors"
 VAE_FILE = "seedvr2x_ema_vae_fp16.safetensors"
 
 # The settings of an upscale node. The numbers the plan makes (each pass's tile, the blocks
-# swapped, a clip's window length) are optional INT inputs with no widget (the user's Desktop
-# test, 2026-11-05: a widget whose 0 meant auto let a tile of 64 px be chosen): unwired, the plan
-# chooses; wired, the value is taken exactly. Their min, max and step are the planner's own
-# candidates, so that a value on the grid is one the plan could take: a tile a multiple of
-# peaks.TILE_STEP from peaks.TILE_MIN to peaks.TILE_MAX, the tiles the plan makes; blocks from 0
-# (none swapped) to the DiT's; a window from 5 latents (shots.SHARED makes shorter ones leave no
-# latent of their own) to 128.
-#
-# Untiled is a tile pin of its own in the library (0), and no side says it: a side that covers
-# the frame is refused there (shot_plan's _covering), the planner taking a covering tile for no
-# tiling. So the input's one value past the largest tile, TILE_MAX + TILE_STEP, on the same grid,
-# is untiled, which the tooltip says (ComfyUI_frontend 1.57 has no word for a special value of an
-# INT: a min, a max, a step and a display type).
-UNTILED_TILE = peaks.TILE_MAX + peaks.TILE_STEP
+# swapped, a clip's window length) are optional sockets of seedvr2x's own types, each given by a
+# value node of its own (the user's Desktop test, 2026-11-05: a widget whose 0 meant auto let a
+# tile of 64 px be chosen; a socket of its own type lets ComfyUI propose its node): unconnected,
+# the plan chooses; connected, the value is taken exactly. A socket carries the library's pin
+# (the tile's side in px, 0 for untiled; the blocks; the window in latents), which the value nodes
+# make from what the user sets on their grid, the planner's own candidates: a tile a multiple of
+# peaks.TILE_STEP from peaks.TILE_MIN to peaks.TILE_MAX, the tiles the plan makes, or the whole
+# image at once; blocks from 0 (none swapped) to the DiT's; a window from 5 latents (shots.SHARED
+# makes shorter ones leave no latent of their own) to 128, set in frames.
 WINDOW_MIN = 2 * shots.SHARED + 1
 WINDOW_MAX = 128
+# The value nodes' defaults: a tile of 1024 px (design, 2026-11-05), no block swapped, and a
+# window of 41 frames (11 latents, the 73-frame clip's on the RTX 5090 in impl-nodes' GPU run).
+TILE_DEFAULT = 1024
+SWAP_DEFAULT = 0
+WINDOW_FRAMES_DEFAULT = 41
+
+
+def window_frames(latents: int) -> int:
+    """A window of `latents` latents in frames, the model's grid: its first latent is one frame,
+    each other four (the VAE's temporal compression), 4(L - 1) + 1."""
+    return 4 * (latents - 1) + 1
+
+
+def window_latents(frames: int) -> int:
+    """The latents of a window of `frames` frames on the model's grid (window_frames' inverse)."""
+    return (frames - 1) // 4 + 1
+
+
+WINDOW_FRAMES_MIN = window_frames(WINDOW_MIN)
+WINDOW_FRAMES_MAX = window_frames(WINDOW_MAX)
+WINDOW_FRAMES_STEP = 4
 ATTENTIONS = (AUTO, peaks.SDPA, peaks.FLASH_ATTN_2)
 # The colour correction, a BOOLEAN: on is split, off none (the user, 2026-11-05).
 CORRECTIONS = ("split", "none")
@@ -107,49 +123,92 @@ class BadSetting(ValueError):
     a link gives)."""
 
 
-def tile_problem(name: str, value: int) -> str | None:
-    """Why `value` is no tile side for the input `name` (encode_tile, decode_tile), or None: a
-    multiple of peaks.TILE_STEP from peaks.TILE_MIN to peaks.TILE_MAX, or UNTILED_TILE."""
-    if value == UNTILED_TILE:
-        return None
+# ---- The value nodes' grids, in the user's units -------------------------------------------------
+
+
+def _whole(label: str, value: object) -> str | None:
+    """Why a value given for a number is none (a link may carry anything), or None."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return f"{label} {value!r}: must be a whole number"
+    return None
+
+
+def tile_size_problem(value: object) -> str | None:
+    """Why `value` is no tile size seedvr2x Tile takes, or None."""
+    if (problem := _whole("tile size", value)) is not None:
+        return problem
+    assert isinstance(value, int)
     if peaks.TILE_MIN <= value <= peaks.TILE_MAX and value % peaks.TILE_STEP == 0:
         return None
     return (
-        f"{LABELS[name]} {value}: must be {peaks.TILE_MIN} to {peaks.TILE_MAX} px in steps of"
-        f" {peaks.TILE_STEP}, or {UNTILED_TILE} for no tiles"
+        f"tile size {value}: must be {peaks.TILE_MIN} to {peaks.TILE_MAX} px in steps of"
+        f" {peaks.TILE_STEP}"
     )
 
 
-def swap_problem(value: int) -> str | None:
+def blocks_problem(value: object) -> str | None:
+    """Why `value` is no count seedvr2x Blocks Swapped takes, or None."""
+    if (problem := _whole(LABELS["swap_blocks"], value)) is not None:
+        return problem
+    assert isinstance(value, int)
     if 0 <= value <= peaks.BLOCKS:
         return None
     return f"{LABELS['swap_blocks']} {value}: must be from 0 to {peaks.BLOCKS}"
 
 
-def window_problem(value: int) -> str | None:
-    if WINDOW_MIN <= value <= WINDOW_MAX:
+def window_frames_problem(value: object) -> str | None:
+    """Why `value` is no window length seedvr2x Window Length takes, in frames, or None."""
+    if (problem := _whole(LABELS["window"], value)) is not None:
+        return problem
+    assert isinstance(value, int)
+    if WINDOW_FRAMES_MIN <= value <= WINDOW_FRAMES_MAX and (value - 1) % WINDOW_FRAMES_STEP == 0:
         return None
-    return f"{LABELS['window']} {value}: must be from {WINDOW_MIN} to {WINDOW_MAX}"
+    return (
+        f"{LABELS['window']} {value}: must be {WINDOW_FRAMES_MIN} to {WINDOW_FRAMES_MAX} frames"
+        f" in steps of {WINDOW_FRAMES_STEP} ({WINDOW_FRAMES_MIN}, {WINDOW_FRAMES_MIN + 4},"
+        f" {WINDOW_FRAMES_MIN + 8}...)"
+    )
 
 
-def seed_problem(value: int) -> str | None:
+def tile_pin(size: int, whole_image: bool) -> int:
+    """seedvr2x Tile's value as the library's pin: the side in px, or 0 for the whole image."""
+    return 0 if whole_image else size
+
+
+# ---- What an upscale node takes, in the library's units ------------------------------------------
+
+# The value node that gives each pin, named in a refusal of a value no such node gives.
+VALUE_NODES = {
+    "encode_tile": "seedvr2x Tile",
+    "decode_tile": "seedvr2x Tile",
+    "swap_blocks": "seedvr2x Blocks Swapped",
+    "window": "seedvr2x Window Length",
+}
+
+
+def _pin_problem(name: str, value: object) -> str | None:
+    """Why `value`, given to the upscale node's socket `name` in the library's units, is no value
+    its value node gives, or None (another node of the same type could give anything)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        valid = False
+    elif name in ("encode_tile", "decode_tile"):
+        valid = value == 0 or tile_size_problem(value) is None
+    elif name == "swap_blocks":
+        valid = blocks_problem(value) is None
+    else:
+        valid = WINDOW_MIN <= value <= WINDOW_MAX
+    if valid:
+        return None
+    return f"{LABELS[name]} {value!r}: not a value {VALUE_NODES[name]} gives; connect one to it"
+
+
+def seed_problem(value: object) -> str | None:
+    if (problem := _whole("seed", value)) is not None:
+        return problem
+    assert isinstance(value, int)
     if 0 <= value <= SEED_MAX:
         return None
     return f"seed {value}: must be from 0 to {SEED_MAX:,}"
-
-
-def _problem(name: str, value: object) -> str | None:
-    """Why `value`, given for the number `name`, is not one the input takes, or None. A link may
-    carry anything: what is no whole number is refused first."""
-    if isinstance(value, bool) or not isinstance(value, int):
-        return f"{LABELS[name]} {value!r}: must be a whole number"
-    if name in ("encode_tile", "decode_tile"):
-        return tile_problem(name, value)
-    if name == "swap_blocks":
-        return swap_problem(value)
-    if name == "window":
-        return window_problem(value)
-    return seed_problem(value)
 
 
 def problems(
@@ -160,23 +219,18 @@ def problems(
     decode_tile: object = None,
     seed: object = None,
 ) -> list[str]:
-    """What is wrong with the numbers given (a number left None is not given, and not checked):
-    each reason as the node words it. The inputs' own min, max and step hold neither a value that
-    a link gives nor one on the grid but outside the tiles the plan makes."""
+    """What is wrong with the values an upscale node is given (a value left None is not given,
+    and not checked): each reason as the node words it."""
     given = {
         "encode_tile": encode_tile,
         "decode_tile": decode_tile,
         "swap_blocks": swap_blocks,
         "window": window,
-        "seed": seed,
     }
-    found = [_problem(name, value) for name, value in given.items() if value is not None]
+    found = [_pin_problem(name, value) for name, value in given.items() if value is not None]
+    if seed is not None:
+        found.append(seed_problem(seed))
     return [each for each in found if each is not None]
-
-
-def _tile(value: int | None) -> int | None:
-    """A tile input's value as the library's pin: None unwired (the plan's choice), 0 untiled."""
-    return 0 if value == UNTILED_TILE else value
 
 
 @dataclass(frozen=True)
@@ -206,9 +260,9 @@ class Settings:
         color_correction: bool = True,
         seed: int = SEED,
     ) -> "Settings":
-        """The settings of the node's inputs: a number None where its input is unwired, the
-        colour correction's on or off. BadSetting, worded for the node, for a value an input does
-        not take."""
+        """The settings of the node's inputs: a pin in the library's units, None where its socket
+        is unconnected; the colour correction's on or off. BadSetting, worded for the node, for a
+        value an input does not take."""
         found = problems(
             window=window,
             swap_blocks=swap_blocks,
@@ -225,8 +279,8 @@ class Settings:
         return cls(
             window,
             swap_blocks,
-            _tile(encode_tile),
-            _tile(decode_tile),
+            encode_tile,
+            decode_tile,
             None if attention == AUTO else attention,
             CORRECTIONS[0] if color_correction else CORRECTIONS[1],
             seed,
@@ -350,7 +404,7 @@ def _became(name: str, given: bool, outcome: str) -> str:
 
 
 def _tiles(name: str, given: bool, tiles: Tiles | None, peak: int | None) -> str:
-    how = "no tiles, the whole image at once" if tiles is None else f"{tiles.size} px"
+    how = "the whole image at once, no tiles" if tiles is None else f"{tiles.size} px"
     said = "" if peak is None else f" (needs up to {gib(peak)})"
     return _became(name, given, f"{how}{said}")
 
@@ -367,8 +421,8 @@ def _swap(given: bool, swapped: int) -> str:
 
 
 def _frames(length: int) -> str:
-    """A window's length as the node's input counts it, in groups of 4 frames, and in frames."""
-    return f"{length} groups of 4 frames (about {4 * length} frames)"
+    """A window's length in latents, said in frames as seedvr2x Window Length sets it."""
+    return f"{window_frames(length)} frames"
 
 
 _ATTENTION = {peaks.FLASH_ATTN_2: "FlashAttention 2", peaks.SDPA: "PyTorch's SDPA"}

@@ -60,6 +60,9 @@ from . import plans, words
 logger = logging.getLogger("seedvr2x_comfyui.nodes")
 
 CATEGORY = "seedvr2x"
+# The value nodes in a subcategory of their own (the user, 2026-11-05): ComfyUI's node library
+# nests a category at each "/".
+SETTINGS_CATEGORY = f"{CATEGORY}/plan settings"
 
 # A node's progress bar is a monotone position, not a measure: the clip's steps are the encode, the
 # DiT's windows and the decode's frames, of unequal lengths. PROVISIONAL (impl-nodes lane 05,
@@ -237,70 +240,49 @@ def _checked(handle: models_module.Handle) -> None:
 # ---- The settings an upscale node carries --------------------------------------------------------
 
 # The widgets are the choices with a default the user reads (resolution, attention, colour
-# correction, seed, plan only). The numbers the plan makes are optional INT inputs with no widget
-# (`force_input`): unwired, the plan chooses, and its text says what; wired, the value is taken
-# exactly. Their min, max and step are the planner's own grid (plans.py), which no value node
-# takes from them in ComfyUI_frontend 1.57.6: its Int node has its own range, and its legacy
-# Primitive, given no widget's config by a socket with none, sends no value at all (read in its
-# bundle, 2026-11-05). So the tooltips name the Int node, and a value a link gives is held to the
-# grid at the node's start, before anything loads; a value the prompt holds, when it is queued
-# (validate_inputs).
+# correction, seed, plan only). The numbers the plan makes are optional sockets of seedvr2x's own
+# types (the user, 2026-11-05), each given by its value node below (seedvr2x Tile, Blocks Swapped,
+# Window Length): a link dragged from the socket and released on the canvas makes ComfyUI offer
+# that node, which carries its own range, step and description. Unconnected, the plan chooses,
+# and its text says what; connected, the value is taken exactly. A socket carries the library's
+# pin (plans.py), and a value no value node gives is refused at the node's start, before anything
+# loads.
 
-
-# How each optional number's tooltip begins: in ComfyUI_frontend 1.57.6 an Int node gives such
-# an input its value, and a Primitive node none (above).
-_OPTIONAL = "Optional: connect a number (from an Int node, for one)"
+TileType = io.Custom("SEEDVR2X_TILE")
+SwapType = io.Custom("SEEDVR2X_BLOCKS_SWAPPED")
+WindowType = io.Custom("SEEDVR2X_WINDOW")
 
 
 def _tile_input(name: str, pass_: str) -> Any:
-    return io.Int.Input(
+    return TileType.Input(
         name,
         display_name=plans.LABELS[name],
         optional=True,
-        force_input=True,
-        min=peaks.TILE_MIN,
-        max=plans.UNTILED_TILE,
-        step=peaks.TILE_STEP,
-        tooltip=f"{_OPTIONAL} to set the tile size of the VAE {pass_}, in pixels of the output:"
-        f" {peaks.TILE_MIN} to {peaks.TILE_MAX} in steps of {peaks.TILE_STEP}, or"
-        f" {plans.UNTILED_TILE} for no tiles, the whole image at once. Unconnected, the plan"
-        " chooses: the whole image at once if it fits the card, else the largest tile that does."
-        " A larger tile is faster and takes more of the card; a smaller one leaves more room for"
-        " the model and blends more seams.",
+        tooltip=f"Optional: connect a seedvr2x Tile node to set the tile size of the VAE {pass_}."
+        " Unconnected, the plan chooses: the whole image at once if it fits the card, else the"
+        " largest tile that does.",
     )
 
 
 def _swap_input() -> Any:
-    return io.Int.Input(
+    return SwapType.Input(
         "swap_blocks",
         display_name=plans.LABELS["swap_blocks"],
         optional=True,
-        force_input=True,
-        min=0,
-        max=peaks.BLOCKS,
-        step=1,
-        tooltip=f"{_OPTIONAL} to set how many of the model's {peaks.BLOCKS} blocks wait in RAM"
-        " and pass through the card in turn, from 0 (none: the whole model on the card) to"
-        f" {peaks.BLOCKS}. Unconnected, the plan chooses the fewest that fit. Swapping more"
-        " blocks lets the model fit a smaller graphics card, and slows the run.",
+        tooltip="Optional: connect a seedvr2x Blocks Swapped node to set how many of the model's"
+        " blocks wait in RAM and pass through the card in turn. Unconnected, the plan chooses the"
+        " fewest that fit.",
     )
 
 
 def _window_input() -> Any:
-    return io.Int.Input(
+    return WindowType.Input(
         "window",
         display_name=plans.LABELS["window"],
         optional=True,
-        force_input=True,
-        min=plans.WINDOW_MIN,
-        max=plans.WINDOW_MAX,
-        step=1,
-        tooltip=f"{_OPTIONAL} to set the longest stretch of the clip the model works on at once,"
-        f" counted in groups of 4 frames: from {plans.WINDOW_MIN} (about"
-        f" {4 * plans.WINDOW_MIN} frames) to {plans.WINDOW_MAX} (about"
-        f" {4 * plans.WINDOW_MAX} frames). Unconnected, the plan chooses the longest that fits"
-        " the card. A longer window keeps more frames consistent with each other and takes more"
-        " of the card; a shorter one is lighter, and the clip is blended across more windows.",
+        tooltip="Optional: connect a seedvr2x Window Length node to set the longest stretch of"
+        " the clip the model works on at once. Unconnected, the plan chooses the longest that"
+        " fits the card.",
     )
 
 
@@ -392,16 +374,7 @@ def _settings(**values: Any) -> plans.Settings:
     try:
         return plans.Settings.of(**values)
     except plans.BadSetting as error:
-        raise words.Refused(f"{error}. Change the number connected to this node.") from error
-
-
-def _validate(**values: int | None) -> bool | str:
-    """validate_inputs of the upscale nodes: the numbers the prompt holds are checked when it is
-    queued, before anything runs. A linked number is not there to check (the executor hands over
-    the constants only) and is checked at the node's start; an unwired one is None. ComfyUI
-    checks the min and max itself for the inputs this function does not take."""
-    found = plans.problems(**values)
-    return "; ".join(found) if found else True
+        raise words.Refused(f"{error}.") from error
 
 
 def _plan_only(text: str) -> io.NodeOutput:
@@ -511,15 +484,6 @@ class UpscaleImage(io.ComfyNode):
             ],
             hidden=[io.Hidden.unique_id],
         )
-
-    @classmethod
-    def validate_inputs(  # pyright: ignore[reportIncompatibleMethodOverride]
-        cls,
-        encode_tile: int | None = None,
-        decode_tile: int | None = None,
-        swap_blocks: int | None = None,
-    ) -> bool | str:
-        return _validate(encode_tile=encode_tile, decode_tile=decode_tile, swap_blocks=swap_blocks)
 
     @classmethod
     def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -691,18 +655,6 @@ class UpscaleVideo(io.ComfyNode):
         )
 
     @classmethod
-    def validate_inputs(  # pyright: ignore[reportIncompatibleMethodOverride]
-        cls,
-        window: int | None = None,
-        encode_tile: int | None = None,
-        decode_tile: int | None = None,
-        swap_blocks: int | None = None,
-    ) -> bool | str:
-        return _validate(
-            window=window, encode_tile=encode_tile, decode_tile=decode_tile, swap_blocks=swap_blocks
-        )
-
-    @classmethod
     def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
         cls,
         images: torch.Tensor,
@@ -805,13 +757,210 @@ class UpscaleVideo(io.ComfyNode):
             raise words.non_finite(str(error)) from error
 
 
+# ---- The value nodes: a setting of the plan's, its range, step and description -------------------
+
+
+_LINKED = "Change the number connected to this node."
+_FROM_INT = (
+    " The number can also come from another node, an Int node for one, through the widget's"
+    " input socket."
+)
+
+
+def _value(problem: str | None) -> None:
+    """A value node's refusal of a value a link gave it off its grid, in the nodes' words (a
+    value the prompt holds is refused when it is queued, validate_inputs)."""
+    if problem is not None:
+        raise words.Refused(f"{problem}. {_LINKED}")
+
+
+def _queued(problem: str | None) -> bool | str:
+    """validate_inputs of a value node: True, or the reason a value the prompt holds is off the
+    node's grid. ComfyUI's own check of min and max is left out for the inputs it names, and
+    ComfyUI checks no step: this one checks both."""
+    return True if problem is None else problem
+
+
+class Tile(io.ComfyNode):
+    """A tile for the VAE's passes: the value of an upscale node's encode or decode tile."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="seedvr2xTile",
+            display_name="seedvr2x Tile",
+            category=SETTINGS_CATEGORY,
+            description=(
+                "A tile size for seedvr2x's upscale nodes: connect it to their encode tile or"
+                " decode tile input. The VAE turns the image into what the model works on (the"
+                " encode) and back (the decode) in square tiles of this many output pixels,"
+                " blended at their seams. A larger tile is faster and takes more of the graphics"
+                " card; a smaller one leaves more room for the model, and has more seams to"
+                " blend. Whole image at once: no tiles, the fastest, and the most memory. Leave"
+                " the upscale node's input unconnected and the plan chooses for you: the whole"
+                " image at once if it fits the card, else the largest tile that does." + _FROM_INT
+            ),
+            inputs=[
+                io.Int.Input(
+                    "tile_size",
+                    default=plans.TILE_DEFAULT,
+                    min=peaks.TILE_MIN,
+                    max=peaks.TILE_MAX,
+                    step=peaks.TILE_STEP,
+                    display_name="tile size (px)",
+                    tooltip="The side of a square tile, in pixels of the output:"
+                    f" {peaks.TILE_MIN} to {peaks.TILE_MAX} in steps of {peaks.TILE_STEP}. Not"
+                    " used when whole image at once is on.",
+                ),
+                io.Boolean.Input(
+                    "whole_image",
+                    default=False,
+                    display_name="whole image at once",
+                    tooltip="On: no tiles, the whole image in one pass; the tile size is not used.",
+                ),
+            ],
+            outputs=[
+                TileType.Output(
+                    "tile",
+                    display_name="tile",
+                    tooltip="The tile, for an upscale node's encode tile or decode tile input.",
+                )
+            ],
+        )
+
+    @classmethod
+    def validate_inputs(  # pyright: ignore[reportIncompatibleMethodOverride]
+        cls, tile_size: int | None = None
+    ) -> bool | str:
+        return _queued(None if tile_size is None else plans.tile_size_problem(tile_size))
+
+    @classmethod
+    def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
+        cls, tile_size: int, whole_image: bool
+    ) -> io.NodeOutput:
+        _value(plans.tile_size_problem(tile_size))
+        if not isinstance(whole_image, bool):  # pyright: ignore[reportUnnecessaryIsInstance]
+            _value(f"whole image at once {whole_image!r}: must be on or off")
+        return io.NodeOutput(plans.tile_pin(tile_size, whole_image))
+
+
+class BlocksSwapped(io.ComfyNode):
+    """The DiT's blocks swapped: the value of an upscale node's blocks swapped."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="seedvr2xBlocksSwapped",
+            display_name="seedvr2x Blocks Swapped",
+            category=SETTINGS_CATEGORY,
+            description=(
+                f"How many of the model's {peaks.BLOCKS} blocks wait in your computer's RAM and"
+                " pass through the graphics card in turn, for seedvr2x's upscale nodes: connect it"
+                " to their blocks swapped input. 0 keeps the whole model on the card, the fastest;"
+                " each block swapped leaves the card more room, so that the model fits a smaller"
+                " card, and slows the run. Leave the upscale node's input unconnected and the plan"
+                " chooses the fewest that fit." + _FROM_INT
+            ),
+            inputs=[
+                io.Int.Input(
+                    "blocks",
+                    default=plans.SWAP_DEFAULT,
+                    min=0,
+                    max=peaks.BLOCKS,
+                    step=1,
+                    display_name=plans.LABELS["swap_blocks"],
+                    tooltip=f"From 0 (none: the whole model on the card) to {peaks.BLOCKS}.",
+                )
+            ],
+            outputs=[
+                SwapType.Output(
+                    "blocks_swapped",
+                    display_name=plans.LABELS["swap_blocks"],
+                    tooltip="The blocks swapped, for an upscale node's blocks swapped input.",
+                )
+            ],
+        )
+
+    @classmethod
+    def validate_inputs(  # pyright: ignore[reportIncompatibleMethodOverride]
+        cls, blocks: int | None = None
+    ) -> bool | str:
+        return _queued(None if blocks is None else plans.blocks_problem(blocks))
+
+    @classmethod
+    def execute(cls, blocks: int) -> io.NodeOutput:  # pyright: ignore[reportIncompatibleMethodOverride]
+        _value(plans.blocks_problem(blocks))
+        return io.NodeOutput(blocks)
+
+
+class WindowLength(io.ComfyNode):
+    """A clip's window length: the value of Upscale Video's window length, set in frames on the
+    model's grid and given in the planner's latents."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="seedvr2xWindowLength",
+            display_name="seedvr2x Window Length",
+            category=SETTINGS_CATEGORY,
+            description=(
+                "The longest stretch of a clip the model works on at once, in frames, for"
+                " seedvr2x Upscale Video: connect it to its window length input. The model takes"
+                " frames 4 at a time after the first, so a window is"
+                f" {plans.WINDOW_FRAMES_MIN}, {plans.WINDOW_FRAMES_MIN + 4},"
+                f" {plans.WINDOW_FRAMES_MIN + 8}... frames, up to {plans.WINDOW_FRAMES_MAX}. A"
+                " longer window keeps more frames consistent with each other and takes more of"
+                " the graphics card; a shorter one is lighter, and the clip is blended across"
+                " more windows. Leave the input unconnected and the plan chooses the longest that"
+                " fits the card." + _FROM_INT
+            ),
+            inputs=[
+                io.Int.Input(
+                    "frames",
+                    default=plans.WINDOW_FRAMES_DEFAULT,
+                    min=plans.WINDOW_FRAMES_MIN,
+                    max=plans.WINDOW_FRAMES_MAX,
+                    step=plans.WINDOW_FRAMES_STEP,
+                    display_name="window length (frames)",
+                    tooltip=f"{plans.WINDOW_FRAMES_MIN} to {plans.WINDOW_FRAMES_MAX} frames, in"
+                    f" steps of {plans.WINDOW_FRAMES_STEP}.",
+                )
+            ],
+            outputs=[
+                WindowType.Output(
+                    "window_length",
+                    display_name=plans.LABELS["window"],
+                    tooltip="The window length, for Upscale Video's window length input.",
+                )
+            ],
+        )
+
+    @classmethod
+    def validate_inputs(  # pyright: ignore[reportIncompatibleMethodOverride]
+        cls, frames: int | None = None
+    ) -> bool | str:
+        return _queued(None if frames is None else plans.window_frames_problem(frames))
+
+    @classmethod
+    def execute(cls, frames: int) -> io.NodeOutput:  # pyright: ignore[reportIncompatibleMethodOverride]
+        _value(plans.window_frames_problem(frames))
+        return io.NodeOutput(plans.window_latents(frames))
+
+
 # ---- What ComfyUI loads --------------------------------------------------------------------------
 
-NODES: tuple[type[io.ComfyNode], ...] = (Models, UpscaleImage, UpscaleVideo)
+NODES: tuple[type[io.ComfyNode], ...] = (
+    Models,
+    UpscaleImage,
+    UpscaleVideo,
+    Tile,
+    BlocksSwapped,
+    WindowLength,
+)
 
 
 class Extension(ComfyExtension):
-    """The three nodes, as ComfyUI's loader asks for them (it awaits get_node_list and registers
+    """The nodes, as ComfyUI's loader asks for them (it awaits get_node_list and registers
     each class under its schema's node_id and display name)."""
 
     @override

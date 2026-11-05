@@ -3,6 +3,7 @@ names, the combos, the widgets' choices as the library's pins, and the pins take
 refused in the nodes' words) by the planners the upscale nodes make."""
 
 import asyncio
+import inspect
 import re
 from typing import Any
 
@@ -105,10 +106,25 @@ def test_there_is_no_tuning_node() -> None:
         "seedvr2xModels",
         "seedvr2xUpscaleImage",
         "seedvr2xUpscaleVideo",
+        "seedvr2xTile",
+        "seedvr2xBlocksSwapped",
+        "seedvr2xWindowLength",
     ]
 
 
 PLANS_NUMBERS = ("window", "encode_tile", "decode_tile", "swap_blocks")
+# Each socket's type, and the one value node that gives it.
+TYPES = {
+    "window": "SEEDVR2X_WINDOW",
+    "encode_tile": "SEEDVR2X_TILE",
+    "decode_tile": "SEEDVR2X_TILE",
+    "swap_blocks": "SEEDVR2X_BLOCKS_SWAPPED",
+}
+VALUE_NODES = {
+    "SEEDVR2X_TILE": nodes.Tile,
+    "SEEDVR2X_BLOCKS_SWAPPED": nodes.BlocksSwapped,
+    "SEEDVR2X_WINDOW": nodes.WindowLength,
+}
 
 
 def test_the_pictures_come_first_then_the_models_then_the_widgets_then_the_plans_numbers() -> None:
@@ -132,8 +148,11 @@ def test_the_pictures_come_first_then_the_models_then_the_widgets_then_the_plans
     for node in (nodes.UpscaleImage, nodes.UpscaleVideo):
         spec = schema_inputs(node)
         assert spec["images"].io_type == "IMAGE" and spec["models"].io_type == "SEEDVR2X_MODELS"
-        for name in ("resolution", "seed", *[each for each in PLANS_NUMBERS if each in spec]):
+        for name in ("resolution", "seed"):
             assert spec[name].io_type == "INT", name
+        for name, kind in TYPES.items():
+            if name in spec:
+                assert spec[name].io_type == kind, name
         assert spec["attention"].io_type == "COMBO"
         assert spec["color_correction"].io_type == spec["plan_only"].io_type == "BOOLEAN"
         # The required ones first, as INPUT_TYPES lists them and the frontend builds them.
@@ -141,36 +160,106 @@ def test_the_pictures_come_first_then_the_models_then_the_widgets_then_the_plans
         assert optional == sorted(optional)
 
 
-def test_the_plans_numbers_are_optional_inputs_with_no_widget_on_the_planners_grid() -> None:
+def test_the_plans_numbers_are_optional_sockets_each_given_by_one_value_node() -> None:
     """The user's Desktop test, 2026-11-05: a tile of 64 px could be chosen, the INT's min being
-    0 for auto. Unwired, the plan chooses; wired, the value is taken; no value stands for auto."""
+    0 for auto; then: each setting a type of its own, so that a link dragged from its socket
+    makes ComfyUI offer the node that gives it. Unconnected, the plan chooses."""
     for node in (nodes.UpscaleImage, nodes.UpscaleVideo):
         spec = schema_inputs(node)
         for name in PLANS_NUMBERS:
             if name not in spec:
                 continue
             each = spec[name]
-            assert each.optional and each.force_input and each.default is None, name
-            assert each.as_dict()["forceInput"] is True
+            assert each.optional and not isinstance(each, io.WidgetInput), name
             assert "Unconnected, the plan chooses" in each.tooltip and "auto" not in each.tooltip
-            assert each.tooltip.startswith("Optional: connect a number (from an Int node, for one)")
-            assert "auto" not in each.display_name and "=" not in each.display_name
-            # Every value on the input's grid is one the plan takes, and nothing off it.
-            grid = range(each.min, each.max + 1, each.step)
-            assert all(plans.problems(**{name: value}) == [] for value in grid), name
-            assert plans.problems(**{name: each.min - each.step}) != [], name
-            assert plans.problems(**{name: each.max + each.step}) != [], name
-        for name in ("encode_tile", "decode_tile"):
-            tile = spec[name]
-            assert (tile.min, tile.max, tile.step) == (512, 2112, 64)
-            assert tile.max == peaks.TILE_MAX + peaks.TILE_STEP == plans.UNTILED_TILE
-            assert "2112 for no tiles, the whole image at once" in tile.tooltip
-        swap = spec["swap_blocks"]
-        assert (swap.min, swap.max, swap.step) == (0, peaks.BLOCKS, 1)
-        assert "from 0 (none: the whole model on the card)" in swap.tooltip
-    window = schema_inputs(nodes.UpscaleVideo)["window"]
-    assert (window.min, window.max, window.step) == (plans.WINDOW_MIN, plans.WINDOW_MAX, 1)
-    assert plans.WINDOW_MIN == 5 and "from 5 (about 20 frames) to 128" in window.tooltip
+            giver = VALUE_NODES[each.io_type]
+            assert each.tooltip.startswith(
+                f"Optional: connect a {giver.GET_SCHEMA().display_name} node"
+            )
+    # Each type is given by its value node alone, whose inputs are widgets.
+    outputs = [each.io_type for node in nodes.NODES for each in node.GET_SCHEMA().outputs]
+    for kind, giver in VALUE_NODES.items():
+        assert outputs.count(kind) == 1
+        assert [each.io_type for each in giver.GET_SCHEMA().outputs] == [kind]
+        assert all(isinstance(each, io.WidgetInput) for each in giver.GET_SCHEMA().inputs)
+
+
+def value(node: type[io.ComfyNode], **inputs: Any) -> Any:
+    """A value node's output, run as the executor runs it."""
+    return execute(node, None, **inputs)[0]
+
+
+def test_seedvr2x_tile_gives_a_side_on_the_planners_grid_or_the_whole_image() -> None:
+    spec = schema_inputs(nodes.Tile)
+    size, whole = spec["tile_size"], spec["whole_image"]
+    assert (size.default, size.min, size.max, size.step) == (1024, 512, 2048, 64)
+    assert size.display_name == "tile size (px)" and whole.display_name == "whole image at once"
+    assert whole.default is False and whole.io_type == "BOOLEAN"
+    # Every side on the widget's grid is a tile the plan makes; the switch is untiled (0).
+    for side in range(size.min, size.max + 1, size.step):
+        assert value(nodes.Tile, tile_size=side, whole_image=False) == side
+        assert plans.problems(encode_tile=side) == []
+    assert value(nodes.Tile, tile_size=1024, whole_image=True) == 0
+    assert plans.Settings.of(encode_tile=0).encode_tile == 0
+
+
+def test_seedvr2x_blocks_swapped_gives_0_to_36() -> None:
+    blocks = schema_inputs(nodes.BlocksSwapped)["blocks"]
+    assert (blocks.default, blocks.min, blocks.max, blocks.step) == (0, 0, peaks.BLOCKS, 1)
+    for count in range(peaks.BLOCKS + 1):
+        assert value(nodes.BlocksSwapped, blocks=count) == count
+        assert plans.problems(swap_blocks=count) == []
+
+
+def test_seedvr2x_window_length_is_set_in_frames_on_the_models_grid_and_gives_latents() -> None:
+    frames = schema_inputs(nodes.WindowLength)["frames"]
+    assert (frames.default, frames.min, frames.max, frames.step) == (41, 17, 509, 4)
+    assert frames.display_name == "window length (frames)"
+    # The planner's own range, 5 to 128 latents, in frames: 4(L - 1) + 1.
+    assert (plans.window_frames(5), plans.window_frames(128)) == (17, 509)
+    for count in range(frames.min, frames.max + 1, frames.step):
+        latents = value(nodes.WindowLength, frames=count)
+        assert plans.window_frames(latents) == count and 5 <= latents <= 128
+        assert plans.problems(window=latents) == []
+    assert value(nodes.WindowLength, frames=41) == 11
+    # The frontend rounds an INT to its step from its min: 17 + 4k, the model's grid.
+    assert frames.min % frames.step == 1
+
+
+@pytest.mark.parametrize(
+    ("node", "inputs", "said"),
+    [
+        (nodes.Tile, {"tile_size": 1000, "whole_image": False}, "tile size 1000: must be 512"),
+        (nodes.Tile, {"tile_size": 448, "whole_image": False}, "tile size 448"),
+        (nodes.Tile, {"tile_size": 2112, "whole_image": True}, "tile size 2112"),
+        (nodes.Tile, {"tile_size": 1024.0, "whole_image": False}, "must be a whole number"),
+        (nodes.Tile, {"tile_size": 1024, "whole_image": 1}, "whole image at once 1"),
+        (nodes.BlocksSwapped, {"blocks": 37}, "blocks swapped 37: must be from 0 to 36"),
+        (nodes.BlocksSwapped, {"blocks": -1}, "blocks swapped -1"),
+        (nodes.WindowLength, {"frames": 20}, "window length 20: must be 17 to 509 frames"),
+        (nodes.WindowLength, {"frames": 13}, "window length 13"),
+        (nodes.WindowLength, {"frames": 513}, "window length 513"),
+    ],
+)
+def test_a_value_node_refuses_a_number_off_its_grid_queued_or_linked(
+    node: type[io.ComfyNode], inputs: dict[str, Any], said: str
+) -> None:
+    from standins import validate
+
+    # A link brings the number when the node runs: refused there, in the nodes' words.
+    with pytest.raises(words.Refused, match=re.escape(said)) as refused:
+        value(node, **inputs)
+    assert "Change the number connected to this node" in str(refused.value)
+    # A number the prompt holds is refused when it is queued (ComfyUI checks no step).
+    number = next(each for key, each in inputs.items() if key != "whole_image")
+    names = list(inspect.signature(node.validate_inputs).parameters)
+    if isinstance(number, int) and not said.startswith("whole image"):
+        queued = validate(node, **{names[0]: number})
+        assert isinstance(queued, str) and said.split(":")[0] in queued
+    assert all(
+        each.default is None for each in inspect.signature(node.validate_inputs).parameters.values()
+    )
+    assert validate(node) is True
 
 
 def test_every_input_and_output_has_a_label_and_a_tooltip() -> None:
@@ -254,7 +343,7 @@ def test_the_inputs_values_are_the_settings_as_pins() -> None:
     settings = settings_of(
         window=9,
         swap_blocks=30,
-        encode_tile=plans.UNTILED_TILE,
+        encode_tile=0,
         decode_tile=1024,
         attention="sdpa",
         color_correction=False,
@@ -263,7 +352,7 @@ def test_the_inputs_values_are_the_settings_as_pins() -> None:
     assert settings == plans.Settings(9, 30, 0, 1024, "sdpa", "none", 7)
     assert settings.clip_pins().window == 9 and settings.clip_pins().encode_tile == 0
     assert settings.picture_pins().swap_blocks == 30 and settings.picture_pins().decode_tile == 1024
-    # Unwired: nothing given, the plan's choice.
+    # Unconnected: nothing given, the plan's choice.
     auto = settings_of()
     assert auto == plans.Settings()
     assert auto.clip_pins().window is None and auto.attention is None and auto.split
@@ -276,24 +365,16 @@ def test_the_inputs_values_are_the_settings_as_pins() -> None:
 @pytest.mark.parametrize(
     ("bad", "said"),
     [
-        ({"window": 4}, "window length 4: must be from 5 to 128"),
+        # What reaches a socket in the library's units: what no value node gives is refused.
+        ({"window": 4}, "window length 4: not a value seedvr2x Window Length gives"),
         ({"window": 129}, "window length 129"),
-        ({"window": 0}, "window length 0"),
-        ({"window": -1}, "window length -1"),
-        ({"swap_blocks": 37}, "blocks swapped 37: must be from 0 to 36"),
+        ({"swap_blocks": 37}, "blocks swapped 37: not a value seedvr2x Blocks Swapped gives"),
         ({"swap_blocks": -1}, "blocks swapped -1"),
-        (
-            {"encode_tile": 256},
-            "encode tile 256: must be 512 to 2048 px in steps of 64, or 2112 for no tiles",
-        ),
-        ({"encode_tile": 64}, "encode tile 64"),
-        ({"encode_tile": 0}, "encode tile 0"),
+        ({"encode_tile": 256}, "encode tile 256: not a value seedvr2x Tile gives; connect one"),
+        ({"encode_tile": 2112}, "encode tile 2112"),
         ({"decode_tile": 1000}, "decode tile 1000"),
-        ({"decode_tile": 4096}, "decode tile 4096"),
-        ({"encode_tile": -1}, "encode tile -1"),
-        # A link may carry what is no whole number.
-        ({"encode_tile": 1024.0}, "encode tile 1024.0: must be a whole number"),
-        ({"swap_blocks": True}, "blocks swapped True: must be a whole number"),
+        ({"encode_tile": 1024.0}, "encode tile 1024.0"),
+        ({"swap_blocks": True}, "blocks swapped True"),
         ({"attention": "flash"}, "attention 'flash'"),
         ({"color_correction": "split"}, "colour correction 'split': must be on or off"),
         ({"seed": -1}, "seed -1"),
@@ -305,45 +386,12 @@ def test_a_value_no_input_takes_is_refused_naming_it(bad: dict[str, Any], said: 
         plans.Settings.of(**bad)
 
 
-def test_the_values_on_the_grid_the_plan_tries_are_taken() -> None:
-    for tile in range(512, 2113, 64):
-        assert plans.tile_problem("encode_tile", tile) is None, tile
-    for window in range(5, 129):
-        assert plans.window_problem(window) is None, window
-    for blocks in range(37):
-        assert plans.swap_problem(blocks) is None, blocks
-    assert plans.UNTILED_TILE == 2112
-
-
-def test_numbers_the_prompt_holds_are_checked_when_it_is_queued() -> None:
-    from standins import validate
-
-    # A value the prompt holds (a value node the frontend folds into it): refused in the nodes'
-    # words, before anything runs; the constants only are given, and only the arguments the node
-    # names (the executor hands over what validate_inputs takes).
-    text = validate(nodes.UpscaleVideo, window=3, encode_tile=256, decode_tile=2112, swap_blocks=99)
-    assert isinstance(text, str)
-    assert "window length 3" in text and "encode tile 256" in text and "blocks swapped 99" in text
-    assert "decode tile" not in text and "--" not in text
-    assert validate(nodes.UpscaleImage, encode_tile=1024, decode_tile=2112, swap_blocks=0) is True
-    # A linked number is not among the constants, an unwired one not given: nothing to check.
-    assert validate(nodes.UpscaleImage, resolution=1080) is True
-    assert validate(nodes.UpscaleVideo) is True
-    # The window is the video node's alone: a picture node does not take it.
-    assert validate(nodes.UpscaleImage, window=3) is True
-    for node in (nodes.UpscaleImage, nodes.UpscaleVideo):
-        import inspect
-
-        names = inspect.signature(node.validate_inputs).parameters
-        assert all(each.default is None for each in names.values()), "each has a default"
-        assert set(names) <= set(schema_inputs(node))
-
-
-def test_a_linked_number_off_the_grid_is_refused_at_the_nodes_start_before_anything_loads(
+def test_a_value_off_the_grid_at_an_upscale_nodes_socket_is_refused_before_anything_loads(
     machine: StandIn, tmp_path
 ) -> None:
-    from standins import execute, handle
+    from standins import handle
 
+    # A node of another pack that gives the same type could give anything.
     with pytest.raises(words.Refused) as refused:
         execute(
             nodes.UpscaleImage,
@@ -357,9 +405,34 @@ def test_a_linked_number_off_the_grid_is_refused_at_the_nodes_start_before_anyth
             plan_only=False,
             encode_tile=300,
         )
-    assert "encode tile 300" in str(refused.value)
-    assert "Change the number connected to this node" in str(refused.value)
+    assert "encode tile 300: not a value seedvr2x Tile gives" in str(refused.value)
     assert machine.loads == [] and machine.probes == [] and machine.made == []
+
+
+def test_the_value_nodes_outputs_reach_the_plan_as_set(machine: StandIn, tmp_path) -> None:
+    from standins import handle
+
+    out = execute(
+        nodes.UpscaleVideo,
+        "1",
+        images=torch.zeros(33, 24, 40, 3),
+        models=handle(tmp_path),
+        resolution=48,
+        attention="auto",
+        color_correction=True,
+        seed=42,
+        plan_only=True,
+        window=value(nodes.WindowLength, frames=21),
+        decode_tile=value(nodes.Tile, tile_size=512, whole_image=True),
+        swap_blocks=value(nodes.BlocksSwapped, blocks=0),
+    )
+    text = out[1]
+    assert "window length: at most 21 frames, as you set it" in text
+    assert "decode tile: the whole image at once, no tiles (needs up to " in text
+    assert "blocks swapped: none, the whole model on the card while it works, as you set it" in (
+        text
+    )
+    assert "encode tile: auto -> " in text
 
 
 def test_the_optional_inputs_unwired_are_not_given_and_the_plan_chooses(
@@ -384,6 +457,9 @@ def test_the_optional_inputs_unwired_are_not_given_and_the_plan_chooses(
     assert "blocks swapped: auto -> " in text
     with pytest.raises(TypeError, match="optionally"):
         execute(nodes.UpscaleImage, "1", images=torch.zeros(1, 24, 40, 3))
+    # Nothing to check when the prompt is queued: a socket holds no number of its own.
+    for node in (nodes.UpscaleImage, nodes.UpscaleVideo):
+        assert "validate_inputs" not in node.__dict__
 
 
 @pytest.mark.parametrize(
@@ -440,8 +516,8 @@ def test_a_pin_the_plan_cant_take_is_refused_in_the_nodes_words() -> None:
     with pytest.raises(PlanRefused) as refused:
         picture_plan(plans.Settings(swap_blocks=0, decode_tile=4096))
     text = str(words.refusal(refused.value))
-    assert "decode tile 4096 on this node" in text and "--" not in text
-    assert "decode tile 2112 (no tiles) on this node" in text
+    assert "decode tile 4096 px on this node" in text and "--" not in text
+    assert "decode tile set to the whole image at once on this node" in text
     with pytest.raises(PlanRefused) as clip:
         clip_plan(plans.Settings(swap_blocks=99), frames=10)
     said = str(words.refusal(clip.value))
@@ -459,16 +535,28 @@ def test_the_registered_nodes() -> None:
     extension = asyncio.run(comfyui.comfy_entrypoint())
     assert isinstance(extension, ComfyExtension)
     listed = asyncio.run(extension.get_node_list())
-    assert listed == [nodes.Models, nodes.UpscaleImage, nodes.UpscaleVideo]
+    assert listed == list(nodes.NODES)
     # The ids a saved workflow names, with the names the menu shows, kept from the V1 nodes.
     schemas = {each.GET_SCHEMA().node_id: each.GET_SCHEMA() for each in listed}
     assert {key: value.display_name for key, value in schemas.items()} == {
         "seedvr2xModels": "seedvr2x Models",
         "seedvr2xUpscaleImage": "seedvr2x Upscale Image",
         "seedvr2xUpscaleVideo": "seedvr2x Upscale Video",
+        "seedvr2xTile": "seedvr2x Tile",
+        "seedvr2xBlocksSwapped": "seedvr2x Blocks Swapped",
+        "seedvr2xWindowLength": "seedvr2x Window Length",
     }
     for schema in schemas.values():
-        assert schema.category == "seedvr2x" and schema.description
+        assert schema.description
+    # Models and the upscale nodes in seedvr2x's category, the value nodes in its subcategory.
+    assert {key: value.category for key, value in schemas.items()} == {
+        "seedvr2xModels": "seedvr2x",
+        "seedvr2xUpscaleImage": "seedvr2x",
+        "seedvr2xUpscaleVideo": "seedvr2x",
+        "seedvr2xTile": "seedvr2x/plan settings",
+        "seedvr2xBlocksSwapped": "seedvr2x/plan settings",
+        "seedvr2xWindowLength": "seedvr2x/plan settings",
+    }
     upscale = nodes.UpscaleImage.GET_SCHEMA()
     assert [each.id for each in upscale.inputs][:3] == ["images", "models", "resolution"]
     assert upscale.hidden == [io.Hidden.unique_id]
@@ -552,7 +640,7 @@ def test_the_text_says_what_each_auto_became_and_what_a_value_wired_in_was_taken
     encode = next(each for each in lines if each.startswith("encode tile: "))
     # "encode tile: auto -> 1024 px (up to ...)", or one pass where it fits.
     assert re.fullmatch(
-        r"encode tile: auto -> (\d+ px|no tiles, the whole image at once) \(needs up to"
+        r"encode tile: auto -> (\d+ px|the whole image at once, no tiles) \(needs up to"
         r" \d+\.\d\d GiB\)",
         encode,
     ), encode
@@ -570,11 +658,8 @@ def test_the_text_says_what_each_auto_became_and_what_a_value_wired_in_was_taken
     )
     assert "blocks swapped: auto -> " in picture_text(plans.Settings())
     clipped = clip_text(plans.Settings(window=9, encode_tile=0))
-    assert (
-        "window length: at most 9 groups of 4 frames (about 36 frames), as you set it"
-        in clipped.splitlines()
-    )
-    assert "encode tile: no tiles, the whole image at once (needs up to " in clipped
+    assert "window length: at most 33 frames, as you set it" in clipped.splitlines()
+    assert "encode tile: the whole image at once, no tiles (needs up to " in clipped
     assert "window length: auto -> " in clip_text(plans.Settings())
     for said in (text, pinned, clipped, clip_text(plans.Settings())):
         assert plain(said), said

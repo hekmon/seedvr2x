@@ -1,6 +1,6 @@
 # seedvr2x's ComfyUI nodes
 
-Three [ComfyUI](https://github.com/Comfy-Org/ComfyUI) nodes that run
+[ComfyUI](https://github.com/Comfy-Org/ComfyUI) nodes that run
 [SeedVR2](https://github.com/ByteDance-Seed/SeedVR) with seedvr2x's own model files, loaders and
 memory planner: a picture, a batch of pictures or the frames of a short clip upscaled on the card
 you have, with the plan said on the node and a refusal, where one is due, before any model loads.
@@ -23,6 +23,9 @@ you have, with the plan said on the node and a refusal, where one is due, before
   side given by `resolution` (1080 by default).
 - **seedvr2x Upscale Video** upscales the frames it is given as one shot, in sliding windows of the
   model.
+- **seedvr2x Tile**, **seedvr2x Blocks Swapped** and **seedvr2x Window Length**, in the node
+  library's `seedvr2x/plan settings`, give a number of the plan's a value of your own
+  ([Setting a value yourself](#setting-a-value-yourself)). The other three are in `seedvr2x`.
 
 Each upscale node takes `images` first, then `models`, and gives `images` and `plan`. Its settings
 are widgets, each at its default:
@@ -35,24 +38,33 @@ are widgets, each at its default:
 | seed | `42` | ComfyUI's seed with its control after generate, `fixed`. |
 | plan only | off | Make the plan, say it and give it as text, and stop: no model is loaded and the nodes after the images output do not run. |
 
-The numbers the plan makes are optional inputs, sockets with no widget. Unconnected, the plan
-chooses, and its text says what it chose (`encode tile: auto -> 1024 px`); a number connected is
-taken exactly and the plan is built around it, or the run is refused before anything loads.
-
-| Input | Values |
-| --- | --- |
-| encode tile, decode tile | The VAE's tiles, squares of this many output pixels a side: 512 to 2048 in steps of 64, or `2112` for no tiles, the whole image at once. |
-| blocks swapped | The model's blocks that wait in RAM and pass through the card in turn, from `0` (none) to 36. |
-| window length (Upscale Video) | The longest stretch of frames the model works on at once, in groups of 4 frames, from 5 to 128. |
-
-Connect an `Int` node to one to set it. ComfyUI's `Primitive` node, which a double click on such
-an input makes, sends it no value in ComfyUI v0.44.0 (its frontend 1.57.6): the plan's text then
-says `auto`. No value node takes the input's range from it, so a value outside it is refused when
-the node starts, saying the range.
+The numbers the plan makes are optional inputs: [Setting a value yourself](#setting-a-value-yourself).
 
 Each upscale node makes its plan at run time, where the input's size and the card are known, and
 says it three ways: on the node, in ComfyUI's console, and as its `plan` output, text that
 `Preview as Text` shows. The plan is made for the card as it would be without ComfyUI's own models.
+
+## Setting a value yourself
+
+The numbers the plan makes are optional inputs of the upscale nodes, each a socket of its own
+type: `encode tile` and `decode tile`, `blocks swapped`, and Upscale Video's `window length`.
+Unconnected, the plan chooses, and its text says what it chose (`encode tile: auto -> 1024 px`).
+To set one, drag a link out of the socket and release it on the canvas: ComfyUI offers the one
+node that gives that type, first in its search box, where Enter adds it already connected, and
+among the suggestions of its link menu, which a release with Shift opens instead (ComfyUI's
+setting `Comfy.LinkRelease.Action` swaps the two). The node library lists them under
+`seedvr2x/plan settings`. Each value node carries its range, its step and a description:
+
+| Node | Widgets | Gives |
+| --- | --- | --- |
+| seedvr2x Tile | tile size (px): 512 to 2048 in steps of 64, 1024 by default; whole image at once: off by default | a tile for encode tile or decode tile, or no tiles where whole image at once is on |
+| seedvr2x Blocks Swapped | blocks swapped: 0 to 36, 0 by default | the model's blocks that wait in RAM and pass through the card in turn |
+| seedvr2x Window Length | window length (frames): 17 to 509 in steps of 4, 41 by default | the longest stretch of a clip the model works on at once |
+
+A value connected is taken exactly and the plan is built around it, or the run is refused before
+anything loads. Each widget keeps ComfyUI's input socket, so an `Int` node, or any node that gives
+an integer, can drive the value through its value node; a number off the node's grid is then
+refused when the value node runs.
 
 ## Install
 

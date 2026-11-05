@@ -85,7 +85,7 @@ def test_a_clip_is_the_libraries_clip(machine: StandIn, tmp_path) -> None:
     assert out.shape == (33, 48, 80, 3)
     assert out.numpy().tobytes() == expected.tobytes()
     assert "3 windows of the model, the longest" in plan
-    assert "window length: at most 5 groups of 4 frames (about 20 frames), as you set it" in plan
+    assert "window length: at most 17 frames, as you set it" in plan
 
 
 def test_a_clips_bar_moves_with_its_steps_and_ends_full(machine: StandIn, tmp_path) -> None:
@@ -159,8 +159,8 @@ def test_the_plan_is_said_on_the_node_in_the_console_and_given_as_text(
         # Each setting and what it came to: a value given as set, the rest as the plan chose.
         "attention: PyTorch's SDPA, as you set it",
         "blocks swapped: none, the whole model on the card while it works, as you set it",
-        "encode tile: auto -> no tiles, the whole image at once (needs up to ",
-        "decode tile: auto -> no tiles, the whole image at once (needs up to ",
+        "encode tile: auto -> the whole image at once, no tiles (needs up to ",
+        "decode tile: auto -> the whole image at once, no tiles (needs up to ",
         "colour correction: on (split)",
         "seed: 5",
         "keep in RAM between runs: on -> kept, ",
@@ -170,7 +170,7 @@ def test_the_plan_is_said_on_the_node_in_the_console_and_given_as_text(
     _, video = upscale_video(handle(tmp_path), settings, pictures(5), RESOLUTION, "32")
     assert "a clip of 5 frames 40x24 to 80x48" in video
     assert "the whole clip in one window of the model" in video
-    assert "window length: auto -> at most 2 groups of 4 frames (about 8 frames)" in video
+    assert "window length: auto -> at most 5 frames" in video
     assert "RAM: this run needs about" in video and "--" not in video
     assert [node for _, node in instance.texts] == ["31", "32"]
 

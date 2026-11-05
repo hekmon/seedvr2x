@@ -1,6 +1,7 @@
-"""seedvr2x's nodes for ComfyUI: three nodes (seedvr2x Models, Upscale Image, Upscale
-Video) that run SeedVR2 with seedvr2x's own loaders and placement (the library, `seedvr2x`,
-installed in ComfyUI's Python environment).
+"""seedvr2x's nodes for ComfyUI: seedvr2x Models, Upscale Image and Upscale Video, which run
+SeedVR2 with seedvr2x's own loaders and placement (the library, `seedvr2x`, installed in ComfyUI's
+Python environment), and the value nodes of the plan's settings (Tile, Blocks Swapped, Window
+Length).
 
 ComfyUI imports this folder from its custom_nodes directory, whatever the folder is called: it
 keys a custom node by the folder's full path and loads its `__init__.py`. The folder is not on
