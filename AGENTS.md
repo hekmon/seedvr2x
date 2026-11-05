@@ -112,8 +112,10 @@ is and what numz changed in it.
   whoever changes it doesn't read StableSR's functions in numz's `src/utils/color_fix.py`, lines
   25-247 at 4490bd1 (`adain_color_fix`, `wavelet_color_fix`, `calc_mean_std`,
   `adaptive_instance_normalization`, `wavelet_blur`, `wavelet_decomposition`,
-  `wavelet_reconstruction`). numz's own `lab` code there (lines 249-521, Apache-2.0) may be read;
-  no numz code is left in the correction since `split` replaced `lab`.
+  `wavelet_reconstruction`), nor ComfyUI's `comfy/ldm/seedvr/color_fix.py`, which holds functions
+  of the same names (`wavelet_blur` among them), under GPL-3.0 besides. numz's own `lab` code
+  there (lines 249-521, Apache-2.0) may be read; no numz code is left in the correction since
+  `split` replaced `lab`.
 - `tools/vendor.py diff` compares the copy with numz and with ByteDance, both read from the
   submodules' git objects at the pinned commits, never from their work trees: a moved submodule
   can't shift the reference. `tools/vendor.py check`, also run by the tests, verifies that a file
