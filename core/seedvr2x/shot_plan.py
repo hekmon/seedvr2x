@@ -343,6 +343,8 @@ class _Job:
     # The DiT's file's format, whose figures its phase and its weights' places are counted by
     # (peaks.DITS): fp16's, int8's or a dynamic GGUF file's.
     dit_model: Architecture = peaks.FP16
+    # The weights' pinned copies exist already (plan's held): none is counted against the host.
+    held: bool = False
 
     @property
     def margin(self) -> int:
@@ -385,6 +387,7 @@ def plan(
     compile_vae: bool = False,
     compile_fixed: bool = False,
     dit_model: Architecture = peaks.FP16,
+    held: bool = False,
 ) -> tuple[Plan, Peaks]:
     """The plan of a job of `shots` resized to target (frames.target_size), in the GPU memory it may
     count on, less its margin, and what it is predicted to take; refused (PlanError) when a pin
@@ -482,7 +485,17 @@ def plan(
     own compile_vae, whatever is asked (the units made are what they are), and is refused as
     any recorded shape; compile_fixed is the same for a plan planned again around a recorded
     shape (planner.plan_again), and for the compiled plan itself, whose refusal is
-    _compile_refusal's."""
+    _compile_refusal's.
+
+    held: the weights' pinned copies exist already, the models kept in system memory between
+    runs (model.Models.place, passes.HELD; DESIGN.md, Repository and apps, the nodes): the plan
+    counts none of them against host_available, the pinned part of the host count (_pinned) is
+    0, and the choices made only to pin less of it are never taken: neither the VAE kept on the
+    GPU for the DiT's phase (_vae_kept) nor the DiT kept there in the VAE's phases with tiles
+    shrunk (_dit_kept), whatever the host leaves. A host short of the process's own memory, a
+    shot's or a scratch's still refuses the plan or shortens its window. Not a word of the
+    plan's record: the weights' place is no part of what a plan shapes. The default, False, plans
+    as before."""
     if recorded is not None:
         compile_vae, compile_fixed = recorded.compile_vae, True
     if compile_vae and not compile_fixed:
@@ -499,14 +512,15 @@ def plan(
                 compile_vae=True,
                 compile_fixed=True,
                 dit_model=dit_model,
+                held=held,
             )
         except PlanError as refused:
             raise _compile_refusal(
                 refused,
                 (free, target, shots, pins, host_available),
-                dict(split=split, attention=attention, dit_model=dit_model),
+                dict(split=split, attention=attention, dit_model=dit_model, held=held),
             ) from None
-    job = _job(free, target, shots, split, attention, compile_vae, dit_model)
+    job = _job(free, target, shots, split, attention, compile_vae, dit_model, held)
     if pins.swap_blocks is not None and pins.swap_blocks > peaks.BLOCKS:
         swap = Setting("swap_blocks", str(pins.swap_blocks))
         raise PinRefused(
@@ -612,7 +626,8 @@ def _compile_refusal(
     (DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in", decided on 2026-10-29): the same
     command without --compile and, for a tile pinned, the pin within the shapes that the planner
     takes (the untiled pass if it is within them, else the largest tile that fits). `job` is plan's
-    free, target, shots, pins and host_available, `options` its split, attention and dit_model.
+    free, target, shots, pins and host_available, `options` its split, attention, dit_model and
+    held.
     A job no plain plan fits is refused as it was, whatever --compile asked: the plain plan's
     refusal.
 
@@ -911,7 +926,7 @@ def _host_short(job: _Job, made: Plan, host_available: int | None) -> tuple[int,
     a GiB, as its refusal would have said them (_unfit: each part to the nearest hundredth of a
     GiB, their sum, and what is there rounded down, a hundredth under the total at least)."""
     assert host_available is not None
-    taken = sum(_host_hundredths(made, _peaks(job, made).shot, job.dit_model))
+    taken = sum(_host_hundredths(made, _peaks(job, made).shot, job.dit_model, job.held))
     return taken, min(_hundredths(host_available, up=False), taken - 1)
 
 
@@ -967,6 +982,7 @@ def _job(
     attention: str = peaks.FLASH_ATTN_2,
     compile_vae: bool = False,
     dit_model: Architecture = peaks.FP16,
+    held: bool = False,
 ) -> _Job:
     if not shots:
         raise ValueError("a job without a shot")
@@ -987,6 +1003,7 @@ def _job(
         attention,
         compile_vae,
         dit_model,
+        held,
     )
 
 
@@ -1238,7 +1255,8 @@ def _vae_kept(job: _Job, plan: Plan, host_available: int | None) -> Plan | None:
     more blocks swapped as that takes, the fewest, where the plan as made fits the GPU's memory
     and not the system's; None where it doesn't apply: the system memory unchecked or enough,
     a phase over the budget, the VAE's weights there already, or no count of swapped blocks
-    holding the window with them. Not chosen under --swap-blocks, taken exactly (plan).
+    holding the window with them; nor for weights held (plan's held), whose pinned copies this
+    would spare nothing of. Not chosen under --swap-blocks, taken exactly (plan).
 
     DESIGN.md has the VAE leave the DiT's phase before a block is swapped (Memory planner,
     Choices, 1: "the VAE off the GPU for the DiT's phase first, then as many blocks swapped as
@@ -1255,7 +1273,13 @@ def _vae_kept(job: _Job, plan: Plan, host_available: int | None) -> Plan | None:
     refused (tests/test_shot_plan.py)."""
     predicted = _peaks(job, plan)
     over = any(predicted.need(phase) + job.margin > job.free for phase in PHASES)
-    if host_available is None or over or predicted.host <= host_available or plan.vae_in_dit:
+    if (
+        job.held
+        or host_available is None
+        or over
+        or predicted.host <= host_available
+        or plan.vae_in_dit
+    ):
         return None
     counts = range(max(plan.swapped, peaks.SLOTS) + 1, peaks.BLOCKS + 1)
     fits = (count for count in counts if _dit_need(job, plan.window, count, True) <= job.budget)
@@ -1285,7 +1309,8 @@ def _dit_kept(job: _Job, plan: Plan, host_available: int | None, pins: Pins) -> 
     taken, with the largest tiles that do; where none does, the last one made, which takes the
     least, for the shorter windows' search and the refusal's figures (plan). None where it
     doesn't apply: the system memory unchecked or enough, a phase over the budget, or no tile
-    under a pass's own that keeps one block more.
+    under a pass's own that keeps one block more; nor for weights held (plan's held), the
+    pinned copies this would spare being counted none.
 
     A pinned pass keeps its tiles, as on any host ("never under a tile pin"), the other one
     still shrinking. The swapped blocks stay as they are, under --swap-blocks or not: each is
@@ -1304,7 +1329,7 @@ def _dit_kept(job: _Job, plan: Plan, host_available: int | None, pins: Pins) -> 
     output a little)."""
     predicted = _peaks(job, plan)
     over = any(predicted.need(phase) + job.margin > job.free for phase in PHASES)
-    if host_available is None or over or predicted.host <= host_available:
+    if job.held or host_available is None or over or predicted.host <= host_available:
         return None
     passes: tuple[tuple[Phase, Tiles | None, bool], ...] = (
         ("encode", plan.encode_tiles, pins.encode_tile is not None),
@@ -1661,7 +1686,7 @@ def _residents(plan: Plan) -> tuple[int | None, int | None]:
     return plan.resident_encode, plan.resident_decode
 
 
-def _pinned(plan: Plan, dit_model: Architecture) -> int:
+def _pinned(plan: Plan, dit_model: Architecture, held: bool = False) -> int:
     """The pinned system memory of the plan, in bytes: a copy of each part of the weights that
     leaves the GPU in some phase, of its own size rounded up to a page (blockswap.HostCopy;
     DESIGN.md, BlockSwap, rewritten), as the loader makes them (model.load_models: the parts of
@@ -1669,7 +1694,11 @@ def _pinned(plan: Plan, dit_model: Architecture) -> int:
     doesn't keep; the DiT's other parameters when a VAE phase keeps nothing of it; the VAE's
     weights when they leave the DiT's phase; the DiT's in the format of its file (dit_model).
     In fp16, 15.19 GiB for the 36 blocks, 15.35 with the other parameters, 15.81 with the VAE
-    (measured, milestone 3, 2026-10-11); in int8, by its headers, 7.61, 7.76 and 8.23."""
+    (measured, milestone 3, 2026-10-11); in int8, by its headers, 7.61, 7.76 and 8.23. None of
+    them with `held` (plan): the copies exist already, taken by the models kept in system
+    memory, and this plan's run takes none more."""
+    if held:
+        return 0
     parts = list(peaks.leaving_blocks(dit_model, _leaving(plan)))
     parts += [peaks.other_bytes(dit_model)] if 0 in _residents(plan) else []
     parts += [] if plan.vae_in_dit else [peaks.VAE_WEIGHTS]
@@ -1710,20 +1739,23 @@ def _peaks(job: _Job, plan: Plan) -> Peaks:
     (scratch.Scratch), and the allowance is still counted, as DESIGN.md counts it, for the page
     cache its mapping works in."""
     latents = _longest(job.lengths, plan.window)
-    held, moment, holder = _shot_held(job, plan)
+    held_by_shot, moment, holder = _shot_held(job, plan)
     return Peaks(
         job.free,
         job.budget,
         _vae_peak(job, "encode", plan.encode_tiles, plan.resident_encode, plan.swapped),
         _dit_need(job, plan.window, plan.swapped, plan.vae_in_dit),
         _vae_peak(job, "decode", plan.decode_tiles, plan.resident_decode, plan.swapped),
-        HOST_RESIDENT + _pinned(plan, job.dit_model) + held + plan.scratch_allowance,
+        HOST_RESIDENT
+        + _pinned(plan, job.dit_model, job.held)
+        + held_by_shot
+        + plan.scratch_allowance,
         _kept(job, plan),
         latents,
         peaks.tokens(job.padded, 1),
         job.reading,
         job.attention,
-        held,
+        held_by_shot,
         moment,
         holder,
         dit_model=job.dit_model,
@@ -1806,7 +1838,7 @@ def _allowance(job: _Job, plan: Plan, host_available: int | None) -> int:
     kept = _kept(job, plan)
     if host_available is None:
         return min(kept, ALLOWANCE_UNKNOWN_HOST)
-    left = host_available - _pinned(plan, job.dit_model) - _shot_held(job, plan)[0]
+    left = host_available - _pinned(plan, job.dit_model, job.held) - _shot_held(job, plan)[0]
     return max(0, min(kept, left // 2, left - HOST_RESIDENT))
 
 
@@ -1841,7 +1873,9 @@ def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
     if host_available is not None and peaks.host > host_available:
         # Each part as the plan's lines say it, and the total their sum as said, so that the
         # message's figures add up (_host_hundredths).
-        process, pinned, held, allowance = _host_hundredths(plan, peaks.shot, job.dit_model)
+        process, pinned, held, allowance = _host_hundredths(
+            plan, peaks.shot, job.dit_model, job.held
+        )
         taken = [(process, "for the process")]
         if pinned:
             left = _left(plan, "the DiT's other parameters", "the VAE's weights")
@@ -1898,7 +1932,9 @@ def _refusing(job: _Job, plan: Plan, host_available: int | None) -> Phase | Lite
     return ""
 
 
-def _host_hundredths(plan: Plan, shot: int, dit_model: Architecture) -> tuple[int, int, int, int]:
+def _host_hundredths(
+    plan: Plan, shot: int, dit_model: Architecture, held: bool = False
+) -> tuple[int, int, int, int]:
     """What the plan takes of system memory, as its line and a refusal for it say it (planner.said,
     _unfit), in hundredths of a GiB: the process's own (HOST_RESIDENT), the pinned copies
     (_pinned), what the run holds of a shot at the most, `shot` bytes (Peaks.shot), and the
@@ -1909,7 +1945,7 @@ def _host_hundredths(plan: Plan, shot: int, dit_model: Architecture) -> tuple[in
     the GPU's memory is, a refusal would say 15.82 where the plan's line says 15.81."""
     return (
         _nearest(HOST_RESIDENT),
-        _nearest(_pinned(plan, dit_model)),
+        _nearest(_pinned(plan, dit_model, held)),
         _nearest(shot),
         _nearest(plan.scratch_allowance),
     )

@@ -348,6 +348,27 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   but in a path or the advised command); `test_weights.py`, `test_pull.py`, `test_blockswap.py`
   and `test_picture.py` each kind raised by its sites, their texts with options rendered by
   `cli_words`.
+- Models kept in their pinned copies and placed per run (`passes.HELD`, `Models.place` and
+  `Models.release` in `seedvr2x/model.py`; DESIGN.md, Repository and apps, the nodes):
+  `tests/test_held.py` on `test_blockswap.py`'s toys and simulated streams, loaded as
+  `load_models` loads them for `HELD`: models placed for each of five plans, in turn forwards and
+  backwards, with a release between or place alone, giving through `Models.enter` the bits of
+  models loaded directly for that plan and the bytes the placement keeps; nothing read again
+  (reads counted) and the pinned copies the same memory; the VAE staying in the DiT's phase where
+  the plan says so, and a job's models keeping the VAE away as before; release leaving nothing on
+  the device, idempotent, refusing an `enter` before the next `place`, safe after a forward that
+  raised and after a release that failed half-way; a `place` that can't be made changing
+  nothing; the VAE's causal memory and the vendored RoPE's `lru_cache` dropped by release and by
+  `model.forget`, for any `Models` (a dropped job's models leave no RoPE module alive); only
+  `HELD` itself, never a plan equal to it, making models kept; the
+  modules' buffers and the text embeddings copied to the CPU by release and back by place, equal
+  to the bit, with a stand-in card and a walk of the models (`strays`) finding no tensor left on
+  a device or in a cache. The
+  loader with `HELD` on the real weights is a GPU test, not yet written. The planners' `held`
+  (`shot_plan.plan`, `still_plan.plan`): `tests/test_shot_plan.py` and `tests/test_still_plan.py`
+  hold the plan the card alone gives where the host is short, no pinned copy counted, a job the
+  host refused planned, `held=False` changing no plan (the plan matrix's 5,120 cases too), and
+  `_vae_kept` and `_dit_kept` returning nothing for weights held.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
   `test_pull_cli.py` holds what the command line does over it.

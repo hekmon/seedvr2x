@@ -116,6 +116,7 @@ class StillPlan:
         int | None
     )  # bytes of system memory available as the plan was made; None: unread
     tightened: str = ""  # the refusal with the usual reserve, where the tight reserve was taken
+    held: bool = False  # the weights' pinned copies existed already: `pinned` is 0 (plan's held)
 
     @property
     def margin(self) -> int:
@@ -154,6 +155,7 @@ class _Job:
     pins: Pins
     process: int
     host_available: int | None
+    held: bool = False  # the weights' pinned copies exist already (plan's held)
 
     @property
     def free(self) -> int:
@@ -183,6 +185,7 @@ def plan(
     split: bool = True,
     pins: Pins = NO_PINS,
     picture: tuple[int, int] | None = None,
+    held: bool = False,
 ) -> StillPlan:
     """The plan for every picture whose output is within `bound`, (long, short) in pixels, each
     side even (frames.output_size) and either orientation, in the GPU memory it may count on
@@ -223,7 +226,14 @@ def plan(
     (_input_refused).
     Then, on a held run, a refusal is planned again with memory.RESERVE_TIGHT in
     memory.RESERVE's place, as the planner's plan does (memory.tightened; DESIGN.md, Allocator),
-    only under torch's own allocator with expandable segments (Reading.expandable)."""
+    only under torch's own allocator with expandable segments (Reading.expandable).
+
+    held: the weights' pinned copies exist already, the models kept in system memory between
+    runs (model.Models.place, passes.HELD; DESIGN.md, Repository and apps, the nodes): the plan
+    counts none of them against `host_available`, its `pinned` is 0, and step 4's choices, which
+    only pin less system memory, are never taken (_vae_kept, _dit_kept), whatever the host
+    leaves; a host short of the process's own memory and a scratch still refuses the plan. The
+    default, False, plans as before."""
     _check_bound(bound)
     if picture is not None:
         height, width = output_size(picture)
@@ -254,6 +264,7 @@ def plan(
         pins,
         process,
         host_available,
+        held,
     )
     if pins.swap_blocks is not None and pins.swap_blocks > peaks.BLOCKS:
         swap = Setting("swap_blocks", str(pins.swap_blocks))
@@ -381,6 +392,7 @@ def _job_of(plan: StillPlan) -> _Job:
         plan.pins,
         plan.process,
         plan.host_available,
+        plan.held,
     )
 
 
@@ -1373,12 +1385,15 @@ def _both(models: ModelPlan) -> tuple[int | None, int | None]:
     return models.resident_encode, models.resident_decode
 
 
-def _pinned(models: ModelPlan, dit_model: Architecture) -> int:
+def _pinned(models: ModelPlan, dit_model: Architecture, held: bool = False) -> int:
     """The pinned system memory of the plan, in bytes: a copy of each part of the weights that
     leaves the GPU in some phase, of its own size rounded up to a page (blockswap.HostCopy), as
     the planner's _pinned counts them: each block of the DiT that is swapped or that a VAE phase
     doesn't keep; the DiT's other parameters when a VAE phase keeps nothing of it; the VAE's
-    weights when they leave the DiT's phase; the DiT in the format of its file."""
+    weights when they leave the DiT's phase; the DiT in the format of its file. None with `held`
+    (plan): the copies exist already."""
+    if held:
+        return 0
     parts = list(peaks.leaving_blocks(dit_model, _leaving(models)))
     parts += [peaks.other_bytes(dit_model)] if 0 in _both(models) else []
     parts += [] if models.vae_in_dit else [peaks.VAE_WEIGHTS]
@@ -1404,9 +1419,10 @@ def _account(job: _Job, models: ModelPlan) -> StillPlan:
         job.process,
         _dit_need(job, models.swapped, models.vae_in_dit),
         windows_most(job.bound, job.picture),
-        _pinned(models, job.dit_model),
+        _pinned(models, job.dit_model, job.held),
         0,
         job.host_available,
+        held=job.held,
     )
     tiled = any(
         found is not None and found[0] is not None
@@ -1425,10 +1441,11 @@ def _vae_kept(job: _Job, made: StillPlan) -> StillPlan | None:
     """The plan with the VAE's weights left on the GPU in the DiT's phase and as many more blocks
     swapped as that takes, the fewest, where the plan as made fits the GPU's memory and not the
     system's; None where it doesn't apply: the VAE's weights are there already, --swap-blocks is
-    pinned (taken exactly), or no count of swapped blocks holds the DiT's phase with them. The
+    pinned (taken exactly), no count of swapped blocks holds the DiT's phase with them, or the
+    weights are held (plan's held), their pinned copies there already. The
     planner's _vae_kept: the VAE's weights away are 0.47 GiB more of pinned memory, and a swapped
     block costs none where a VAE phase sends it away anyway."""
-    if made.models.vae_in_dit or job.pins.swap_blocks is not None:
+    if job.held or made.models.vae_in_dit or job.pins.swap_blocks is not None:
         return None
     counts = range(max(made.models.swapped, peaks.SLOTS) + 1, peaks.BLOCKS + 1)
     swapped = next(
@@ -1446,7 +1463,10 @@ def _dit_kept(job: _Job, made: StillPlan) -> StillPlan | None:
     the least, for the refusal's figures. None where no block more can be kept. The planner's
     _dit_kept shrinks the tiles of the one frame size of its job to keep them; a bound's tiles
     are chosen per picture, so here the placement is what rises, to the most the proof of the
-    smallest tiles (or the pin's) allows."""
+    smallest tiles (or the pin's) allows. None for weights held (plan's held): the pinned copies
+    it would spare are counted none."""
+    if job.held:
+        return None
     models, kept = made.models, None
     fixed = peaks.BLOCKS - models.swapped
     while True:
@@ -1635,6 +1655,8 @@ def said(
     process, pinned, scratch = _host_hundredths(plan)
     left = _left(models, "the DiT's other parameters", "the VAE")
     copies = f"{pinned / 100:.2f} GiB pinned for {left}" if left else "nothing pinned"
+    if plan.held:
+        copies = "none counted for the weights, pinned already"
     scratch_said = (
         f"; {scratch / 100:.2f} GiB for the scratch of a tiled pass of one frame" if scratch else ""
     )

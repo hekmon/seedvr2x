@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 from dataclasses import replace
+from typing import Any
 
 import pytest
 from library_fixtures import cli_words
@@ -1762,6 +1763,87 @@ def test_a_picture_refused_for_the_memory_names_the_largest_picture_that_fits() 
             f"the largest picture that fits there is {fits[1]}x{fits[0]}"
         )
         made(error.fits, 4 * GIB, input_pixels=1000, picture=fits)
+
+
+# ---- Weights held: the pinned copies exist already (still_plan.plan's held) ----------------------
+
+
+def held_made(bound: still_plan.Bound, free: int | Reading, host: int | None) -> StillPlan:
+    return still_plan.plan(
+        bound, free, host, process=PROCESS, input_pixels=INPUT, split=True, held=True
+    )
+
+
+def test_held_weights_count_no_pinned_memory_and_are_planned_as_the_card_alone_gives() -> None:
+    # The same two jobs as the choices for a short host above: with the copies existing already,
+    # neither the VAE kept for the DiT's phase nor the DiT kept in the VAE's phases is taken.
+    free = card(24)
+    # The first takes the VAE kept (a byte under what its plan as the card gives it takes), the
+    # second the DiT kept in the VAE's phases.
+    eight = made(EIGHT_K, free, 64 * GIB).host - 1
+    for bound, host in ((EIGHT_K, eight), (FOUR_K, round(6.0 * GIB))):
+        plain, unchecked = made(bound, free, host), made(bound, free, None)
+        kept = held_made(bound, free, host)
+        assert (plain.models, plain.pinned) != (unchecked.models, unchecked.pinned)
+        assert kept.models == unchecked.models and kept.held and not plain.held
+        assert kept.pinned == 0
+        assert kept.host == unchecked.host - unchecked.pinned
+        assert kept.host_available == host
+
+
+def test_a_job_the_host_refused_is_planned_with_the_weights_held() -> None:
+    free, host = card(24), round(12 * GIB)
+    with pytest.raises(PlanRefusal) as refused:
+        made(EIGHT_K, free, host)
+    assert refused.value.phase == "host" and "pinned for" in str(refused.value)
+    kept = held_made(EIGHT_K, free, host)
+    assert kept.host <= host
+    # A host that holds neither the process nor a scratch refuses it too, counting no copy.
+    with pytest.raises(PlanRefusal) as short:
+        held_made(EIGHT_K, free, round(2.5 * GIB))
+    assert short.value.phase == "host"
+    assert "for the process" in str(short.value) and "pinned for" not in str(short.value)
+
+
+def test_held_false_changes_no_plan() -> None:
+    for bound, free, host in (
+        (EIGHT_K, card(24), 64 * GIB),
+        (EIGHT_K, card(24), None),
+        (FOUR_K, card(24), round(6.0 * GIB)),
+        (FOUR_K, card(16), round(8.0 * GIB)),
+    ):
+        kwargs: dict[str, Any] = dict(process=PROCESS, input_pixels=INPUT, split=True)
+        try:
+            before = still_plan.plan(bound, free, host, **kwargs)
+        except PlanRefusal as error:
+            # The same refusal, in the same words.
+            with pytest.raises(PlanRefusal) as again:
+                still_plan.plan(bound, free, host, **kwargs, held=False)
+            assert str(again.value) == str(error) and again.value.phase == error.phase
+            continue
+        assert still_plan.plan(bound, free, host, **kwargs, held=False) == before
+    assert not made(EIGHT_K, card(24), 64 * GIB).held
+
+
+def test_the_choices_for_the_host_are_not_made_on_held_weights() -> None:
+    free = card(24)
+    base = made(EIGHT_K, free, 64 * GIB)
+    plain_job, held_job = (replace(still_plan._job_of(base), held=flag) for flag in (False, True))
+    assert still_plan._vae_kept(plain_job, base) is not None
+    assert still_plan._vae_kept(held_job, base) is None
+    four = made(FOUR_K, free, 64 * GIB)
+    plain_job, held_job = (replace(still_plan._job_of(four), held=flag) for flag in (False, True))
+    assert still_plan._dit_kept(plain_job, four) is not None
+    assert still_plan._dit_kept(held_job, four) is None
+    # A plan made held keeps its flag for the figures that follow from it.
+    assert still_plan._job_of(held_made(FOUR_K, free, None)).held
+
+
+def test_a_held_plan_says_none_of_the_copies_are_counted() -> None:
+    plan = held_made(FOUR_K, card(24), None)
+    words = "\n".join(still_plan.said(plan))
+    assert "none counted for the weights, pinned already" in words
+    assert "GiB pinned for" not in words
 
 
 # ---- The refusals by kind (errors.PlanRefused) --------------------------------------------------

@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from io import BufferedReader, BytesIO
 from math import prod
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, NoReturn, cast
 
 import torch
@@ -847,6 +848,13 @@ class Placement:
     def block_bytes(self) -> int:
         """The device bytes of a slot: the largest swapped block's; 0 with none swapped."""
         return max((part.size for part in self._streaming), default=0)
+
+    @property
+    def parts(self) -> Mapping[str, Part]:
+        """The parts this placement moves, by name, read-only: the same parts, host copies and
+        all, that another placement takes after close (Models.place builds its next from
+        them)."""
+        return MappingProxyType(self._parts)
 
     @property
     def host_bytes(self) -> int:

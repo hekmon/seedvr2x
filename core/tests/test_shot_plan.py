@@ -2257,6 +2257,99 @@ def test_resumed_on_another_attention_backend() -> None:
     )
 
 
+# ---- Weights held: the pinned copies exist already (shot_plan.plan's held) -----------------------
+
+
+def one_film(*frames: int) -> list[Shot]:
+    ends = [sum(frames[: index + 1]) for index in range(len(frames))]
+    return [Shot(end - count, end) for end, count in zip(ends, frames, strict=True)]
+
+
+# Three jobs a short host makes the planner shrink tiles, shorten the window or keep the VAE
+# for (test_the_vae_kept_first_costs_no_window's): the free memory, target, shots, host, split.
+SHORT_HOSTS = {
+    "4k": (67_645_735_689, UHD, one_film(23, 24, 150, 600), 12_050_198_642, False),
+    "5k": (46_170_899_209, (2880, 5120), one_film(149), 15_379_895_297, True),
+    "720p": (19 * GIB, (720, 1280), shots(12, 133), round(16.5 * GIB), False),
+}
+
+
+@pytest.mark.parametrize("name", list(SHORT_HOSTS))
+def test_held_weights_make_the_plan_the_card_alone_gives(name: str) -> None:
+    # The weights' pinned copies exist already: none is counted against the host, so that the
+    # choices made only to pin less of it (the VAE kept for the DiT's phase, the DiT kept in the
+    # VAE's phases with tiles shrunk, a window shortened for the blocks it pins) are never taken:
+    # the plan is the one the card alone gives, a host unchecked, but for the scratch's allowance,
+    # which follows what the host has left.
+    free, target, film, host, split = SHORT_HOSTS[name]
+    plain, plain_peaks = shot_plan.plan(free, target, film, Pins(), host, split=split)
+    made, held_peaks = shot_plan.plan(free, target, film, Pins(), host, split=split, held=True)
+    card, _ = shot_plan.plan(free, target, film, Pins(), None, split=split)
+    # Where the plan without it did take such a choice, or the tests below mean nothing.
+    assert (
+        plain_peaks.shrunk is not None
+        or plain_peaks.shortened is not None
+        or (plain.vae_in_dit != card.vae_in_dit)
+    )
+    assert replace(made, scratch_allowance=0) == replace(card, scratch_allowance=0)
+    assert held_peaks.shrunk is None and held_peaks.shortened is None
+    # Nothing pinned in the host count: the process's own, the shot and the scratch.
+    assert shot_plan._pinned(made, peaks.FP16, held=True) == 0  # pyright: ignore[reportPrivateUsage]
+    assert held_peaks.host == (shot_plan.HOST_RESIDENT + held_peaks.shot + made.scratch_allowance)
+    assert held_peaks.host < plain_peaks.host
+
+
+def test_a_job_refused_for_the_host_is_planned_with_the_weights_held() -> None:
+    free, target, film, _, split = SHORT_HOSTS["5k"]
+    host = 5 * GIB
+    words = refused(free, target, film, Pins(), host, split=split)
+    assert "pinned for" in words and "5.00 GiB are available" in words
+    made, held_peaks = shot_plan.plan(free, target, film, Pins(), host, split=split, held=True)
+    assert held_peaks.host <= host
+    # The same weights still leave the GPU in the plan's phases, held or not: only the host's
+    # count of them is 0.
+    assert made.swapped == 25 and not made.vae_in_dit
+    # A host that doesn't hold the process, a shot and no scratch is refused all the same, and
+    # its words count no pinned copy.
+    words = refused(free, target, film, Pins(), 2 * GIB, split=split, held=True)
+    assert "for the process" in words and "pinned for" not in words
+    assert "2.00 GiB are available" in words
+
+
+def test_held_false_plans_every_job_as_before() -> None:
+    for free, target, film, host, split in SHORT_HOSTS.values():
+        for available in (None, host, 5 * GIB):
+            job = (free, target, film, Pins(), available)
+            try:
+                before = shot_plan.plan(*job, split=split)
+            except PlanError as error:
+                assert refused(*job, split=split, held=False) == str(error)
+                continue
+            assert shot_plan.plan(*job, split=split, held=False) == before
+    # Pinned parts: the planner's function counts them unless it is told they exist.
+    plan_, _ = shot_plan.plan(*SHORT_HOSTS["5k"][:3], Pins(), None, split=True)
+    assert shot_plan._pinned(plan_, peaks.FP16) > 0  # pyright: ignore[reportPrivateUsage]
+    assert shot_plan._pinned(plan_, peaks.FP16, held=True) == 0  # pyright: ignore[reportPrivateUsage]
+
+
+def test_the_choices_for_the_host_are_not_taken_on_held_weights() -> None:
+    # The two functions that make them, called on a job that applies to them: they return a plan
+    # for the job as it was, and None for one whose weights are held.
+    free, target, film, host, split = SHORT_HOSTS["720p"]
+    plain_job = shot_plan._job(free, target, film, split)  # pyright: ignore[reportPrivateUsage]
+    held_job = shot_plan._job(free, target, film, split, held=True)  # pyright: ignore[reportPrivateUsage]
+    pins = Pins()
+    start, _ = shot_plan.plan(free, target, film, pins, None, split=split)
+    assert shot_plan._vae_kept(plain_job, replace(start, vae_in_dit=False), host) is not None  # pyright: ignore[reportPrivateUsage]
+    assert shot_plan._vae_kept(held_job, replace(start, vae_in_dit=False), host) is None  # pyright: ignore[reportPrivateUsage]
+    free, target, film, host, split = SHORT_HOSTS["5k"]
+    plain_job = shot_plan._job(free, target, film, split)  # pyright: ignore[reportPrivateUsage]
+    held_job = shot_plan._job(free, target, film, split, held=True)  # pyright: ignore[reportPrivateUsage]
+    start, _ = shot_plan.plan(free, target, film, pins, None, split=split)
+    assert shot_plan._dit_kept(plain_job, start, host, pins) is not None  # pyright: ignore[reportPrivateUsage]
+    assert shot_plan._dit_kept(held_job, start, host, pins) is None  # pyright: ignore[reportPrivateUsage]
+
+
 # ---- The refusals by kind (errors.PlanRefused) --------------------------------------------------
 
 

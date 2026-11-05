@@ -32,7 +32,7 @@ from tqdm import tqdm
 from seedvr2x import blockswap, int8, kquant, memory, weights
 from seedvr2x.blockswap import Part, Placement
 from seedvr2x.frames import BLACK, padding
-from seedvr2x.passes import Compilation, ModelPlan, Phase
+from seedvr2x.passes import HELD, Compilation, ModelPlan, Phase
 from seedvr2x.pull import Hashes
 from seedvr2x.vendor.common.config import create_object, load_config
 from seedvr2x.vendor.common.seed import set_seed as vendor_set_seed
@@ -91,6 +91,78 @@ class Models:
     placement: Placement | None = None  # the DiT's, when the plan swaps blocks or sends it away
     vae: Part | None = None  # the VAE's weights, when the plan sends them away
     phase: Phase | None = None  # the phase entered last; None after the load, the parts away
+    # The DiT's parts, every one, when the models were loaded with passes.HELD: kept between runs
+    # in their pinned copies, placed per run by place, sent back by release. None: the models
+    # were loaded for one plan, which no run can change.
+    parts: dict[str, Part] | None = None
+
+    def place(self, model_plan: ModelPlan) -> None:
+        """Place models loaded with passes.HELD for a run's plan: whatever the last run left is
+        sent back to the pinned copies first, then the buffers and the text embeddings come back
+        to the device (release took them off it; a copy, the same values), and a new Placement
+        takes the same parts, no copy and no read, with model_plan's swapped blocks. No weight is
+        on the device after it: Models.enter brings each phase's, as for a job's models. A method
+        rather than a function of load_models' module: it changes the models it is called on.
+
+        ValueError for models not loaded with HELD (their parts for one plan are all there is to
+        place), for a plan for another DiT than this one (_dit_parts), and for a plan with
+        compile_vae, a VAE compiled being a load's matter (compiling.compile_vae): never run
+        plain in its place."""
+        parts = self._held("place")
+        blocks = len(self.runner.dit.blocks)
+        _dit_parts(model_plan, blocks)
+        if model_plan.compile_vae:
+            raise ValueError("a plan with compile_vae for models placed, the VAE compiled at load")
+        self._send_back()
+        to_device = functools.partial(_to_device, device=self.device)
+        _move_buffers(self.runner.dit, to_device)
+        _move_buffers(self.runner.vae, to_device)
+        self.text_pos = _to_device(self.text_pos, self.device)
+        self.text_neg = _to_device(self.text_neg, self.device)
+        self.placement = Placement(self.runner.dit, self.device, model_plan.swapped, parts=parts)
+        self.model_plan = model_plan
+
+    def release(self) -> None:
+        """Send every weight back to its pinned copy, after a run, an error or a cancel: the
+        DiT's placement closed (its device work waited for, its hooks off, its slots freed), the
+        VAE's part left, what the VAE's causal convolutions and the DiT's RoPE keep from call to
+        call dropped, torch's cache trimmed (blockswap.Cuda.trim), the phase None. The models are
+        then in none: place them for the next run. Idempotent, and safe after a run that raised
+        in a window or a decode, whatever phase it was in: a part never brought is as it was.
+
+        ValueError for models not loaded with HELD. A release that raises (a CUDA error in the
+        wait) leaves the models as they were, to be released again.
+
+        Nothing of the models is left on the device: the buffers of the DiT and of the VAE (the
+        7B's RoPE tables, 108 of them, 24,774,336 B) and the text embeddings (1,249,280 B) are
+        copied to system memory, pageable, and place copies them back, exactly: a copy changes no
+        bit."""
+        self._send_back()
+        _move_buffers(self.runner.dit, _to_host)
+        _move_buffers(self.runner.vae, _to_host)
+        self.text_pos = _to_host(self.text_pos)
+        self.text_neg = _to_host(self.text_neg)
+        blockswap.Cuda(self.device).trim()
+
+    def _send_back(self) -> None:
+        """The weights of release and place: the placement closed, the VAE's part left, the
+        caches the modules keep dropped, no phase and no plan."""
+        self._held("release")
+        self.phase = None
+        self.model_plan = None
+        forget(self)
+        backend = blockswap.Cuda(self.device)
+        if self.vae is not None and self.vae.device is not None:
+            backend.wait(backend.compute())
+            self.vae.leave()
+        if self.placement is not None:
+            self.placement.close()
+            self.placement = None
+
+    def _held(self, what: str) -> dict[str, Part]:
+        if self.parts is None:
+            raise ValueError(f"{what}: the models weren't loaded with passes.HELD")
+        return self.parts
 
     def enter(self, phase: Phase) -> None:
         """Before a unit of `phase`, a shot's encode, a window or a decode: put on the device
@@ -107,6 +179,8 @@ class Models:
         # place), other programs filling the card stop the run here, before the unit passes it
         # (seedvr2x/memory.py).
         memory.check(self.device)
+        if self.parts is not None and self.model_plan is None:
+            raise RuntimeError("the models are released: Models.place puts them for a run")
         if self.model_plan is None or phase == self.phase:
             return
         # Unknown until every move is done: an enter that raises half-way, the VAE gone and the
@@ -114,7 +188,11 @@ class Models:
         self.phase = None
         started = time.monotonic()
         backend = blockswap.Cuda(self.device)
-        away = phase == "dit"  # the VAE's place in this phase, when it has a part
+        # The VAE's place in this phase, when it has a part: away in the DiT's phase where the
+        # plan says so. A job's models have a VAE part only for a plan that does (load_models),
+        # so for them this is "the DiT's phase" as before; models loaded with HELD always have
+        # one, and a plan placed on them (place) may keep the VAE there.
+        away = phase == "dit" and not self.model_plan.vae_in_dit
         if self.vae is not None and away and self.vae.device is not None:
             backend.wait(backend.compute())
             self.vae.leave()
@@ -180,6 +258,10 @@ def load_models(
     is read, once, and its SHA-256 proved or given at the end of its own load (Hashes.proved): a
     file whose bytes aren't those the run took them for is refused there, before the model is
     used (DESIGN.md, Weights, decided on 2026-11-03).
+
+    With passes.HELD itself, that object and not a plan equal to it, the models are kept between
+    runs: Models.parts holds every part of the DiT, and Models.place gives each run its plan. A
+    job's plan that equals HELD by value is a job's: its models serve that plan alone.
 
     Without a plan, every weight is on the device, for good. With one, the weights it has away
     from the device in some phase, the DiT's swapped blocks among them, are read straight into
@@ -309,6 +391,10 @@ def load_models(
 
     if model_plan is not None and (dit_parts or model_plan.swapped):
         models.placement = Placement(dit, device, model_plan.swapped, parts=dit_parts)
+    # By identity: a job's plan can equal HELD by value (swapped 0, nothing resident, the VAE away)
+    # and is still a job's, for one plan, whose models no run can place again.
+    if model_plan is HELD:
+        models.parts = dict(dit_parts)
     _say_pinned(models, [*dit_parts, *vae_parts])
     return models
 
@@ -325,6 +411,10 @@ def _say_pinned(models: Models, parts: Iterable[str]) -> None:
     swapped = {0: "none of the DiT's blocks swapped", 1: "the DiT's last block swapped"}.get(
         model_plan.swapped, f"the DiT's last {model_plan.swapped} blocks swapped"
     )
+    if model_plan is HELD:
+        # HELD's swapped is 0, but nothing stays on the device: a job's plan places the blocks
+        # at each run (Models.place), which "none swapped" would contradict.
+        swapped = "every weight in its pinned copy, placed by each run's plan"
     logger.info(
         "%.2f GiB of host memory pinned for the weights that leave the GPU: %s; %s",
         pinned / blockswap.GIB,
@@ -634,6 +724,20 @@ def to_latent(models: Models, mean: Tensor) -> Tensor:
     return latent
 
 
+def forget(models: Models) -> None:
+    """Drop what the models keep on the device between calls besides their parameters, for any
+    Models, loaded with passes.HELD or for a job's plan: the VAE's causal convolutions' memory
+    from slice to slice (_forget) and the RoPE frequencies the DiT's rotary modules cache
+    (_forget_rope), the latter an lru_cache of the vendored class that keeps the module alive
+    and, per window shape, its frequencies on the device (1.99 MB a latent at 1080p), up to 128
+    shapes. Whoever drops a Models without release (a run's models not kept, an error) calls
+    it first, or the cache keeps the dropped DiT's first module and its tensors until 128 other
+    shapes push them out. Safe at any time: the values are recomputed from the module's buffer
+    to the same bits."""
+    _forget(models.runner.vae)
+    _forget_rope(models.runner.dit)
+
+
 def _forget(vae: Any) -> None:
     """Clear the memory the VAE's causal convolutions keep from slice to slice, as numz's
     slicing_encode and slicing_decode do after their last slice (attn_video_vae.py:1269-1273,
@@ -641,6 +745,47 @@ def _forget(vae: Any) -> None:
     for module in vae.modules():
         if isinstance(module, InflatedCausalConv3d) and module.memory is not None:
             module.memory = None
+
+
+def _to_host(tensor: Tensor) -> Tensor:
+    """tensor in system memory, pageable, a copy where it was on a device (torch's own `to`,
+    which waits for the device's work on it); named so that the tests can stand in for the
+    device."""
+    return tensor.to("cpu")
+
+
+def _to_device(tensor: Tensor, device: torch.device) -> Tensor:
+    """tensor on device, the same dtype and values."""
+    return tensor.to(device)
+
+
+def _move_buffers(module: torch.nn.Module, move: Callable[[Tensor], Tensor]) -> None:
+    """Every registered buffer of module and its submodules moved by `move` (_to_host,
+    _to_device), in place in the module's own table:
+    rotary_embedding_torch's `cached_freqs` and `dummy` (the module's device is its dummy's), the
+    zero-filled buffers _load_weights registers. Nothing else in that package refers to a
+    buffer: its `cached_freqs_seq_len` is a Python int, and the module's buffers are not its
+    parameters, which the parts move."""
+    for each in module.modules():
+        for name, buffer in each._buffers.items():  # pyright: ignore[reportPrivateUsage]
+            if buffer is not None:
+                each._buffers[name] = move(buffer)  # pyright: ignore[reportPrivateUsage]
+
+
+def _forget_rope(dit: Any) -> None:
+    """Drop the RoPE frequencies the DiT's rotary modules cache, per (frames, rows, columns) of
+    a window, on the device: the vendored rope.py memoises get_axial_freqs with an lru_cache on
+    the class, of up to 128 entries keyed by the module and the shape, which keeps the first
+    block's module alive and (frames x rows x columns) x 60 float32 values of the 7B a shape
+    (1.99 MB a latent at 1080p), 126 of the 3B's. The values are recomputed from the module's
+    buffer when a shape comes again, to the same bits."""
+    cleared: set[Any] = set()
+    for module in dit.modules():
+        method = getattr(type(module), "get_axial_freqs", None)
+        clear = getattr(method, "cache_clear", None)
+        if clear is not None and method not in cleared:
+            clear()
+            cleared.add(method)
 
 
 def condition(models: Models, noise: Tensor, latent: Tensor) -> Tensor:

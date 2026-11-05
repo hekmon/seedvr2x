@@ -85,6 +85,19 @@ class ModelPlan:
     compile_vae: bool = False
 
 
+# The plan models are loaded with to hold every weight in its pinned host copy and none on the
+# device (model.load_models), for the models kept between runs and placed per run
+# (model.Models.place, release): every block of the DiT a part (nothing swapped, and no VAE phase
+# keeping any block, resident_encode and resident_decode 0), its parameters outside the blocks a
+# part (a VAE phase keeping nothing of the DiT), and the VAE a part (vae_in_dit False), which
+# model._dit_parts and the VAE's load turn into one part each: 36 blocks and the others for the
+# 7B, and the VAE. They pin what model.py's figures say: the 7B in fp16, 15.35 GiB (36 blocks of
+# 0.4220 GiB and the parameters outside them, DESIGN.md, BlockSwap, rewritten; the block tests of
+# tests/test_placement.py), and the VAE's 0.47 GiB, 15.81 GiB in all; less in int8 or GGUF
+# (shot_plan._pinned). Not compiled: a VAE compiled is a load's matter (compile_vae).
+HELD = ModelPlan(swapped=0, resident_encode=0, resident_decode=0, vae_in_dit=False)
+
+
 @dataclass(frozen=True)
 class Plan:
     """A job's plan. Its first part shapes the output, where a long shot's joins fall and where
