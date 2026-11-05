@@ -23,13 +23,14 @@ import calibration
 import run
 import timing
 from calibration import FIRST, FRAMES, SHORT, Calibrated, calibrate
-from job import OutputSegment, Shot, shot_runs
+from job import OutputSegment, shot_runs
 from media.checksums import read_checksums
-from plan import Plan
+from scratch import Scratch
 from seedvr2x import peaks
 from seedvr2x.frames import padded_size
-from seedvr2x.passes import Tiles
-from shot import Correction, shot_layout
+from seedvr2x.passes import Plan, Tiles
+from seedvr2x.shots import Shot, shot_layout
+from shot import Correction
 from timing import (
     RATIOS,
     Clock,
@@ -333,7 +334,7 @@ def test_units_of_the_first_unit_pays_against_the_start_phase() -> None:
 
 def test_units_of_a_resumed_run_s_first_window_draws_the_whole_run() -> None:
     # Run 2's first window is done: its second is the first left, which draws the noise of all
-    # 6 latents (shot.sample_windows draws it with the first window made).
+    # 6 latents (shot_pass.sample_windows draws it with the first window made).
     units = units_of(
         SHOTS, SEGMENTS, 1, 5, 100, encoded=[True] * 3, windows_done=[1, 1, 1], start="dit"
     )
@@ -792,7 +793,7 @@ class Steady:
     ) -> Any:
         assert models is self.models
         self.called.append(("window", layout))
-        # The first window of a run draws its noise (shot.sample_windows).
+        # The first window of a run draws its noise (shot_pass.sample_windows).
         self.took("window", self.windowing(layout[0][1] - layout[0][0]))
         yield latent
 
@@ -838,15 +839,15 @@ class Quick(Steady):
 
 
 def untiled(**more: Any) -> dict[str, Any]:
-    return {"tiles": None, "scratch": None, **more}
+    return {"tiles": None, "store": None, **more}
 
 
 def test_the_calibrations_decodes_take_the_latent_in_the_dits_layout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The compiler's guards read the latent's strides, and a run's decodes take the DiT's output,
-    # (T', h, w, 16) dense (shot.merge_windows): the encode's channel-major latent, handed on as
-    # it is, would be a layout of its own for a compiled decoder (design's ruling of 2026-10-30,
+    # (T', h, w, 16) dense (shot_pass.merge_windows): the encode's channel-major latent, handed on
+    # as it is, would be a layout of its own for a compiled decoder (design's ruling of 2026-10-30,
     # baton 3).
     steady = Steady(monkeypatch)
     calibrate(steady.models, TARGET, Plan(9), 9)
@@ -891,18 +892,17 @@ def test_calibration(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(found, Calibrated)
     assert (FIRST, FRAMES, SHORT) == (5, 13, 2)
     size = TARGET
-    rest = {"allowance": plan.scratch_allowance}
-    decoding = {"tiles": None, "scratch": None, **rest}
+    decoding = {"tiles": None, "store": None}
     assert steady.called == [
         # Each encode's two lengths right after a window (the warm-up's first, at the encode's
         # largest shape, unmeasured), as a run's encodes come; the second length: 0.88 s a frame
         # at 5 frames, change of phase included, so 3 s is about 3 frames, and never fewer
         # than 13.
-        ("encode", 13, size, TARGET, untiled(**rest)),
+        ("encode", 13, size, TARGET, untiled()),
         ("window", [(0, 2)]),
-        ("encode", 5, size, TARGET, untiled(**rest)),
+        ("encode", 5, size, TARGET, untiled()),
         ("window", [(0, 2)]),
-        ("encode", 13, size, TARGET, untiled(**rest)),
+        ("encode", 13, size, TARGET, untiled()),
         # Then the windows and the decodes, each after a step of its own kind: the longest's
         # warm-up, the draw alone, the two lengths.
         ("window", [(0, 9)]),
@@ -1154,20 +1154,23 @@ def test_calibration_reads_frames_of_the_source_s_size(monkeypatch: pytest.Monke
 def test_calibration_passes_a_tiled_plans_scratch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The run's rule (run._scratch): a scratch directory for a tiled pass alone.
+    # The run's rule (run._scratch): a scratch, its directory and the plan's allowance, for a tiled
+    # pass alone.
     steady = Steady(monkeypatch)
     plan = Plan(9, encode_tiles=Tiles(512), scratch_allowance=1 << 30)
     calibrate(steady.models, TARGET, plan, 9)
     encodes = [call[4] for call in steady.called if call[0] == "encode"]
     decodes = [call[3] for call in steady.called if call[0] == "decode"]
-    assert all(o["tiles"] == Tiles(512) and isinstance(o["scratch"], Path) for o in encodes)
-    assert all(o["tiles"] is None and o["scratch"] is None for o in decodes)
-    assert all(o["allowance"] == 1 << 30 for o in [*encodes, *decodes])
+    assert all(o["tiles"] == Tiles(512) and isinstance(o["store"], Scratch) for o in encodes)
+    assert all(isinstance(o["store"].directory, Path) for o in encodes)
+    assert all(o["store"].allowance == 1 << 30 for o in encodes)
+    assert all(o["tiles"] is None and o["store"] is None for o in decodes)
     steady.called.clear()
     both = Plan(9, encode_tiles=Tiles(512), decode_tiles=Tiles(256))
     calibrate(steady.models, TARGET, both, 9)
     decodes = [call[3] for call in steady.called if call[0] == "decode"]
-    assert all(o["tiles"] == Tiles(256) and isinstance(o["scratch"], Path) for o in decodes)
+    assert all(o["tiles"] == Tiles(256) and isinstance(o["store"], Scratch) for o in decodes)
+    assert all(isinstance(o["store"].directory, Path) for o in decodes)
 
 
 class FakeCopy:

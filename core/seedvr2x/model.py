@@ -607,7 +607,8 @@ def to_latent(models: Models, mean: Tensor) -> Tensor:
 
     Its memory is numz's latent's: channel-major storage, (16, T', h, w), seen through a permuted
     view, the layout torch gives numz's expression on the whole batch, whatever T', h and w
-    (tests/test_tiling.py). The noise drawn from the latent depends on it (shot.sample_windows)."""
+    (tests/test_tiling.py). The noise drawn from the latent depends on it
+    (shot_pass.sample_windows)."""
     runner = models.runner
     scale = runner.config.vae.scaling_factor
     shift = runner.config.vae.get("shifting_factor", 0.0)

@@ -344,8 +344,8 @@ def warm(models: Models, shapes: Shapes) -> None:
     and model.latent_slices.
 
     The decoder's latent is warmed in one memory layout, the DiT's: (T', h, w, 16) dense, what
-    the run's decodes take (shot.merge_windows), and the calibration's too since design's ruling
-    of 2026-10-30 (baton 3), which hands decode_shot the encode's latent made dense
+    the run's decodes take (shot_pass.merge_windows), and the calibration's too since design's
+    ruling of 2026-10-30 (baton 3), which hands decode_shot the encode's latent made dense
     (calibration.calibrate). The compiler's guards tell layouts apart by the latent's strides.
     On 2026-10-30 a 1080p job of three shots, warmed with the encode's layout alone, the
     channel-major one (model.to_latent), compiled 12 more graphs in its decodes (TORCH_LOGS=
@@ -391,5 +391,5 @@ def warm(models: Models, shapes: Shapes) -> None:
 
 def _latent(latents: int, rows: int, columns: int) -> torch.Tensor:
     """Zeros for a shot's latent (T', h, w, 16) in system memory, dense as the DiT gives it and
-    shot.merge_windows keeps it."""
+    shot_pass.merge_windows keeps it."""
     return torch.zeros((latents, rows, columns, 16), dtype=COMPUTE_DTYPE)

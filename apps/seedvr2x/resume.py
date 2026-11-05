@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
-from job import JobError, OutputSegment, Shot, window_layout
+from job import OutputSegment
 from manifest import (
     ASSEMBLED,
     COMPILE_CACHE,
@@ -35,8 +35,10 @@ from manifest import (
 from media.assembly import work_file
 from media.files import command_partial, partial_path
 from media.source import Source
-from plan import Plan
+from seedvr2x.errors import JobError
+from seedvr2x.passes import Plan
 from seedvr2x.pull import TIMES
+from seedvr2x.shots import Shot, window_layout
 from seedvr2x.tiling import SCRATCH
 from units import CHECKSUMS, COPY, KEPT, run_file
 
@@ -160,7 +162,8 @@ def differences(recorded: dict[str, Any], asked: dict[str, Any]) -> list[str]:
 
 def compiles(content: dict[str, Any]) -> bool:
     """Whether a job's content, recorded or asked, has the VAE compiled (settings.compile_vae,
-    --compile as given: a plan's plan.compile_vae is the same whenever it is made, planner.plan)."""
+    --compile as given: a plan's plan.compile_vae is the same whenever it is made,
+    shot_plan.plan)."""
     settings: Any = content.get("settings")
     return isinstance(settings, dict) and cast(dict[str, Any], settings).get("compile_vae") is True
 
@@ -416,7 +419,7 @@ def reshape(manifest: Manifest, recorded: dict[str, Any]) -> Reshaped:
         done: int = entry["windows_done"]
         if done == len(was) and was != now:
             # The cap it was made under is its longest window: a layout is the same under any cap
-            # from its longest window up (planner._own_cap).
+            # from its longest window up (shot_plan._own_cap).
             cap = max(end - first for first, end in was)
             if window_layout(was[-1][1], cap) != was:
                 raise JobError(f"{manifest.path}: a layout seedvr2x lays out for no cap: {was}")

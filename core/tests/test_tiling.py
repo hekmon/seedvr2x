@@ -904,7 +904,7 @@ def test_encode_refuses_slices_that_dont_follow(stand_in: model.Models) -> None:
 
 
 def test_tiled_passes_are_bfloat16() -> None:
-    # A VAE in float32, as tests/test_shot.py's: its streamed passes run, its tiled ones are
+    # A VAE in float32, as tests/test_shot_pass.py's: its streamed passes run, its tiled ones are
     # refused, since the store would round what it is given.
     vae = StandIn()
     torch.nn.Module.to(vae, torch.float32)

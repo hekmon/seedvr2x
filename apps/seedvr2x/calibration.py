@@ -25,19 +25,20 @@ import run
 from media.checksums import write_checksums
 from media.decode import to_float32
 from media.writer import FFV1Writer, Tags, Writer
-from plan import Plan
+from scratch import Scratch
 from seedvr2x import compiling, peaks
 from seedvr2x.clock import spent
 from seedvr2x.frames import padded_size
 from seedvr2x.model import Models, synchronize
-from seedvr2x.passes import Phase
+from seedvr2x.passes import Phase, Plan
 from seedvr2x.sampling import draw
-from shot import Correction, finite
+from seedvr2x.shot_pass import finite
+from shot import Correction
 from timing import ENTER, Clock, Kind, Model, tokens
 
 logger = logging.getLogger("cli.calibration")
 
-# What a decode's frames are written by: (n, H', W', 3) float32 in [0, 1] (shot.decode_shot).
+# What a decode's frames are written by: (n, H', W', 3) float32 in [0, 1] (shot_pass.decode_shot).
 Write = Callable[[npt.NDArray[np.float32]], None]
 
 # What a calibration encodes and decodes, in frames (DESIGN.md, Memory planner, Time estimates:
@@ -104,7 +105,7 @@ def calibrate(
     directory: Path | None = None,
 ) -> Calibrated:
     """A clock for a job whose frames are resized to target, (height, width), run by plan, whose
-    longest window is `longest` latents (shot.shot_layout): the models of its three kinds of
+    longest window is `longest` latents (shots.shot_layout): the models of its three kinds of
     unit, measured on the job's own steps at the job's size and tiles, on frames of its own
     making (DESIGN.md, Memory planner, Time estimates).
 
@@ -209,8 +210,9 @@ def calibrate(
                     *(models, read, count, target, 0),
                     tiles=plan.encode_tiles,
                     # The run's: a tiled pass's alone (run._scratch).
-                    scratch=None if plan.encode_tiles is None else where,
-                    allowance=plan.scratch_allowance,
+                    store=None
+                    if plan.encode_tiles is None
+                    else Scratch(where, plan.scratch_allowance),
                 )
 
             if split:
@@ -241,7 +243,7 @@ def calibrate(
 
         def decode(shot: int, latent: torch.Tensor, count: int, write: Write) -> float:
             # The latent in the DiT's layout, (T', h, w, 16) dense, as a run's decodes take it
-            # (shot.merge_windows; design's ruling of 2026-10-30, baton 3), not the encode's
+            # (shot_pass.merge_windows; design's ruling of 2026-10-30, baton 3), not the encode's
             # channel-major one (model.to_latent): the compiler's guards read the latent's
             # strides, so a decoder compiled for one layout compiles again for the other (RTX
             # 5090, 1080p, 2026-10-31: in the dense layout the decoder's warm-up 236 s, in the
@@ -263,8 +265,7 @@ def calibrate(
             run.decode_shot(
                 *(models, latent, count, target, write, "the calibration", 0, correction),
                 tiles=plan.decode_tiles,
-                scratch=None if plan.decode_tiles is None else where,
-                allowance=plan.scratch_allowance,
+                store=None if plan.decode_tiles is None else Scratch(where, plan.scratch_allowance),
             )
             return time.monotonic() - begun
 
@@ -311,8 +312,9 @@ def calibrate(
             repeated = torch.cat([warm] * -(-longest // warm.shape[0]))
             warmed_window = window(repeated[:longest].contiguous())
             # The noise's draw, timed alone on the longest window's latent: a run's first window
-            # draws its whole run's (shot.sample_windows), about 1 us a token on a desktop's CPU
-            # (sampling.drawn's figure), which a window of the calibration pays for its own tokens.
+            # draws its whole run's (shot_pass.sample_windows), about 1 us a token on a desktop's
+            # CPU (sampling.drawn's figure), which a window of the calibration pays for its own
+            # tokens.
             begun = time.monotonic()
             draw(models, repeated[:longest].contiguous(), 0)
             drawing = (time.monotonic() - begun) / (longest * per_latent)

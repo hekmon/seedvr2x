@@ -163,10 +163,10 @@ import pytest
 
 import disk
 import planner
-from job import Shot
 from manifest import NAME
 from seedvr2x import memory, peaks, pull
 from seedvr2x.frames import target_size
+from seedvr2x.shots import Shot
 from seedvr2x.weights import Architecture
 
 # core/tools/compare.py: the repository is three levels up (apps/seedvr2x/tests/).
@@ -393,7 +393,7 @@ def upscaled(
     if run.returncode == 1 and refused is not None:
         pytest.skip(f"{card()}: the case can't run there: {refused}")
     assert run.returncode == 0, run.stderr[-3000:]
-    # A held run's plan made with the reserve of 2.5 GiB, the one with 4.5 refused (planner.plan):
+    # A held run's plan made with the reserve of 2.5 GiB, the one with 4.5 refused (shot_plan.plan):
     # not the case its reference was made in, which keeps 2 GiB of the card's budget (DESIGN.md,
     # Validation, decided on 2026-10-21), the card's desktop having grown.
     budget = [line for line in plan_lines(run.stderr) if line.startswith("budget: ")]
@@ -453,7 +453,7 @@ def choices(lines: list[str]) -> list[str]:
     ]
 
 
-# What every refusal of the planner's for the memory a job takes says (planner.PlanError): the
+# What every refusal of the planner's for the memory a job takes says (shot_plan.PlanError): the
 # free VRAM it takes, or the system memory.
 REFUSED = (" GiB of free VRAM", " GiB of system memory")
 
@@ -467,7 +467,7 @@ UNTILED_FREE = 40.0
 # refusals, the first that is there (reported): on a run held to the card, the driver's own
 # figure, said beside the whole card's (at debug, under --verbose: planner.card_detail) or in
 # its place; on a driver that refuses, the one figure
-# a refusal gives, or the plan's first line (planner._card_said, planner._there).
+# a refusal gives, or the plan's first line (planner._card_said, shot_plan._there).
 REPORTED = (
     r"driver reports ([\d.]+) GiB free to this process",
     r"([\d.]+) GiB free as its driver reports it to this process",
@@ -528,7 +528,7 @@ class Free:
 
 def recorded_free(record: dict[str, Any]) -> Free:
     """The free memory a plan was made in, from the manifest's plan record, its "memory" part
-    (planner.Peaks.record): the driver's figure, the card's, and a reserve only on a held run."""
+    (shot_plan.Peaks.record): the driver's figure, the card's, and a reserve only on a held run."""
     return Free(record["driver_free"], record["card_free"], record["reserve"] is not None)
 
 

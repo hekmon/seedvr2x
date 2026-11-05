@@ -645,7 +645,7 @@ def available(proc: Path = Path("/proc"), cgroups: Path = Path("/sys/fs/cgroup")
     file cache (memory.stat's active_file and inactive_file; v1: total_ of each), which the
     kernel gives back when asked, as MemAvailable counts the host's: a model file just hashed
     is 16 GiB of it. None where nothing can be read. The planner counts the job's host memory
-    with it before the load (planner.py)."""
+    with it before the load (shot_plan.py)."""
     left: list[int] = []
     try:
         for line in (proc / "meminfo").read_text().splitlines():

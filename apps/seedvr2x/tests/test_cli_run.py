@@ -46,18 +46,18 @@ import calibration
 import main as cli
 import planner
 import timing
-from job import Shot
 from media import ffmpeg
 from media.ffmpeg import MediaError
-from plan import Plan
-from planner import Peaks, Pins
-from seedvr2x import peaks, pull, weights
+from scratch import Scratch
+from seedvr2x import peaks, pull, shot_pass, shot_plan, tiling, weights
 from seedvr2x.detector import BATCH, Detector
 from seedvr2x.frames import output_size, padded_length, padded_size
-from seedvr2x.passes import Tiles
+from seedvr2x.passes import Plan, Tiles
 from seedvr2x.peaks import GIB
 from seedvr2x.pull import Pin
-from shot import decode_shot, shot_layout
+from seedvr2x.shot_pass import decode_shot
+from seedvr2x.shot_plan import Peaks, Pins
+from seedvr2x.shots import Shot, shot_layout
 
 
 def _usable() -> bool:
@@ -84,13 +84,12 @@ def stand_in_encode(
     seed: int,
     *,
     tiles: Tiles | None = None,
-    scratch: Path | None = None,
-    allowance: int | None = None,
+    store: tiling.Store | None = None,
 ) -> torch.Tensor:
     """A latent (T', 1, 1, 16) in channel-major memory, as the VAE's, saying the shot's first frame
-    (channel 0), its frame count (1) and the target's height and width (2, 3). Untiled,
-    with no scratch and nothing allowed one: the plan's tiles are the tiled passes' own tests'."""
-    assert tiles is None and scratch is None and not allowance
+    (channel 0), its frame count (1) and the target's height and width (2, 3). Untiled, with no
+    scratch: the plan's tiles are the tiled passes' own tests'."""
+    assert tiles is None and store is None
     assert read(count).shape[0] == count
     latent = torch.zeros(16, (padded_length(count) - 1) // 4 + 1, 1, 1)
     latent[0], latent[1] = seed - SEED, count
@@ -637,8 +636,7 @@ class Steps:
         seed: int,
         *,
         tiles: Tiles | None = None,
-        scratch: Path | None = None,
-        allowance: int | None = None,
+        store: tiling.Store | None = None,
     ) -> torch.Tensor:
         frames = read(count)
         self.read[seed - SEED] = hashlib.md5(frames.tobytes()).hexdigest()
@@ -646,8 +644,7 @@ class Steps:
         latent = stand_in_encode(
             *(models, lambda n: frames[:n], count, target, seed),
             tiles=tiles,
-            scratch=scratch,
-            allowance=allowance,
+            store=store,
         )
         if self.poison == f"encode {seed - SEED}":
             latent[-1, 0, 0, 5] = math.nan
@@ -1056,8 +1053,8 @@ def test_plan_recorded_and_phases_entered(
         "bound": "encode",
         # The process's own, and the longest shot as its decode merges its two windows of 4: the
         # windows, 8 latents, the merged latent, 6, and a join's mix, 6, of 8,192 bytes each
-        # (planner.host_moments).
-        "host": planner.HOST_RESIDENT + 20 * 8_192,
+        # (shot_plan.host_moments).
+        "host": shot_plan.HOST_RESIDENT + 20 * 8_192,
         "host_shot": 20 * 8_192,
         "scratch": 0,
         "longest_window": 4,
@@ -1835,17 +1832,15 @@ def test_plan_tiles_reach_the_passes(
     given: list[tuple[str, Tiles | None, Path | None]] = []
     work: list[bool] = []
 
-    def encode(
-        *arguments: Any, tiles: Tiles | None, scratch: Path | None, allowance: int, **options: Any
-    ) -> Any:
-        given.append(("encode", tiles, scratch))
-        assert allowance == 12_345
+    def encode(*arguments: Any, tiles: Tiles | None, store: Scratch, **options: Any) -> Any:
+        given.append(("encode", tiles, store.directory))
+        assert store.allowance == 12_345
         work.append((tmp_path / "one.mkv.work").is_dir())
         return steps.encode(*arguments, **options)
 
-    def decode(*arguments: Any, tiles: Tiles | None, scratch: Path | None, allowance: int) -> None:
-        given.append(("decode", tiles, scratch))
-        assert allowance == 12_345
+    def decode(*arguments: Any, tiles: Tiles | None, store: Scratch) -> None:
+        given.append(("decode", tiles, store.directory))
+        assert store.allowance == 12_345
         steps.decode(*arguments)
 
     monkeypatch.setattr(run, "encode_shot", encode)
@@ -2071,7 +2066,7 @@ def test_one_file_plans_as_a_directory(
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     listed = str(tmp_path / "plan.txt")
     assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", listed) == 0
-    # --compile's setting is asked of the planner for every job (planner.plan's compile_vae),
+    # --compile's setting is asked of the planner for every job (shot_plan.plan's compile_vae),
     # which is no output's own: the three alike.
     assert asked == [{"split", "recorded", "attention", "compile_vae", "dit_model"}] * 3
     # Each is planned for the attention backend its run takes (cli._attention, the stand-in's
@@ -3077,7 +3072,7 @@ def test_the_early_warning_says_what_the_refusal_would_where_no_programs_cure(
     # quitting programs can't free enough, the early warning says what the refusal would, that
     # the job needs a card with more memory free, instead of the advice to free the card and the
     # minutes to do it in. An early reading takes what quitting programs can give back for what
-    # they hold of the card by NVML (planner._freeable): short by 0.26 GiB (1.7 held), with 4 GiB
+    # they hold of the card by NVML (shot_plan._freeable): short by 0.26 GiB (1.7 held), with 4 GiB
     # held by programs the advice stands; with 0.1 GiB it doesn't. Through the real path.
     source_path = job(tmp_path, monkeypatch)
     options = (*JOB[:4], *(["--accept-env-change"] if accept else []))
@@ -3125,9 +3120,9 @@ def _with_paravirtual(
 
 def test_a_shortfall_no_programs_cure_says_so() -> None:
     # PROVISIONAL (impl-v010, 2026-10-28): where no memory freed on the card gives a held run's
-    # shape its memory (planner._freeable), the refusal does not send the user to quit programs.
+    # shape its memory (shot_plan._freeable), the refusal does not send the user to quit programs.
     error = planner.PlanError(
-        "the figures", shortfall=planner.Shortfall("the decode", "1.01", freeable=False)
+        "the figures", shortfall=shot_plan.Shortfall("the decode", "1.01", freeable=False)
     )
     assert cli._kept_refusal(error).split("\n") == [  # pyright: ignore[reportPrivateUsage]
         "the job is kept, nothing is lost, and the same command resumes it",
@@ -3304,23 +3299,22 @@ def tiled_steps(
     the directory the run gives it, on disk, as a tiled pass beyond its allowance does
     (scratch.Scratch), around the stand-in's own pass, untiled. Returns the list each pass adds
     its kind, its tiles, that directory and the allowance the run gave it to. The tiled passes
-    themselves are test_tiling.py's and test_shot.py's."""
+    themselves are test_tiling.py's and test_shot_pass.py's."""
     import run
-    from scratch import Scratch
     from seedvr2x import tilegrid
 
     given: list[tuple[str, Tiles | None, Path | None, int]] = []
 
-    def encode(
-        *arguments: Any, tiles: Tiles | None, scratch: Path | None, allowance: int, **options: Any
-    ) -> Any:
+    def encode(*arguments: Any, tiles: Tiles | None, store: Scratch, **options: Any) -> Any:
+        scratch, allowance = store.directory, store.allowance
         given.append(("encode", tiles, scratch, allowance))
         assert scratch is not None and not (scratch / tilegrid.SCRATCH).exists()
         with Scratch(scratch, 0).store(1, (8, 8)):
             assert (scratch / tilegrid.SCRATCH).is_file()
             return steps.encode(*arguments, **options)
 
-    def decode(*arguments: Any, tiles: Tiles | None, scratch: Path | None, allowance: int) -> None:
+    def decode(*arguments: Any, tiles: Tiles | None, store: Scratch) -> None:
+        scratch, allowance = store.directory, store.allowance
         given.append(("decode", tiles, scratch, allowance))
         assert scratch is not None and not (scratch / tilegrid.SCRATCH).exists()
         with Scratch(scratch, 0).store(1, (8, 8)):
@@ -3395,7 +3389,7 @@ def test_tile_pins_are_the_jobs(
 ) -> None:
     # The tiles shape the output: a job is resumed with the pins it was made with, and refused
     # with others, or without. The pins are settings, which refuse it: a resume takes the plan's
-    # tiles as recorded, whatever is pinned (planner.plan), so the plan itself never differs.
+    # tiles as recorded, whatever is pinned (shot_plan.plan), so the plan itself never differs.
     tiled_steps(monkeypatch, steps)
     source_path = job(tmp_path, monkeypatch)
     steps.stop = "window 4:1"
@@ -4248,7 +4242,7 @@ def test_split_frame_by_frame(
     from media.source import examine
     from seedvr2x import colour, model
     from seedvr2x.frames import target_size
-    from shot import pad_4n1
+    from seedvr2x.shot_pass import pad_4n1
 
     source_path = job(tmp_path, monkeypatch)
     # Uniform noise from -0.5 to 2.5, the same on each frame: the stand-in's frames, -1 to -0.95,
@@ -4298,7 +4292,6 @@ def test_split_streams(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # and written as it comes out, never a file beside the shot's units but its input copy and
     # their checksums; its last frames once the copy is read whole and checked.
     import run
-    import shot
     from media.decode import Decoder
     from seedvr2x import model
 
@@ -4334,7 +4327,7 @@ def test_split_streams(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             events.append(f"write {frames.shape[0]}")
             write(frames)
 
-        shot.decode_shot(models, merged, count, target, written, *names, **tiled)
+        shot_pass.decode_shot(models, merged, count, target, written, *names, **tiled)
 
     monkeypatch.setattr(model, "decode_stream", streamed)
     monkeypatch.setattr(Decoder, "finish", finished)

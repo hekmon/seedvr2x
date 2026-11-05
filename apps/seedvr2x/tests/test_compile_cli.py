@@ -27,21 +27,20 @@ from test_compile import (
     inductor_state,  # noqa: F401
     undo_global_state,  # noqa: F401
 )
-from test_planner import HD, UHD, our_free, shots
+from test_shot_plan import HD, UHD, our_free, shots
 from torch._dynamo.exc import FailOnRecompileLimitHit
 
 import planner
 import resume
 import run
-from job import Shot
-from plan import Plan
-from planner import Pins, PlanError
 from seedvr2x import compiling, model, peaks
 from seedvr2x.errors import Refusal
 from seedvr2x.frames import output_size, padded_size
 from seedvr2x.model import COMPUTE_DTYPE, Models
-from seedvr2x.passes import Compilation, Shapes, Tiles
+from seedvr2x.passes import Compilation, Plan, Shapes, Tiles
 from seedvr2x.peaks import GIB
+from seedvr2x.shot_plan import Pins, PlanError
+from seedvr2x.shots import Shot
 from seedvr2x.vendor.models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
 
 
@@ -250,7 +249,7 @@ def test_a_pin_in_the_range_that_fits_plain_and_not_compiled_is_refused_with_its
 
 def test_a_frame_too_small_for_a_tile_has_no_compiled_decode_and_is_refused() -> None:
     # A decode can't be untiled compiled, and a frame under 576 px a side has no tile to make
-    # (planner._tile_sizes): refused, with no pin to advise.
+    # (shot_plan._tile_sizes): refused, with no pin to advise.
     lines = refusal(our_free(96), (96, 128), Pins(), (3,)).split("\n")
     assert lines[0].startswith("the VAE compiled has no decode pass within the shapes measured")
     assert lines[1:] == ["The same command without --compile fits"]
@@ -1025,15 +1024,15 @@ class Loads:
 
 
 def accepting_tiles(monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:  # noqa: F811
-    """The stand-in's encode and decode (steps) taking the plan's tiles, scratch and allowance
-    as the run gives them, around their own, untiled, pass: what these tests ask of them is the
-    plan's, not the tiled passes' own (tests/test_tiling.py, tests/test_shot.py)."""
+    """The stand-in's encode and decode (steps) taking the plan's tiles and scratch as the run
+    gives them, around their own, untiled, pass: what these tests ask of them is the
+    plan's, not the tiled passes' own (tests/test_tiling.py, tests/test_shot_pass.py)."""
     import run
 
-    def encode(*arguments: Any, tiles: Any, scratch: Any, allowance: Any, **options: Any) -> Any:
+    def encode(*arguments: Any, tiles: Any, store: Any, **options: Any) -> Any:
         return steps.encode(*arguments, **options)
 
-    def decode(*arguments: Any, tiles: Any, scratch: Any, allowance: Any) -> None:
+    def decode(*arguments: Any, tiles: Any, store: Any) -> None:
         steps.decode(*arguments)
 
     monkeypatch.setattr(run, "encode_shot", encode)

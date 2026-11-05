@@ -10,9 +10,10 @@ from fractions import Fraction
 from itertools import pairwise
 from pathlib import Path
 
-from seedvr2x.errors import Refusal
+from seedvr2x.errors import JobError
 from seedvr2x.frames import output_size, short_side, target_size
 from seedvr2x.passes import ENCODE_SEED_OFFSET
+from seedvr2x.shots import Shot
 
 # numz seeds Python's, NumPy's and torch's generators with each seed (common/seed.py), and NumPy
 # takes seeds in [0, 2**32). numz seeds again before the VAE encode, with the seed plus
@@ -23,34 +24,6 @@ SEED_LIMIT = 2**32
 # parser has no value by default, so that a size given is told from the default (the size line,
 # default_smaller), and each path takes this where it reads the option, as --format's is.
 DEFAULT_RESOLUTION = 1080
-
-# Latents shared by consecutive DiT windows, M (DESIGN.md, Pipeline step 2): M = 2 cut the boundary
-# jump by 80% against independent batches in the stitching study (research/docs/stitching.md).
-SHARED = 2
-
-
-class JobError(Refusal):
-    """A job seedvr2x can't lay out: a bad cut list; the message says what."""
-
-
-@dataclass(frozen=True)
-class Shot:
-    """Frames [start, end) of the source: the model's unit, between two cuts. Its noise seed is
-    the job's plus start (DESIGN.md, Pipeline step 2)."""
-
-    start: int
-    end: int
-
-    @property
-    def frames(self) -> int:
-        return self.end - self.start
-
-    def seed(self, seed: int) -> int:
-        """The shot's seed: the job's seed plus its first frame's index in the source. A shot
-        starting at frame 0 gets the plain seed, as numz's single batch does; shots never share a
-        noise pattern; and a shot's output depends only on the seed, its frames and its place,
-        so a resumed or re-cut job reproduces the untouched shots exactly."""
-        return seed + self.start
 
 
 # The runs of a shot --quality offers, and each one's first frame in the shot (DESIGN.md,
@@ -301,31 +274,3 @@ def check_cuts(cuts: Sequence[int], frames: int) -> None:
         raise JobError(
             f"cut at frame {cuts[-1]}: the source has {frames} frames (0 to {frames - 1})"
         )
-
-
-# window_layout lives here, in plain Python, and shot.py (torch) imports it, as it does
-# frames.padded_length: the planner's arithmetic needs them before torch is imported (impl-v010,
-# 2026-10-28: a resume's early reading of the card, main._early_memory, runs before the allocator
-# is chosen).
-def window_layout(latents: int, window: int, shared: int = SHARED) -> list[tuple[int, int]]:
-    """[start, end) of the windows over a shot of `latents` latents: as few windows as `window`
-    allows, their lengths balanced (differing by at most 1, the longer first), consecutive ones
-    sharing `shared` latents (DESIGN.md, Pipeline step 2)."""
-    if latents <= window:
-        return [(0, latents)]
-    if window < 2 * shared + 1:
-        raise ValueError(
-            f"windows of {window} latents leave none of their own with {shared} shared"
-        )
-    count = math.ceil((latents - shared) / (window - shared))
-    base, longer = divmod(latents + (count - 1) * shared, count)
-    layout: list[tuple[int, int]] = []
-    start = 0
-    for index in range(count):
-        length = base + 1 if index < longer else base
-        layout.append((start, start + length))
-        start += length - shared
-    # A latent is in at most two windows: a window is at least as long as the two zones it
-    # shares with its neighbours.
-    assert layout[-1][1] == latents and base >= 2 * shared
-    return layout

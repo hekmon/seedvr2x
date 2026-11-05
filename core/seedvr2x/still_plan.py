@@ -6,14 +6,14 @@ model sees it (plan's `picture`): its own padded frame and output, and no other 
 2026-11-04: in either orientation, a pin of 0 was refused for a landscape 1080p picture that the
 plan itself took untiled, the portrait frame being past the one measured untiled).
 
-An addition beside the CLI's planner (apps/seedvr2x/planner.py), not a move: it imports nothing of
-the CLI, and no torch, the command line planning before torch is imported
-(tests/test_still_plan.py). Its margins and its order of choices are the planner's (DESIGN.md,
-Memory planner, Choices), and the comments name the planner's function each choice mirrors. What
-differs is what a plan is for: a job's plan is made for the one frame size it runs, so that its
-tiles are chosen at it; a bound's plan holds for every size within it, and "the largest picture's
-tiles don't hold for every smaller one" (DESIGN.md: a cut-off tile is counted at its rule plus 0.3
-GiB, and measured steps aren't monotone). So the placement of the DiT and the VAE
+An addition beside the video's planner (shot_plan.py, the CLI's planner.py until 2026-11-04), not a
+move: it imports nothing of the CLI, and no torch, the command line planning before torch is
+imported (tests/test_still_plan.py). Its margins and its order of choices are the planner's
+(DESIGN.md, Memory planner, Choices), and the comments name the planner's function each choice
+mirrors. What differs is what a plan is for: a job's plan is made for the one frame size it runs, so
+that its tiles are chosen at it; a bound's plan holds for every size within it, and "the largest
+picture's tiles don't hold for every smaller one" (DESIGN.md: a cut-off tile is counted at its rule
+plus 0.3 GiB, and measured steps aren't monotone). So the placement of the DiT and the VAE
 (peaks.ModelPlan) is fixed for the bound, once, by a proof that every picture within it has a pass
 that fits (_worst); the tiles are chosen per picture under that placement (tiles), never refused
 within the bound. Sizes are (height, width) in pixels, and a bound (long, short), unless said;
@@ -88,7 +88,7 @@ class PlanRefusal(Refusal):
 
 @dataclass(frozen=True)
 class Pins:
-    """A user's pins, as the CLI's planner.Pins have them (the picture has no window to pin):
+    """A user's pins, as the video's shot_plan.Pins have them (the picture has no window to pin):
     each taken exactly or refused, None leaving a choice to the plan."""
 
     encode_tile: int | None = None  # --encode-tile: a tile's side in output pixels; 0: untiled
@@ -1734,7 +1734,7 @@ def _bound_said(bound: Bound) -> str:
     return f"{long}x{short}"
 
 
-# ---- Words, the planner's (planner.py), for a reading without the early look at the card -------
+# ---- Words, the planner's (shot_plan.py), for a reading without the early look at the card -------
 
 
 def _held_under(reading: Reading) -> int:

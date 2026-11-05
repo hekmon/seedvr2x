@@ -21,13 +21,7 @@ from seedvr2x.frames import (
     padded_length,
     padded_size,
 )
-from shot import (
-    _frames,
-    decode_shot,
-    encode_shot,
-    encoder_inputs,
-    reference_inputs,
-)
+from seedvr2x.shot_pass import _frames, decode_shot, encode_shot, encoder_inputs, reference_inputs
 
 
 @pytest.mark.parametrize("target", [(24, 32), (30, 37)])
@@ -36,7 +30,7 @@ def test_encoder_slices_padded_as_asked(
 ) -> None:
     # Each slice the encoder takes, from encoder_inputs and through encode_shot:
     # frames.padded_size. (24, 32) is padded to (48, 32); (30, 37) to (64, 64).
-    from test_shot import SLICING, Reads
+    from test_shot_pass import SLICING, Reads
 
     count = 6
     frames = np.random.default_rng(target[1]).random((count, 15, 20, 3), dtype=np.float32)
@@ -63,8 +57,8 @@ def test_encoder_slices_padded_as_asked(
 )
 def test_decode_trimmed(monkeypatch: pytest.MonkeyPatch, target: tuple[int, int]) -> None:
     # The decode's frames at the padded size, NaN in the padding, which the crop must drop whole
-    # (a NaN written stops the run: shot.finite) and no more: the output's size, the target's even
-    # sides as before, and the picture as decoded.
+    # (a NaN written stops the run: shot_pass.finite) and no more: the output's size, the target's
+    # even sides as before, and the picture as decoded.
     padded = padded_size(target)
     decoded = torch.full((3, 2, *padded), math.nan, dtype=torch.bfloat16)
     generator = torch.Generator().manual_seed(target[0])
@@ -88,7 +82,7 @@ def test_decode_trimmed(monkeypatch: pytest.MonkeyPatch, target: tuple[int, int]
 def test_reference_is_the_picture(target: tuple[int, int]) -> None:
     # split's reference, cropped as the decode's frames are (_frames): the picture alone, whatever
     # padding the transform made: the frames resized, clamped and normalised.
-    from test_shot import SLICING, Reads
+    from test_shot_pass import SLICING, Reads
 
     count = 6
     rng = np.random.default_rng(target[1])

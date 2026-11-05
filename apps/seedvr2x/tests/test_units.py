@@ -19,13 +19,14 @@ from stand_ins import channel_major
 from torch import Tensor
 
 import units
-from job import QUALITY, OutputSegment, Shot, shot_runs
+from job import QUALITY, OutputSegment, shot_runs
 from manifest import Manifest
 from media.source import Source
-from plan import Plan
 from seedvr2x import model
+from seedvr2x.passes import Plan
 from seedvr2x.sampling import moved
-from shot import sample_windows, shot_layout
+from seedvr2x.shot_pass import sample_windows
+from seedvr2x.shots import Shot, shot_layout
 from units import STATE, Units
 
 
@@ -323,7 +324,7 @@ def test_a_shape_planned_again_reads_each_run_of_a_shot(tmp_path: Path) -> None:
 
 def test_a_cap_no_layout_comes_of_is_refused(tmp_path: Path) -> None:
     import resume
-    from job import JobError
+    from seedvr2x.errors import JobError
 
     segment = [OutputSegment("a", 0, 176)]
     for cap in (3, 0, True, "9"):

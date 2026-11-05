@@ -1,7 +1,7 @@
 """The arithmetic of VAE tiling (DESIGN.md, Pipeline, per shot, steps 1 and 3; Memory planner):
 the tiles numz lays over a picture, the largest one's area, and the bytes of a tiled shot's
 scratch. Nothing here imports torch, nor anything that does: the planner imports it
-(planner.py), and counts with it before the command line imports torch, as it does with
+(shot_plan.py), and counts with it before the command line imports torch, as it does with
 passes.py. seedvr2x/tiling.py runs the passes over this grid, and gives every name here as
 its own.
 

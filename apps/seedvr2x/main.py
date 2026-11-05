@@ -48,17 +48,18 @@ if TYPE_CHECKING:
     from calibration import Calibrated
     from cuts import Cut
     from disk import Disk
-    from job import JobError, OutputSegment, Shot
+    from job import OutputSegment
     from manifest import Manifest
     from media.index import FrameIndex
     from media.source import Declared, FirstPass, Source
     from media.writer import Writer
-    from plan import Plan
-    from planner import Pins, PlanError
+    from seedvr2x.errors import JobError
     from seedvr2x.model import Models
-    from seedvr2x.passes import Compilation, ModelPlan
+    from seedvr2x.passes import Compilation, ModelPlan, Plan
     from seedvr2x.pull import ModelFile, ModelFiles
     from seedvr2x.record import Record
+    from seedvr2x.shot_plan import Pins, PlanError
+    from seedvr2x.shots import Shot
     from seedvr2x.weights import Architecture
     from timing import Clock, Unit
 
@@ -484,7 +485,7 @@ def _parser() -> argparse.ArgumentParser:
         " or refused (default: the planner's, the longest that fits the GPU's free memory)",
     )
     # The planner's other pins (DESIGN.md, Memory planner, Pins), each fixing one choice, taken
-    # exactly or refused, never adjusted (planner.plan). Then --until (DESIGN.md, Pause and
+    # exactly or refused, never adjusted (shot_plan.plan). Then --until (DESIGN.md, Pause and
     # resume, Stopping).
     parser.add_argument(
         "--encode-tile",
@@ -665,10 +666,10 @@ def _verify(output: Path) -> int:
 def _checked(output: Path) -> list[_Checked]:
     """What verify checks of output: the segments its manifest names, or the one it is, or the
     one-file output it is."""
-    from job import JobError
     from manifest import NAME, SUMS, checksums_file, read
     from media.ffmpeg import MediaError
     from media.probe import probe
+    from seedvr2x.errors import JobError
 
     directory, only = (output, None) if output.is_dir() else (output.parent, output.name)
     kept = _manifest_beside(output)
@@ -726,9 +727,9 @@ def _counted_beside(output: Path, record: Path) -> _Checked:
     checksums, a --segment-cmd job's (DESIGN.md, Output, Assembly, decided on 2026-10-12: "a
     `--segment-cmd` file's frames can be counted"): the file's frames, counted, against the
     job's, the segments' together."""
-    from job import JobError
     from manifest import read
     from media.probe import probe
+    from seedvr2x.errors import JobError
 
     content = read(record)
     try:
@@ -796,7 +797,7 @@ def _video_arguments(args: argparse.Namespace) -> None:
     job's settings and record are unchanged (a picture takes --resolution's default in stills.py);
     --plan without a file, the picture's (stills.BARE_PLAN), and a PNG format for a picture alone
     or a .png or .webp name for the output are refused, as a video's."""
-    from job import JobError
+    from seedvr2x.errors import JobError
 
     if args.plan is BARE_PLAN:
         raise JobError(
@@ -843,15 +844,7 @@ def _say_default_smaller(args: argparse.Namespace, given: bool, declared: "Decla
 
 def _run(args: argparse.Namespace) -> int:
     import planner
-    from job import (
-        SHARED,
-        JobError,
-        Shot,
-        check_seed,
-        read_cuts,
-        shot_runs,
-        shots_from_cuts,
-    )
+    from job import check_seed, read_cuts, shot_runs, shots_from_cuts
     from manifest import (
         ASSEMBLED,
         NAME,
@@ -865,10 +858,11 @@ def _run(args: argparse.Namespace) -> int:
     from media.fingerprint import fingerprint
     from media.source import counted, declare
     from media.writer import check_command
-    from planner import Pins
     from seedvr2x import memory, pull
-    from seedvr2x.errors import Refusal
+    from seedvr2x.errors import JobError, Refusal
     from seedvr2x.frames import check_target, output_size, target_size
+    from seedvr2x.shot_plan import Pins
+    from seedvr2x.shots import SHARED, Shot
     from seedvr2x.weights import check_models
 
     # The build, the source, the target, the cut list and the model files are checked before
@@ -1176,7 +1170,7 @@ def _run(args: argparse.Namespace) -> int:
         )
         _say_default_smaller(args, resolution_given, declared)
         import manifest
-        from shot import shot_layout
+        from seedvr2x.shots import shot_layout
 
         def recorded_as(plan_record: dict[str, Any] | None, window: int | None) -> "Manifest":
             """The job's record with the plan's record, its runs laid out under `window`, the
@@ -1434,7 +1428,8 @@ def _run(args: argparse.Namespace) -> int:
     from media.reader import FramesLeft
     from media.writer import SegmentWriter, Tags, Writer, open_writer
     from run import job_units, run_job
-    from shot import CopyError, NonFinite
+    from seedvr2x.shot_pass import NonFinite
+    from shot import CopyError
     from units import Units
 
     remaining = list(range(len(segments)))  # the segments to write, those not finished
@@ -1484,7 +1479,7 @@ def _run(args: argparse.Namespace) -> int:
     # record in each output), from the job's manifest as this run has it, a resume planned again
     # included; the finished file's is written by the assembly from the same (_assemble).
     recorded_tags = _job_record(record.content()).tags()
-    # The VAE compiled, as the plan has it (--compile, planner.plan): its shapes from the plan,
+    # The VAE compiled, as the plan has it (--compile, shot_plan.plan): its shapes from the plan,
     # its cache in the job's directory (manifest.COMPILE_CACHE), compiled as the models load.
     compilation = None
     if plan.compile_vae:
@@ -2185,7 +2180,8 @@ def _calibrated(
 
     from calibration import FIRST, FRAMES, calibrate
     from job import shot_runs
-    from shot import NonFinite, shot_layout
+    from seedvr2x.shot_pass import NonFinite
+    from seedvr2x.shots import shot_layout
 
     runs = [run for shot in shots for run in shot_runs(shot, QUALITY[args.quality])]
     layouts = [shot_layout(run.frames, plan.window) for run in runs]
@@ -2366,9 +2362,9 @@ def _trial(args: argparse.Namespace, declared: "Declared", size: tuple[int, int]
 
     import numpy as np
 
-    from job import JobError
     from media.ffmpeg import MediaError
     from media.writer import Tags, open_writer
+    from seedvr2x.errors import JobError
 
     height, width = size
     stream = declared.stream
@@ -2492,8 +2488,8 @@ def _copied(source: Path, directory: Path, ffmpeg_version: str, conversions: str
     What is refused is refused before any work, the fix being the user's, a remux of the source
     or a directory output, rather than copied without it, or converted (DESIGN.md, Output,
     Assembly, "Before any work, at every start")."""
-    from job import JobError
     from media import assembly
+    from seedvr2x.errors import JobError
 
     refused = assembly.preflight(source, directory)
     if refused:
@@ -2567,8 +2563,8 @@ def _grid_start(source: "Source") -> None:
     frames, and refuses it (assembly.assemble); said here, before any unit is made, not after
     the last (DESIGN.md, Output, Assembly, "Before any work": no real file has shown one, kept on
     2026-10-28)."""
-    from job import JobError
     from media import assembly
+    from seedvr2x.errors import JobError
 
     if source.index is None:
         raise ValueError(f"{source.path}: no frame index to time the assembly by: a seedvr2x bug")
@@ -2907,8 +2903,8 @@ def _assembled(
     of 100 GiB harmless, a directory half removed being otherwise refused by the next run. With
     --plan, FILE isn't written, which is said: the job's first pass's record may be gone with
     the directory, and the manifest beside the file then holds the job (_finished_file)."""
-    from job import JobError
     from manifest import ASSEMBLED
+    from seedvr2x.errors import JobError
 
     entry: Any = recorded.get(ASSEMBLED)
     if not isinstance(entry, dict):
@@ -3021,8 +3017,8 @@ def _output(args: argparse.Namespace) -> Path:
     it without a word"). Refused before anything is written, the file untouched. A work directory
     with no manifest is the removal's leftover of a finished job when the manifest beside the file
     is there (_run finishes it), else refused when not empty."""
-    from job import JobError
     from manifest import NAME
+    from seedvr2x.errors import JobError
 
     output: Path = args.output
     # The output naming the source itself: its file, once assembled, would replace the source,
@@ -3165,10 +3161,10 @@ def _refuse_foreign(path: Path, content: dict[str, Any], work: bool = False) -> 
     Here, not in resume.py, which imports torch: it runs before the allocator is chosen
     (memory.startup). PROVISIONAL (implementation, 2026-10-21): the directory's own entries
     alone are judged here."""
-    from job import JobError
     from manifest import COMPILE_CACHE, INDEX, NAME, STATE, SUMS
     from media.assembly import work_file
     from media.files import command_partial, partial_path
+    from seedvr2x.errors import JobError
 
     directory = path.parent
     segments = content.get("segments")
@@ -3258,7 +3254,7 @@ CHECK_SOURCE_RATE, CHECK_REHEARSAL_RATE = 7.49e9 / 36, 7.49e9 / 66
 
 
 # What a refusal, and the early warning, say where no memory freed on the card gives the shape
-# what it lacks (planner._freeable). PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md gives the way
+# what it lacks (shot_plan._freeable). PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md gives the way
 # out for programs alone): advice to quit programs would be advice nobody can follow (a review's
 # find, 2026-10-12). DESIGN.md, Memory planner, A plan shapes the output a little (decided on
 # 2026-10-28): "Where quitting programs can't free enough, it says the job needs a card with more
@@ -3350,10 +3346,10 @@ def _early_memory(
     from importlib.util import find_spec
 
     import planner
-    from job import Shot
-    from plan import Plan
     from seedvr2x import memory, peaks
     from seedvr2x.errors import Refusal
+    from seedvr2x.passes import Plan
+    from seedvr2x.shots import Shot
 
     state = memory.card_state()
     if state is None:
@@ -3390,12 +3386,12 @@ def _early_memory(
         if short is None:
             logger.debug("the recorded plan isn't judged before the checks: %s", error)
             return
-        # The error's words say what NVML read and the context counted off it (planner._there).
+        # The error's words say what NVML read and the context counted off it (shot_plan._there).
         logger.debug("before the checks: %s", error)
         # With --accept-env-change, a resume still short at the plan is planned again for the
         # memory free (DESIGN.md, Memory planner, decided on 2026-10-28), not refused: the second
         # line says that, and no more than the freeing the user can still do meanwhile. Where
-        # quitting programs can't free enough (planner._freeable), the line says what the refusal
+        # quitting programs can't free enough (shot_plan._freeable), the line says what the refusal
         # would (_kept_refusal), with no advice to free the card and no minutes to do it in.
         if not short.freeable:
             then = (
@@ -3576,11 +3572,11 @@ def _host_available(
     group's. The plan's pinned copies and scratch are counted against it, and the scratch's
     allowance sized from it (DESIGN.md, Memory planner, Host RAM). None when nothing can be
     read: the plan then can't check the system memory it takes, nor size the allowance from the
-    host's, a tiled shot's scratch allowed planner.ALLOWANCE_UNKNOWN_HOST at most. Said as a
+    host's, a tiled shot's scratch allowed shot_plan.ALLOWANCE_UNKNOWN_HOST at most. Said as a
     warning, once a run, which reads it once (_run)."""
-    from planner import ALLOWANCE_UNKNOWN_HOST
     from seedvr2x import blockswap
     from seedvr2x.peaks import GIB
+    from seedvr2x.shot_plan import ALLOWANCE_UNKNOWN_HOST
 
     available = blockswap.available(proc, cgroups)
     if available is None:
@@ -3607,9 +3603,8 @@ def _recorded_plan(
     for no job of these shots at this target: a cap they can't be laid out by, or a tile that
     covers the whole padded frame (planner.check_recorded)."""
     import planner
-    from job import JobError
-    from plan import Plan
-    from seedvr2x.errors import Refusal
+    from seedvr2x.errors import JobError, Refusal
+    from seedvr2x.passes import Plan
 
     try:
         plan = Plan.recorded(recorded.get("plan"))
@@ -3665,7 +3660,7 @@ def _settings(
         "decode_tile": args.decode_tile,
         # --compile as asked, which a resume repeats: the compiled VAE's frames are not plain
         # code's (DESIGN.md, Memory planner). The plan records the same (Plan.compile_vae): a job
-        # that can't be compiled is refused (planner.plan).
+        # that can't be compiled is refused (shot_plan.plan).
         "compile_vae": args.compile,
         "format": args.format,
         # The segments' writer (DESIGN.md, Output, Writer): the user's command, as given, or
@@ -3705,8 +3700,8 @@ def _lock(directory: Path) -> None:
     .mkv path's work directory is locked from its start (_work), an output directory once its
     job is known (_run), and a second lock on the same directory, even this process's own,
     would be refused, flock's locks being its descriptors'."""
-    from job import JobError
     from media.files import make_directories
+    from seedvr2x.errors import JobError
 
     if directory in _LOCKED:
         return
@@ -3788,7 +3783,7 @@ def _identity(
     driver and cuDNN's version, which are the record's own, the card that made its segments
     (environment.current).
     The device is still named, and used by nothing."""
-    from job import JobError
+    from seedvr2x.errors import JobError
 
     settings = _settings(args, cuts, model_files)
     import torch
@@ -4549,8 +4544,8 @@ def _finished_file(
     manifest): the file's size against the record, the one test that needs no read of it, where
     exit status 0 would otherwise pass for a file that was changed or truncated since. Nor does it
     say how a record with no assembly's record, edited by hand, is read: refused."""
-    from job import JobError
     from manifest import ASSEMBLED, complete
+    from seedvr2x.errors import JobError
 
     recorded = prior.recorded
     made: Any = recorded.get(ASSEMBLED)
@@ -4735,7 +4730,7 @@ def _discard(path: Path) -> None:
 
 def _plan_of(record: dict[str, Any]) -> "Plan":
     """The plan a manifest's plan record (Plan.record) holds, as a resume takes it."""
-    from plan import Plan
+    from seedvr2x.passes import Plan
 
     return Plan.recorded(record)
 
@@ -4839,7 +4834,7 @@ def _another_job(
     settings differ alone in what a plan would take (_prior, resume.FIRST_PASS_SETTINGS), but the
     job has made units; `plan_elsewhere` when a plan's settings differ, which it takes, and its
     environment too, which --accept-env-change takes."""
-    from job import JobError
+    from seedvr2x.errors import JobError
 
     return JobError(
         f"{path}: another job than the one asked, which differs in:\n  "
@@ -5081,7 +5076,7 @@ def _plan_file(args: argparse.Namespace, directory: Path) -> None:
     link at the playlist's name, or is the output directory itself, one named FILE.cuts.m3u8."""
     import tempfile
 
-    from job import JobError
+    from seedvr2x.errors import JobError
 
     plan: Path = args.plan
     where = plan.resolve()
@@ -5286,9 +5281,10 @@ def _room_on_disk(
     nothing again. The allocations in a shot's units stay the last guard (run.Kept,
     scratch.Scratch). What a kill left in the shots' unit directories, kept frames or a scratch,
     which the resume discards after this check (resume.leftovers), counts as free."""
-    from job import JobError, kept_bytes
+    from job import kept_bytes
     from manifest import STATE
     from planner import scratch_file
+    from seedvr2x.errors import JobError
     from seedvr2x.frames import output_size
     from seedvr2x.tilegrid import SCRATCH
     from units import KEPT

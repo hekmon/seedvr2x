@@ -41,11 +41,11 @@ import main as cli
 import run
 import stop as stop_module
 import timing
-from plan import Plan
 from seedvr2x import clock
 from seedvr2x.clock import spoken
 from seedvr2x.files import size_said
-from shot import shot_layout
+from seedvr2x.passes import Plan
+from seedvr2x.shots import shot_layout
 from timing import Clock, Kind, Model
 
 # A step of the stand-in, an encode, a window or a shot's decode, on the test's clock.
@@ -957,7 +957,7 @@ def termed(monkeypatch: pytest.MonkeyPatch, clocked: SimpleNamespace) -> SimpleN
     def drawing(*arguments: Any, **options: Any) -> Any:
         layout: list[tuple[int, int]] = arguments[2]
         windows = iter(sampled(*arguments, **options))
-        # The run's noise, drawn for all its windows with the first (shot.sample_windows).
+        # The run's noise, drawn for all its windows with the first (shot_pass.sample_windows).
         clocked.elapsed += DRAW * layout[-1][1] * PER_LATENT
         yield from windows
 

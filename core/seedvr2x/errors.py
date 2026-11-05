@@ -24,3 +24,7 @@ class Refusal(ValueError):
         self.kind = kind
         self.reason = reason
         self.way = way
+
+
+class JobError(Refusal):
+    """A job seedvr2x can't lay out: a bad cut list; the message says what."""

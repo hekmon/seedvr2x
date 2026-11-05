@@ -1,6 +1,7 @@
-"""A job's plan as the run and the manifest take it (plan.py; DESIGN.md, Memory planner),
-a resume's reading of it, the pins the command line reads and the memory it finds free for the
-planner (planner.py, whose own tests are test_planner.py's)."""
+"""A job's plan as the run and the manifest take it (seedvr2x/passes.py's Plan; DESIGN.md, Memory
+planner), a resume's reading of it, the pins the command line reads and the memory it finds free
+for the planner (seedvr2x/shot_plan.py and planner.py, whose own tests are test_shot_plan.py's
+and test_planner.py's)."""
 
 import argparse
 import datetime
@@ -14,11 +15,10 @@ from levels import levels
 
 import main as cli
 import resume
-from job import JobError
-from plan import Plan
-from planner import PlanError
-from seedvr2x.passes import OVERLAP, Tiles
+from seedvr2x.errors import JobError
+from seedvr2x.passes import OVERLAP, Plan, Tiles
 from seedvr2x.peaks import GIB
+from seedvr2x.shot_plan import PlanError
 
 
 def test_record() -> None:
@@ -58,7 +58,7 @@ def test_record() -> None:
     other = {"plan": {**Plan(12, Tiles(1536), Tiles(1024)).record(), "timings": {"encode": 1.5}}}
     assert resume.differences(one, other) == []
     # Nor what the plan was made in, recorded there with its predicted peaks (cli._run;
-    # planner.Peaks.record): the memory it counted on, what the driver reported free and what
+    # shot_plan.Peaks.record): the memory it counted on, what the driver reported free and what
     # the whole card had, read or not, and the attention backend of that day's run.
     read = {"free": 22 * GIB, "driver_free": 30 * GIB, "card_free": 28 * GIB, "attention": "sdpa"}
     unread = {"free": 30 * GIB, "driver_free": 30 * GIB, "card_free": None}
@@ -176,7 +176,7 @@ def test_host_available(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> Non
     # tests/test_blockswap.py holds to the kernel's files): the kernel's MemAvailable, in bytes,
     # or less under a container's limit; None when nothing can be read, said as a warning, once:
     # the plan then can't check the system memory it takes, nor size the scratch's allowance
-    # from the host's (planner.ALLOWANCE_UNKNOWN_HOST then bounds it).
+    # from the host's (shot_plan.ALLOWANCE_UNKNOWN_HOST then bounds it).
     from seedvr2x import blockswap
 
     levels(caplog, logging.DEBUG)

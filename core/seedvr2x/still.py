@@ -5,8 +5,8 @@ reconfigures them, beyond entering the three phases as the video path does (Mode
 that a server can call it in a loop on the models it keeps.
 
 A picture is a shot of one frame at frame 0, encoded alone (DESIGN.md, Still images, the model on
-one picture) and seeded as such, so that the output is bit for bit what the command line's shot
-pipeline gives for it (apps/seedvr2x/shot.py: encode_shot, sample_windows over the one window
+one picture) and seeded as such, so that the output is bit for bit what the shot's pass gives for
+it (seedvr2x/shot_pass.py: encode_shot, sample_windows over the one window
 [(0, 1)], decode_shot with its correction; tests/test_still_cli.py holds it). The tiled passes
 keep their scratch in system memory (tiling.InMemory): a picture's is 191 MiB at 8K."""
 
@@ -45,8 +45,8 @@ def upscale(
     pixels is the picture as stored, (H, W, 3) float32 in [0, 1]. target is the (height, width)
     in pixels the encode resizes it to (frames.target_size, the caller's). seed is the picture's:
     its encode is seeded with seed + ENCODE_SEED_OFFSET and its noise drawn from seed, as a
-    shot's first frame is (shot.encode_shot, sample_windows). encode_tiles and decode_tiles, the
-    plan's (None: one pass), tile the VAE's passes (tiling). correct runs the colour correction
+    shot's first frame is (shot_pass.encode_shot, sample_windows). encode_tiles and decode_tiles,
+    the plan's (None: one pass), tile the VAE's passes (tiling). correct runs the colour correction
     (colour.split) against the picture itself.
 
     The three steps one after the other: encoded, sampled, decoded, which a caller running
@@ -98,7 +98,7 @@ def sampled(models: Models, latent: Tensor, seed: int) -> Tensor:
     out = sampling.window(models, noise, latent)
     del noise, latent
     # decode_shot's start: the window's output leaves the device for system memory, and is
-    # decoded from there (shot._slices). Here before the decode's phase is entered, so that a
+    # decoded from there (shot_pass._slices). Here before the decode's phase is entered, so that a
     # picture waiting for the VAE holds nothing on the device.
     model.synchronize(out.device)
     return out.to("cpu")
@@ -127,16 +127,16 @@ def decoded(
     height, width = output_size(target)
     try:
         # One frame: one slice. Cropped to the target's even sides, dropping the padding, as
-        # shot._decoded crops, (1, H', W', C) in [-1, 1] unclamped, on the device.
+        # shot_pass._decoded crops, (1, H', W', C) in [-1, 1] unclamped, on the device.
         chunk = next(slices).permute(1, 2, 3, 0)[:1, :height, :width]
         if chunk.shape[0] != 1:
             raise RuntimeError(f"{chunk.shape[0]} frames decoded for a picture of one")
     finally:
         # A generator, as both decodes are; closing it clears the VAE's causal memory and the
-        # tiles' scratch at once (shot._slices).
+        # tiles' scratch at once (shot_pass._slices).
         if isinstance(slices, Generator):
             slices.close()
-    # As shot.finite checks it, before the correction and the post-processing; the picture's
+    # As shot_pass.finite checks it, before the correction and the post-processing; the picture's
     # frame is the one part.
     if not bool(torch.isfinite(chunk).all()):
         bad = int((~torch.isfinite(chunk)).sum())
@@ -144,7 +144,7 @@ def decoded(
     if correct:
         stages = colour.colour_stages((pixels.shape[0], pixels.shape[1]), target)
         # split's reference is the picture through the encoder's transform in float32 (no
-        # float16 or bfloat16 step), cropped as the decode is (shot.reference_inputs, _frames).
+        # float16 or bfloat16 step), cropped as the decode is (shot_pass.reference_inputs, _frames).
         reference = _transformed(models, torch.as_tensor(pixels), target, torch.float32)
         reference = reference.permute(1, 0, 2, 3)[:, :, :height, :width]
         corrected = colour.split(chunk.permute(0, 3, 1, 2), reference, stages)
@@ -162,6 +162,6 @@ def _transformed(
     """The picture's frame, (H, W, 3) made a tensor on the CPU by the caller (model.to_input for
     the encoder's input, float16 as numz's; torch.as_tensor for the reference), through
     model.input_transform(target) as dtype on the device: (C, 1, H', W') in [-1, 1],
-    (H', W') = frames.padded_size(target) (shot._transformed)."""
+    (H', W') = frames.padded_size(target) (shot_pass._transformed)."""
     frames = frame.unsqueeze(0).permute(0, 3, 1, 2).to(models.device, dtype)
     return model.input_transform(target)(frames)

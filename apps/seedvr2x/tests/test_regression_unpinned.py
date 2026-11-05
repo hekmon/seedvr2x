@@ -13,8 +13,8 @@ from levels import levels
 
 import disk
 import planner
-from job import Shot
 from seedvr2x import memory, peaks
+from seedvr2x.shots import Shot
 
 GIB = memory.GIB
 HD = (1080, 1920)

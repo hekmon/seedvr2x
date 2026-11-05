@@ -107,9 +107,9 @@ class Units:
 
     def save_latent(self, run: int, latent: Tensor) -> Tensor:
         """Keep run `run`'s latent, (T', h, w, 16) as its encode gives it, in system memory
-        (shot.encode_shot). Returns the one written for a resume: itself, or its copy in system
+        (shot_pass.encode_shot). Returns the one written for a resume: itself, or its copy in system
         memory were it given on the GPU, values and memory layout kept (sampling.moved), so that a
-        run samples its windows from it (shot.sample_windows) and holds no second copy of a
+        run samples its windows from it (shot_pass.sample_windows) and holds no second copy of a
         latent, nor reads back a file it wrote."""
         self.settle()
         kept = _save(latent, self._unit(run, "latent.pt"))

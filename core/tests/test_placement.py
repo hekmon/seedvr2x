@@ -73,8 +73,8 @@ def digest(tensor: Tensor) -> str:
 
 
 def windows(models: model.Models) -> tuple[list[str], int]:
-    """FORWARDS windows through the DiT, as shot.sample_windows runs one: their digests, and the
-    device's peak over them, in bytes."""
+    """FORWARDS windows through the DiT, as shot_pass.sample_windows runs one: their digests, and
+    the device's peak over them, in bytes."""
     height, width = frames.padded_size(TARGET)
     generator = torch.Generator().manual_seed(7)
     values = torch.randn((16, LATENTS, height // 8, width // 8), generator=generator)

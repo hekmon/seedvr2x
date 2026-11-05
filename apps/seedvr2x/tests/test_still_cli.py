@@ -52,7 +52,8 @@ from seedvr2x.errors import Refusal
 from seedvr2x.frames import output_size
 from seedvr2x.passes import Tiles
 from seedvr2x.peaks import GIB
-from shot import Correction, decode_shot, encode_shot, merge_windows, sample_windows
+from seedvr2x.shot_pass import decode_shot, encode_shot, merge_windows, sample_windows
+from shot import Correction
 
 LAYOUT = [(0, 1)]
 
@@ -81,7 +82,7 @@ def shots_pipeline(
         1,
         target,
         written.append,
-        correction=correction,
+        reference=correction,
         tiles=decode_tiles,
     )
     assert len(written) == 1 and written[0].shape[0] == 1
@@ -107,7 +108,7 @@ def test_a_picture_is_a_shot_of_one_frame(
     cpu_models: model.Models,  # noqa: F811
 ) -> None:
     # The shot's input copy, which the correction re-reads through ffmpeg for a job, is read from
-    # memory here (test_shot.py does the same): the frame the encode read.
+    # memory here (test_shot_cli.py does the same): the frame the encode read.
     pixels = pixels_of(7)
 
     @contextmanager
@@ -714,7 +715,8 @@ def test_the_seeds_at_the_picture_bounds_are_taken(
 ) -> None:
     # The same bound as a shot at frame 0 has (job.check_seed): the seed plus the encode's offset
     # under numz's limit.
-    from job import Shot, check_seed
+    from job import check_seed
+    from seedvr2x.shots import Shot
 
     check_seed(int(seed), [Shot(0, 1)])
     assert run(machine, make_picture(tmp_path / "in.png"), tmp_path / "o.png", "--seed", seed) == 0
@@ -1674,8 +1676,8 @@ def test_the_host_figure_counts_the_pictures_own_arrays(
     machine: Machine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # An 8K output (7680x4320) from a small picture; --format png8 and the default 16 bits.
-    from planner import HOST_RESIDENT
     from seedvr2x import still_plan
+    from seedvr2x.shot_plan import HOST_RESIDENT
 
     source = tmp_path / "small.png"
     Image.new("RGB", (160, 90), (30, 60, 90)).save(source)

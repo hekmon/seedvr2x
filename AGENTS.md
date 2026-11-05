@@ -23,6 +23,9 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
     gguf_file.py kquant.py      a dynamic GGUF file: its header read without torch, and the
                          K-quants' dequantisation on the card with the linear that uses it;
                          pull.py also holds the smaller files of a DiT file, which a plan names
+    shots.py shot_plan.py shot_pass.py     a video's shots: a shot and its DiT windows, the
+                         job's plan for its shots (the memory planner, no torch at import), and a
+                         shot's pass, encode, windows and decode, on models already loaded
     picture.py png.py webp.py still.py still_plan.py     a still picture: read, written as PNG
                          or lossless WebP, upscaled on models already loaded, its plan for a bound
     record.py            seedvr2x's record in each output: its fields and the AI mark, a picture's
@@ -36,9 +39,11 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
 apps/seedvr2x/          the seedvr2x command: distribution seedvr2x (setuptools), flat: its
                          modules at the app's root, no package folder
   main.py                options, logging (the script `seedvr2x = "main:main"`)
-  shot run cuts planner plan job manifest resume units scratch environment calibration timing
-  stop disk .py          the pipeline per shot, then stitching, planner, a job's plan, saving and
-                         resume, its environment record
+  shot run cuts planner job manifest resume units scratch environment calibration timing
+  stop disk .py          a job: its shots through the library's pass, unit by unit (shot.py: the
+                         input copy a decode is corrected against), stitching, the plan's lines
+                         and a resume's checks (planner.py), saving and resume, its environment
+                         record
   stills.py              a still picture's run: its options, -o, plan, load, pass, PNG or WebP
   media/                 I/O layer: ffprobe, ffmpeg pipes, FFV1 and PNG writers
   tests/                 the CLI's, with levels.py and conftest.py
@@ -220,8 +225,15 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   across the two, a helper being imported by name. A file that held both halves is two: the
   library's, and its `_cli` half beside the command (`test_pull_cli.py`, `test_weights_cli.py`,
   `test_compile_cli.py`, `test_detector_cli.py`, `test_padding_cli.py`, `test_int8_cli.py`,
-  `test_gguf_cli.py`), which use the library's half's helpers and say so in their docstring. The
-  helpers both directories use are `core/tests/`'s (`library_fixtures.py`, `stand_ins.py`, the fixtures
+  `test_gguf_cli.py`, `test_shot_cli.py`), which use the library's half's helpers and say so in
+  their docstring. The shot's pass and its plan moved to the library on 2026-11-04 (DESIGN.md,
+  Repository and apps, "The shot's pass moves to the library"), their tests with them:
+  `core/tests/test_shot_plan.py` holds the plan (`seedvr2x/shot_plan.py`, importing no torch) and
+  `core/tests/test_shot_pass.py` the pass on the CPU; the CLI's `tests/test_planner.py` what the
+  command line does with a plan (its lines, the smaller DiT files, a resume's record checked or
+  planned again) and `tests/test_shot_cli.py` the pass with the units' files, the scratch and the
+  input copy, and the GPU test of a shot's windows through the real DiT. The helpers both
+  directories use are `core/tests/`'s (`library_fixtures.py`, `stand_ins.py`, the fixtures
   `conftest.py` imports from the first); the CLI's pytest puts `../../core/tests` on its
   `pythonpath`.
 - The rule between them: `core/tests/test_library.py` holds that no library file imports the
@@ -506,8 +518,9 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   written, a segment command's unknown and then measured, the room free to a user, and the line
   among `--plan`'s and a run's warning, which never refuses.
 - `--compile` is held on the CPU by `tests/test_compile.py` (`seedvr2x/compiling.py`, `peaks.py`'s
-  range of shapes) for the library's side and by `test_compile_cli.py` (`planner.py`'s compiled
-  passes, the job's plan and record) for the CLI's: the plan holding a compiled pass to 1.1 times
+  range of shapes) for the library's side and by `test_compile_cli.py` (the compiled
+  passes of `seedvr2x/shot_plan.py`'s plan, `planner.py`'s shapes, the job's plan and record)
+  for the CLI's: the plan holding a compiled pass to 1.1 times
   its tile's plain peak and to the measured range of shapes, the shapes warmed (the decoder's latent
   in one layout, the DiT's, dense channels last, for the run's decodes and the calibration's: the
   run's own calls, shots of 1 to 64 latents, are compared with the warm-up's), the order of the load
@@ -645,7 +658,7 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   orientation, unchanged without it. `tests/test_peaks.py`
   holds the colour correction's term by its frames, a video's `SLICE` unchanged.
 - The command line's still path (`stills.py`, `main.py`'s branch by content): `tests/
-  test_still_cli.py` holds `still.upscale` bit for bit to `shot.py`'s pass over a shot of one
+  test_still_cli.py` holds `still.upscale` bit for bit to `shot_pass.py`'s pass over a shot of one
   frame, tiled and corrected, and under `-m gpu` on CUDA with the sharp 7B and the VAE from
   `SEEDVR2X_MODEL_DIR`, untiled at 720p, the plan's own at 1080p, and both passes tiled at 1080p
   pinned to 1728 and 1024 px, the models placed by the plan for one picture in the card's free
@@ -702,7 +715,7 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   (`still_plan.RESIZE`, cuBLAS's workspace held) and what a phase takes for a reservation
   (`still_plan.Peak`, `bound_peaks`, `picture_peaks`, a picture's passes within a `budget`). No
   video plan moves: the plan matrix's
-  5,480 cases are main's byte for byte.
+  5,480 cases are main's byte for byte (5,120 since the tests' numz modes retired, 2026-11-04).
 - A picture's refusals carry their kind, their reason and their way out apart (`errors.Refusal`'s
   `kind`, `reason`, `way`; `picture.KINDS`, and `frames.check_target`'s `too-small`), so that the
   image server words its own way out with no file name and no command (DESIGN.md, The image
@@ -729,9 +742,10 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   apps/imgserver/Dockerfile .`), its ignore file `Dockerfile.dockerignore` beside it, and
   `.github/workflows/imgserver-image.yml`, which pushes it to ghcr.io on release tags. No test
   builds it: a build downloads torch's CUDA wheels, several GB.
-- A resume short of the memory free is held by `tests/test_planner.py` (the shortfall and the
-  phase a refusal names, a recorded shape planned again releasing that part, planning importing
-  no torch), `tests/test_memory.py` (the early NVML reading, off this process's own context),
+- A resume short of the memory free is held by `tests/test_shot_plan.py` (the shortfall and the
+  phase a refusal names, planning importing no torch) and the CLI's `tests/test_planner.py` (a
+  recorded shape planned again releasing that part), `tests/test_memory.py` (the early NVML
+  reading, off this process's own context),
   `tests/test_units.py` and `tests/test_timing.py` (each run's windows decided, kept or made
   again, from the layouts the manifest records) and `tests/test_cli_run.py`: the refusal naming
   `--accept-env-change`, the warning given before the checks, the re-plan under the flag

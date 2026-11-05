@@ -51,7 +51,6 @@ py-modules = [
     "job",
     "main",
     "manifest",
-    "plan",
     "planner",
     "resume",
     "run",

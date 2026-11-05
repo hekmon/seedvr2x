@@ -17,17 +17,11 @@ from pathlib import Path
 from typing import Any, cast
 
 import seedvr2x
-from job import (
-    QUALITY,
-    JobError,
-    OutputSegment,
-    Run,
-    Shot,
-    shot_runs,
-    window_layout,
-)
+from job import QUALITY, OutputSegment, Run, shot_runs
 from media.files import write_whole
 from media.source import Source
+from seedvr2x.errors import JobError
+from seedvr2x.shots import Shot, window_layout
 
 # The CLI's own code, which code_sha256 hashes and the environment record imports: its top-level
 # modules, sorted, and its packages. The command is flat, with no package folder of its own
@@ -41,7 +35,6 @@ MODULES: tuple[str, ...] = (
     "job",
     "main",
     "manifest",
-    "plan",
     "planner",
     "resume",
     "run",
@@ -317,7 +310,7 @@ class Manifest:
     # in the input's record; None for a directory's job, which makes none.
     rehearsal: dict[str, Any] | None = None
     # Each run's own window cap (WINDOW_CAP), None where its windows are the job's plan's: with
-    # layouts, those windows laid out by the cap (job.window_layout), and by the plan's window
+    # layouts, those windows laid out by the cap (shots.window_layout), and by the plan's window
     # when it is None. In the order of runs.
     window_caps: list[int | None] = field(default_factory=list[int | None])
     # Called once, before the manifest's next write, then dropped: it writes the frame index that

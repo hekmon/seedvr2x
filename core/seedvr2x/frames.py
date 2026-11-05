@@ -46,8 +46,8 @@ def output_size(target: tuple[int, int]) -> tuple[int, int]:
 # research/docs/numerics.md, reflect+black+16): at the bottom, the fewest rows reflected from the
 # picture, at least REFLECTED, that bring it to a multiple of MULTIPLE (8 to 23), then BLACK rows
 # of zeros; at the right, columns the same way, only when the width isn't a multiple of MULTIPLE.
-# All are trimmed after the decode (shot._decoded). numz pads zeros alone, up to the multiple (8
-# rows at 1080p, none at 720p), which costs the bottom 16 rows 3-10 dB, while the black rows
+# All are trimmed after the decode (shot_pass._decoded). numz pads zeros alone, up to the multiple
+# (8 rows at 1080p, none at 720p), which costs the bottom 16 rows 3-10 dB, while the black rows
 # anchor the model's tone: without them the whole frame is worse.
 MULTIPLE = 16
 REFLECTED = 8

@@ -34,7 +34,7 @@ def cpu_models() -> model.Models:
 
 
 # The models' holder where only the device matters, the CPU: a copy to the device or back is the
-# tensor itself (test_sampling.py, the CLI's test_shot.py).
+# tensor itself (test_sampling.py, test_shot_pass.py).
 DEVICE = cast(model.Models, SimpleNamespace(device=torch.device("cpu")))
 
 

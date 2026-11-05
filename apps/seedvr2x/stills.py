@@ -147,9 +147,9 @@ def run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
 def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     from fractions import Fraction
 
-    from job import DEFAULT_RESOLUTION, JobError, default_smaller
+    from job import DEFAULT_RESOLUTION, default_smaller
     from seedvr2x import memory, picture, png, pull, still_plan, webp
-    from seedvr2x.errors import Refusal
+    from seedvr2x.errors import JobError, Refusal
     from seedvr2x.frames import check_target, output_size, target_size
     from seedvr2x.weights import check_models
 
@@ -448,7 +448,7 @@ def _process(size: tuple[int, ...], output: tuple[int, int], bits: int) -> int:
     samples quantised for the PNG, (H', W', 3) at 2 bytes (16 bits) or 1; and the PNG's bytes held
     twice at most, 2 times the raw size, the worst case of zlib on noise (a grey picture's
     are a third of that, counted as colour all the same)."""
-    from planner import HOST_RESIDENT
+    from seedvr2x.shot_plan import HOST_RESIDENT
 
     height, width = size
     out_height, out_width = output
@@ -459,7 +459,7 @@ def _process(size: tuple[int, ...], output: tuple[int, int], bits: int) -> int:
 
 def _check_tile_pins(args: "argparse.Namespace", target: tuple[int, int]) -> None:
     """Refuse a tile pin that covers the picture's own padded frame, as a video's planner does
-    (planner.plan), in its words: a covering tile is no tiling, and the tiled passes would run it
+    (shot_plan.plan), in its words: a covering tile is no tiling, and the tiled passes would run it
     untiled without saying so. still_plan.plan, made for the picture alone, refuses the same pin
     at the same frame; this refuses it before the card is read."""
     from seedvr2x import peaks, still_plan
@@ -481,7 +481,8 @@ def _check_seed(seed: int) -> None:
     shot of one frame at frame 0 (still.upscale doesn't check it), its noise drawn from the seed
     and its encode seeded with ENCODE_SEED_OFFSET more, so the bound is job.check_seed's for a
     shot at frame 0. The words are not the video's, which speak of shots and a source."""
-    from job import ENCODE_SEED_OFFSET, SEED_LIMIT, JobError
+    from job import ENCODE_SEED_OFFSET, SEED_LIMIT
+    from seedvr2x.errors import JobError
 
     highest = SEED_LIMIT - 1 - ENCODE_SEED_OFFSET
     if not 0 <= seed <= highest:
@@ -500,7 +501,7 @@ def _given(args: "argparse.Namespace", dest: str) -> bool:
 def _check_options(args: "argparse.Namespace") -> None:
     """Refuse every option a picture has no use for, all at once, each saying why
     (DESIGN.md, Still images, Options taken); --plan with a file, which would be a cut list."""
-    from job import JobError
+    from seedvr2x.errors import JobError
 
     reasons = [f"{flag}: {why}" for dest, (flag, why) in REFUSED.items() if _given(args, dest)]
     if args.plan is not None and args.plan is not BARE_PLAN:
@@ -526,7 +527,7 @@ def _bits(args: "argparse.Namespace") -> int:
     rounded to the nearest code; for a .webp, 8, the only depth a lossless WebP holds, and the
     format is the file's, so --format with it is refused (DESIGN.md, Still images, Output). A
     video's format is refused."""
-    from job import JobError
+    from seedvr2x.errors import JobError
 
     if _is_webp(args.output):
         if args.format is not None:
@@ -549,7 +550,7 @@ def _check_output(output: Path, source: Path) -> None:
     """Refuse an -o a picture can't go to, before any work (DESIGN.md, Still images, Output): a
     .png or .webp file, new, beside a directory that exists; a directory, the source itself or a
     file already there is refused, nothing replaced."""
-    from job import JobError
+    from seedvr2x.errors import JobError
 
     if output.is_dir():
         raise JobError(f"{output}: a directory; a picture goes to a new .png or .webp file")
@@ -586,8 +587,8 @@ def _write(path: Path, data: bytes) -> None:
     """The file's bytes (PNG or WebP) at path, written whole as a finished file is
     (media.files.write_whole): a partial file beside it, then renamed. Nothing is left on a
     failure, a stop included; a file that has come since the check is not replaced."""
-    from job import JobError
     from media.files import partial_path, write_whole
+    from seedvr2x.errors import JobError
 
     if os.path.lexists(path):
         raise JobError(f"{path}: written to since it was checked, by another program: not replaced")

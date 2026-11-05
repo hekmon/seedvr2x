@@ -35,11 +35,10 @@ from test_cli_runs import KEPT_BYTES, listed, short_disk
 
 import main as cli
 import planner
-from plan import Plan
 from seedvr2x import model, peaks
 from seedvr2x.blockswap import HostMemoryError
 from seedvr2x.frames import padded_size
-from seedvr2x.passes import Tiles
+from seedvr2x.passes import Plan, Tiles
 
 # What every refusal after the first pass adds, the job's directory named (cli._first_kept).
 KEPT = (

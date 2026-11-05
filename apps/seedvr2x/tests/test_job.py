@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from job import JobError, Shot, read_cuts, shots_from_cuts
+from job import read_cuts, shots_from_cuts
+from seedvr2x.errors import JobError
+from seedvr2x.shots import Shot
 
 
 def test_cut_list(tmp_path: Path) -> None:

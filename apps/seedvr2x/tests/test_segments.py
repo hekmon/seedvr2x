@@ -21,20 +21,15 @@ import numpy as np
 import pytest
 from test_weights import accepted_models
 
-from job import (
-    JobError,
-    OutputSegment,
-    Shot,
-    merge_short,
-    merged_segments,
-    min_segment_frames,
-)
+from job import OutputSegment, merge_short, merged_segments, min_segment_frames
 from manifest import Manifest, code_sha256, read
 from media import ffmpeg
 from media.ffmpeg import MediaError
 from media.source import Source
 from media.writer import SegmentWriter, Tags, Writer, count_packets, open_writer
-from plan import Plan
+from seedvr2x.errors import JobError
+from seedvr2x.passes import Plan
+from seedvr2x.shots import Shot
 
 
 def at(second: int) -> int:

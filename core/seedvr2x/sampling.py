@@ -1,7 +1,8 @@
 """The DiT's sampling of latents (DESIGN.md, Pipeline step 2): the noise of a shot's latent drawn
 once, on the CPU, from a seed, and one window's pass of the DiT over a window's noise and latent.
-The library's brick (DESIGN.md, Repository and apps); the windows over a shot, their layout, the
-units they are kept in and their merge are the command line's (shot.py, sample_windows)."""
+The library's brick (DESIGN.md, Repository and apps); the windows over a shot run in shot_pass.py
+(sample_windows, merge_windows), their layout is shots.py's (window_layout), and the units they are
+kept in are the command line's."""
 
 import logging
 import time
@@ -22,7 +23,7 @@ CPU = torch.device("cpu")
 def moved(tensor: Tensor, device: torch.device, what: str) -> Tensor:
     """tensor on device with its values and its memory layout, its strides: itself when it is
     there already, else a copy. The noise drawn from a latent follows the latent's layout
-    (shot.py, sample_windows), and the decode is fed the windows as the DiT gave them, so
+    (shot_pass.sample_windows), and the decode is fed the windows as the DiT gave them, so
     neither changes layout on its way to system memory or back (units.py). torch keeps
     the strides of a tensor that is dense, as an encode's latent and a window's output are, and
     lays the copy of any other out anew, dense in the same order of dimensions (a slice of the
@@ -41,7 +42,7 @@ def moved(tensor: Tensor, device: torch.device, what: str) -> Tensor:
 
 
 def draw(models: Models, latent: Tensor, seed: int) -> Tensor:
-    """The noise of a shot's latent as shot.py's sample_windows draws it (drawn), on
+    """The noise of a shot's latent as shot_pass.sample_windows draws it (drawn), on
     its own: for the time estimates' calibration (calibration.py), which times it apart
     from the window."""
     return drawn(models, latent, seed)[0]

@@ -1614,7 +1614,7 @@ def test_re_holds_summing_past_what_the_plan_leaves_stop_the_run(
 def test_a_plan_made_with_2_5_loses_that_much_at_the_most(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # A plan made with the reserve of 2.5 GiB, the one with 4.5 refused (planner.plan; DESIGN.md,
+    # A plan made with the reserve of 2.5 GiB, the one with 4.5 refused (shot_plan.plan; DESIGN.md,
     # Allocator): a check may take from the limit what that plan leaves torch's allocator beyond
     # a step's peak, 2.5, and the run stops past it (PROVISIONAL, implementation, 2026-10-21).
     # The plan's limit 25.5 GiB, torch holding 20.
@@ -1653,7 +1653,7 @@ def test_a_plan_made_with_2_5_loses_that_much_at_the_most(
 
 
 def test_tightened_moves_the_reserve_alone() -> None:
-    # The plan's last resort (planner.plan): the same figures, the reserve 2.5 GiB where 4.5,
+    # The plan's last resort (shot_plan.plan): the same figures, the reserve 2.5 GiB where 4.5,
     # under the card's figure or the driver's alone.
     for card, left in ((26 * GIB, memory.HELD_BACK), (None, memory.HELD_BACK_UNREAD)):
         taken = 30 * GIB if card is None else card

@@ -22,12 +22,12 @@ from seedvr2x.tilegrid import CHANNELS, SCRATCH, scratch_bytes
 
 logger = logging.getLogger("cli.scratch")
 
-# The bytes of a scratch kept in system memory where its pass is given no allowance (Scratch), a
-# larger one going to its file: for a test or a script that calls shot.encode_shot or
-# shot.decode_shot without one. 8 GiB, which holds 675 frames at 1080p (padded to 1104x1920,
-# 12,718,080 bytes each) and 170 at 4K (2192x3840, 50,503,680). A run gives each pass its plan's
-# allowance, which the planner sets from the host's memory (planner.plan; DESIGN.md, Memory
-# planner, Host RAM).
+# The bytes of a scratch kept in system memory where it is given no allowance (Scratch), a larger
+# one going to its file: for a test or a script that builds one without; a pass given no store at
+# all keeps its scratch in system memory alone (tiling.InMemory). 8 GiB, which holds 675 frames at
+# 1080p (padded to 1104x1920, 12,718,080 bytes each) and 170 at 4K (2192x3840, 50,503,680). A run
+# gives each pass its plan's allowance, which the planner sets from the host's memory
+# (shot_plan.plan; DESIGN.md, Memory planner, Host RAM).
 DEFAULT_ALLOWANCE = 8 * 2**30
 
 

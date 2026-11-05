@@ -21,7 +21,7 @@ import torch
 
 import stop as stopping
 import timing
-from job import KEPT_SAMPLE_BYTES, OutputSegment, Run, Shot, run_of
+from job import KEPT_SAMPLE_BYTES, OutputSegment, Run, run_of
 from media.checksums import write_checksums
 from media.decode import to_float32
 from media.ffmpeg import MediaError
@@ -29,22 +29,15 @@ from media.files import make_directories
 from media.reader import Reader, listed
 from media.source import Source
 from media.writer import FFV1Writer, Tags, Writer, quantise
-from plan import Plan
-from scratch import ScratchError
+from scratch import Scratch, ScratchError
 from seedvr2x import compiling, memory
 from seedvr2x.clock import spent
 from seedvr2x.frames import output_size
 from seedvr2x.model import Models, synchronize
-from seedvr2x.passes import Phase, Tiles
-from shot import (
-    CopyError,
-    Correction,
-    decode_shot,
-    encode_shot,
-    finite,
-    merge_windows,
-    sample_windows,
-)
+from seedvr2x.passes import Phase, Plan, Tiles
+from seedvr2x.shot_pass import decode_shot, encode_shot, finite, merge_windows, sample_windows
+from seedvr2x.shots import Shot
+from shot import CopyError, Correction
 from stop import Stop
 from timing import ENTER, Clock, Key, Kind, Progress, run_name, tokens, units_of
 from units import Units
@@ -92,7 +85,7 @@ def run_job(
 ) -> None:
     """Upscale the shots of a job, which cover its source in order (job.shots_from_cuts), each
     with its own seed (Shot.seed), its frames resized to target (frames.target_size), as the job's
-    plan says (plan.py): its DiT windows capped at plan.window latents, or laid out as
+    plan says (passes.Plan): its DiT windows capped at plan.window latents, or laid out as
     the manifest records a run's (units.manifest.layouts: a run kept by its own cap when the plan
     was made again for the memory free), its encodes and decodes tiled or not; write(frames) takes
     the output frames as they come, (n, H', W', 3) float32 in [0, 1], the segments' in turn; with
@@ -300,7 +293,7 @@ def _sample(
 
     Between two of the shot's units the GPU holds nothing of the shot: its latent waits in
     system memory and each window's output in its file (units.Units), and its noise, drawn
-    there, in system memory with the latent (shot.sample_windows). A unit's logged VRAM peak is
+    there, in system memory with the latent (shot_pass.sample_windows). A unit's logged VRAM peak is
     then its own; the first window a run makes of a shot takes the noise's draw's time too, on
     the CPU."""
     if progress is None:
@@ -332,23 +325,21 @@ def _sample(
         progress.first_encode = False
         read = inputs.reader(shot)
         tiles = plan.encode_tiles
-        scratch = _scratch(units, index, tiles)
+        store = _scratch(units, index, tiles, plan.scratch_allowance)
         # A held run warns where torch refused allocations during the pass (memory.watched).
         with memory.watched(models.device, f"{name}'s encode", "latent, and the frames from it,"):
             if copying is None:
                 latent = encode_shot(
                     *(models, read, shot.frames, target, run.seed(seed)),
                     tiles=tiles,
-                    scratch=scratch,
-                    allowance=plan.scratch_allowance,
+                    store=store,
                 )
             else:
                 with _copying(units, index, copying) as copy:
                     latent = encode_shot(
                         *(models, _copied(read, copy), shot.frames, target, run.seed(seed)),
                         tiles=tiles,
-                        scratch=scratch,
-                        allowance=plan.scratch_allowance,
+                        store=store,
                     )
         finite(latent, f"{name}'s encode")
         # In system memory, as its encode gives it: the one the units keep or wrote, which the
@@ -369,7 +360,7 @@ def _sample(
             left,
         )
     # The latent is in system memory, the one the units keep or read back, where the noise is
-    # drawn from it, with the first window made here (shot.sample_windows).
+    # drawn from it, with the first window made here (shot_pass.sample_windows).
     sampled = sample_windows(models, latent, layout, run.seed(seed), done)
     per_latent = tokens(target, 1)
     for number in range(done, len(layout)):
@@ -481,8 +472,7 @@ def _decode(
             decode_shot(
                 *(models, merged, run.frames, target, write, name, run.start, correction),
                 tiles=plan.decode_tiles,
-                scratch=_scratch(units, index, plan.decode_tiles),
-                allowance=plan.scratch_allowance,
+                store=_scratch(units, index, plan.decode_tiles, plan.scratch_allowance),
             )
     except CopyError:
         # Derived data: removed, the next run makes it again from the input (_sample).
@@ -687,11 +677,11 @@ class Kept:
             raise RuntimeError(f"{len(self.frames) - self._next} kept frames never written")
 
 
-def _scratch(units: Units, index: int, tiles: Tiles | None) -> Path | None:
-    """Where a tiled pass of shot `index` keeps its scratch once it outgrows its allowance of
-    system memory (DESIGN.md, Pipeline, per shot, step 3): the shot's own directory, among its
-    units. None for an untiled pass, which keeps none."""
-    return None if tiles is None else units.shot_directory(index)
+def _scratch(units: Units, index: int, tiles: Tiles | None, allowance: int) -> Scratch | None:
+    """The scratch of a tiled pass of shot `index` (DESIGN.md, Pipeline, per shot, step 3): system
+    memory up to allowance, the plan's, in bytes, then a file in the shot's own directory, among
+    its units. None for an untiled pass, which keeps none."""
+    return None if tiles is None else Scratch(units.shot_directory(index), allowance)
 
 
 @contextmanager

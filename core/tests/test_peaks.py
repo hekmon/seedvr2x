@@ -13,7 +13,7 @@ from seedvr2x.frames import output_size, padded_size
 from seedvr2x.passes import Tiles
 from seedvr2x.peaks import GIB
 
-# A 1080p target (tests/test_planner.py has it with the 4K one).
+# A 1080p target (tests/test_shot_plan.py has it with the 4K one).
 HD = (1080, 1920)
 
 # numz's padded sizes, multiples of 16 (planner-limits.md's tables), and seedvr2x's own

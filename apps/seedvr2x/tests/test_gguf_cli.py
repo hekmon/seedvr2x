@@ -46,8 +46,8 @@ from test_weights import as_dtype, dynamic_file, write
 
 import main as cli
 import planner
-from planner import Pins
 from seedvr2x import files, model, peaks, pull, weights
+from seedvr2x.shot_plan import Pins
 from seedvr2x.weights import Architecture
 
 DIT_MODEL = cli._dit_model  # pyright: ignore[reportPrivateUsage]

@@ -1,7 +1,7 @@
 """The DiT's sampling of latents (sampling.py; DESIGN.md, Pipeline step 2) on the CPU: the noise
 drawn in system memory from the latent's layout, held to its digest, not a card's, and the
 log line saying where it was drawn; `draw`, the same noise alone; and `moved`, a tensor on a
-device with its strides kept. The windows over a shot, which call these, are test_shot.py's."""
+device with its strides kept. The windows over a shot, which call these, are test_shot_pass.py's."""
 
 import logging
 import re

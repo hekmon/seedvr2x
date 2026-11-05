@@ -93,12 +93,12 @@ def test_a_second_provider_is_found(tmp_path: Path) -> None:
     (tmp_path / "run.py").write_text("")
     (tmp_path / "media").mkdir()
     (tmp_path / "media" / "__init__.py").write_text("")
-    (tmp_path / "plan").mkdir()
-    (tmp_path / "plan" / "a.py").write_text("")
+    (tmp_path / "planner").mkdir()
+    (tmp_path / "planner" / "a.py").write_text("")
     entries = [str(tmp_path)]
     assert foreign_providers("run", entries, APP) == [f"{tmp_path}: {tmp_path / 'run.py'}"]
     assert len(foreign_providers("media", entries, APP)) == 1
-    assert foreign_providers("plan", entries, APP) == [f"{tmp_path}: {tmp_path / 'plan'}"]
+    assert foreign_providers("planner", entries, APP) == [f"{tmp_path}: {tmp_path / 'planner'}"]
     assert foreign_providers("shot", entries, APP) == []
     # The app's own root on the path provides nothing foreign.
     assert [foreign_providers(name, [str(APP)], APP) for name in NAMES] == [[]] * len(NAMES)

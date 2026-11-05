@@ -5,7 +5,7 @@ measured on numz's CLI with the 7B fp16 (FP16), and by the peaks measured on see
 passes (MEASURED); the DiT in seedvr2x's int8 files (INT8) by its weights, read from its files'
 headers, and the fp16 fit's other terms, provisional until measured (INT8_*); the compiled
 passes' range; and the store a tiled pass takes. The library's (DESIGN.md, Repository and
-apps), as the bricks are; the command line's planner (planner.py) chooses a job's plan with them.
+apps), as the bricks are; the planner (shot_plan.py) chooses a job's plan with them.
 Sizes are (height, width) in pixels; `padded` is the frame the model takes, the target padded
 (frames.padded_size). No torch at import: the command line plans before it imports torch
 (tests/test_cli.py)."""
@@ -67,14 +67,14 @@ NUM_WINDOWS = (4, 3, 3)
 #   the first card's at the same windows, and set the constant: the 29 alone are bounded by
 #   0.124 GiB, which the desktop's 4 latents of 4K pass by 0.016.
 # The least margin left is 0.0009 GiB, on that window; on the 96 GB card 0.017, at 8 latents
-# of 4K, and 0.13 at the most (tests/test_planner.py holds the 45).
+# of 4K, and 0.13 at the most (the CLI's tests/test_planner.py holds the 45).
 FLASH_ATTN_2, SDPA = "flash_attn_2", "sdpa"
 DIT_ATTENTION = {FLASH_ATTN_2: (0, 1.0), SDPA: (round(0.141 * GIB), 1.0469)}
 
 # The VAE's weights, on the GPU in the VAE's phases, and in the DiT's unless the plan sends them
 # away for it, in bytes: 0.4669 GiB, its parameters by the model's shapes in the pipeline's
 # bfloat16, each on a multiple of 512 bytes, as the part that leaves lays them out (model.Models'
-# vae, a blockswap.Part; tests/test_planner.py builds the model). Measured on numz as DESIGN.md's
+# vae, a blockswap.Part; tests/test_shot_plan.py builds the model). Measured on numz as DESIGN.md's
 # 0.47 GiB: 28.15 to 27.68 GiB (Memory planner, Per-phase peaks; vram.md, Practical rules).
 VAE_WEIGHTS = 501_306_880
 
@@ -101,7 +101,7 @@ BLOCKS = len(FP16.blocks)
 BLOCK = FP16.blocks[0]
 SLOTS = weights.SLOTS
 # The DiT's parameters outside its blocks, emb_in, txt_in, vid_in and vid_out, in bytes: 0.155
-# GiB, by the model's shapes in fp16 (tests/test_planner.py builds the model), the same in an int8
+# GiB, by the model's shapes in fp16 (tests/test_shot_plan.py builds the model), the same in an int8
 # file, which holds them in fp16. They leave the GPU only with the last block a VAE phase keeps
 # (dit_on_gpu).
 DIT_OTHER = FP16.other
@@ -376,7 +376,7 @@ ENCODE_EXTRA = round(0.4 * GIB)
 
 # The colour correction, split, on the GPU: 0.56 GiB per 3840x2160 output frame it corrects at
 # once (research/docs/colour.md, Cost and what streams), in the decode's phase, where it runs on
-# each slice as the decode hands it on (shot._correct).
+# each slice as the decode hands it on (shot_pass._correct).
 SPLIT_FRAME_4K = round(0.56 * GIB)
 PIXELS_4K = 3840 * 2160
 # The most frames a slice of the decode holds: its first is the first two latents, 5 frames, the
@@ -403,7 +403,7 @@ TILE_STEP = 64
 # (planner-limits.md, The margin over free memory). Measured where the driver refuses a full
 # card, and a driver's alone: a run held to its card, whose driver gives memory the card doesn't
 # have, counts on memory.RESERVE less already, which measures the same need under torch's own
-# allocator, and takes no margin on top (the command line's planner.py, _Job.margin; DESIGN.md,
+# allocator, and takes no margin on top (shot_plan._Job.margin; DESIGN.md,
 # Allocator, 2026-10-12). The planner's, here so that the library's plan for one picture
 # (still_plan.py) takes the same.
 MARGIN = round(0.6 * GIB)
@@ -635,7 +635,7 @@ def decode_peak(
     832 px (12.87 for 13.624) and by 0.57 at 640 px (9.22 for 9.792), whose prediction by the
     fit alone was then 0.13 GiB under its measured peak, the small tiles' fit that much short
     there (the predictions as the planner made them then, by the fits and the five squares
-    measured; tests/test_planner.py, test_first_matrix)."""
+    measured; tests/test_shot_plan.py, test_first_matrix)."""
     # compiled: the tile's peak is COMPILE_PEAK times its plain one (encode_peak); the correction's
     # term, a pass of its own on the GPU, is not compiled.
     if frames < 1:

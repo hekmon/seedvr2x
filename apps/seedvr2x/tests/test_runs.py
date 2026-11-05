@@ -25,22 +25,15 @@ import manifest
 import planner
 import resume
 import run
-from job import (
-    PLACES_BEST_FIRST,
-    RUN_OFFSETS,
-    JobError,
-    OutputSegment,
-    Run,
-    Shot,
-    shot_runs,
-)
+from job import PLACES_BEST_FIRST, RUN_OFFSETS, OutputSegment, Run, shot_runs
 from manifest import Manifest
 from media.source import Source
 from media.writer import quantise
-from plan import Plan
 from scratch import ScratchError
+from seedvr2x.errors import JobError
 from seedvr2x.frames import padded_length
-from shot import shot_layout
+from seedvr2x.passes import Plan
+from seedvr2x.shots import Shot, shot_layout
 from units import KEPT, Units, run_file
 
 # --- The rule -----------------------------------------------------------------------------------

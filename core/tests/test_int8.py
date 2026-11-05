@@ -249,7 +249,7 @@ def test_the_memory_model_s_figures_are_the_module_s() -> None:
 def allocated(run: Callable[[], object]) -> int:
     """The most bytes torch allocated in system memory while run() ran, over what was allocated
     before it, by torch's memory profiler: every allocation and release of its CPU allocator, in
-    order (the CLI's test_shot.py measures so)."""
+    order (test_shot_pass.py measures so)."""
     activities = [torch.profiler.ProfilerActivity.CPU]
     with torch.profiler.profile(activities=activities, profile_memory=True) as profiled:
         result = run()

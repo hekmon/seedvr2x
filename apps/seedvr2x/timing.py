@@ -33,11 +33,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from job import OutputSegment, Shot, shot_runs
+from job import OutputSegment, shot_runs
 from seedvr2x.clock import spoken, wall
 from seedvr2x.frames import padded_length, padded_size
 from seedvr2x.passes import Phase
-from shot import shot_layout
+from seedvr2x.shots import Shot, shot_layout
 from stop import late
 
 logger = logging.getLogger("cli.timing")
@@ -207,7 +207,7 @@ def units_of(
 ) -> list[Unit]:
     """The units a job has left, in the order the run makes them (run.run_job): its shots, each
     run `per_shot` times (job.shot_runs), their windows capped at `window` latents
-    (shot.shot_layout) of per_latent tokens each (tokens); each segment's runs' encodes and
+    (shots.shot_layout) of per_latent tokens each (tokens); each segment's runs' encodes and
     windows in turn, then its decode and write. What the job's record says is made already is
     left out, as the run skips it: a run's encode (encoded, run by run, as the manifest's), its
     windows done (windows_done), a finished segment (finished).
@@ -215,7 +215,7 @@ def units_of(
     Each unit but an encode, whose model holds it (ENTER), pays, as parts of its own, the change
     of phase it opens, where the unit before it is of another phase (the first unit's against
     `start`, the phase the models are in, None for one unknown), and a run's first window left,
-    its run's noise draw, by the tokens of the run's whole latent (shot.sample_windows draws it
+    its run's noise draw, by the tokens of the run's whole latent (shot_pass.sample_windows draws it
     with that window).
 
     layouts: each run's windows as the job records them, in the order of runs, where a resume

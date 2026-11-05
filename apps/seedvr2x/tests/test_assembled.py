@@ -1756,10 +1756,10 @@ def test_first_frame_before_the_files_start_refused_before_any_unit(
     # assembled. No such file was found to make: the join's start is given one.
     import numpy as np
 
-    from job import JobError
     from media import assembly
     from media.index import FrameIndex
     from seedvr2x import model
+    from seedvr2x.errors import JobError
 
     def index(start_time: int) -> FrameIndex:
         none, times = np.zeros(1, np.uint32), np.array([23], np.int64)
@@ -1910,7 +1910,7 @@ def test_work_directory_another_holds_is_not_removed(
 ) -> None:
     # A work directory another seedvr2x made and locked between this run's look and its lock:
     # refused, and not this run's to remove as it leaves, empty as it is.
-    from job import JobError
+    from seedvr2x.errors import JobError
 
     source = job(tmp_path, monkeypatch)
     work = tmp_path / "x.mkv.work"

@@ -208,7 +208,7 @@ HELD_BACK_UNREAD = 3 * GIB
 # driver refuses, and with both the planner refused a window of 5 latents at 4K, the smallest,
 # beside that card's usual desktop, by 0.27 GiB (counted on the CPU, never run so on the card;
 # design, 2026-10-12; DESIGN.md, Allocator): on a held run the budget is what the plan counts on
-# (planner._Job.margin). The day before it was 2.3, from one window of 8 latents: with the margin
+# (shot_plan._Job.margin). The day before it was 2.3, from one window of 8 latents: with the margin
 # and the room that left a VAE pass 4.4 GiB beyond its peak, under what a decode in tiles of 1088 px
 # needs. PROVISIONAL (implementation, 2026-10-12): one card; a larger card's larger windows and
 # tiles need more, unmeasured; it follows planner.VAE_ROOM, to be raised by what that room loses;
@@ -231,7 +231,7 @@ HELD_BACK_UNREAD = 3 * GIB
 # decided on 2026-10-16): a step is then left less beyond its peak, never under it.
 RESERVE = round(4.5 * GIB)
 # The reserve a held run's plan takes where the plan made with RESERVE would be refused, a new
-# job's as a resume's recorded shape (planner.plan; DESIGN.md, Allocator, decided on 2026-10-13
+# job's as a resume's recorded shape (shot_plan.plan; DESIGN.md, Allocator, decided on 2026-10-13
 # with the user's go, for a resume's plan on 2026-10-21), and nowhere else: under expandable
 # segments a step left less than its need beyond its peak slows down and runs (EXPANDABLE). Run
 # so on the RTX 5090 under WSL2 (2026-10-13, a desktop holding 3.2 GiB of the card): 4K's
@@ -347,8 +347,8 @@ class Driver:
 @dataclass(frozen=True)
 class Reading:
     """The GPU's free memory as a plan is made in it, in bytes, each figure by its name, for
-    whoever words the plan and its refusals (planner.py) and for the manifest:
-    - reported: what the driver reports free to this process (main._free_memory);
+    whoever words the plan and its refusals (shot_plan.py, the command line's planner.py) and for
+    the manifest: - reported: what the driver reports free to this process (main._free_memory);
     - card: what the whole card has free by NVML, other programs' memory counted (card_free);
       None where it isn't read: on a driver that refuses, whose figure is the card's, and
       where NVML doesn't answer;
@@ -363,14 +363,14 @@ class Reading:
       RESERVE refused (tightened);
     - expandable: on a held run, whether torch's own allocator takes it with expandable segments
       (EXPANDABLE, startup), under which a step short of room slows down and runs where it is
-      otherwise refused: the only allocator a plan takes RESERVE_TIGHT under (planner.plan;
+      otherwise refused: the only allocator a plan takes RESERVE_TIGHT under (shot_plan.plan;
       DESIGN.md, Allocator: "With a reserve of 2.5 GiB under those segments");
     - nvml: on an early reading only (early), what the whole card has free by NVML before this
       process has a CUDA context on it, in bytes; `reported` and `card` are then that figure less
-      CONTEXT, so that the plan's words (planner._there) say what was read and what was counted
+      CONTEXT, so that the plan's words (shot_plan._there) say what was read and what was counted
       off it; None on a run's own reading;
     - nvml_used: on an early reading, what programs hold of the card by NVML (card_state), the
-      most that quitting them can give back (planner._freeable); None where not read."""
+      most that quitting them can give back (shot_plan._freeable); None where not read."""
 
     reported: int
     card: int | None
@@ -400,7 +400,7 @@ class Reading:
 def tightened(reading: Reading) -> Reading:
     """`reading`, a held run's, its plan counting on RESERVE_TIGHT less than torch's limit
     where RESERVE: what the planner plans in where the plan made in `reading` is refused, a new
-    job's or a resume's recorded shape (planner.plan; DESIGN.md, Allocator). The free memory and
+    job's or a resume's recorded shape (shot_plan.plan; DESIGN.md, Allocator). The free memory and
     what torch's limit leaves under it are the reading's: only the reserve moves."""
     taken = reading.reported if reading.card is None else min(reading.reported, reading.card)
     counted = max(taken - reading.left - RESERVE_TIGHT, 0)
@@ -415,7 +415,7 @@ def reading(free: int) -> Reading:
     what torch is held back from (hold: HELD_BACK) and RESERVE; where NVML fails twice, the
     driver's figure alone less HELD_BACK_UNREAD and RESERVE, with a warning. The planner's
     budget is `counted` less its own margin on a driver that refuses, and `counted` itself on a
-    held run, RESERVE holding that margin (planner.py); its plan's first line names the
+    held run, RESERVE holding that margin (shot_plan.py); its plan's first line names the
     figures: here they are said at debug level only, with what each of the two constants is
     left to.
 
@@ -606,7 +606,7 @@ def startup() -> str:
             if _native
             else "torch limited"
         )
-        # The tight reserve said where a plan can take it: under the segments (planner.plan).
+        # The tight reserve said where a plan can take it: under the segments (shot_plan.plan).
         tight = (
             f", {RESERVE_TIGHT / GIB:.1f} where that plan would be refused, slower"
             if _native and _segments and RESERVE_TIGHT < RESERVE

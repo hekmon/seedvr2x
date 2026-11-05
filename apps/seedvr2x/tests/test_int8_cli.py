@@ -39,8 +39,8 @@ from test_weights import as_dtype, int8_file, write
 
 import main as cli
 import planner
-from planner import Pins
 from seedvr2x import files, model, peaks, weights
+from seedvr2x.shot_plan import Pins
 from seedvr2x.weights import Architecture
 
 # The DiT's format by its file's header, as the command line reads it: the stand-in replaces it
