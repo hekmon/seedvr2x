@@ -591,7 +591,9 @@ def _transparent_files() -> dict[str, bytes]:
         "rgba": pillow(Image.fromarray(rgba, "RGBA"), "PNG"),
         "la": pillow(Image.fromarray(np.dstack([GREY8, alpha]), "LA"), "PNG"),
         "palette trns": pillow(palette, "PNG", transparency=bytes([255] * 15 + [0])),
-        "rgb colour key": pillow(Image.fromarray(RGB8), "PNG", transparency=tuple(RGB8[0, 0])),
+        "rgb colour key": pillow(
+            Image.fromarray(RGB8), "PNG", transparency=tuple(int(v) for v in RGB8[0, 0])
+        ),
         "gif": pillow(palette, "GIF", transparency=int(np.asarray(palette)[0, 0])),
         "webp": pillow(Image.fromarray(rgba, "RGBA"), "WEBP", lossless=True),
         "tiff": pillow(Image.fromarray(rgba, "RGBA"), "TIFF"),

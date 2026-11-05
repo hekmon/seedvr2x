@@ -934,7 +934,6 @@ def _download(name: str, pin: Pin, where: Path, needed: int) -> Path:
     sent (utils/_headers.py:125-133). Each of the library's failures is refused (ModelError),
     saying what to do; needed is what the downloads left need on the cache's disk, in bytes, this
     one's and the next ones', as _check_space checked it."""
-    import httpx
     from huggingface_hub import constants, file_download
     from huggingface_hub.errors import (
         HfHubHTTPError,
@@ -1066,7 +1065,7 @@ def _download(name: str, pin: Pin, where: Path, needed: int) -> Path:
             "failed",
             lambda say: f"{name}: its download failed ({said}): {again(say)}",
         ) from None
-    except (httpx.RequestError, RuntimeError) as error:
+    except (*_request_errors(), RuntimeError) as error:
         # A plain download's network lost past its retries (file_download.py:468-472), a proxy's
         # failure (1822), a body that doesn't decode or redirects without end (httpx's
         # DecodingError and TooManyRedirects, RequestErrors but not TransportErrors); hf_xet's
@@ -1097,6 +1096,20 @@ def _unreachable(name: str, why: str, message: Message) -> ModelUnreachable:
     return ModelUnreachable(message, why=why, file=name, settings=(MODEL_DIR,))
 
 
+def _request_errors() -> tuple[type[Exception], ...]:
+    """The base class of the request errors of the HTTP library the installed huggingface_hub
+    uses: httpx's up to 1.x (1.33.0), httpx2's from 2.x (2.3.0, errors.py:6, whose requests raise
+    httpx2's own classes, not httpx's). Each is taken only if it is installed, imported here and
+    not at import: the Hub has imported the one it uses by now, and the other may be absent."""
+    found: list[type[Exception]] = []
+    for module in ("httpx", "httpx2"):
+        try:
+            found.append(importlib.import_module(module).RequestError)
+        except ImportError:
+            continue
+    return tuple(found)
+
+
 def _library_logging() -> None:
     """huggingface_hub's log and httpx's in seedvr2x's: each of the library's records once, through
     seedvr2x's handler, but the Hub's advice to set a token; httpx's and httpcore's warnings
@@ -1104,7 +1117,10 @@ def _library_logging() -> None:
     # httpx logs every request at INFO (httpx 0.28.1: _client.py:1025-1032, 1740-1747), the
     # library's own among them (its registry of AI agents, utils/_detect_agent.py:197), which a
     # run's log isn't for; httpcore's are debug traces.
-    for name in ("httpx", "httpcore"):
+    # huggingface_hub 2.x moved to httpx2, a fork whose loggers are named httpx2 and httpcore2
+    # (httpx2 2.16.0: _client.py:110, httpcore2/_sync/http11.py:27); 1.x, the CLI's lock, keeps
+    # httpx's. Both generations' names are set, whichever the Hub uses.
+    for name in ("httpx", "httpcore", "httpx2", "httpcore2"):
         logging.getLogger(name).setLevel(logging.WARNING)
     # huggingface_hub's logging module gives the library's logger a handler of its own as it is
     # imported, writing the message alone to stderr, and leaves the logger propagating to the
