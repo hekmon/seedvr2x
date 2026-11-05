@@ -103,17 +103,17 @@ known-first-party = ["seedvr2x"]
 exclude = ["*.md"]
 
 [tool.pyright]
-include = ["*.py", "media", "tests"]
+include = ["*.py", "media", "tests", "tools"]
 exclude = [".venv", "**/__pycache__"]
 # The CLI's modules strictly, the tests at the standard level.
 strict = ["*.py", "media"]
 pythonVersion = "3.13"
 venvPath = "."
 venv = ".venv"
-# The library as source, as the editable install gives it at run time, and its tests' helpers
-# (pytest's pythonpath below): without py.typed, pyright takes an installed package for an
-# untyped one and wants stubs in strict mode.
-extraPaths = ["../../core", "../../core/tests"]
+# The library as source, as the editable install gives it at run time, its tests' helpers
+# (pytest's pythonpath below) and its tools (tools/plan_lines.py imports plan_matrix): without
+# py.typed, pyright takes an installed package for an untyped one and wants stubs in strict mode.
+extraPaths = ["../../core", "../../core/tests", "../../core/tools"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

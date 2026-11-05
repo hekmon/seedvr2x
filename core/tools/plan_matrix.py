@@ -34,7 +34,8 @@ What is covered, all of it the library's (core imports nothing of the CLI):
   encode_peak, decode_peak, covers, in_compile_range, scratch, dit_on_gpu, and
   shot_plan.host_moments, one line each.
 What the CLI does with a plan (its lines, a plan made again after a refusal, a record checked,
-the compiled shapes, the cache's disk) is not here.
+the compiled shapes, the cache's disk, the smaller DiT files) is not here: the CLI's half of the
+matrix, apps/seedvr2x/tools/plan_lines.py, adds it through Matrix's hooks.
 
 Deterministic: no time, randomness, environment or network reaches the text; memory.reading runs
 on the module's state as imported (no driver asked), and the held readings are made from the
@@ -49,6 +50,7 @@ import argparse
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from fractions import Fraction
 from itertools import product
 from pathlib import Path
@@ -57,8 +59,8 @@ from typing import Any
 import seedvr2x
 from seedvr2x import frames, memory, peaks
 from seedvr2x.errors import JobError, Refusal
-from seedvr2x.passes import Phase, Tiles
-from seedvr2x.shot_plan import Pins, PlanError, host_moments, plan
+from seedvr2x.passes import Phase, Plan, Tiles
+from seedvr2x.shot_plan import Peaks, Pins, PlanError, host_moments, plan
 from seedvr2x.shots import Shot
 from seedvr2x.weights import Architecture
 
@@ -121,16 +123,39 @@ PIN_SETS = {
 RECORDED_TARGETS = ("1920x1080@720", "1920x1080@1080", "1920x1080@2160", "1916x1080@1080")
 RECORDED_SHOTS = ("long300", "mixed17-300-81", "very-long1000")
 TILE_SIZES = (None, 0, 256, 512, 576, 1024, 1152, 1216, 1856, 2048, 4096)
+# The output's quality, a digit of the stride's: only the CLI's lines say it.
+QUALITIES = ("standard", "enhanced", "maximum")
+
+
+@dataclass(frozen=True)
+class Case:
+    """A case's job as plan takes it, for the hooks: its number, the free memory, the target,
+    shots and pins, the system memory, split, the attention kernel, the compiled VAE and the
+    quality (a recorded case's is the default's)."""
+
+    index: int
+    free: int | memory.Reading
+    target: tuple[int, int]
+    shots: list[Shot]
+    pins: Pins
+    host: int | None
+    split: bool
+    attention: str
+    compile_vae: bool
+    quality: str = QUALITIES[0]
 
 
 class Matrix:
-    """One run's text and counts."""
+    """One run's text and counts. The hooks (described, planned, recording, refused, checks and
+    more_bricks) add nothing here: the CLI's half of the matrix, apps/seedvr2x/tools/
+    plan_lines.py, adds the CLI's lines through them, which core can't import."""
 
     def __init__(self, grid: Grid, dit: Architecture) -> None:
         self.grid = grid
         self.dit = dit
         self.lines: list[str] = []
         self.crashes = 0
+        self.items = 0
         self.targets: list[tuple[str, tuple[int, int]]] = []
         for width, height in grid.sources:
             for resolution in grid.resolutions:
@@ -186,6 +211,31 @@ class Matrix:
         reading = memory.Reading(free, card_free, counted, True, memory.HELD_BACK, expandable=False)
         return reading, label + f" held-card={card_free}"
 
+    def item(self, text: str, function: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+        """A brick item: `text -> ` and what function(*args, **kwargs) gives, or its refusal."""
+        self.items += 1
+        self.emit(f"{text} -> {self.show(lambda: function(*args, **kwargs))}")
+
+    def described(self, case: Case) -> str:
+        """More of a grid case's header, after its own words (a hook)."""
+        return ""
+
+    def planned(self, case: Case, made: Plan, made_peaks: Peaks) -> None:
+        """Lines after a grid case's Plan and Peaks (a hook)."""
+
+    def recording(self, kept: Plan, case: Case) -> None:
+        """Lines after a recorded case's header, before its plan (a hook)."""
+
+    def refused(self, error: Exception, kept: Plan, case: Case) -> None:
+        """Lines after a recorded case's refusal (a hook)."""
+
+    def checks(self, index: int) -> int:
+        """Cases after the recorded ones, numbered on from `index`; the last number (a hook)."""
+        return index
+
+    def more_bricks(self) -> None:
+        """Brick items after the peaks' (a hook)."""
+
     def plan_case(
         self,
         index: int,
@@ -199,14 +249,18 @@ class Matrix:
         split: bool,
         attention: str,
         compile_vae: bool,
+        quality: str,
     ) -> None:
         free, free_label = self.free_figure(free_kind, card, exact)
+        shots, pins = self.shots(shots_label), PIN_SETS[pins_label]
+        case = Case(
+            *(index, free, target[1], shots, pins, host, split, attention, compile_vae, quality)
+        )
         self.emit(
             f"## case {index}: card={card} free={free_label} target={target[0]}={target[1]}"
             f" shots={shots_label} pins={pins_label} host={host} split={split}"
-            f" attention={attention} compile={compile_vae}"
+            f" attention={attention} compile={compile_vae}{self.described(case)}"
         )
-        shots, pins = self.shots(shots_label), PIN_SETS[pins_label]
         ok, result = self.attempt(
             lambda: plan(
                 *(free, target[1], shots, pins, host),
@@ -222,6 +276,7 @@ class Matrix:
         made, made_peaks = result
         self.emit(f"plan {made!r}")
         self.emit(f"peaks {made_peaks!r}")
+        self.planned(case, made, made_peaks)
 
     def main_grid(self) -> int:
         """The full grid on the main dimensions, then a stride through the product of all."""
@@ -233,16 +288,15 @@ class Matrix:
                         index += 1
                         self.plan_case(
                             *(index, 0, card, False, target, shots_label, "none", host),
-                            *(False, peaks.FLASH_ATTN_2, False),
+                            *(False, peaks.FLASH_ATTN_2, False, QUALITIES[0]),
                         )
         self.emit(f"## main grid: {index} cases")
         attentions = (peaks.FLASH_ATTN_2, peaks.SDPA)
-        # Mixed radix, the last digit varying fastest. Two digits no longer change a plan: numz's
-        # padding (retired on 2026-11-04), whose cases are skipped, and the quality (3), which
-        # only the CLI's lines say. They stay so that the stride samples the cases it sampled
-        # before them.
+        # Mixed radix, the last digit varying fastest. Two digits change no plan: numz's padding
+        # (retired on 2026-11-04), whose cases are skipped, kept so that the stride samples the
+        # cases it sampled before; and the quality, which only the CLI's lines say.
         radices = [len(grid.cards), 2, len(self.targets), len(grid.shot_sets), len(PIN_SETS)]
-        radices += [len(grid.hosts), 2, 2, 2, 2, 4, 3]
+        radices += [len(grid.hosts), 2, 2, 2, 2, 4, len(QUALITIES)]
         total = 1
         for radix in radices:
             total *= radix
@@ -254,7 +308,7 @@ class Matrix:
             for radix in reversed(radices):
                 number, digit = divmod(number, radix)
                 digits.append(digit)
-            c, e, t, s, p, h, sp, at, co, retired, k, _quality = reversed(digits)
+            c, e, t, s, p, h, sp, at, co, retired, k, q = reversed(digits)
             if retired:
                 continue
             sampled += 1
@@ -262,6 +316,7 @@ class Matrix:
             self.plan_case(
                 *(index, k, grid.cards[c], bool(e), self.targets[t], list(grid.shot_sets)[s]),
                 *(list(PIN_SETS)[p], grid.hosts[h], bool(sp), attentions[at], bool(co)),
+                QUALITIES[q],
             )
         self.emit(f"## sampled: {grid.sampled} cases of {total}")
         return index
@@ -315,6 +370,11 @@ class Matrix:
                 f" shots={shots_label} host={host} split={split} compile={compile_vae}"
                 f" record={kept!r}"
             )
+            case = Case(
+                *(index, our_free(card), target[1], shots, Pins(), host, split),
+                *(options["attention"], kept.compile_vae),
+            )
+            self.recording(kept, case)
             try:
                 again, again_peaks = plan(
                     *(our_free(card), target[1], shots, Pins(), host),
@@ -327,6 +387,7 @@ class Matrix:
                 for part in REFUSAL_PARTS:
                     if hasattr(error, part):
                         self.emit(f"  {part}={getattr(error, part)!r}")
+                self.refused(error, kept, case)
                 continue
             except Exception as error:  # written, as attempt's
                 self.crashes += 1
@@ -337,15 +398,10 @@ class Matrix:
         return index
 
     def bricks(self) -> int:
-        """The peaks' functions over grids, one line each."""
-        count = 0
+        """The peaks' functions over grids, one line each, then more_bricks'; their count."""
         dit = self.dit
+        line = self.item
         paddeds = sorted({frames.padded_size(target) for _, target in self.targets})
-
-        def line(text: str, function: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-            nonlocal count
-            count += 1
-            self.emit(f"{text} -> {self.show(lambda: function(*args, **kwargs))}")
 
         def tiles_of(size: int | None) -> Tiles | None:
             return None if size is None else Tiles(size)
@@ -418,19 +474,22 @@ class Matrix:
                     *(resident, swapped),
                     dit_model=dit,
                 )
-        return count
+        self.more_bricks()
+        return self.items
 
 
-def run(dit_name: str, quick: bool) -> int:
+def run(dit_name: str, quick: bool, made: Callable[[Grid, Architecture], Matrix] = Matrix) -> int:
+    """The matrix's text on stdout, the Matrix `made` of the grid and the DiT's figures."""
     if Path(seedvr2x.__file__).resolve().parents[1] != PROJECT:
         raise SystemExit(
             f"plan_matrix: the seedvr2x imported, {seedvr2x.__file__}, is not this tree's"
             f" ({PROJECT}): run it from this tree's core/ in its own environment"
         )
     started = time.perf_counter()
-    matrix = Matrix(Grid(quick), DITS[dit_name])
+    matrix = made(Grid(quick), DITS[dit_name])
     index = matrix.main_grid()
     index = matrix.recorded_cases(index)
+    index = matrix.checks(index)
     items = matrix.bricks()
     matrix.emit(f"## bricks: {items} items")
     matrix.emit(f"## total: {index} cases, {items} brick items")
@@ -449,7 +508,8 @@ def case_key(header: str) -> str | None:
     """The key a case is compared by, from its header line; None for a line no case header is.
     A grid's case by its number, which no plan moves; a recorded one by what it is, the record
     left out: a plan refused on the larger card makes no recorded cases, and numbers the next
-    ones lower."""
+    ones lower; the CLI's check of a record (plan_lines.py) by what it is too, its result, which
+    its header ends with, left out."""
     words = header.split(maxsplit=3)
     if len(words) < 3 or words[0] != "##" or not words[2].rstrip(":").isdigit():
         return None
@@ -457,12 +517,15 @@ def case_key(header: str) -> str | None:
         return f"case {words[2].rstrip(':')}"
     if words[1] == "recorded" and len(words) == 4:
         return "recorded " + words[3].partition(" record=")[0]
+    if words[1] == "check" and len(words) == 4:
+        described, _, shots = words[3].partition(" shots=")
+        return f"check {described} shots={shots.partition(':')[0]}"
     return None
 
 
 def parsed(path: Path) -> tuple[dict[str, list[str]], dict[str, str], dict[str, str]]:
     """An output's cases (key: header and lines), brick items (call: result) and counts (label:
-    line). A recorded case's header is kept without its number."""
+    line). A recorded case's header, or a check's, is kept without its number."""
     cases: dict[str, list[str]] = {}
     items: dict[str, str] = {}
     counts: dict[str, str] = {}
@@ -471,8 +534,9 @@ def parsed(path: Path) -> tuple[dict[str, list[str]], dict[str, str], dict[str, 
         key = case_key(line)
         if key is not None:
             case = cases.setdefault(key, [])
-            # A recorded case's header compared without its number, as its key.
-            case.append(f"## recorded {line.split(maxsplit=3)[3]}" if key[0] == "r" else line)
+            # A recorded case's header, or a check's, compared without its number, as its key.
+            words = line.split(maxsplit=3)
+            case.append(line if key.startswith("case ") else f"## {words[1]} {words[3]}")
         elif line.startswith("## "):
             case = None
             counts[line.partition(":")[0]] = line
