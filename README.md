@@ -65,7 +65,12 @@ uv sync
 uv run seedvr2x film.mkv -o film.1080p.mkv
 ```
 
-The first run downloads the model files (17 GB). Each run prints its plan, then the time left.
+The first run downloads the model files (17 GB). Each run prints its plan, then the time left. A
+still picture goes through the same command:
+
+```
+uv run seedvr2x photo.jpg --resolution 2160 -o photo.2160p.png
+```
 
 **→ [The seedvr2x README](apps/seedvr2x/README.md)** has the rest: what ffmpeg needs, the two
 workflows, the options that matter and the model files. The [manual](apps/seedvr2x/MANUAL.md)
@@ -95,13 +100,16 @@ possible:
   seedvr2x's is as close to the originals or closer, and the int8 file is as close to the
   float16 model's output as a second run with another seed, at 1080p and 4K. The
   [model card](https://huggingface.co/hekmon/seedvr2x) measures every file.
+- **Read by seedvr2x's own code:** the GGUF files are dequantised on the card, matrix by matrix
+  just before each multiply, in float32, equal bit for bit to llama.cpp's own (its `gguf`
+  package) on all 288 block matrices.
 
 ## Roadmap
 
 - **In development: version 0.1.0,** on Linux, one GPU per job:
   - **The `seedvr2x` command** for long videos and for still pictures
-    (`seedvr2x photo.png -o photo.4k.png`), through the same models, tiling and colour
-    correction.
+    (`uv run seedvr2x photo.png --resolution 2160 -o photo.2160p.png`), through the same
+    models, tiling and colour correction.
   - **An image server:** pictures over HTTP, the models loaded once and kept on the GPU, in a
     container.
   - **The 7B in smaller files,** for smaller cards: int8, 8.3 GB, and the dynamic GGUF, 4.8 GB,
@@ -127,7 +135,7 @@ possible:
 
 | Where | What |
 |---|---|
-| [apps/seedvr2x/](apps/seedvr2x/) | The `seedvr2x` command, its [README](apps/seedvr2x/README.md) and [manual](apps/seedvr2x/MANUAL.md) |
+| [apps/seedvr2x/](apps/seedvr2x/) | The `seedvr2x` command, for videos and pictures, its [README](apps/seedvr2x/README.md) and [manual](apps/seedvr2x/MANUAL.md) |
 | [apps/imgserver/](apps/imgserver/) | The image server: pictures over HTTP, the models kept on the GPU, in a container; its [README](apps/imgserver/README.md) |
 | [core/](core/) | The library the apps assemble: SeedVR2's model and each step of an upscale |
 | [models/](models/) | The scripts that make the model files |
