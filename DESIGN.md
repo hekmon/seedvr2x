@@ -289,10 +289,16 @@ seedvr2x/                the repository
     before loading (ComfyUI's 7B clips on an 8 GB card died or crawled), the plan's bits, one
     code path with the CLI and the server, and the tuning shown to the user. Decided that day:
     - The weights stay in pinned host memory between runs, a choice of the loader node ("keep
-      in RAM between runs", on by default; off, the next run reads the files again),
-      registered with ComfyUI's model manager for that memory alone, a minimal `ModelPatcher`:
-      the only way ComfyUI counts a node's memory and can free it, by its "unload models" and
-      when its own models need the room.
+      in RAM between runs": auto, on or off; off, the next run reads the files again). Auto,
+      the default (the user, 2026-11-05, after an outside review): kept where they fit under
+      ComfyUI's own cap on pinned memory for the platform (40% of the RAM on Windows in
+      v0.44.0), the node saying which and why; a 32 GB machine running ComfyUI, a desktop and
+      a browser would swap under 15.8 GiB kept. Registered with ComfyUI's model manager for
+      that memory alone, a minimal `ModelPatcher`, the only way ComfyUI counts a node's memory
+      and frees it by its "unload models". Under its dynamic VRAM, ComfyUI drops such an entry
+      at nearly every load of its own models, and never for want of RAM, which it judges by
+      its dynamic models alone (impl-nodes' reading of v0.44.0); posing as one would lean on
+      comfy-aimdo's internals, so the registration stays plain and the cap is seedvr2x's guard.
     - On the card only while a node runs. The plan is made for the card as it would be with
       ComfyUI's models gone (its free memory and what ComfyUI says its own models hold), and
       ComfyUI is asked to free only the room that plan needs (`free_memory`): its models stay
@@ -306,15 +312,41 @@ seedvr2x/                the repository
     - seedvr2x Models: the DiT file by a name a user reads ("Sharp 7B, int8"), with its size
       and the model card's typical error (0.86% for int8), from Hugging Face's cache or a
       directory; the RAM choice above.
-    - seedvr2x Tuning, required: every setting the plan makes (tiles, windows, blocks swapped
-      and the rest) shown at "auto"; one set by hand, the plan makes the others around it, as
-      the CLI's pins do. That tuning is seedvr2x's first value, and the node shows it in
-      every workflow, the example workflows shipped with it wired. It holds the choices only:
-      the plan is made in the upscale node, at run time, where the input's size and the card
-      are known.
+    - seedvr2x Cuts: seedvr2x's shot detector on the clip's frames, detecting with a threshold
+      or taking the clip as one shot; its cut list is wired to Upscale Video (a clip's fact, not
+      a setting), and it says the cuts and the possible cuts as text (the user, 2026-11-05: a
+      short clip of 3 or 4 shots is handled as the CLI handles a film). The frames are
+      ComfyUI's, already decoded, shrunk to the detector's 48×27 in torch, with no ffmpeg: the
+      cuts at the threshold are checked equal to those of the frames TransNetV2's own
+      extraction gives the CLI, on clips of the shot-detection study, before the node relies on
+      them. The drawing of the cuts from the probabilities moves from the CLI's `cuts.py` to
+      the library.
     - seedvr2x Upscale Image, a batch of pictures each upscaled on its own, and seedvr2x
-      Upscale Video, the frames of one shot in sliding windows. Each says its plan on the node
-      and in ComfyUI's console, and gives it as text.
+      Upscale Video, a clip's frames shot by shot, each in sliding windows, its cut list a
+      required input.
+    - Each upscale node carries the settings the plan makes as its own widgets: each pass's
+      tiles, the blocks swapped, a clip's window cap, the attention kernel, the colour
+      correction, the seed (the user, 2026-11-05: a Tuning node first specified would only
+      have forwarded them). A number is an INT input, so that any node giving an INT drives
+      it, as ComfyUI's flow has it; "auto" is a value no pin takes (0 for a tile side or the
+      window cap, -1 for the blocks swapped, where 0 swaps none), said in its label and its
+      tooltip; min, max and step are the planner's own candidates, so that a pin is always a
+      value the plan could take. One pinned, the plan makes the others around it, as the CLI's
+      pins do: that tuning is seedvr2x's first value, and every workflow shows it.
+    - The plan is made in the upscale node, at run time, where the input's size, the shots and
+      the card are known. "Plan only", off by default, has the node make it and say it, loading
+      nothing and reading no weight, and stops what follows it, as the CLI's `--plan` does: a
+      button could not know the input's size before the nodes ahead of it have run. Each node
+      says its plan on the node and in ComfyUI's console, what each "auto" became and the host
+      memory it counts (the input's frames, the output's, the weights kept) beside the card's,
+      and gives it as text.
+    - A clip is whole in RAM, as ComfyUI's Load Video gives it: the nodes stream nothing, keep
+      nothing on disk and resume nothing. The plan counts the clip's frames in host memory and
+      refuses past it, saying what the CLI does instead: a film streamed shot by shot, never
+      held whole, resumed after a stop, written as lossless masters. ComfyUI's console says the
+      CLI once, when the nodes load, as seedvr2x's tool for whole films, by its place beside
+      the nodes (the user, 2026-11-05: the repository that brings the nodes brings it); never
+      at each run.
     - No node saves: the nodes give ComfyUI's image, float32, which ComfyUI's savers or others
       write; a 16-bit PNG with seedvr2x's record is the CLI's. Writing no file, the nodes
       carry no record ([The record in each output](#the-record-in-each-output)).
