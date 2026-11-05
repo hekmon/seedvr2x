@@ -263,7 +263,9 @@ seedvr2x/                the repository
   - **Published with v0.2.0.** With seedvr2x's own placement (below), Windows and macOS are
     first-class for the nodes: the library runs right there, not only imports. Their design and
     code begin now, in `apps/comfyui/`, installed by hand into a local ComfyUI for
-    development; nothing of them is published with v0.1.0. They are published with v0.2.0,
+    development (ComfyUI v0.44.0 under WSL2, the library installed editable in its
+    environment; the user's ComfyUI Desktop on Windows is the user's side of the test);
+    nothing of them is published with v0.1.0. They are published with v0.2.0,
     the multi-platform version, when the command reaches Windows and macOS too and a user can
     follow them to it. Published,
     they sit in this repository, where ComfyUI's own install (its Manager, its registry) finds
@@ -274,21 +276,68 @@ seedvr2x/                the repository
   - **ComfyUI runs SeedVR2 itself** since its v0.28.0 (July 2026, its pull request 14424): its
     own nodes, the 3B, the 7B and the sharp 7B in several precisions, int8 among them, on
     ComfyUI's model and memory management. numz's nodes load and place the models their own
-    way, with a setting for each choice. Before the nodes are specified, both are measured
-    beside seedvr2x on the RTX 5090, smaller cards emulated: time, memory, what runs on which
-    card, and the pictures for the eyes.
+    way, with a setting for each choice. Both were measured beside seedvr2x on the RTX 5090
+    before the nodes were specified (comfy-study, 2026-11-04), smaller cards emulated: time,
+    memory, what runs on which card, and the pictures for the eyes.
   - **seedvr2x's own loaders and placement**, reversing 2026-11-02's "ComfyUI's own model and
     memory management": on ComfyUI's, the nodes would be ComfyUI's own SeedVR2 again, and its
     partial loading knows none of the plan's windows, tiles and measured peaks. The nodes load
-    the models with the library and place them by the plan for the card. ComfyUI is asked to
-    unload its own models before they load, its Cancel is honoured between steps and its
-    progress bar moves; whether ComfyUI can unload seedvr2x's models when another node needs
-    the card is read in its code.
+    the models with the library and place them by the plan for the card. Kept after
+    comfy-study (the user, 2026-11-05): ComfyUI's dynamic VRAM streams the weights through the
+    card as BlockSwap does (on 12 GB, every block swapped, seedvr2x's 4K picture took 12 s
+    against 14 s on the whole card), and handing it the placement would lose the refusal
+    before loading (ComfyUI's 7B clips on an 8 GB card died or crawled), the plan's bits, one
+    code path with the CLI and the server, and the tuning shown to the user. Decided that day:
+    - The weights stay in pinned host memory between runs, a choice of the loader node ("keep
+      in RAM between runs", on by default; off, the next run reads the files again),
+      registered with ComfyUI's model manager for that memory alone, a minimal `ModelPatcher`:
+      the only way ComfyUI counts a node's memory and can free it, by its "unload models" and
+      when its own models need the room.
+    - On the card only while a node runs. The plan is made for the card as it would be with
+      ComfyUI's models gone (its free memory and what ComfyUI says its own models hold), and
+      ComfyUI is asked to free only the room that plan needs (`free_memory`): its models stay
+      where both fit, and the output never depends on what else was loaded. A long clip on a
+      consumer card takes it whole; a picture, a short clip or a large card leave room. The
+      card is freed when the node ends, on Cancel and on an error too. ComfyUI's nodes run one
+      at a time, so nothing of ComfyUI's touches the card meanwhile (read in v0.44.0's
+      executor, its `async` nodes included, before it is relied on); its Cancel is honoured
+      between steps and its progress bar moves.
+  - **Four nodes** (the user, 2026-11-05):
+    - seedvr2x Models: the DiT file by a name a user reads ("Sharp 7B, int8"), with its size
+      and the model card's typical error (0.86% for int8), from Hugging Face's cache or a
+      directory; the RAM choice above.
+    - seedvr2x Tuning, required: every setting the plan makes (tiles, windows, blocks swapped
+      and the rest) shown at "auto"; one set by hand, the plan makes the others around it, as
+      the CLI's pins do. That tuning is seedvr2x's first value, and the node shows it in
+      every workflow, the example workflows shipped with it wired. It holds the choices only:
+      the plan is made in the upscale node, at run time, where the input's size and the card
+      are known.
+    - seedvr2x Upscale Image, a batch of pictures each upscaled on its own, and seedvr2x
+      Upscale Video, the frames of one shot in sliding windows. Each says its plan on the node
+      and in ComfyUI's console, and gives it as text.
+    - No node saves: the nodes give ComfyUI's image, float32, which ComfyUI's savers or others
+      write; a 16-bit PNG with seedvr2x's record is the CLI's. Writing no file, the nodes
+      carry no record ([The record in each output](#the-record-in-each-output)).
+  - **Refusals by kind** (the user, 2026-11-05): the library raises a refusal as an exception
+    class of its kind carrying its facts (the phase, what it needs, what the card has, the
+    smaller files that would fit), and each app words it and its way out: the CLI with its
+    options, the server with no file or command, the nodes in ComfyUI's terms ("choose the
+    int8 file in seedvr2x Models"). The library keeps a plain message for its logs; the CLI's
+    words stay as they are, the plan matrix holding them byte for byte.
+  - **The code:** `core/seedvr2x/clip.py`, one shot from frames in memory through models already
+    loaded, the video's counterpart of `still.py`; the refusal classes in `errors.py`;
+    `apps/comfyui/`: `nodes.py` (the four nodes and ComfyUI's calls), `models.py` (loading,
+    the RAM kept, the placement per run), `words.py` (the nodes' words for each refusal), the
+    example workflows and a README; its tests against a stand-in for ComfyUI's few calls, in
+    the CLI's environment. Not a uv project of its own, unlike the other apps: the nodes run
+    in ComfyUI's environment.
   - **The model files from Hugging Face's cache**, as the CLI and the image server take them, or
     from a directory given; not ComfyUI's `models/` folders, where its own SeedVR2 files sit and
     its loaders would list seedvr2x's. A user who goes on to the CLI finds the files there
     already. The README says where the cache is and how to move it (`HF_HOME`), for users who
-    keep their models on another disk.
+    keep their models on another disk. seedvr2x's files stay without the two text-conditioning
+    tensors ComfyUI's own SeedVR2 wants in a DiT file (the user, 2026-11-05): seedvr2x holds
+    that conditioning in its code, and the nodes read the files with its own loader.
   - **No cut detection, no ffmpeg:** the frames given are one shot, in sliding windows, and
     ComfyUI's video nodes load and save. A clip and its output are held in memory, as ComfyUI
     holds any video (about 100 MB a 4K frame in float32). The full features stay the CLI's, to
@@ -315,17 +364,28 @@ seedvr2x/                the repository
     in their docstrings and comments, a logger's name and the two things handed in; the plan
     matrix's 5,120 cases byte for byte under each DiT file's figures (float16, int8, both
     GGUFs); on the RTX 5090, the milestone-1 regression bit for bit and the GPU tests passing.
-    The picture node comes first, on what the library already has; the shot's entry for frames
-    in memory waits for the nodes' design.
+    The shot's entry for frames in memory, `clip.py`, is built with the nodes (above).
   - The nodes need Windows and macOS: the library must then import and run there, its Linux-only
     parts kept to the apps. On macOS that is Apple's M chips, with PyTorch's MPS backend and
     the planner of one pool ([Not in the first version](#not-in-the-first-version)). On Windows
     the library must run right, not only import: pinned host memory, the card's readings, and
     the driver's fallback to system memory, on by default.
-  - ComfyUI's process is not seedvr2x's: its Python, its torch and its allocator (ComfyUI turns
-    on `cudaMallocAsync` by default) are its user's, and the library requires Python 3.13
-    today. The plan's figures, measured in the CLI's environment, are checked in ComfyUI's
-    before the nodes rely on them.
+  - ComfyUI's process is not seedvr2x's: its Python, its torch and its allocator are its user's.
+    ComfyUI's defaults are the nodes' first case, nearly every user's (the user, 2026-11-05):
+    `cudaMallocAsync` on its CUDA 13 builds, its dynamic VRAM on. The plan's figures under them
+    are place-study's to measure (from 2026-11-05). Under a driver that lends system memory
+    (Windows, WSL2), where seedvr2x itself runs torch's own allocator, not `cudaMallocAsync`
+    ([Allocator](#allocator)), the nodes say once that `--disable-cuda-malloc` gives it. Its
+    Desktop app offers torch 2.9.1 to 2.13.0 on
+    CUDA 12.6, 12.8 or 13.0, so no list of figures made ahead holds: an environment probe, a
+    brick of the library, checks at the first run in an environment that each kernel the
+    chosen file needs gives the right numbers, and measures the allocator's margin on a few
+    small steps; cached on disk by a fingerprint (seedvr2x's version, torch and its CUDA, the
+    driver, the GPU, the allocator), run again when any of them changes; where it fails, the
+    loader refuses, saying why. The versions tested are listed before v0.2.0's publication.
+    The library requires Python 3.13 today (the Desktop app runs 3.12), and its caps on Pillow
+    (below 13) and huggingface_hub (below 2), under the Windows portable's 13.0.0 and 2.3.0,
+    widen once its tests pass with them.
 - **The front README:** short, there to catch a visitor long enough to send them on to the
   app's README (the user, 2026-11-02). A line saying what seedvr2x does; a picture of the best
   it makes, an input beside seedvr2x's output at `--quality maximum`, the caption saying so;
@@ -453,7 +513,8 @@ In steps:
    assembling the same bricks, built by a conductor of their own. Their specification, begun
    on 2026-11-04 (above), waited for two things, both done that day: the measurement of
    ComfyUI's own SeedVR2 and numz's nodes beside seedvr2x, and the shot's pass moved to the
-   library (above). They don't hold v0.1.0; the roadmap shows them under next.
+   library (above). Specified on 2026-11-05 (above). They don't hold v0.1.0; the roadmap
+   shows them under next.
 
 ## Architecture
 
