@@ -36,6 +36,7 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
   tests/                 the library's, with library_fixtures.py, stand_ins.py and conftest.py
   tools/vendor.py        copy, diff and check of the vendored code
   tools/compare.py       two runs' outputs compared bit for bit
+  tools/plan_matrix.py   the memory planner's plans over a fixed matrix, two runs' compared
 apps/seedvr2x/          the seedvr2x command: distribution seedvr2x (setuptools), flat: its
                          modules at the app's root, no package folder
   main.py                options, logging (the script `seedvr2x = "main:main"`)
@@ -213,6 +214,11 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   `apps/seedvr2x/`, standard on the tests and tools. The vendored code is excluded: the tests show
   that it imports and runs. The CLI's pyright reads the library as source and the library's test
   helpers (`extraPaths`).
+- A change that may move a plan (`seedvr2x/shot_plan.py` or any module it imports, `peaks.py`,
+  `memory.py`, `passes.py`, `weights.py` and the vendored window code among them):
+  `tools/plan_matrix.py run` for the four DiT formats on the tree before it and on the tree after
+  it, then `diff`, which lists the cases it moves: none where none was meant, and the list shown
+  where some were (the tool's docstring).
 
 ## Tests
 
@@ -714,8 +720,9 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   pin taking one there at the slice's figure; `tests/test_still_plan.py` the copies' measured rule
   (`still_plan.RESIZE`, cuBLAS's workspace held) and what a phase takes for a reservation
   (`still_plan.Peak`, `bound_peaks`, `picture_peaks`, a picture's passes within a `budget`). No
-  video plan moves: the plan matrix's
-  5,480 cases are main's byte for byte (5,120 since the tests' numz modes retired, 2026-11-04).
+  video plan moves: the plan matrix's 5,480 cases are main's byte for byte (5,120 since the tests'
+  numz modes retired, 2026-11-04; `tools/plan_matrix.py`'s 4,760 since it came into the
+  repository, 2026-11-05, the CLI's lines and its 360 checks of a record left out).
 - A picture's refusals carry their kind, their reason and their way out apart (`errors.Refusal`'s
   `kind`, `reason`, `way`; `picture.KINDS`, and `frames.check_target`'s `too-small`), so that the
   image server words its own way out with no file name and no command (DESIGN.md, The image
@@ -751,6 +758,17 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   `--accept-env-change`, the warning given before the checks, the re-plan under the flag
   (`peaks.PER_TOKEN` multiplied, so that the DiT phase refuses at the stand-in's size), the
   segments and latents kept, `--plan` looking and writing nothing.
+- The plan matrix, `tools/plan_matrix.py` (`core/`'s, the library's alone): `shot_plan.plan` over
+  a fixed matrix, 4,760 cases today (cards, targets, shots, system memory, pins, kernels,
+  readings, plans recorded on a larger card planned again on smaller ones, as many as the larger
+  card plans) and the peaks' bricks, as text,
+  for each DiT format (`--dit`), and `diff` of two such texts ([Checks](#checks)). What the CLI
+  does with a plan (its lines, `planner.plan_again`, `check_recorded`, the compiled shapes) is not
+  in it: the library imports nothing of the CLI. `tests/test_plan_matrix.py` keeps it running:
+  its `--quick` part for each format, in a process of its own, with no crash and no torch
+  imported, each format's text its own, and `diff` on two outputs made to differ (a plan moved, a
+  case gone, a brick item moved, the recorded cases numbered again and compared by what they
+  are).
 - Met running the suite from a worktree: `git read-tree -u --reset` empties the `upstream/`
   submodule directories (link them again); `--compile`'s cache on a Windows drive under WSL2
   costs minutes, so compile times are measured with the job on Linux's disk; `--until` takes
