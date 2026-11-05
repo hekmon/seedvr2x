@@ -1,0 +1,17 @@
+# The nodes' checks, the CLI's settings (apps/seedvr2x/pyproject.toml): the nodes are no uv project
+# (they run in ComfyUI's environment), so the settings sit beside them. Run from here in the CLI's
+# environment: uv run --project ../seedvr2x ruff check
+line-length = 100
+target-version = "py313"
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+
+[lint.isort]
+# The library is installed beside the third-party packages, but it is seedvr2x's own. ComfyUI's
+# modules (comfy, server) are third-party: its stand-ins in the tests are theirs.
+known-first-party = ["seedvr2x"]
+
+[format]
+# Python only: the documents are edited by hand.
+exclude = ["*.md"]

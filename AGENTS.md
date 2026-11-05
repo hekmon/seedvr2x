@@ -66,6 +66,24 @@ apps/imgserver/          the image server: distribution seedvr2x-imgserver (setu
                          server's words, /metrics
   tests/                 the server's, with serving.py and conftest.py
   pyproject.toml uv.lock .python-version LICENSE NOTICE README.md
+apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in ComfyUI's own
+                         environment; a package ComfyUI imports from its custom_nodes (relative
+                         imports, any folder name)
+  __init__.py nodes.py   V3 registration (`comfy_entrypoint`, a ComfyExtension; `io.ComfyNode`,
+                         `io.Schema`); the three nodes (Models, Upscale Image, Upscale Video: the
+                         settings are the upscale nodes' widgets, no Tuning node) and ComfyUI's
+                         calls (progress, Cancel, the plan said on the node, plan only); the one
+                         module that imports `comfy_api` (unstable)
+  models.py plans.py     the files, the models kept in pinned memory and the one registration
+                         with ComfyUI's model manager, a run's room and placement, keep in RAM
+                         auto/on/off against ComfyUI's cap; the widgets' values as pins and
+                         the plan in the nodes' words
+  words.py               the nodes' words for each refusal, with the way out in ComfyUI's terms
+  workflows/ README.md   the two example workflows (picture.json, clip.json: ComfyUI's UI format,
+                         Models wired in), and the nodes' README, for users
+  ruff.toml pyrightconfig.json pytest.ini     the checks' settings, the CLI's
+  tests/                 the nodes', with standins.py, conftest.py and comfy_stand_in/ (ComfyUI's
+                         few modules, comfy, comfy_api.latest and server, written for the tests)
 research/ models/ upstream/
 ```
 
@@ -96,7 +114,14 @@ folder package; the CLI by setuptools, which lists each top-level module (`py-mo
   `tests/` is the directory of the package the test is for ([Tests](#tests)). README.md and
   MANUAL.md are `apps/seedvr2x/`'s.
 - The loggers: the library's are `seedvr2x.<module>`, the CLI's `cli.<module>` (`cli.main`,
-  `cli.media.reader`).
+  `cli.media.reader`), the nodes' `seedvr2x_comfyui.<module>` (ComfyUI's console shows INFO and
+  above, as bare messages).
+- The ComfyUI nodes, `apps/comfyui/`, are checked and tested in the CLI's environment, from
+  `apps/comfyui/` with `uv run --project ../seedvr2x` before each command ([Checks](#checks)):
+  they have no lock of their own. ComfyUI imports the folder as a package, its folder not on
+  `sys.path`, so their modules import each other by relative imports, and the tests import the
+  package as `comfyui` (pytest.ini puts `apps/` on the path, with `core/tests` for the library's
+  helpers and `tests/comfy_stand_in` for the stand-in `comfy` and `server`).
 
 ## The vendored model layer
 
@@ -211,7 +236,9 @@ uv run pyright
 uv run pytest
 ```
 
-From `apps/imgserver/`, in its own environment, the same four as the CLI's.
+From `apps/imgserver/`, in its own environment, the same four as the CLI's. From
+`apps/comfyui/`, in the CLI's environment, the same four with `uv run --project ../seedvr2x`
+before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
 
 - ruff: line length 100, rules E, F, W, I, B, UP and RUF, set in each pyproject. The vendored
   code, `seedvr2x/vendor/` and `seedvr2x/transnetv2/`, is excluded from formatting and from that
@@ -846,6 +873,60 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   the tests alone), `test_main.py`, `test_names.py` and `test_lock.py` the parts alone. The
   library's three steps (`still.encoded`, `sampled`, `decoded`) are held to `still.upscale` by
   the CLI's `tests/test_still_cli.py`, through `upscale`, which composes them.
+- The ComfyUI nodes (DESIGN.md, Repository and apps), on the CPU in the CLI's environment, from
+  `apps/comfyui/`: `tests/comfy_stand_in/` writes ComfyUI's few modules from the reading of
+  v0.44.0, no ComfyUI code (`comfy.model_management`: `current_loaded_models` of weak
+  references, `load_models_gpu`, `free_memory` in ComfyUI's order and partial, `unload_all_models`,
+  Cancel as a flag that raises a `BaseException`, torch's cache that a partial unload fills and
+  `soft_empty_cache` empties; `comfy.model_patcher`; `comfy.utils`' ProgressBar, recording;
+  `comfy_api.latest`: `io`'s types, `Schema`, `ComfyNode`, `NodeOutput`, `Hidden` and
+  `ComfyExtension`, with the executor's run of a node on a clone of its class that holds the
+  hidden values; `server`'s `send_progress_text`, recording), and `tests/standins.py`
+  the machine on the CPU (`models.Machine`: the card is the stand-in manager's, the models those
+  of `core/tests/test_still.py` with place and release recorded) and ComfyUI's other models on the
+  stand-in card. `tests/test_registration.py` holds the one patcher (its sizes, strong
+  references, Unload models and POST /free dropping the weights, the next run loading again,
+  keep in RAM off, `--disable-smart-memory`); `tests/test_room.py` the room (the plan made for the
+  card without ComfyUI's models, `free_memory` asked for the plan's largest phase plus
+  `ASK_MARGIN` (a partial unload's buffer) and only when the card has less than the phase alone,
+  never more, seedvr2x's registration kept, a card still short of the phase refused, the
+  library's command-line allocator and limit warnings left out of ComfyUI's console for the
+  nodes' own lines, once); `tests/test_release.py`
+  the card freed at the end, on Cancel between steps and on an error, and `strays` finding
+  nothing on the real `Models.place` and `release` over test_held's toy models, and the models
+  of a run not kept gone while the exception that ended it is held (the frames cleared, a
+  refusal raised from the library's error included), with what they keep on the device (the
+  RoPE's cache, `model.forget`); `tests/test_nodes.py` each picture of a batch and a clip equal
+  bit for bit to `still.upscale` and `clip.upscale`, the batch's output allocated once and
+  counted in the plan's `process`, the alpha rule, the plan said on the node, in the console and
+  as text with what each auto became and the host memory beside the host's, the attention,
+  colour correction and seed, the probe, a clip as one shot run by one function; `tests/test_plans.py`
+  the DiT files' names, the widgets (every number an INT, 0 or -1 for auto, the grid of tiles,
+  blocks and windows, the untiled value, the seed's fixed control, the linked and typed values
+  refused in the nodes' words at queue time and at the node's start), the settings' pins
+  reaching the plan exactly, the text's lines, the V3 registration (the entrypoint, the three
+  ids, names, inputs, outputs and hidden id), `nodes.py` the one user of `comfy_api`;
+  `tests/test_keeping.py` keep in RAM auto/on/off against ComfyUI's cap (its MAX_PINNED_MEMORY
+  or its rule), what is said, the first file's memory freed before the second is pinned,
+  Unload models under a cached Models output said once, the Models node reading nothing;
+  `tests/test_plan_only.py` the plan alone (the headers read and nothing loaded, registered or
+  freed, an execution blocker for the pictures); `tests/
+  test_words.py` every refusal class worded without "--", and the library's real refusals (a
+  damaged or unpinned file in a cache and in a directory written there, the plan with tiny
+  figures, the target check) worded with the way out; `tests/test_machine.py` the reading
+  shifted by ComfyUI's models, torch's allocator setting given to `memory.startup` and the
+  environment left as it was; `tests/test_process_state.py` torch's memory fraction never set
+  and the global random generators as they were after a run; `tests/test_room.py` also the card
+  read again after torch's cache is emptied; `tests/test_workflows.py` the two example workflows
+  (`workflows/picture.json`, `clip.json`, ComfyUI's UI format): each parses, every node seedvr2x's
+  or a stock one of a table read from v0.44.0, seedvr2x's sockets, outputs and widgets equal to
+  their V3 schemas' in count, order and defaults, every link joining an output to an input of its
+  type, Models wired into the upscale node and no Tuning node, the plan shown as text. Smoke in the real ComfyUI, CPU only, by hand: the folder
+  linked into its `custom_nodes`, then `CUDA_VISIBLE_DEVICES= python main.py --cpu
+  --quick-test-for-ci` in its environment with `PYTHONPATH` at `core/`, which lists the nodes
+  among the custom nodes imported with no error, and a script that imports ComfyUI's `nodes`
+  as the server does, awaits `init_external_custom_nodes` and checks the three ids registered from
+  the extension with their schemas (`GET_NODE_INFO_V1`) and run on the executor's locked clone.
 - The image server's container (DESIGN.md, The image server, The Docker image):
   `apps/imgserver/Dockerfile`, built from the repository's root (`docker build -f
   apps/imgserver/Dockerfile .`), its ignore file `Dockerfile.dockerignore` beside it, and
