@@ -865,9 +865,8 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
   is what numz goes by (`src/core/model_configuration.py:718-720`): their names and shapes,
   pinned per architecture, and every tensor's dtype, read from the file's header without
   torch, before anything else runs (the resume's comparison, the first pass). Anything but a 7B
-  in fp16, the sharp one or the regular one (and their int8 and dynamic GGUF files, once built:
-  above), is refused, saying what the file is; so is a file holding other tensors beside the
-  model's.
+  in fp16, the sharp one or the regular one (and their int8 and dynamic GGUF files: above), is
+  refused, saying what the file is; so is a file holding other tensors beside the model's.
 - **Small cards** rely on BlockSwap and tiling (milestone 3): the 7B fp16 DiT's weights alone
   take 15.35 GiB. Milestone 3 measures how small a card that reaches, 16 GB being the aim:
   there every block is swapped, its weights in pinned host RAM (about 15 GiB of it). numz's
@@ -1072,8 +1071,7 @@ how users are guided to them. What is known already:
     - File by file, only those the run uses: the DiT it runs (the sharp 7B by default, 16.5 GB)
       and the VAE (0.5 GB), the regular 7B only when asked for, TransNetV2's weights (30 MB)
       when the shot detector runs, so not with `--cuts`. Never the repository whole: 122 GB,
-      most of it phase 2's files, of which v1 runs only the int8 and dynamic GGUF ones, once
-      built (above).
+      most of it phase 2's files, of which v1 runs only the int8 and dynamic GGUF ones (above).
     - `huggingface_hub`'s download of one file, at the pinned revision (`c14a2bc4`), into Hugging
       Face's own cache, with no token: the repo is public. The library is already in the
       environment through diffusers; seedvr2x declares it.
@@ -2567,7 +2565,9 @@ measured that day on test files, against ffmpeg 9.0's decode.
   source's ICC profile is carried to the output unchanged, and a PNG's colour chunks (cICP,
   cHRM, gAMA, sRGB) verbatim, which seedvr2x reads from the file's chunks itself, Pillow
   reading no cICP; a picture with neither is sRGB, as viewers take it. HDR (a cICP transfer of
-  PQ or HLG) is refused, as for video.
+  PQ or HLG) is refused, as for video. Other HDR stills come as AVIF, HEIC or JPEG XL, refused,
+  or as Ultra HDR JPEGs, read as their SDR picture (above); an ICC profile's own transfer (its
+  `cicp` tag) is not read in v0.1.0, the profile carried as any other.
 - **Orientation:** processed as stored; the output's pixels are turned upright after the model,
   an exact permutation of the 8 EXIF orientations (a rotation, a mirror or both), and no
   orientation is written, in PNG and in WebP alike (the user, 2026-11-03: seedvr2x recreates
@@ -2589,9 +2589,11 @@ measured that day on test files, against ffmpeg 9.0's decode.
   on a video too.
   - Lossless WebP holds 8 bits and an ICC profile, not PNG's other colour chunks: `-o x.webp`
     writes 8 bits, `--format` refused with it, and a picture of 16 bits, or one carrying cICP,
-    cHRM or gAMA without a profile, is refused, naming `.png`, and so is a side over 16,383 px,
-    WebP's limit. Pillow writes it with the profile, at libwebp's method 4 and quality 50,
-    lossless's effort, not its fidelity: 28 to 42% under the 8-bit PNG, methods 5 and 6 saving
+    cHRM or gAMA without a profile, is refused, naming `.png`, and so is an output side over
+    16,383 px, WebP's limit, each before any model loads (decided 2026-11-05: the side was
+    refused only once the picture was upscaled). Pillow writes it with the profile, at
+    libwebp's method 4 and quality 50, lossless's effort, not its fidelity: 28 to 42% under
+    the 8-bit PNG, methods 5 and 6 saving
     nothing more.
   - seedvr2x writes the PNG with numpy and zlib, each row's filter chosen as libpng chooses
     it, at zlib's level 6: in the four cases measured, the smallest file or within 4.5% of
@@ -2726,8 +2728,9 @@ library's four modules.
   picture taken, 50 MP by default), `--max-concurrent` (the pictures in flight, 1 by default),
   `--queue` (the pictures waiting, 8 by default), the CLI's model options, its pins (at one
   picture at a time only), `--api-key`, and `-v`. Built on 2026-11-03 and 04 (impl-imgserver).
-  - It listens at once, then checks the model files as the CLI does, pulling them at the pinned
-    revision where they are missing, reads the card, and makes its reservation: what the
+  - It listens at once, then checks the model files as the CLI does, sizes first and each
+    SHA-256 by its load's one read ([Weights](#weights)), pulling them at the pinned revision
+    where they are missing, reads the card, and makes its reservation: what the
     models and `--max-concurrent` pictures at `--max-size` from inputs of `--max-input` take
     with the plan's tiles, and the margin, not the whole card (4K from 50 MP: 40.7 GiB on the
     96 GB card). More than one picture at a time needs the whole DiT on the card; one at a
@@ -2760,9 +2763,10 @@ library's four modules.
     always returned in `Seedvr2x-Seed`, so that any answer can be made again. Any other
     `Seedvr2x-` header is refused, never ignored. The colour correction is always `split`.
   - The answer's format by `Accept`: PNG by default, lossless WebP where it is asked for. A
-    picture WebP can't hold (16 bits, or cICP, cHRM or gAMA without a profile) gets PNG where
-    the client takes it, else 406. The output keeps the input's depth, 8 bits for 8, 16 for 16
-    (a grainy 3840×2880 picture: 10 MB at 8 bits, 46 MB at 16).
+    picture WebP can't hold (16 bits, cICP, cHRM or gAMA without a profile, or an output side
+    over 16,383 px) gets PNG where the client takes it, else 406 before the upscale. The output
+    keeps the input's depth, 8 bits for 8, 16 for 16 (a grainy 3840×2880 picture: 10 MB at 8
+    bits, 46 MB at 16).
   - The answer: the picture, with `Seedvr2x-Seed`, the source's and the output's sizes, and
     `Server-Timing` (the wait in the queue, the upscale).
   - `OPTIONS /upscale` says what it takes (the user, 2026-11-04): 204, `Allow: POST, OPTIONS`
@@ -2803,10 +2807,10 @@ library's four modules.
     the text of the wrong sample and fails on two sizes, where ByteDance's
     (`models/dit_v2/na.py:101-142` at e4de8c2) doesn't: harmless at the batch of one seedvr2x
     runs.
-  - Decided (the user, 2026-11-04): the card measures 1, 2 and 4 at once by the locks as built.
-    The link to numz cut the same day ([Vendored model code](#vendored-model-code)), batching
-    is measured there too with ByteDance's `repeat_concat_idx` restored, and its figures decide
-    whether v0.1.0 has it.
+  - Decided (the user, 2026-11-04): the 96 GB card measures 1, 2 and 4 at once by the locks as
+    built. The link to numz cut the same day ([Vendored model code](#vendored-model-code)),
+    batching is measured there too with ByteDance's `repeat_concat_idx` restored, and its
+    figures decide whether v0.1.0 has it.
 - **`/health`**, for a container's probes: 503 `starting` until the warm-up has passed; 200
   `ready`; 503 `stopping`; 503 `failed` after a CUDA error other than out-of-memory, which
   leaves the card's state untrusted: the pictures running are answered 500, the waiting ones
@@ -4014,6 +4018,8 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 
 | numz option | seedvr2x |
 |---|---|
+| `input` (a video, an image or a directory) | one video, or one still picture told by its content; a directory refused |
+| `--output` | `-o`, required: a `.mkv` path gives the finished file, any other path a directory of segments; for a picture, a new `.png` or `.webp` file; no default directory |
 | `--attention_mode` | dropped: FA2 when installed, else SDPA |
 | `--color_correction` | `split` (seedvr2x's own, beyond numz's `lab`) by default; `none` available; numz's `lab`, `wavelet`, `wavelet_adaptive`, `hsv` and `adain` dropped |
 | `--input_noise_scale` | dropped (numz's own addition, only degrades) |
@@ -4023,7 +4029,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | `--compile_dit`, `--compile_vae` | replaced by `--compile`: the VAE compiled, opt-in (decided on 2026-10-24, built on 2026-10-30); the DiT not in v0.1.0 (see [Memory planner](#memory-planner)) |
 | `--cache_dit`, `--cache_vae`, `--chunk_size` | dropped: one long-running process, streaming by design |
 | `--seed` | kept (comparisons, reproducibility) |
-| `--output_format`, `--video_backend`, `--10bit` | replaced by FFV1 (`yuv420p10le` by default, `gbrp16le`) and 16-bit PNG |
+| `--output_format`, `--video_backend`, `--10bit` | replaced by FFV1 (`yuv420p10le` by default, `gbrp16le`) and 16-bit PNG for a video; for a still picture, PNG at 16 bits or 8 (`--format png8`), or lossless WebP, by `-o`'s extension |
 | `--resolution` | kept: the output's short side, 1080 by default, numz's; a line where the default makes the output smaller than its source, naming the value that keeps its size |
 | `--max_resolution` | dropped from v0.1.0 (2026-10-31; said kept here, never built): the short side is the one size asked, and a size that doesn't fit is refused, naming the largest that does |
 | `--skip_first_frames`, `--load_cap` | dropped (2026-10-31): no option takes part of a source; the part wanted is cut first, and that file is the source. `--until` stops a job at a set time, which is not that |
@@ -4157,6 +4163,10 @@ explanation.
   work, a command kept in a script
 - the finished file: its work directory, what is refused before any work and the remux that
   mends the source, its checksums and its manifest beside it
+- still pictures ([Still images](#still-images)): what is read and refused, PNG or lossless
+  WebP out, colour, orientation and metadata, size, seed and plan, the options a picture takes
+- the record in each output ([The record in each output](#the-record-in-each-output)): a
+  video's tags, a picture's XMP, the AI mark, and where none is written
 - disk use: master sizes per hour, the input copies during a run, and twice the master while
   a finished file is assembled, in its work directory beside it; a long tiled shot's scratch
   (a film's credits, one shot of 8,055 frames: 95 GiB at 1080p)
