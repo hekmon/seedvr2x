@@ -770,7 +770,8 @@ def test_a_refused_start_names_the_smaller_files_that_fit() -> None:
         with pytest.raises(ReservationRefused) as plain:
             reservation.make(replace(wanted, dit_file=""))
         assert (
-            str(error.value) == f"{plain.value}; or a smaller DiT file that plans this job: {named}"
+            str(error.value)
+            == f"{plain.value}; or a smaller DiT file that plans this bound: {named}"
         )
         assert (error.value.most, error.value.largest) == (plain.value.most, plain.value.largest)
     # Where the server was given --model-dir, the way out says once that the file goes there; the
@@ -779,7 +780,7 @@ def test_a_refused_start_names_the_smaller_files_that_fit() -> None:
     with pytest.raises(ReservationRefused) as error:
         reservation.make(wanted)
     assert str(error.value).endswith(
-        f"; or a smaller DiT file that plans this job, put in --model-dir: {SHARP_INT8} or"
+        f"; or a smaller DiT file that plans this bound, put in --model-dir: {SHARP_INT8} or"
         f" {SHARP_GGUF}"
     )
     assert str(error.value).count("--model-dir") == 1
@@ -795,7 +796,7 @@ def test_a_refused_start_names_the_smaller_files_that_fit() -> None:
     int8 = two_in_full_hd(12, peaks.INT8, "seedvr2x_ema_7b_sharp_int8_convrot.safetensors")
     with pytest.raises(ReservationRefused) as error:
         reservation.make(int8)
-    assert str(error.value).endswith(f"a smaller DiT file that plans this job: {SHARP_GGUF}")
+    assert str(error.value).endswith(f"a smaller DiT file that plans this bound: {SHARP_GGUF}")
     for held in (
         two_in_full_hd(10, peaks.GGUF_7B_SHARP, "seedvr2x_ema_7b_sharp_dyn.gguf"),
         two_in_full_hd(10, peaks.FP16, sharp),
@@ -828,24 +829,26 @@ def test_the_start_says_the_smaller_files_that_swap_fewer_blocks() -> None:
     # the command line's plan says, a picture being one latent: blocks alone, no window.
     sharp = "seedvr2x_ema_7b_sharp_fp16.safetensors"
     assert line(one_in_full_hd(10, peaks.FP16, sharp)) == (
-        "smaller DiT files plan this job better: this plan swaps 23 blocks; int8 9 blocks;"
+        "smaller DiT files plan this bound better: this plan swaps 23 blocks; int8 9 blocks;"
         " the dynamic GGUF 0 blocks; --dit-model names them"
     )
     assert line(one_in_full_hd(12, peaks.FP16, sharp)) == (
-        "smaller DiT files plan this job better: this plan swaps 19 blocks; int8 0 blocks;"
+        "smaller DiT files plan this bound better: this plan swaps 19 blocks; int8 0 blocks;"
         " the dynamic GGUF 0 blocks; --dit-model names them"
     )
     # An int8 DiT is offered the GGUF alone.
     assert line(
         one_in_full_hd(10, peaks.INT8, "seedvr2x_ema_7b_sharp_int8_convrot.safetensors")
     ) == (
-        "smaller DiT files plan this job better: this plan swaps 9 blocks; the dynamic GGUF 0"
+        "smaller DiT files plan this bound better: this plan swaps 9 blocks; the dynamic GGUF 0"
         " blocks; --dit-model names them"
     )
     # The regular 7B's file gets the regular 7B's files.
     regular = line(one_in_full_hd(12, peaks.FP16, "seedvr2x_ema_7b_fp16.safetensors"))
     assert regular is not None and "seedvr2x_ema_7b_sharp" not in regular
-    assert regular.startswith("smaller DiT files plan this job better: this plan swaps 19 blocks;")
+    assert regular.startswith(
+        "smaller DiT files plan this bound better: this plan swaps 19 blocks;"
+    )
 
 
 def test_the_start_says_nothing_where_no_smaller_file_swaps_fewer() -> None:
@@ -865,7 +868,7 @@ def test_an_unpinned_dit_name_gives_both_7bs_files_in_the_start_line() -> None:
     # A file that is not a pinned one does not say which 7B it holds (pull.smaller_files): each
     # 7B's files, in brackets, the sharp 7B's first.
     assert line(one_in_full_hd(12, peaks.FP16, "w.safetensors")) == (
-        "smaller DiT files plan this job better: this plan swaps 19 blocks; for the sharp 7B"
+        "smaller DiT files plan this bound better: this plan swaps 19 blocks; for the sharp 7B"
         " (int8 0 blocks; the dynamic GGUF 0 blocks); for the 7B (int8 0 blocks; the dynamic GGUF"
         " 0 blocks); --dit-model names them"
     )

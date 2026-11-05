@@ -691,7 +691,7 @@ def planner_says(reading: memory.Reading, inputs: Inputs, host: int | None) -> l
             dit_model=inputs.dit_model,
         )
     except planner.PlanError as error:
-        return [f"refused: {error}"]
+        return [f"refused: {planner.worded(error)}"]
     said = planner.said(
         made,
         peaks,

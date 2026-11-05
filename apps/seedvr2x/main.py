@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from media.index import FrameIndex
     from media.source import Declared, FirstPass, Source
     from media.writer import Writer
-    from seedvr2x.errors import JobError
+    from seedvr2x.errors import JobError, ModelChanged
     from seedvr2x.model import Models
     from seedvr2x.passes import Compilation, ModelPlan, Plan
     from seedvr2x.pull import ModelFile, ModelFiles
@@ -589,6 +589,7 @@ class _Checked:
 
 
 def _verify(output: Path) -> int:
+    import planner
     from media import ffmpeg
     from media.checksums import check_frames, read_checksums
     from media.ffmpeg import MediaError, argument, input_args
@@ -599,7 +600,7 @@ def _verify(output: Path) -> int:
         ffmpeg.found()
         checked = _checked(output)
     except (MediaError, Refusal) as error:
-        logger.error("%s", error)
+        logger.error("%s", planner.worded(error))
         return 1
     wrong = unfinished = 0
     # A segment command's output has no checksums (DESIGN.md, Output, Checksums: "`--segment-cmd`
@@ -1322,7 +1323,7 @@ def _run(args: argparse.Namespace) -> int:
                 # A resume's recorded shape that no longer fits: the words first, the figures
                 # under --verbose (DESIGN.md, Memory planner, A plan shapes the output a
                 # little, decided on 2026-10-28).
-                logger.debug("%s", error)
+                logger.debug("%s", planner.worded(error))
                 if not args.accept_env_change:
                     raise JobError(_kept_refusal(error)) from None
                 # With --accept-env-change, planned again for what is left (same place).
@@ -1336,7 +1337,7 @@ def _run(args: argparse.Namespace) -> int:
                         dit_model=dit_model,
                     )
                 except planner.PlanError as again:
-                    logger.debug("%s", again)
+                    logger.debug("%s", planner.worded(again))
                     raise JobError(_replan_refusal(again)) from None
                 if (plan.window, plan.encode_tiles, plan.decode_tiles) != (
                     kept_plan.window,
@@ -1404,7 +1405,7 @@ def _run(args: argparse.Namespace) -> int:
             _room_on_disk(args, directory, shots, target, prior, plan)
     except (MediaError, Refusal) as error:
         listed = _listed_anyway(args, listing)
-        logger.error("%s%s%s", error, listed, _first_kept(kept_first))
+        logger.error("%s%s%s", planner.worded(error), listed, _first_kept(kept_first))
         return 1
     except _out_of_memory() as error:
         # The GPU's memory refused before the models load, where a run first works on the
@@ -1444,7 +1445,7 @@ def _run(args: argparse.Namespace) -> int:
                 record, prior, final is not None, reshaped, args.plan is not None, remade
             )
         except Refusal as error:
-            logger.error("%s%s", error, _listed_anyway(args, listing))
+            logger.error("%s%s", planner.worded(error), _listed_anyway(args, listing))
             return 1
         remaining = [index for index, done in enumerate(record.finished) if not done]
         if not replanned:
@@ -2113,6 +2114,7 @@ def _load(
     first pass and the plan are made, the plan's `reserve` (memory.hold)."""
     import torch  # loaded since the job's identity: named here for the refusals below
 
+    import planner
     from seedvr2x import memory
     from seedvr2x.blockswap import HostMemoryError
     from seedvr2x.compiling import CompileError
@@ -2144,7 +2146,7 @@ def _load(
         # pinned copies of the weights the plan has away from the GPU: refused before the run,
         # naming the RAM they take (DESIGN.md, BlockSwap, rewritten). Or a VAE that did not compile
         # (--compile), refused as it is, never run plain in its place.
-        logger.error("%s", _kept_before_command(str(error), kept))
+        logger.error("%s", _kept_before_command(planner.worded(error), kept))
         return None
     except torch.OutOfMemoryError as error:
         # The weights the plan has on the GPU don't fit there after all: other programs hold
@@ -3271,6 +3273,8 @@ def _kept_refusal(error: "PlanError") -> str:
     that the job is kept and the same command resumes it; the phase that doesn't fit and what
     it lacks, in GiB; how to free it. The figures (the reading, the budget, both reserves) are
     the error's message, said under --verbose by the caller."""
+    import planner
+
     short = error.shortfall
     assert short is not None
     lines = ["the job is kept, nothing is lost, and the same command resumes it"]
@@ -3278,7 +3282,7 @@ def _kept_refusal(error: "PlanError") -> str:
         # PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md words the card's memory alone): the
         # system's memory falls short, which quitting the GPU's programs doesn't cure and whose
         # figures are the cure's, so they stay in the refusal, whole.
-        lines.append(str(error))
+        lines.append(planner.worded(error))
     else:
         lines.append(f"{short.what} lacks {short.short} GiB of the card's memory")
         if short.freeable:
@@ -3301,10 +3305,12 @@ def _replan_refusal(error: "PlanError") -> str:
     pin is a setting), and the planner's refusal names what a pin lacks. PROVISIONAL (impl-v010,
     2026-10-28: DESIGN.md says "refused as any plan the memory can't hold"): the planner's own
     sentence, its figures with it, as DESIGN.md's refusal of a new job has them."""
+    import planner
+
     lines = [
         "the job is kept, nothing is lost, and the same command resumes it",
         "its shape planned again for the memory free now, as --accept-env-change takes, still does"
-        f" not fit: {error}",
+        f" not fit: {planner.worded(error)}",
     ]
     if error.phase != "host":
         lines.append(f"to free it, {FREE_THE_CARD}")
@@ -3384,10 +3390,12 @@ def _early_memory(
     except planner.PlanError as error:
         short = error.shortfall
         if short is None:
-            logger.debug("the recorded plan isn't judged before the checks: %s", error)
+            logger.debug(
+                "the recorded plan isn't judged before the checks: %s", planner.worded(error)
+            )
             return
         # The error's words say what NVML read and the context counted off it (shot_plan._there).
-        logger.debug("before the checks: %s", error)
+        logger.debug("before the checks: %s", planner.worded(error))
         # With --accept-env-change, a resume still short at the plan is planned again for the
         # memory free (DESIGN.md, Memory planner, decided on 2026-10-28), not refused: the second
         # line says that, and no more than the freeing the user can still do meanwhile. Where
@@ -3425,7 +3433,7 @@ def _early_memory(
             *freeing,
         )
     except (Refusal, KeyError, TypeError, ValueError) as error:
-        logger.debug("the recorded plan isn't judged before the checks: %s", error)
+        logger.debug("the recorded plan isn't judged before the checks: %s", planner.worded(error))
 
 
 def _kept_before_command(refusal: str, kept: str) -> str:
@@ -3610,7 +3618,7 @@ def _recorded_plan(
         plan = Plan.recorded(recorded.get("plan"))
         planner.check_recorded(plan, shots, target)
     except Refusal as error:
-        raise JobError(f"{path}: {error}") from None
+        raise JobError(f"{path}: {planner.worded(error)}") from None
     return plan
 
 
@@ -4053,19 +4061,24 @@ def _vouch_models(model_files: "ModelFiles", recorded: dict[str, Any]) -> None:
                 break
 
 
-def _changed_in_place(path: Path, digest: str) -> Callable[[str], str]:
+def _changed_in_place(path: Path, digest: str) -> "Callable[[str], ModelChanged]":
     """The refusal of a model file vouched for by the job's record, by its size and modification
     time, whose load read another SHA-256 than the record's, found: the file changed with its size
     and time kept, which another job's settings would hold (DESIGN.md, Pause and resume, decided
     on 2026-11-03: the file is refused at the end of its load). A file of seedvr2x's own is
     refused in its pin's words instead (pull.check_pin)."""
+    from seedvr2x.errors import ModelChanged
 
-    def refusal(found: str) -> str:
-        return (
+    def refusal(found: str) -> ModelChanged:
+        return ModelChanged(
             f"{path}: SHA-256 {found} as it loaded, where the job's record has {digest} for it,"
             " with the size and modification time it records: changed since the job recorded it;"
             " put back the file the job was made with, or give another output directory (-o) to"
-            " start a job with the file as it is"
+            " start a job with the file as it is",
+            file=path.name,
+            figure="sha256",
+            expected=digest,
+            found=found,
         )
 
     return refusal

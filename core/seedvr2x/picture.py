@@ -21,7 +21,7 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-from seedvr2x.errors import Refusal
+from seedvr2x.errors import PictureRefused, Refusal
 
 logger = logging.getLogger(__name__)
 
@@ -696,17 +696,27 @@ KINDS = (
 
 
 def _refused(
-    name: str, kind: str, what: str, way: str = "", *, subject: str = "the picture"
-) -> Refusal:
+    name: str,
+    kind: str,
+    what: str,
+    way: str = "",
+    *,
+    subject: str = "the picture",
+    pixels: int | None = None,
+    frames: int | None = None,
+) -> PictureRefused:
     """The refusal of kind `kind`, in its parts and as the command line says it. `what` completes
     "the picture ...": the message is "{name} {what}. {way}" (no stop after `what` and no way
     where `way` is empty), the reason "{subject} {what}" naming no file, and the way out as the
-    message has it, which may name the file and give a command."""
+    message has it, which may name the file and give a command. `pixels` and `frames` are the
+    facts of the kinds that count them (PictureRefused)."""
     message = f"{name} {what}. {way}" if way else f"{name} {what}"
-    return Refusal(message, kind=kind, reason=f"{subject} {what}", way=way)
+    return PictureRefused(
+        message, kind=kind, reason=f"{subject} {what}", way=way, pixels=pixels, frames=frames
+    )
 
 
-def _damaged(name: str, error: Exception) -> Refusal:
+def _damaged(name: str, error: Exception) -> PictureRefused:
     return _refused(
         name,
         "damaged",
@@ -715,13 +725,14 @@ def _damaged(name: str, error: Exception) -> Refusal:
     )
 
 
-def _too_large(name: str, error: Exception) -> Refusal:
+def _too_large(name: str, error: Exception) -> PictureRefused:
     # Pillow raises over twice Image.MAX_IMAGE_PIXELS (178,956,970 pixels at Pillow 12.3), its guard
     # against decompression bombs; its message holds the picture's pixel count, which a header
     # alone gives, so the decode need not be tried.
     limit = 2 * (Image.MAX_IMAGE_PIXELS or 0)
     counted = re.search(r"\(([\d,]+) pixels\)", str(error))
-    count = f"{int(counted[1].replace(',', '')):,} pixels" if counted else "more pixels"
+    pixels = int(counted[1].replace(",", "")) if counted else None
+    count = f"{pixels:,} pixels" if pixels is not None else "more pixels"
     # Into an 8192-px square, the ratio kept: 67 Mpixels at most, and always smaller, since a
     # picture over the limit has a side over 8192 (8192 x 8192 is 67,108,864 pixels).
     shrink = "scale=8192:8192:force_original_aspect_ratio=decrease"
@@ -735,10 +746,11 @@ def _too_large(name: str, error: Exception) -> Refusal:
         " on a side), and upscale the copy:"
         f" ffmpeg -i {shlex.quote(name)} -vf {shlex.quote(shrink)}"
         f" {shlex.quote(f'{name}.small.png')}",
+        pixels=pixels,
     )
 
 
-def _transparent(name: str) -> Refusal:
+def _transparent(name: str) -> PictureRefused:
     # The command, checked on a PNG with transparent and half-transparent pixels: the picture on
     # white to within half a level of 8 bits, at any size (drawbox's replace=1 writes white over
     # a copy, alpha included; without it, the white is blended and the result is wrong).
@@ -758,7 +770,7 @@ def _transparent(name: str) -> Refusal:
     )
 
 
-def _several_frames(name: str, fmt: str, frames: int, stream: bool = False) -> Refusal:
+def _several_frames(name: str, fmt: str, frames: int, stream: bool = False) -> PictureRefused:
     """The refusal of a file of several frames, with the command that makes a video of it: a
     fixed rate (VIDEO_RATE), since the delays of a GIF are uneven and the video path refuses a
     video whose timestamps contradict its rate; the rate is the user's to choose. The format
@@ -773,6 +785,7 @@ def _several_frames(name: str, fmt: str, frames: int, stream: bool = False) -> R
             what,
             "Save each page of it as a file of its own (an image editor, or libtiff's"
             " tiffsplit), and upscale each",
+            frames=frames,
         )
     video = shlex.quote(f"{name}.mkv")
     if stream:
@@ -783,6 +796,7 @@ def _several_frames(name: str, fmt: str, frames: int, stream: bool = False) -> R
             "To upscale it as a video, make one of it first, choosing the rate"
             f" ({MJPEG_RATE} frames a second here): ffmpeg -f mjpeg -framerate {MJPEG_RATE}"
             f" -i {shlex.quote(name)} -pix_fmt rgb24 -c:v ffv1 {video}",
+            frames=frames,
         )
     return _refused(
         name,
@@ -792,10 +806,11 @@ def _several_frames(name: str, fmt: str, frames: int, stream: bool = False) -> R
         f" ({VIDEO_RATE} frames a second here; its transparency, if any, is dropped, the colours"
         " under it showing):"
         f" ffmpeg -i {shlex.quote(name)} -vf fps={VIDEO_RATE},format=rgb24 -c:v ffv1 {video}",
+        frames=frames,
     )
 
 
-def _raw(name: str, why: str) -> Refusal:
+def _raw(name: str, why: str) -> PictureRefused:
     return _refused(
         name,
         "raw",
@@ -808,7 +823,7 @@ def _raw(name: str, why: str) -> Refusal:
     )
 
 
-def _tiff16(name: str, icc: bool) -> Refusal:
+def _tiff16(name: str, icc: bool) -> PictureRefused:
     # ffmpeg 9.0 makes the PNG at 16 bits (rgb48 for colour, gray16 for grey, by the encoder's
     # own choice from the TIFF's pixel format) but carries no ICC profile into it.
     command = f"ffmpeg -i {shlex.quote(name)} {shlex.quote(f'{name}.png')}"

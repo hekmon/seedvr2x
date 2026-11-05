@@ -31,6 +31,7 @@ it (until 2026-11-05) did: the text they made, which the tool's proof compares.
 
 import argparse
 import sys
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ import plan_matrix
 from plan_matrix import Case, Grid, Matrix
 
 import planner
+from seedvr2x.errors import PlanRefused
 from seedvr2x.passes import Plan, Tiles
 from seedvr2x.shot_plan import Peaks, PlanError
 from seedvr2x.weights import Architecture
@@ -92,6 +94,34 @@ class Lines(Matrix):
 
     def described(self, case: Case) -> str:
         return f" quality={case.quality}"
+
+    def refusal(self, error: Exception) -> tuple[str, str, list[tuple[str, str]]]:
+        """A refusal as the matrix said it before the library's refusals had kinds: a plan's is a
+        PlanError (the library names the kind), its message the command line's words, its parts
+        the three PlanError had, `instead` as the option string ("" for none). Kept so that this
+        half's text proves the CLI's words unchanged."""
+        if not isinstance(error, PlanRefused):
+            name, _, parts = super().refusal(error)
+            return name, planner.worded(error), parts
+        parts = [("instead", repr(self.legacy_instead(error))), ("phase", repr(error.phase))]
+        return "PlanError", planner.worded(error), [*parts, ("shortfall", repr(error.shortfall))]
+
+    @staticmethod
+    def legacy_instead(error: PlanRefused) -> str:
+        """The pin a plan's refusal ended with as PlanError.instead said it, an option string. The
+        floor's refusal (MemoryShort.instead the resolution that fits) said none then."""
+        if error.instead is None or error.instead.name == "resolution":
+            return ""
+        return planner.option(error.instead)
+
+    def peaks_text(self, made_peaks: Peaks) -> str:
+        """Peaks as they were: the refusal of the usual reserve in the command line's words, the
+        pin that runs with it as an option string ("" for none)."""
+        tightened = made_peaks.tightened
+        words = None if tightened is None else planner.worded(tightened)
+        instead = "" if made_peaks.instead is None else planner.option(made_peaks.instead)
+        # The two fields are strings in what is printed, as they were.
+        return repr(replace(made_peaks, tightened=words, instead=instead))  # type: ignore[arg-type]
 
     def planned(self, case: Case, made: Plan, made_peaks: Peaks) -> None:
         self.kept.append((made, case.target, case.shots))
@@ -144,7 +174,7 @@ class Lines(Matrix):
         )
         if ok:
             self.emit(f"plan_again {again[0]!r}")
-            self.emit(f"plan_again peaks {again[1]!r}")
+            self.emit(f"plan_again peaks {self.peaks_text(again[1])}")
         else:
             self.emit(f"plan_again {again}")
 

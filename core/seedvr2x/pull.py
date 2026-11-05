@@ -19,13 +19,26 @@ import shlex
 import shutil
 import sys
 import time
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePath
 
 from seedvr2x import files, weights
 from seedvr2x.clock import spent, taking, wall
-from seedvr2x.weights import Architecture, ModelError, Role
+from seedvr2x.errors import (
+    Message,
+    ModelChanged,
+    ModelError,
+    ModelNoRoom,
+    ModelNotPinned,
+    ModelsRefused,
+    ModelUnknown,
+    ModelUnreachable,
+    ModelUnreadable,
+    Say,
+    Setting,
+)
+from seedvr2x.weights import Architecture, Role
 
 logger = logging.getLogger(__name__)
 
@@ -96,13 +109,10 @@ PINNED: dict[str, Pin] = {
 SUMS = "SHA256SUMS"
 SUMS_PIN = Pin(2_335, "57cf5a7b00bec79fac929f6776d1819ef80f28fc957a8b131cf2b6887cd09b53")
 
-# The option naming each role's file, or what takes the shot detector's, which no option names
-# (DETECTOR); and what one of seedvr2x's own files in that role is.
-OPTIONS: dict[Role, str] = {
-    "dit": "--dit-model",
-    "vae": "--vae-model",
-    "detector": "seedvr2x's shot detection",
-}
+# The setting naming each role's file, None for the shot detector's, which no option names
+# (DETECTOR: "seedvr2x's shot detection" takes it); and what one of seedvr2x's own files in that
+# role is.
+ROLE_SETTINGS: dict[Role, str | None] = {"dit": "dit_model", "vae": "vae_model", "detector": None}
 KINDS: dict[Role, str] = {
     "dit": "one of seedvr2x's DiTs",
     "vae": "seedvr2x's VAE",
@@ -115,16 +125,30 @@ UNWRITABLE = frozenset({errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC, er
 # error, "(os error 28)" (hf-xet 1.6.0: xet_pkg/src/error.rs:214-218 and 307): its number is read
 # back from it.
 OS_ERROR = re.compile(r"\(os error (\d+)\)")
-# What every refusal of a file seedvr2x can't have offers besides.
-ELSEWHERE = "or download the files elsewhere and give --model-dir with their directory"
-# What a refusal says of a file the Hub refuses to anyone, which no rerun changes.
-UNAVAILABLE = (
-    "the repository or the file is unavailable: download the files elsewhere and give --model-dir"
-    " with their directory"
-)
-# What a refusal says of answers that aren't the Hub's as the library expects them, as from an
-# HF_ENDPOINT that isn't a Hub or a proxy on the way: a rerun alone changes nothing.
-CHECK_ENDPOINT = f"check HF_ENDPOINT, if set, and any proxy on the way to the Hub, {ELSEWHERE}"
+# The setting for a directory of model files, which every refusal of a file seedvr2x can't have
+# offers besides (elsewhere): the apps word it as their option.
+MODEL_DIR = Setting("model_dir")
+
+
+def elsewhere(say: Say) -> str:
+    """What every refusal of a file seedvr2x can't have offers besides."""
+    return f"or download the files elsewhere and give {say(MODEL_DIR)} with their directory"
+
+
+def unavailable(say: Say) -> str:
+    """What a refusal says of a file the Hub refuses to anyone, which no rerun changes."""
+    return (
+        "the repository or the file is unavailable: download the files elsewhere and give"
+        f" {say(MODEL_DIR)} with their directory"
+    )
+
+
+def check_endpoint(say: Say) -> str:
+    """What a refusal says of answers that aren't the Hub's as the library expects them, as from
+    an HF_ENDPOINT that isn't a Hub or a proxy on the way: a rerun alone changes nothing."""
+    return f"check HF_ENDPOINT, if set, and any proxy on the way to the Hub, {elsewhere(say)}"
+
+
 # The Hub's advice to set a token, which it sends in a warning header answering a request made
 # without one, not every time, and huggingface_hub logs as a warning (utils/_http.py:972-993);
 # logged on 2026-10-09 answering SHA256SUMS' download: "Warning: You are sending unauthenticated
@@ -156,13 +180,13 @@ HASH_SAID_FROM = 5.0
 @dataclass
 class _Known:
     """A model file's SHA-256 as the run knows it (Hashes), with the file as it was then (its
-    device and inode, size and modification time: _state); `refusal`, the message refusing a load
+    device and inode, size and modification time: _state); `refusal`, the refusal of a load
     that reads another SHA-256, given the one it read; `proved`, whether a read of the whole file
     gave it (a hash at the start, or a load); `said`, the line said once a load proves it."""
 
     sha256: str
     state: tuple[int, int, int, int]
-    refusal: Callable[[str], str]
+    refusal: Callable[[str], ModelError]
     proved: bool
     said: str | None = None
 
@@ -218,7 +242,7 @@ class Hashes:
         size: int,
         mtime_ns: int,
         sha256: str,
-        refusal: Callable[[str], str] | None = None,
+        refusal: Callable[[str], ModelError] | None = None,
     ) -> bool:
         """Take the SHA-256 a job's record holds for the file at path, and read nothing, when the
         file's size and modification time (nanoseconds) are those the record gives beside it:
@@ -226,8 +250,8 @@ class Hashes:
         resume, decided on 2026-10-29: a finished job compares its model files by size and time
         with its record, where the DiT's SHA-256 alone took 84 s on the RTX 5090. The file is then
         held as hashed (unchanged), and its load, if it runs, proves the record's SHA-256
-        (proved), refused otherwise with `refusal`'s words, given the SHA-256 read (the
-        library's own without it)."""
+        (proved), refused otherwise with `refusal`'s, given the SHA-256 read (the library's own
+        without it)."""
         if path in self._read:
             return True
         try:
@@ -239,10 +263,12 @@ class Hashes:
         self._read[path] = _Known(sha256, state, refusal or _recorded(path, sha256), proved=False)
         return True
 
-    def expect(self, path: Path, sha256: str, refusal: Callable[[str], str], said: str) -> None:
+    def expect(
+        self, path: Path, sha256: str, refusal: Callable[[str], ModelError], said: str
+    ) -> None:
         """Take sha256 for the SHA-256 of the file at path, its pin's, its size checked against the
         pin already (check_pin), and read nothing: its load proves it (proved), refused otherwise
-        with `refusal`'s words, given the SHA-256 read, and says `said` once it has."""
+        with `refusal`'s, given the SHA-256 read, and says `said` once it has."""
         self._read[path] = _Known(sha256, _state(path), refusal, proved=False, said=said)
 
     def proved(self, path: Path, sha256: str, opened: os.stat_result) -> None:
@@ -258,7 +284,7 @@ class Hashes:
             logger.info("%s: SHA-256 %s, read as it loaded", path.name, sha256)
             return
         if sha256 != known.sha256:
-            raise ModelError(known.refusal(sha256))
+            raise known.refusal(sha256)
         if not known.proved:
             logger.info("%s", known.said or f"{path.name}: SHA-256 as expected, read as it loaded")
         known.proved = True
@@ -283,32 +309,43 @@ class Hashes:
         try:
             now = _state(path)
         except OSError as error:
-            raise ModelError(f"{path}: {error.strerror}, since its SHA-256 was read") from None
+            raise ModelChanged(
+                f"{path}: {error.strerror}, since its SHA-256 was read",
+                file=path.name,
+                figure="sha256",
+            ) from None
         if now != self._read[path].state:
-            raise ModelError(_changed(path)(""))
+            raise _changed(path)("")
 
 
-def _changed(path: Path) -> Callable[[str], str]:
+def _changed(path: Path) -> Callable[[str], ModelError]:
     """The refusal of a file found changed since its SHA-256 was read whole or vouched for, by its
     stat or by its load's hash: run again, which reads it again."""
 
-    def refusal(_: str) -> str:
-        return (
+    def refusal(found: str) -> ModelError:
+        return ModelChanged(
             f"{path}: changed since its SHA-256 was read, before its load ended: run again, which"
-            " checks it again"
+            " checks it again",
+            file=path.name,
+            figure="sha256",
+            found=found or None,
         )
 
     return refusal
 
 
-def _recorded(path: Path, sha256: str) -> Callable[[str], str]:
+def _recorded(path: Path, sha256: str) -> Callable[[str], ModelError]:
     """The refusal of a file vouched for by a record's size and modification time whose load reads
     another SHA-256 than the record's: changed with its size and time kept."""
 
-    def refusal(found: str) -> str:
-        return (
+    def refusal(found: str) -> ModelError:
+        return ModelChanged(
             f"{path}: SHA-256 {found} as it loaded, where the record has {sha256} for it, with the"
-            " size and modification time it has: changed since, its size and time kept"
+            " size and modification time it has: changed since, its size and time kept",
+            file=path.name,
+            figure="sha256",
+            expected=sha256,
+            found=found,
         )
 
     return refusal
@@ -381,25 +418,16 @@ def resolve(
             Hashes(),
             ModelFile(DETECTOR, model_dir / DETECTOR) if detector else None,
         )
-    refusals: list[str] = []
+    refusals: list[ModelError] = []
     given: tuple[tuple[Role, str], ...] = (("dit", dit), ("vae", vae))
     for role, name in given:
-        option, pin = OPTIONS[role], PINNED.get(name)
-        own = [each for each, other in PINNED.items() if other.role == role]
-        takes = f"{option}: {_listing(own, 'or')}"
+        pin = PINNED.get(name)
         if pin is None:
-            refusals.append(
-                f"{option} {name}: not one of seedvr2x's own model files, the only ones it"
-                f" downloads ({takes}); give --model-dir with the directory holding another file"
-            )
+            refusals.append(_not_own(role, name))
         elif pin.role is not None and pin.role != role:
-            # Refused by its name, before a download (16.5 GB for a DiT given as the VAE) that the
-            # header check would refuse once done.
-            refusals.append(
-                f"{option} {name}: {KINDS[pin.role]}, which {OPTIONS[pin.role]} takes ({takes})"
-            )
+            refusals.append(_other_role(role, name, pin.role))
     if refusals:
-        raise ModelError("\n".join(refusals))
+        raise ModelsRefused(refusals)
     names = (dit, vae, DETECTOR) if detector else (dit, vae)
     # The files the run loads, which it fetches: every one, or where it loads no model, the
     # shot detector's alone, where its first pass runs.
@@ -422,6 +450,53 @@ def resolve(
         return ModelFile(name, where / folder / "snapshots" / REVISION / name, absent=True)
 
     return ModelFiles(file(dit), file(vae), where, Hashes(), file(DETECTOR) if detector else None)
+
+
+def _named(role: Role, say: Say, value: str = "") -> str:
+    """How a refusal names the setting that gives the file of this role, "--dit-model NAME" for
+    an application whose option it is; the shot detector's has none."""
+    setting = ROLE_SETTINGS[role]
+    return "seedvr2x's shot detection" if setting is None else say(Setting(setting, value))
+
+
+def _takes(role: Role, say: Say) -> str:
+    """What the setting of this role takes: the own files in that role, "--dit-model: A or B"."""
+    own = [each for each, other in PINNED.items() if other.role == role]
+    return f"{_named(role, say)}: {_listing(own, 'or')}"
+
+
+def _not_own(role: Role, name: str) -> ModelUnknown:
+    """The refusal of a file named for a role that isn't one of seedvr2x's own, the only ones it
+    downloads."""
+
+    def message(say: Say) -> str:
+        return (
+            f"{_named(role, say, name)}: not one of seedvr2x's own model files, the only ones it"
+            f" downloads ({_takes(role, say)}); give {say(MODEL_DIR)} with the directory holding"
+            " another file"
+        )
+
+    settings = (Setting(ROLE_SETTINGS[role] or "dit_model", name), MODEL_DIR)
+    return ModelUnknown(message, role=role, file=name, found="", settings=settings)
+
+
+def _other_role(role: Role, name: str, owner: Role) -> ModelUnknown:
+    """The refusal of a pinned file given as another role's, by its name, before a download (16.5
+    GB for a DiT given as the VAE) that the header check would refuse once done."""
+
+    def message(say: Say) -> str:
+        return (
+            f"{_named(role, say, name)}: {KINDS[owner]}, which {_named(owner, say)} takes"
+            f" ({_takes(role, say)})"
+        )
+
+    return ModelUnknown(
+        message,
+        role=role,
+        file=name,
+        found=owner,
+        settings=(Setting(ROLE_SETTINGS[role] or "dit_model", name),),
+    )
 
 
 def cache() -> Path:
@@ -467,11 +542,19 @@ def fetch(pins: Mapping[str, Pin], download: Collection[str] | None = None) -> d
     ]
     if missing and constants.HF_HUB_OFFLINE:
         needed = sum(pins[name].size for name in missing)
-        raise ModelError(
-            f"{_listing(missing)}: not in Hugging Face's cache, {where}, and {_offline()} keeps"
-            f" the network out: unset it to download {_size(needed)}, set HF_HOME (or"
-            f" HF_HUB_CACHE) to a cache holding {'it' if len(missing) == 1 else 'them'},"
-            f" {ELSEWHERE}"
+        offline = _offline()
+        names = _listing(missing)
+        holding = "it" if len(missing) == 1 else "them"
+
+        def offline_message(say: Say) -> str:
+            return (
+                f"{names}: not in Hugging Face's cache, {where}, and {offline} keeps"
+                f" the network out: unset it to download {gigabytes(needed)}, set HF_HOME (or"
+                f" HF_HUB_CACHE) to a cache holding {holding}, {elsewhere(say)}"
+            )
+
+        raise ModelUnreachable(
+            offline_message, why="offline", file=names, settings=(MODEL_DIR,), expected=needed
         )
     if missing:
         logger.info(
@@ -498,7 +581,7 @@ def check_pinned(model_files: ModelFiles, *, load: bool = False, whole: bool = F
     the log, and runs as the header check accepted it. With `load`, the run loads the files, and
     a SHA-256 not known yet is left to the load, but with `whole`, where it is read at once, once
     the size has passed (check_pin)."""
-    refusals: list[str] = []
+    refusals: list[ModelError] = []
     # Each file once, in the first role it was given.
     first: dict[ModelFile, Role] = {}
     for role, file in model_files.roles():
@@ -519,19 +602,19 @@ def check_pinned(model_files: ModelFiles, *, load: bool = False, whole: bool = F
                 whole=whole,
             )
         except ModelError as error:
-            refusals.append(str(error))
+            refusals.append(error)
     if refusals:
-        raise ModelError("\n".join(refusals))
+        raise ModelsRefused(refusals)
 
 
-def advice(model_files: ModelFiles) -> dict[Role, str]:
+def advice(model_files: ModelFiles) -> dict[Role, Message]:
     """How to fetch each of the run's files named like one of seedvr2x's own again, by its role,
     when given in the pinned file's own role: what a refusal of its header check adds
     (weights.check_models), as a refusal of its pin says it (check_pin), from Hugging Face's cache
     or into --model-dir. A pinned name given in another role, which only --model-dir lets
     through (resolve refuses it), gets none: the pinned file fetched again would be refused in
     that role all the same, and leaving out --model-dir would be refused by resolve."""
-    found: dict[Role, str] = {}
+    found: dict[Role, Message] = {}
     for role, file in model_files.roles():
         name = _pinned_name(file)
         if name is not None and PINNED[name].role == role:
@@ -551,6 +634,17 @@ class Smaller:
     size: int
     architecture: Architecture
     model: str | None = None
+
+
+@dataclass(frozen=True)
+class Swaps:
+    """What a plan makes of a job in a smaller file's format (smaller_planning's result for the
+    apps that name the files better than the plan's own): the DiT's blocks it swaps, and the
+    longest window it runs in latents, None for a picture (one latent, no window). An app words
+    the files, the options that choose them and these figures itself."""
+
+    swapped: int
+    window: int | None = None
 
 
 SHARP, REGULAR = "the sharp 7B", "the 7B"
@@ -616,48 +710,6 @@ def smaller_planning[T](
     return found
 
 
-def smaller_way(found: Sequence[Smaller], model_dir: bool = False) -> str:
-    """The way out a refusal for memory adds when the DiT is not in the smallest format and a
-    smaller file plans the job (smaller_planning), for the command line, which gives the option:
-    "a smaller DiT file that plans this job: int8 (--dit-model F, 8.3 GB) or the dynamic GGUF
-    (--dit-model G, 4.8 GB)"; for a file that is not a pinned one, each 7B's files after "for the
-    sharp 7B," and "for the 7B,", separated by semicolons. Where the run was given --model-dir
-    (`model_dir`), the way out says so once, after "this job": the pinned files are named, but
-    only a file put in that directory is read there, nothing being fetched. The job's file is
-    never changed by itself."""
-    groups: dict[str | None, list[str]] = {}
-    for one in found:
-        groups.setdefault(one.model, []).append(
-            f"{one.label} (--dit-model {one.name}, {_size(one.size)})"
-        )
-    said = [
-        (f"for {model}, " if model else "") + " or ".join(each) for model, each in groups.items()
-    ]
-    here = ", put in --model-dir" if model_dir else ""
-    return f"a smaller DiT file that plans this job{here}: " + "; ".join(said)
-
-
-def smaller_line(this: str, found: Sequence[tuple[Smaller, str]]) -> str:
-    """The plan's line of the smaller DiT files that plan the job better than the plan's own
-    (smaller_planning's pairs, each file with what its plan makes of the job, said): "smaller DiT
-    files plan this job better: this plan swaps 11 blocks with windows of 10 latents; int8 19
-    blocks, windows of 17; the dynamic GGUF 17 blocks, windows of 19; --dit-model names them".
-    `this` is what the plan itself makes, said the same way. For a file that is not a pinned one,
-    each 7B's files after "for the sharp 7B" and "for the 7B", in brackets, separated by
-    semicolons. The file is never changed by itself."""
-    groups: dict[str | None, list[str]] = {}
-    for one, said in found:
-        groups.setdefault(one.model, []).append(f"{one.label} {said}")
-    listed = "; ".join(
-        f"for {model} ({'; '.join(each)})" if model else "; ".join(each)
-        for model, each in groups.items()
-    )
-    return (
-        f"smaller DiT files plan this job better: this plan swaps {this}; {listed};"
-        " --dit-model names them"
-    )
-
-
 def check_pin(
     name: str,
     path: Path,
@@ -684,19 +736,33 @@ def check_pin(
     try:
         size = path.stat().st_size
     except OSError as error:
-        raise ModelError(f"{path}: {error.strerror}") from None
+        raise ModelUnreadable(f"{path}: {error.strerror}", file=path.name) from None
 
-    def refusal(found: str, pinned: str) -> str:
-        said = (
-            f"{path}: {found}, where {REPO}'s {name} at {REVISION[:8]} has {pinned}: not the file"
-            " seedvr2x pins, left as it is"
+    def refusal(found: str, pinned: str, sha256: bool = False) -> ModelNotPinned:
+        again = role is None or role == pin.role
+
+        def message(say: Say) -> str:
+            said = (
+                f"{path}: {found}, where {REPO}'s {name} at {REVISION[:8]} has {pinned}: not the"
+                " file seedvr2x pins, left as it is"
+            )
+            if again:
+                said += f"; {_again(name, path, cache)(say)}"
+            return said
+
+        return ModelNotPinned(
+            message,
+            role=role or "",
+            file=name,
+            figure="sha256" if sha256 else "size",
+            expected=pin.sha256 if sha256 else pin.size,
+            found=found.removeprefix("SHA-256 ") if sha256 else size,
+            settings=() if cache is not None or not again else (MODEL_DIR,),
+            command=_command(name, cache) if again and cache is not None else "",
         )
-        if role is None or role == pin.role:
-            said += f"; {_again(name, path, cache)}"
-        return said
 
     if size != pin.size:
-        raise ModelError(refusal(f"{size:,} bytes", f"{pin.size:,}"))
+        raise refusal(f"{size:,} bytes", f"{pin.size:,}")
     said = f"{name}: its size and SHA-256 as seedvr2x pins them, {REPO} at {REVISION[:8]}"
     if load and not hashes.proven(path) and (hashes.known(path) or not whole):
         # Its load hashes it as it reads it, and refuses it at its end in the same words
@@ -705,8 +771,10 @@ def check_pin(
         # proves the pin's, and a file changed since is refused in the pin's words, which say
         # how to fetch it again.
         if hashes.known(path) and (vouched := hashes.sha256(path)) != pin.sha256:
-            raise ModelError(refusal(f"SHA-256 {vouched}", pin.sha256))
-        hashes.expect(path, pin.sha256, lambda found: refusal(f"SHA-256 {found}", pin.sha256), said)
+            raise refusal(f"SHA-256 {vouched}", pin.sha256, True)
+        hashes.expect(
+            path, pin.sha256, lambda found: refusal(f"SHA-256 {found}", pin.sha256, True), said
+        )
         logger.info(
             "%s: its size as seedvr2x pins it, %s at %s; its SHA-256 checked as it loads",
             *(name, REPO, REVISION[:8]),
@@ -714,7 +782,7 @@ def check_pin(
         return
     digest = hashes.sha256(path)
     if digest != pin.sha256:
-        raise ModelError(refusal(f"SHA-256 {digest}", pin.sha256))
+        raise refusal(f"SHA-256 {digest}", pin.sha256, True)
     logger.info("%s", said)
 
 
@@ -731,25 +799,32 @@ def _pinned_name(file: ModelFile) -> str | None:
     return name if name in PINNED else None
 
 
-def _again(name: str, path: Path, cache: Path | None) -> str:
-    """How to fetch REPO's file name again, its copy at path refused: from Hugging Face's cache
-    (cache, its directory), remove the file its link leads to, which the next run downloads
-    again, or have huggingface_hub's command download it again; into --model-dir (cache None),
-    its URL."""
-    if cache is None:
-        return (
-            f"fetch it again from {url(name)}, or leave out --model-dir, which takes it from"
-            " Hugging Face's cache"
-        )
+def _command(name: str, cache: Path) -> str:
+    """The command of huggingface_hub that downloads REPO's file name again into the cache at
+    cache, whose copy is refused."""
     command = shlex.join(
         ["hf", "download", REPO, name, "--revision", REVISION, "--cache-dir", str(cache)]
     )
+    return f"{command} --force-download"
+
+
+def _again(name: str, path: Path, cache: Path | None) -> Callable[[Say], str]:
+    """How to fetch REPO's file name again, its copy at path refused: from Hugging Face's cache
+    (cache, its directory), remove the file its link leads to, which the next run downloads
+    again, or have huggingface_hub's command download it again; into a directory of model files
+    (cache None), its URL."""
+    if cache is None:
+        return lambda say: (
+            f"fetch it again from {url(name)}, or leave out {say(MODEL_DIR)}, which takes it from"
+            " Hugging Face's cache"
+        )
+    command = _command(name, cache)
     # The command on a line of its own, at the message's end, so that it can be copied whole
     # (DESIGN.md, What it prints: a refusal's advised command "on a line of its own", decided on
     # 2026-10-29 for this one).
-    return (
+    return lambda _say: (
         f"remove {path.resolve()}, which the next run downloads again, or download it again with"
-        f" huggingface_hub's command:\n{command} --force-download"
+        f" huggingface_hub's command:\n{command}"
     )
 
 
@@ -787,7 +862,7 @@ def _cached(where: Path, name: str, pin: Pin) -> tuple[Path, bool] | None:
     except OSError as error:
         # The library's lookup lists the snapshots' directory (file_download.py:1606), and Python
         # 3.13's is_file raises on a directory it can't search (EACCES).
-        raise ModelError(_unreadable(where, error)) from None
+        raise _unreadable(where, error) from None
     return None
 
 
@@ -825,14 +900,11 @@ def _check_space(where: Path, downloads: Mapping[str, Pin]) -> None:
             except FileNotFoundError:
                 continue  # renamed into place meanwhile, by a download under way
     except OSError as error:
-        raise ModelError(_unreadable(where, error)) from None
-    refusal = (
-        f"Hugging Face's cache, {where}: {_size(free)} free on its disk, where downloading"
-        f" {_listing(list(downloads))} needs {_size(needed)}: free some space there, set HF_HOME"
-        f" (or HF_HUB_CACHE) to a directory on a disk with room, {ELSEWHERE}"
-    )
+        raise _unreadable(where, error) from None
+    listed = _listing(list(downloads))
+    left = ""
     if partial:
-        listing = _listing([f"{path} ({_size(size)})" for path, size in partial])
+        listing = _listing([f"{path} ({gigabytes(size)})" for path, size in partial])
         if len(partial) == 1:
             said = (
                 "was left there by a download stopped before its end, or is one under way: no"
@@ -843,8 +915,17 @@ def _check_space(where: Path, downloads: Mapping[str, Pin]) -> None:
                 "were left there by downloads stopped before their end, or are under way: no"
                 " later download takes them up, and removing them frees their space"
             )
-        refusal += f". {listing} {said}"
-    raise ModelError(refusal)
+        left = f". {listing} {said}"
+
+    def refusal(say: Say) -> str:
+        return (
+            f"Hugging Face's cache, {where}: {gigabytes(free)} free on its disk, where downloading"
+            f" {listed} needs {gigabytes(needed)}: free some space there, set"
+            f" HF_HOME (or HF_HUB_CACHE) to a directory on a disk with room, {elsewhere(say)}"
+            f"{left}"
+        )
+
+    raise ModelNoRoom(refusal, need=needed, free=free, settings=(MODEL_DIR,))
 
 
 def _download(name: str, pin: Pin, where: Path, needed: int) -> Path:
@@ -865,13 +946,17 @@ def _download(name: str, pin: Pin, where: Path, needed: int) -> Path:
 
     logger.info(
         "%s: not in the cache, downloading %s from %s at %s",
-        *(name, _size(pin.size), REPO, REVISION[:8]),
+        *(name, gigabytes(pin.size), REPO, REVISION[:8]),
     )
     started = time.monotonic()
-    again = f"run again, which downloads it again, {ELSEWHERE}"
+
+    def again(say: Say) -> str:
+        return f"run again, which downloads it again, {elsewhere(say)}"
+
     # The errors are huggingface_hub 1.33.0's (errors.py, file_download.py, utils/_xet.py) and
     # those of hf-xet 1.6.0, which downloads Xet files (xet_pkg/src/error.rs:293-318), every one
-    # caught by name: no bare Exception.
+    # caught by name: no bare Exception. Each message is built from locals bound in its clause
+    # (Python unbinds the clause's name at its end, and a message is worded later, by an app).
     try:
         # Strict typing finds its signature partly unknown, for user_agent's bare dict and
         # tqdm_class's bare tqdm, neither of which is passed.
@@ -883,78 +968,133 @@ def _download(name: str, pin: Pin, where: Path, needed: int) -> Path:
         # (file_download.py:1931-1966): its cause the network's error or the Hub's refusal of the
         # file (1959-1965), but a 401's, raised as itself (1948-1953), or a FileMetadataError, an
         # answer lacking the Hub's headers (1954-1958).
+        cause, endpoint = _cause(error), constants.ENDPOINT
         if _refused(error):
-            raise ModelError(
-                f"{name}: the Hub refused it ({_cause(error)}): {UNAVAILABLE}"
+            raise _unreachable(
+                name,
+                "refused",
+                lambda say: f"{name}: the Hub refused it ({cause}): {unavailable(say)}",
             ) from None
         if _not_the_hub(error):
-            raise ModelError(
-                f"{name}: not in the cache, and {constants.ENDPOINT} answered the request to"
-                f" download it without the Hub's headers ({_cause(error)}): {CHECK_ENDPOINT}"
+            raise _unreachable(
+                name,
+                "not-the-hub",
+                lambda say: (
+                    f"{name}: not in the cache, and {endpoint} answered the request to"
+                    f" download it without the Hub's headers ({cause}): {check_endpoint(say)}"
+                ),
             ) from None
-        raise ModelError(
-            f"{name}: not in the cache, and {constants.ENDPOINT} couldn't be reached to download it"
-            f" ({_cause(error)}): run again once it can be, {ELSEWHERE}"
+        raise _unreachable(
+            name,
+            "unreachable",
+            lambda say: (
+                f"{name}: not in the cache, and {endpoint} couldn't be reached to download it"
+                f" ({cause}): run again once it can be, {elsewhere(say)}"
+            ),
         ) from None
     except RemoteEntryNotFoundError:
-        raise ModelError(
-            f"{name}: not in {REPO} at {REVISION}, the revision this seedvr2x pins (the Hub: entry"
-            f" not found): download it elsewhere and give --model-dir with its directory"
+        raise _unreachable(
+            name,
+            "not-found",
+            lambda say: (
+                f"{name}: not in {REPO} at {REVISION}, the revision this seedvr2x pins (the Hub:"
+                f" entry not found): download it elsewhere and give {say(MODEL_DIR)} with its"
+                " directory"
+            ),
         ) from None
     except RevisionNotFoundError:
         # Unreachable at a commit hash as the Hub answered on 2026-10-09 (the review of this
         # step): a commit it doesn't have gets "Entry Not Found", refused above. Kept, for a Hub
         # that would answer RevisionNotFound, which the library raises on that error code
         # (utils/_http.py:850-852).
-        raise ModelError(
-            f"{name}: {REPO} has no revision {REVISION}, the one this seedvr2x pins (the Hub:"
-            f" revision not found): download the files elsewhere and give --model-dir with their"
-            " directory"
+        raise _unreachable(
+            name,
+            "not-found",
+            lambda say: (
+                f"{name}: {REPO} has no revision {REVISION}, the one this seedvr2x pins (the Hub:"
+                f" revision not found): download the files elsewhere and give {say(MODEL_DIR)}"
+                " with their directory"
+            ),
         ) from None
     except RepositoryNotFoundError:
-        raise ModelError(
-            f"{name}: the Hub has no repository {REPO}, or not a public one (the Hub: repository"
-            " not found): download the files elsewhere and give --model-dir with their directory"
+        raise _unreachable(
+            name,
+            "not-found",
+            lambda say: (
+                f"{name}: the Hub has no repository {REPO}, or not a public one (the Hub:"
+                " repository not found): download the files elsewhere and give"
+                f" {say(MODEL_DIR)} with their directory"
+            ),
         ) from None
     except HfHubHTTPError as error:
+        said = _words(error)
         if _refused(error):
-            raise ModelError(
-                f"{name}: the Hub refused it ({_words(error)}): {UNAVAILABLE}"
+            raise _unreachable(
+                name,
+                "refused",
+                lambda say: f"{name}: the Hub refused it ({said}): {unavailable(say)}",
             ) from None
-        raise ModelError(
-            f"{name}: the Hub refused its download ({_words(error)}): {again}"
+        raise _unreachable(
+            name,
+            "failed",
+            lambda say: f"{name}: the Hub refused its download ({said}): {again(say)}",
         ) from None
     except OSError as error:
+        said = _words(error)
         if _xet_refused(error):
-            raise ModelError(
-                f"{name}: the Hub's storage refused it ({_words(error)}): {UNAVAILABLE}"
+            raise _unreachable(
+                name,
+                "refused",
+                lambda say: f"{name}: the Hub's storage refused it ({said}): {unavailable(say)}",
             ) from None
         number = error.errno if error.errno is not None else _os_error(error)
         if number is not None and number in UNWRITABLE:
-            raise ModelError(
-                f"{name}: Hugging Face's cache, {where}, can't be written ({os.strerror(number)}):"
-                f" set HF_HOME (or HF_HUB_CACHE) to a directory you can write, on a disk with"
-                f" {_size(needed)} free, {ELSEWHERE}"
-            ) from None
+            reason = os.strerror(number)
+
+            def cannot_write(say: Say) -> str:
+                return (
+                    f"{name}: Hugging Face's cache, {where}, can't be written ({reason}):"
+                    f" set HF_HOME (or HF_HUB_CACHE) to a directory you can write, on a disk with"
+                    f" {gigabytes(needed)} free, {elsewhere(say)}"
+                )
+
+            raise ModelUnreadable(cannot_write, file=name, settings=(MODEL_DIR,)) from None
         # The network lost during a Xet download (ConnectionError, TimeoutError), or another I/O
         # error; a plain download's sizes not matching (file_download.py:491).
-        raise ModelError(f"{name}: its download failed ({_words(error)}): {again}") from None
+        raise _unreachable(
+            name,
+            "failed",
+            lambda say: f"{name}: its download failed ({said}): {again(say)}",
+        ) from None
     except (httpx.RequestError, RuntimeError) as error:
         # A plain download's network lost past its retries (file_download.py:468-472), a proxy's
         # failure (1822), a body that doesn't decode or redirects without end (httpx's
         # DecodingError and TooManyRedirects, RequestErrors but not TransportErrors); hf_xet's
         # other failures, its data's integrity among them (xet_pkg/src/error.rs:309-317).
-        raise ModelError(f"{name}: its download failed ({_words(error)}): {again}") from None
+        said = _words(error)
+        raise _unreachable(
+            name,
+            "failed",
+            lambda say: f"{name}: its download failed ({said}): {again(say)}",
+        ) from None
     except ValueError as error:
         # hf_xet's Configuration and InvalidTaskID errors (xet_pkg/src/error.rs:308), and the
         # library's when the Hub's answer lacks the Xet headers it needs (utils/_xet.py:131-132,
         # 179-181), as from a proxy or an HF_ENDPOINT mirror that doesn't pass them on: no rerun
         # changes them.
-        raise ModelError(
-            f"{name}: its download failed ({_words(error)}): {CHECK_ENDPOINT}"
+        said = _words(error)
+        raise _unreachable(
+            name,
+            "failed",
+            lambda say: f"{name}: its download failed ({said}): {check_endpoint(say)}",
         ) from None
     logger.info("%s: downloaded in %.0f s, %s", name, spent(time.monotonic() - started), path)
     return Path(path)
+
+
+def _unreachable(name: str, why: str, message: Message) -> ModelUnreachable:
+    """The refusal of a download that failed: `why` it did (ModelUnreachable), in `message`."""
+    return ModelUnreachable(message, why=why, file=name, settings=(MODEL_DIR,))
 
 
 def _library_logging() -> None:
@@ -1035,15 +1175,19 @@ def _xet_refused(error: OSError) -> bool:
     )
 
 
-def _unreadable(where: Path, error: OSError) -> str:
+def _unreadable(where: Path, error: OSError) -> ModelUnreadable:
     """The refusal of Hugging Face's cache, where, which can't be read (error)."""
     what = error.strerror or _words(error)
     if error.filename is not None:
         what = f"{what}: {error.filename}"
-    return (
-        f"Hugging Face's cache, {where}, can't be read ({what}): make it readable, set HF_HOME (or"
-        f" HF_HUB_CACHE) to another cache, {ELSEWHERE}"
-    )
+
+    def message(say: Say) -> str:
+        return (
+            f"Hugging Face's cache, {where}, can't be read ({what}): make it readable, set"
+            f" HF_HOME (or HF_HUB_CACHE) to another cache, {elsewhere(say)}"
+        )
+
+    return ModelUnreadable(message, settings=(MODEL_DIR,))
 
 
 def _offline() -> str:
@@ -1081,8 +1225,9 @@ def _words(error: BaseException) -> str:
     return " ".join(str(error).split()) or type(error).__name__
 
 
-def _size(count: int) -> str:
-    """A number of bytes, in GB (10^9 bytes, as DESIGN.md gives the files' sizes) from 0.1 GB."""
+def gigabytes(count: int) -> str:
+    """A number of bytes, in GB (10^9 bytes, as DESIGN.md gives the files' sizes) from 0.1 GB; the
+    apps say a file's size with it."""
     return f"{count / 1e9:.1f} GB" if count >= 100_000_000 else f"{count:,} bytes"
 
 

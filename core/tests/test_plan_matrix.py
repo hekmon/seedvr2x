@@ -67,7 +67,8 @@ def test_the_quick_matrix_runs_with_no_crash_and_no_torch(
     lines = done.stdout.splitlines()
     assert lines[0].startswith("## case 1: card=8 ")
     assert any(line.startswith("plan Plan(") for line in lines)
-    assert any(line.startswith("REFUSED PlanError: ") for line in lines)
+    # A plan's refusal is of a kind (errors.PlanRefused), the library's own words with its facts.
+    assert any(line.startswith("REFUSED MemoryShort: ") for line in lines)
     assert any(line.startswith("## recorded ") for line in lines)
     assert any(line.startswith(f"dit_on_gpu{None, 36} -> ") for line in lines)
     assert not any("CRASH" in line for line in lines)

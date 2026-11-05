@@ -41,7 +41,15 @@ from dataclasses import dataclass, replace
 from functools import cache
 
 from seedvr2x import memory, peaks, tilegrid
-from seedvr2x.errors import Refusal
+from seedvr2x.errors import (
+    HostShort,
+    InputTooLarge,
+    MemoryShort,
+    PinRefused,
+    PlanRefused,
+    Say,
+    Setting,
+)
 from seedvr2x.frames import MULTIPLE, output_size, padded_size, padding
 from seedvr2x.memory import Reading
 from seedvr2x.passes import ModelPlan, Phase, Tiles
@@ -58,32 +66,11 @@ FRAMES = 1
 PHASES: tuple[Phase, ...] = ("encode", "dit", "decode")
 
 
-class PlanRefusal(Refusal):
-    """A bound the plan can't take: a pin it can't take exactly, or a size that doesn't fit the
-    memory free, or the system memory. The message counts in free VRAM, never in card sizes, and
-    names what is there for what it is (_there), as the planner's refusals do (PlanError).
-
-    `phase`: the part that doesn't fit, "encode", "dit" or "decode" for the GPU's memory, "host"
-    for the system's, "pin" for a pin that is no pin (swap count above the DiT's blocks, a tile
-    covering the whole padded frame, a tile that fits no picture within the bound); a swap pin
-    that doesn't hold the DiT's phase is the "dit" phase's. `fits`: for a floor refusal, the
-    largest bound (long, short) that fits the memory, searched as the planner searches the
-    largest output (_too_large); None elsewhere, and where no output size fits. `fits_input`:
-    for the refusal of a picture's copies (_input_refused, phase "encode" or "decode"), the
-    largest input in pixels that fits; None elsewhere, and where no input does (the output's own
-    copies are over the memory)."""
-
-    def __init__(
-        self,
-        message: str,
-        phase: str = "",
-        fits: Bound | None = None,
-        fits_input: int | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.phase = phase
-        self.fits = fits
-        self.fits_input = fits_input
+# The refusals of a plan are errors.py's, by kind (PlanRefused and its subclasses); PlanRefusal is
+# the name the command line catches them by. A picture's carry the same parts as a video's, and
+# `phase` "pin" for a pin that is no pin (a swap count above the DiT's blocks, a tile covering the
+# whole padded frame, a tile that fits no picture within the bound), `fits` and `fits_input`.
+PlanRefusal = PlanRefused
 
 
 @dataclass(frozen=True)
@@ -269,58 +256,60 @@ def plan(
         host_available,
     )
     if pins.swap_blocks is not None and pins.swap_blocks > peaks.BLOCKS:
-        raise PlanRefusal(
-            f"--swap-blocks {pins.swap_blocks}: the DiT has {peaks.BLOCKS} blocks, so from 0 to"
-            f" {peaks.BLOCKS}",
+        swap = Setting("swap_blocks", str(pins.swap_blocks))
+        raise PinRefused(
+            lambda say: (
+                f"{say(swap)}: the DiT has {peaks.BLOCKS} blocks, so from 0 to {peaks.BLOCKS}"
+            ),
+            pin=swap,
+            why="range",
             phase="pin",
         )
     # The planner's refusal of a tile pin that covers the frame, before any memory is counted: for
     # a bound, the larger of its two orientations' frames; a smaller picture takes the untiled pass
     # then (tiles), which is no tiling. For one picture, its own frame.
     largest = max(_frames(job.bound, job.picture), key=max)
-    for phase, pin in (("encode", pins.encode_tile), ("decode", pins.decode_tile)):
+    tile_pins: tuple[tuple[Phase, int | None], ...] = (
+        ("encode", pins.encode_tile),
+        ("decode", pins.decode_tile),
+    )
+    for phase, pin in tile_pins:
         if pin and peaks.covers(largest, Tiles(pin)):
-            height, width = largest
-            raise PlanRefusal(
-                f"--{phase}-tile {pin}: a tile of {pin} px covers the whole padded frame,"
-                f" {width}x{height}: --{phase}-tile 0 pins an untiled {phase}",
-                phase="pin",
-            )
+            raise covering(phase, pin, largest)
     try:
         return _planned(job)
-    except PlanRefusal as error:
+    except PlanRefused as error:
         if not reading.held or reading.tight or memory.RESERVE_TIGHT >= reading.reserve:
             raise
         refused = error
     tight = replace(job, reading=memory.tightened(reading))
+    refused_words = refused.words
     if not reading.expandable:
         # Refused with the usual reserve, as the planner does, saying what torch's default
         # setting would do where it would run the picture.
         try:
             _planned(tight)
-        except PlanRefusal:
-            raise PlanRefusal(
-                str(refused), refused.phase, refused.fits, refused.fits_input
-            ) from None
-        raise PlanRefusal(
-            f"{refused}; torch's own allocator with its expandable segments, a held run's"
-            " default, which the allocator's setting in the environment replaces here, would run"
-            f" it with the reserve of {_gib(memory.RESERVE_TIGHT)} GiB, slower",
-            refused.phase,
-            refused.fits,
-            refused.fits_input,
+        except PlanRefused:
+            raise refused from None
+        raise refused.reworded(
+            lambda say: (
+                f"{refused_words(say)}; torch's own allocator with its expandable segments, a"
+                " held run's default, which the allocator's setting in the environment replaces"
+                f" here, would run it with the reserve of {_gib(memory.RESERVE_TIGHT)} GiB,"
+                " slower"
+            )
         ) from None
     try:
         made = _planned(tight)
-    except PlanRefusal as again:
-        raise PlanRefusal(
-            f"{again}; refused with the reserve of {_gib(memory.RESERVE)} GiB that a held run's"
-            " plan leaves torch's allocator beyond a step's peak, and with"
-            f" {_gib(memory.RESERVE_TIGHT)}, the one it takes where that is refused, whose"
-            " figures these are",
-            again.phase,
-            again.fits,
-            again.fits_input,
+    except PlanRefused as again:
+        again_words = again.words
+        raise again.reworded(
+            lambda say: (
+                f"{again_words(say)}; refused with the reserve of {_gib(memory.RESERVE)} GiB that"
+                " a held run's plan leaves torch's allocator beyond a step's peak, and with"
+                f" {_gib(memory.RESERVE_TIGHT)}, the one it takes where that is refused, whose"
+                " figures these are"
+            )
         ) from None
     return replace(made, tightened=str(refused))
 
@@ -599,6 +588,23 @@ def _fewest(job: _Job) -> tuple[int, bool] | None:
     return None
 
 
+def covering(phase: Phase, pin: int, padded: tuple[int, int]) -> PinRefused:
+    """The refusal of a tile pinned that covers the whole padded frame, `padded` (height, width)
+    in pixels: the planner's, in the same words (shot_plan._covering). The way out is always the
+    untiled pass, 0."""
+    height, width = padded
+    asked, untiled = Setting(f"{phase}_tile", str(pin)), Setting(f"{phase}_tile", "0")
+    return PinRefused(
+        lambda say: (
+            f"{say(asked)}: a tile of {pin} px covers the whole padded frame,"
+            f" {width}x{height}: {say(untiled)} pins an untiled {phase}"
+        ),
+        pin=asked,
+        why="covers",
+        phase="pin",
+    )
+
+
 def _swap_choice(job: _Job) -> tuple[int, bool]:
     """The swapped blocks and whether the VAE stays in the DiT's phase: the fewest that hold it
     (_fewest), or --swap-blocks exactly, the VAE staying if it fits and leaving if only that fits
@@ -611,13 +617,20 @@ def _swap_choice(job: _Job) -> tuple[int, bool]:
         return fewest
     if _dit_need(job, swapped, vae_in_dit=False) > job.budget:
         need = _dit_need(job, swapped, vae_in_dit=False) + job.margin
-        raise PlanRefusal(
-            f"--swap-blocks {swapped}: the DiT's phase, one latent of"
-            f" {_whose(job, 'the largest picture')} takes {_over(need)} GiB of free VRAM with"
-            f" {_count(swapped, 'block')} swapped, and {_there(job.reading)}:"
-            f" {_to_free(job.reading, need)}the fewest blocks that hold it are --swap-blocks"
-            f" {fewest[0]}",
+        asked, fits = Setting("swap_blocks", str(swapped)), Setting("swap_blocks", str(fewest[0]))
+        raise PinRefused(
+            lambda say: (
+                f"{say(asked)}: the DiT's phase, one latent of"
+                f" {_whose(job, 'the largest picture')} takes {_over(need)} GiB of free VRAM with"
+                f" {_count(swapped, 'block')} swapped, and {_there(job.reading)}:"
+                f" {_to_free(job.reading, need)}the fewest blocks that hold it are {say(fits)}"
+            ),
+            pin=asked,
+            why="memory",
+            need=int(need),
+            there=int(job.reading.counted),
             phase="dit",
+            instead=fits,
         )
     return swapped, _dit_need(job, swapped, vae_in_dit=True) <= job.budget
 
@@ -899,7 +912,7 @@ def _fits(job: _Job) -> Bound | None:
     return candidates[low] if low < len(candidates) else None
 
 
-def _too_large(job: _Job, phase: Phase, least: int) -> PlanRefusal:
+def _too_large(job: _Job, phase: Phase, least: int) -> MemoryShort:
     """The floor's refusal (_floor), counted in free VRAM, never in card sizes: the free VRAM
     the bound takes, what is there for it (_there), and the largest bound that fits in it
     (_fits); the planner's _too_large. For one picture, the picture and the largest that fits at
@@ -932,16 +945,22 @@ def _too_large(job: _Job, phase: Phase, least: int) -> PlanRefusal:
         if job.picture is None
         else f"the picture, {_oriented(job.bound, job.picture)}, takes"
     )
-    return PlanRefusal(
+    need = least + job.margin
+    return MemoryShort(
         f"{takes} {total / 100:.2f} GiB of free VRAM"
         f" ({how}: a peak of {peak / 100:.2f} GiB{held}{margin}), and {_there(job.reading)}:"
-        f" {_to_free(job.reading, least + job.margin)}{fitting}",
+        f" {_to_free(job.reading, need)}{fitting}",
+        need=int(need),
+        there=int(job.reading.counted),
+        short=int(need) - int(job.reading.counted),
+        freeable=_can_free(job.reading, need),
+        reserve=job.reading.reserve if job.reading.held else None,
         phase=phase,
         fits=fits,
     )
 
 
-def _pin_refused(job: _Job, phase: Phase) -> PlanRefusal | None:
+def _pin_refused(job: _Job, phase: Phase) -> PinRefused | None:
     """The refusal of the phase's tile pin, None when it holds: the pin is taken exactly or
     refused, and it holds when every picture within the bound has a pass that fits with it, the
     DiT away (_worst at the pin; the planner's _pass). The refusal names the largest tile that
@@ -961,19 +980,31 @@ def _pin_refused(job: _Job, phase: Phase) -> PlanRefusal | None:
         ),
         None,
     )
-    fits = (
-        f"no tile fits, the untiled {phase} does, --{phase}-tile 0"
-        if largest is None
-        else f"the largest tile that fits is --{phase}-tile {largest}"
-    )
+    asked, fits = Setting(f"{phase}_tile", str(pin)), Setting(f"{phase}_tile", str(largest or 0))
     said = "untiled" if pin == 0 else f"in tiles of {pin} px"
     need += job.margin
-    return PlanRefusal(
-        f"--{phase}-tile {pin}: the {phase} {said}, for {_whose(job, 'the pictures')} takes"
-        f" {_over(need)} GiB of free VRAM, the DiT off the GPU,"
-        f" {VAE_ROOM / peaks.GIB:.2f} of them the room a VAE pass is held to, and"
-        f" {_there(job.reading)}: {_to_free(job.reading, need)}{fits}",
+
+    def refused(say: Say) -> str:
+        advice = (
+            f"no tile fits, the untiled {phase} does, {say(fits)}"
+            if largest is None
+            else f"the largest tile that fits is {say(fits)}"
+        )
+        return (
+            f"{say(asked)}: the {phase} {said}, for {_whose(job, 'the pictures')} takes"
+            f" {_over(need)} GiB of free VRAM, the DiT off the GPU,"
+            f" {VAE_ROOM / peaks.GIB:.2f} of them the room a VAE pass is held to, and"
+            f" {_there(job.reading)}: {_to_free(job.reading, need)}{advice}"
+        )
+
+    return PinRefused(
+        refused,
+        pin=asked,
+        why="memory",
+        need=int(need),
+        there=int(job.reading.counted),
         phase="pin",
+        instead=fits,
     )
 
 
@@ -1164,7 +1195,7 @@ def _largest_input(job: _Job) -> int | None:
     return fits
 
 
-def _input_refused(job: _Job) -> PlanRefusal | None:
+def _input_refused(job: _Job) -> InputTooLarge | None:
     """The refusal of a picture whose copies don't fit even with the DiT off the GPU (resident 0,
     where the placement ends), None when they do: the phase that is over by the most, what its
     copies take, and the largest input that fits, in megapixels and as about WxH at the bound's
@@ -1183,31 +1214,41 @@ def _input_refused(job: _Job) -> PlanRefusal | None:
     held = _on_gpu(job, 0, 0)
     need = held + copies + job.margin
     fits = _largest_input(job)
-    if fits is None:
-        way = (
-            "no input fits there, the output's own copies being over the memory: a smaller"
-            " --resolution"
-        )
-    else:
+    # The resolution that lowers the output's part of it: named without a value.
+    lower = Setting("resolution")
+
+    def way(say: Say) -> str:
+        if fits is None:
+            return (
+                "no input fits there, the output's own copies being over the memory: a smaller"
+                f" {say(lower)}"
+            )
         long, short = job.bound
         # The ratio as the pictures are: the bound's (long, short), or the picture's own.
         height, width = (short, long) if job.picture is None else output_size(job.picture)
         wide = math.isqrt(fits * width // height)
         whose = "the bound's" if job.picture is None else "the picture's"
-        way = (
+        return (
             f"the largest input that fits is {_megapixels(fits, up=False)} MP, about"
             f" {wide}x{fits // wide} at {whose} ratio: a copy of the picture no larger, or a"
-            " smaller --resolution, which lowers the output's part of it"
+            f" smaller {say(lower)}, which lowers the output's part of it"
         )
+
     which = max(COPIES[phase], key=lambda each: each.at(job.input_pixels, padded))
-    return PlanRefusal(
-        f"the picture's input, {_megapixels(job.input_pixels, up=True)} MP at its stored size, is"
-        f" copied to the GPU and resized there in the {phase}'s phase: its copies take"
-        f" {_over(copies)} GiB at the peak ({which.what}, at {_frame_said(job)}) and"
-        f" {_short(need, copies)} GiB more for the models on the GPU"
-        f" and the margin, {_over(need)} GiB of free VRAM, and {_there(job.reading)}:"
-        f" {_to_free(job.reading, need)}{way}",
+    return InputTooLarge(
+        lambda say: (
+            f"the picture's input, {_megapixels(job.input_pixels, up=True)} MP at its stored"
+            f" size, is copied to the GPU and resized there in the {phase}'s phase: its copies"
+            f" take {_over(copies)} GiB at the peak ({which.what}, at {_frame_said(job)}) and"
+            f" {_short(need, copies)} GiB more for the models on the GPU"
+            f" and the margin, {_over(need)} GiB of free VRAM, and {_there(job.reading)}:"
+            f" {_to_free(job.reading, need)}{way(say)}"
+        ),
+        pixels=job.input_pixels,
+        need=int(need),
+        there=int(job.reading.counted),
         phase=phase,
+        instead=lower,
         fits_input=fits,
     )
 
@@ -1435,7 +1476,7 @@ def _host_hundredths(made: StillPlan) -> tuple[int, int, int]:
     return _nearest(made.process), _nearest(made.pinned), _nearest(scratch)
 
 
-def _unfit(job: _Job, made: StillPlan) -> PlanRefusal:
+def _unfit(job: _Job, made: StillPlan) -> HostShort:
     """The refusal for the system memory, each part named with what it takes where that is a
     hundredth of a GiB or more, the total their sum (the planner's _unfit)."""
     assert job.host_available is not None
@@ -1450,10 +1491,12 @@ def _unfit(job: _Job, made: StillPlan) -> PlanRefusal:
     # What is there is rounded down, and said a hundredth under the total at least.
     there = min(_hundredths(job.host_available, up=False), total - 1)
     said = ", ".join(f"{count / 100:.2f} {what}" for count, what in taken)
-    return PlanRefusal(
+    return HostShort(
         f"the plan takes {total / 100:.2f} GiB of system memory ({said}) and"
         f" {there / 100:.2f} GiB are available, {(total - there) / 100:.2f} GiB short",
-        phase="host",
+        need=made.host,
+        available=job.host_available,
+        short=made.host - job.host_available,
     )
 
 
@@ -1794,6 +1837,13 @@ def _freeable(reading: Reading, need: float) -> bool:
     if not reading.held or reading.card is None or reading.card >= reading.reported:
         return False
     return need - reading.counted <= reading.reported - reading.card
+
+
+def _can_free(reading: Reading, need: float) -> bool:
+    """Whether memory freed on the card gives the plan the `need` bytes it is refused for, as
+    MemoryShort.freeable says it: a driver that refuses reports what other programs leave, and
+    closing them gives it back (the planner's _can_free); a held run's by _freeable."""
+    return (not reading.held and reading.nvml is None) or _freeable(reading, need)
 
 
 def _count(count: int, noun: str) -> str:

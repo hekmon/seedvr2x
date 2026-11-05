@@ -30,6 +30,8 @@ CLI_LINES = (
     "compile_shapes#",
     "on_windows_drive",
 )
+# The lines of core's text that the CLI's half words again: a refusal, its parts, the Peaks.
+REWORDED = ("REFUSED ", "plan REFUSED ", "peaks ", "  ")
 # A tool run as its script runs, then whether torch was imported, said on stderr.
 DRIVER = """
 import runpy, sys
@@ -86,7 +88,11 @@ def test_the_quick_matrix_with_the_clis_lines_runs_with_no_crash_and_no_torch(
 @pytest.mark.parametrize("dit", DITS)
 def test_cores_text_is_in_it_unchanged(quick: Run, dit: str) -> None:
     # The CLI's lines taken out, and the quality from the headers, what is left is core's text
-    # but its two totals: the CLI's half adds, never changes.
+    # but its two totals: the CLI's half adds, never changes, but for the lines that hold a
+    # library refusal, which this half words as the command line does (the CLI's options, under
+    # the class name and the parts a plan's refusal had before the library's had kinds: the
+    # proof that the command line's words did not move) where core's gives the library's own
+    # words and the kind's facts. Those lines are the same in number, each refusal at its place.
     cli = quick(TOOL, "--dit", dit).stdout.splitlines()
     core = quick(CORE_TOOL, "--dit", dit).stdout.splitlines()
     left = [
@@ -96,7 +102,22 @@ def test_cores_text_is_in_it_unchanged(quick: Run, dit: str) -> None:
         for line in cli
         if not line.startswith((*CLI_LINES, "## bricks: ", "## total: "))
     ]
-    assert left == [line for line in core if not line.startswith(("## bricks: ", "## total: "))]
+    core = [line for line in core if not line.startswith(("## bricks: ", "## total: "))]
+
+    def unrefused(lines: list[str]) -> list[str]:
+        return [line for line in lines if not line.startswith(REWORDED)]
+
+    assert unrefused(left) == unrefused(core)
+    kinds = re.compile(r"(REFUSED )(MemoryShort|HostShort|PinRefused|CompileRefused)\b")
+
+    def refusals(lines: list[str]) -> list[str]:
+        return [
+            kinds.sub(r"\1PlanError", line.split(":")[0])
+            for line in lines
+            if line.startswith(("REFUSED ", "plan REFUSED "))
+        ]
+
+    assert refusals(left) == refusals(core)
 
 
 def test_without_smaller_leaves_out_the_smaller_files_line_alone(quick: Run) -> None:

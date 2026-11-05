@@ -338,12 +338,12 @@ def test_the_detector_s_file_is_read_once_and_hashed_as_it_loads(
     assert opened.count("rb") == 2
     assert hashes.known(copy) and hashes.sha256(copy) == digest
     expecting = pull.Hashes()
-    expecting.expect(copy, "0" * 64, lambda got: f"not the pin's: {got}", "said")
+    expecting.expect(copy, "0" * 64, lambda got: ModelError(f"not the pin's: {got}"), "said")
     with pytest.raises(ModelError) as error:
         Detector(copy, CPU, hashes=expecting)
     assert str(error.value) == f"not the pin's: {digest}"
     proving = pull.Hashes()
-    proving.expect(copy, digest, lambda got: "refused", "said")
+    proving.expect(copy, digest, lambda got: ModelError("refused"), "said")
     Detector(copy, CPU, hashes=proving).close()
 
 

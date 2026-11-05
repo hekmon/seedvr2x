@@ -391,7 +391,7 @@ def test_a_start_the_fp16_dit_is_refused_names_the_smaller_files_and_they_start_
         with pytest.raises(reservation.ReservationRefused) as refused:
             main.bring_up(server.running)
         assert str(refused.value).endswith(
-            "; or a smaller DiT file that plans this job, put in --model-dir: for the sharp 7B,"
+            "; or a smaller DiT file that plans this bound, put in --model-dir: for the sharp 7B,"
             " int8 (--dit-model"
             " seedvr2x_ema_7b_sharp_int8_convrot.safetensors, 8.3 GB) or the dynamic GGUF"
             " (--dit-model seedvr2x_ema_7b_sharp_dyn.gguf, 4.8 GB); for the 7B, int8 (--dit-model"
@@ -429,7 +429,7 @@ def test_a_dit_given_by_an_absolute_path_is_known_by_its_file_name(
             main.bring_up(server.running)
     text = str(refused.value)
     assert text.endswith(
-        "; or a smaller DiT file that plans this job, put in --model-dir: int8 (--dit-model"
+        "; or a smaller DiT file that plans this bound, put in --model-dir: int8 (--dit-model"
         " seedvr2x_ema_7b_sharp_int8_convrot.safetensors, 8.3 GB) or the dynamic GGUF"
         " (--dit-model seedvr2x_ema_7b_sharp_dyn.gguf, 4.8 GB)"
     ), text
@@ -1018,9 +1018,9 @@ def test_the_start_logs_the_smaller_files_that_swap_fewer_blocks(
     lines, service = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 12)
     blocks = next(at for at, each in enumerate(lines) if each.startswith("plan: blocks swapped"))
     assert lines[blocks + 1] == (
-        "plan: smaller DiT files plan this job better: this plan swaps 19 blocks; for the sharp 7B"
-        " (int8 0 blocks; the dynamic GGUF 0 blocks); for the 7B (int8 0 blocks; the dynamic GGUF"
-        " 0 blocks); --dit-model names them"
+        "plan: smaller DiT files plan this bound better: this plan swaps 19 blocks; for the sharp"
+        " 7B (int8 0 blocks; the dynamic GGUF 0 blocks); for the 7B (int8 0 blocks; the dynamic"
+        " GGUF 0 blocks); --dit-model names them"
     )
     assert sum("smaller DiT files" in each for each in lines) == 1
     assert service.options.dit == "w.safetensors"
@@ -1035,7 +1035,7 @@ def test_the_start_of_an_int8_dit_names_the_gguf_alone(
 ) -> None:
     lines, _ = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 10, dit_format=peaks.INT8)
     assert (
-        "plan: smaller DiT files plan this job better: this plan swaps 9 blocks; for the sharp 7B"
+        "plan: smaller DiT files plan this bound better: this plan swaps 9 blocks; for the sharp 7B"
         " (the dynamic GGUF 0 blocks); for the 7B (the dynamic GGUF 0 blocks); --dit-model names"
         " them"
     ) in lines

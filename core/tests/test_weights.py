@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from library_fixtures import cli_words
 from test_gguf_file import Spec, body, entry, write_gguf
 
 from seedvr2x import gguf_file, weights
@@ -238,7 +239,7 @@ def reshaped() -> Tensors:
 def refused(path: Path, role: weights.Role) -> str:
     with pytest.raises(ModelError) as error:
         weights.check(path, role)
-    return str(error.value)
+    return cli_words(error.value)
 
 
 @pytest.mark.parametrize(("model", "architecture"), [("7b", DIT_7B), ("3b", DIT_3B), ("vae", VAE)])
@@ -1285,7 +1286,7 @@ def test_check_models(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     # Both refused at once, each saying what it is.
     with pytest.raises(ModelError) as error:
         weights.check_models(tmp_path / vae, tmp_path / dit)
-    assert str(error.value).splitlines() == [
+    assert cli_words(error.value).splitlines() == [
         f"{tmp_path / vae}: SeedVR2's VAE in fp16, given as the DiT (--dit-model): {V1}",
         f"{tmp_path / dit}: SeedVR2's 7B DiT in fp16, given as the VAE (--vae-model): {V1}",
     ]
@@ -1308,14 +1309,14 @@ def test_check_models_with_the_detector(tmp_path: Path, caplog: pytest.LogCaptur
     with pytest.raises(ModelError) as error:
         weights.check_models(tmp_path / vae, tmp_path / vae, advice, cut)
     header = 8 + int.from_bytes(detector.read_bytes()[:8], "little")
-    assert str(error.value).splitlines() == [
+    assert cli_words(error.value).splitlines() == [
         f"{tmp_path / vae}: SeedVR2's VAE in fp16, given as the DiT (--dit-model): {V1}",
         f"{cut}: cut short inside its header, 1,000 bytes of at least {header:,}; the detector's"
         " advice",
     ]
     with pytest.raises(ModelError) as error:
         weights.check_models(tmp_path / dit, tmp_path / vae, None, tmp_path / dit)
-    assert str(error.value) == (
+    assert cli_words(error.value) == (
         f"{tmp_path / dit}: SeedVR2's 7B DiT in fp16, given as the shot detector: {SHOTS}"
     )
 

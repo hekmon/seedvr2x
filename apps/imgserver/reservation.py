@@ -21,12 +21,12 @@ models, one picture's share in the VAE and one in the DiT, whatever --max-concur
 past two wait on the CPU, between the models."""
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import cache
 
 from seedvr2x import frames, peaks, pull, still_plan
-from seedvr2x.errors import Refusal
+from seedvr2x.errors import Refusal, Setting
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Phase
 from seedvr2x.still_plan import Bound, Peak, Pins, StillPlan
@@ -175,7 +175,7 @@ class Asked:
     available (None: unread), the attention kernel and the DiT's format, and the pins (one
     picture at a time only); `dit_file`, the DiT file's name ("" says unknown), whose smaller
     files a refused start names where they would fit (make); `model_dir`, whether the server was
-    given --model-dir, which that way out then says (pull.smaller_way)."""
+    given --model-dir, which that way out then says (smaller_way)."""
 
     bound: Bound
     input_pixels: int
@@ -382,14 +382,71 @@ def make(asked: Asked) -> Made:
         if ways
         else "; no picture fits there at any size the plan takes"
     )
-    raise ReservationRefused(f"{refused}{way}{smaller(asked)}", at_most, found) from None
+    raise ReservationRefused(
+        f"{refused.words(option)}{way}{smaller(asked)}", at_most, found
+    ) from None
+
+
+def option(setting: Setting) -> str:
+    """The server's option for a setting a library refusal names as its way out (errors.Setting):
+    "--" and the setting's name with its underscores as hyphens, then its value, as the command
+    line words them. The server has --encode-tile, --decode-tile, --swap-blocks and --dit-model
+    of its own; the library's plan refusals name two settings it has no option for, the window
+    (a video's) and the resolution (a picture's refusal for its input: "a smaller --resolution",
+    the server's bound being --max-size), worded all the same."""
+    return "--" + setting.name.replace("_", "-") + (f" {setting.value}" if setting.value else "")
+
+
+def worded(error: BaseException) -> str:
+    """An error's text as the server says it: a library refusal's message with the settings it
+    names worded as options (Refusal.words, option), any other error's own. The model files'
+    refusals reach the operator at the start through it."""
+    return error.words(option) if isinstance(error, Refusal) else str(error)
+
+
+def smaller_way(found: Sequence[pull.Smaller], model_dir: bool = False) -> str:
+    """The way out a refused start adds when the DiT is not in the smallest format and a smaller
+    file fits the asked bound and count (pull.smaller_planning): "a smaller DiT file that plans
+    this bound: int8 (--dit-model F, 8.3 GB) or the dynamic GGUF (--dit-model G, 4.8 GB)"; for a
+    file that is not a pinned one, each 7B's files after "for the sharp 7B," and "for the 7B,",
+    separated by semicolons. Where the server was given --model-dir (`model_dir`), it says so
+    once, after "this bound": the pinned files are named, but only a file put in that directory
+    is read there, nothing being fetched. The server's file is never changed by itself."""
+    groups: dict[str | None, list[str]] = {}
+    for one in found:
+        file = option(Setting("dit_model", one.name))
+        groups.setdefault(one.model, []).append(f"{one.label} ({file}, {pull.gigabytes(one.size)})")
+    said = [
+        (f"for {model}, " if model else "") + " or ".join(each) for model, each in groups.items()
+    ]
+    here = ", put in --model-dir" if model_dir else ""
+    return f"a smaller DiT file that plans this bound{here}: " + "; ".join(said)
+
+
+def smaller_files_line(this: int, found: Sequence[tuple[pull.Smaller, pull.Swaps]]) -> str:
+    """The start's line of the smaller DiT files that swap fewer blocks than the asked file's
+    plan, which swaps `this` (pull.smaller_planning's pairs): "smaller DiT files plan this bound
+    better: this plan swaps 5 blocks; int8 0 blocks; the dynamic GGUF 0 blocks; --dit-model names
+    them". A picture is one latent, so blocks alone, no window. For a file that is not a pinned
+    one, each 7B's files after "for the sharp 7B" and "for the 7B", in brackets, separated by
+    semicolons. The file is never changed by itself."""
+    groups: dict[str | None, list[str]] = {}
+    for one, swaps in found:
+        groups.setdefault(one.model, []).append(f"{one.label} {_blocks_said(swaps.swapped)}")
+    listed = "; ".join(
+        f"for {model} ({'; '.join(each)})" if model else "; ".join(each)
+        for model, each in groups.items()
+    )
+    return (
+        f"smaller DiT files plan this bound better: this plan swaps {_blocks_said(this)};"
+        f" {listed}; {option(Setting('dit_model'))} names them"
+    )
 
 
 def smaller(asked: Asked) -> str:
     """The way out of a refused start that names the smaller DiT files of the asked file
-    (pull.smaller_files) whose reservation fits the asked bound and count, as the command line's
-    refusals name them (pull.smaller_way); "" where none does, the file is in the smallest
-    format, or its name is unknown."""
+    (pull.smaller_files) whose reservation fits the asked bound and count (smaller_way); ""
+    where none does, the file is in the smallest format, or its name is unknown."""
     if not asked.dit_file:
         return ""
 
@@ -399,35 +456,35 @@ def smaller(asked: Asked) -> str:
     found = pull.smaller_planning(asked.dit_file, asked.dit_model, plans)
     if not found:
         return ""
-    return f"; or {pull.smaller_way([each for each, _ in found], asked.model_dir)}"
+    return f"; or {smaller_way([each for each, _ in found], asked.model_dir)}"
 
 
 def smaller_line(asked: Asked, made: Made) -> str | None:
     """The start's line of the smaller DiT files of the asked file (pull.smaller_files) that swap
     fewer blocks than `made`, the plan of the asked file: each planned again for the same bound
-    and count as `make` does, and the line worded as the command line's (pull.smaller_line; a
-    picture is one latent, so blocks alone, no window: DESIGN.md, Weights, "The dynamic GGUF
-    before v0.1.0 too"). None where the plan swaps none, the file is in the smallest format, its
-    name is unknown, or no smaller file swaps fewer. The file is never changed by itself."""
+    and count as `make` does (smaller_files_line; a picture is one latent, so blocks alone, no
+    window: DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too"). None where the plan swaps
+    none, the file is in the smallest format, its name is unknown, or no smaller file swaps
+    fewer. The file is never changed by itself."""
     swapped = made.plan.models.swapped
     if not swapped or not asked.dit_file:
         return None
 
-    def fewer(each: Architecture) -> str | None:
+    def fewer(each: Architecture) -> pull.Swaps | None:
         try:
             other = _made(replace(asked, dit_model=each), asked.bound, asked.count)
         except Refusal:
             return None
         return (
-            _blocks_said(other.plan.models.swapped) if other.plan.models.swapped < swapped else None
+            pull.Swaps(other.plan.models.swapped) if other.plan.models.swapped < swapped else None
         )
 
     found = pull.smaller_planning(asked.dit_file, asked.dit_model, fewer)
-    return pull.smaller_line(_blocks_said(swapped), found) if found else None
+    return smaller_files_line(swapped, found) if found else None
 
 
 def _blocks_said(swapped: int) -> str:
-    """The blocks a plan swaps, as the line of the smaller files says them (stills.py's)."""
+    """The blocks a plan swaps, as the line of the smaller files says them."""
     return f"{swapped} block{'' if swapped == 1 else 's'}"
 
 

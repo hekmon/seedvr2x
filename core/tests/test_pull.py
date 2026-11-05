@@ -50,9 +50,18 @@ from huggingface_hub.errors import (
     FileMetadataError,
     LocalEntryNotFoundError,
 )
+from library_fixtures import cli_say, cli_words
 from test_weights import SHOTS, as_dtype, write
 
 from seedvr2x import files, model, pull, weights
+from seedvr2x.errors import (
+    ModelChanged,
+    ModelNoRoom,
+    ModelNotPinned,
+    ModelsRefused,
+    ModelUnreachable,
+    worded,
+)
 from seedvr2x.pull import Pin
 from seedvr2x.weights import ModelError
 
@@ -272,42 +281,14 @@ def test_the_smaller_files_of_a_dit_file_are_its_formats_below() -> None:
         (pull.SHARP, "the dynamic GGUF", weights.DIT_7B_SHARP_DYN.name)
     ]
     assert pull.smaller_planning("x", weights.DIT_7B, lambda each: None) == []
-    int8_sharp = "int8 (--dit-model seedvr2x_ema_7b_sharp_int8_convrot.safetensors, 8.3 GB)"
-    gguf_sharp = "the dynamic GGUF (--dit-model seedvr2x_ema_7b_sharp_dyn.gguf, 4.8 GB)"
-    int8_regular = "int8 (--dit-model seedvr2x_ema_7b_int8_convrot.safetensors, 8.3 GB)"
-    gguf_regular = "the dynamic GGUF (--dit-model seedvr2x_ema_7b_dyn.gguf, 4.8 GB)"
-    way = "a smaller DiT file that plans this job: "
-    assert pull.smaller_way([one for one, _ in planned]) == f"{way}for the sharp 7B, {gguf_sharp}"
-    assert (
-        pull.smaller_way(
-            pull.smaller_files("seedvr2x_ema_7b_sharp_fp16.safetensors", weights.DIT_7B)
-        )
-        == f"{way}{int8_sharp} or {gguf_sharp}"
-    )
-    # The plan's line of those that plan the job better lists them the same way, with the
-    # figures of the plan and of each file.
-    assert pull.smaller_line(
-        "11 blocks with windows of 10 latents",
-        [
-            (one, "19 blocks, windows of 17")
-            for one in pull.smaller_files(sharp[0][1], weights.DIT_7B)
-        ],
-    ) == (
-        "smaller DiT files plan this job better: this plan swaps 11 blocks with windows of 10"
-        " latents; int8 19 blocks, windows of 17; the dynamic GGUF 19 blocks, windows of 17;"
-        " --dit-model names them"
-    )
-    assert pull.smaller_line(
-        "3 blocks", [(one, "0 blocks") for one in pull.smaller_files("x", weights.DIT_7B)]
-    ) == (
-        "smaller DiT files plan this job better: this plan swaps 3 blocks; for the sharp 7B"
-        " (int8 0 blocks; the dynamic GGUF 0 blocks); for the 7B (int8 0 blocks; the dynamic GGUF"
-        " 0 blocks); --dit-model names them"
-    )
-    assert pull.smaller_way(pull.smaller_files("x", weights.DIT_7B)) == (
-        f"{way}for the sharp 7B, {int8_sharp} or {gguf_sharp};"
-        f" for the 7B, {int8_regular} or {gguf_regular}"
-    )
+    # The size each file is said by (the apps' words for the files are theirs).
+    assert [pull.gigabytes(one.size) for one in pull.smaller_files("x", weights.DIT_7B)] == [
+        "8.3 GB",
+        "4.8 GB",
+        "8.3 GB",
+        "4.8 GB",
+    ]
+    assert pull.gigabytes(99_999_999) == "99,999,999 bytes"
 
 
 def test_size_refused_before_the_hash(
@@ -320,11 +301,17 @@ def test_size_refused_before_the_hash(
     size = pins[DIT].size
     with pytest.raises(ModelError) as error:
         pull.check_pin(DIT, path, pins[DIT], pull.Hashes(), None)
-    assert str(error.value) == (
+    assert cli_words(error.value) == (
         f"{path}: {size + 1:,} bytes, where hekmon/seedvr2x's {DIT} at {REVISION[:8]} has"
         f" {size:,}: not the file seedvr2x pins, left as it is; fetch it again from {url(DIT)},"
         f" {INTO_MODEL_DIR}"
     )
+    # The facts, and the library's own words naming no option.
+    assert isinstance(error.value, ModelNotPinned) and error.value.kind == "not-pinned"
+    assert (error.value.file, error.value.figure) == (DIT, "size")
+    assert (error.value.expected, error.value.found) == (size, size + 1)
+    assert error.value.settings == (pull.MODEL_DIR,) and error.value.command == ""
+    assert "--" not in str(error.value) and "the model directory" in str(error.value)
     assert hashed == []
     assert path.read_bytes() == CONTENT[DIT] + b"!"
 
@@ -343,11 +330,22 @@ def test_hash_refused(tmp_path: Path, pins: dict[str, Pin], hashed: list[Path]) 
     link.symlink_to(Path("..", "..", "blobs", blob.name))
     with pytest.raises(ModelError) as error:
         pull.check_pin(DIT, link, pins[DIT], pull.Hashes(), cache)
-    assert str(error.value) == (
+    assert cli_words(error.value) == (
         f"{link}: SHA-256 {hashlib.sha256(other).hexdigest()}, where hekmon/seedvr2x's {DIT} at"
         f" {REVISION[:8]} has {pins[DIT].sha256}: not the file seedvr2x pins, left as it is;"
         f" {from_the_cache(DIT, blob, cache)}"
     )
+    assert isinstance(error.value, ModelNotPinned) and error.value.figure == "sha256"
+    assert (error.value.expected, error.value.found) == (
+        pins[DIT].sha256,
+        hashlib.sha256(other).hexdigest(),
+    )
+    # The command that fetches it again is a fact, apart from the words around it.
+    assert error.value.command == (
+        f"hf download {pull.REPO} {DIT} --revision {pull.REVISION} --cache-dir {cache}"
+        " --force-download"
+    )
+    assert error.value.settings == () and " --" not in str(error.value).splitlines()[0]
     assert hashed == [link]
     assert blob.read_bytes() == other and link.resolve() == blob.resolve()
 
@@ -439,7 +437,7 @@ def test_a_loaded_file_is_hashed_by_its_load(
             continue
         with pytest.raises(ModelError) as error:
             hashes.proved(path, found, path.stat())
-        assert str(error.value) == (
+        assert cli_words(error.value) == (
             f"{path}: SHA-256 {found}, where hekmon/seedvr2x's {DIT} at {REVISION[:8]} has"
             f" {pins[DIT].sha256}: not the file seedvr2x pins, left as it is; {refusal}"
         )
@@ -469,12 +467,12 @@ def test_a_sha256_known_before_the_load_is_checked_at_once_and_proved_by_it(
         pull.check_pin(VAE, path, pins[VAE], vouched, None, load=True)
     assert hashed == []
     digest = pins[VAE].sha256
-    for words in (None, lambda found: f"the caller's words, {found}"):
+    for words in (None, lambda found: ModelError(f"the caller's words, {found}")):
         recorded = pull.Hashes()
         assert recorded.vouch(path, status.st_size, status.st_mtime_ns, digest, words)
         with pytest.raises(ModelError) as error:
             recorded.proved(path, "1" * 64, status)
-        assert str(error.value) == (
+        assert cli_words(error.value) == (
             f"{path}: SHA-256 {'1' * 64} as it loaded, where the record has {digest} for it,"
             " with the size and modification time it has: changed since, its size and time kept"
             if words is None
@@ -482,12 +480,14 @@ def test_a_sha256_known_before_the_load_is_checked_at_once_and_proved_by_it(
         )
         recorded.proved(path, digest, status)
     pinned = pull.Hashes()
-    assert pinned.vouch(path, status.st_size, status.st_mtime_ns, digest, lambda found: "record")
+    assert pinned.vouch(
+        path, status.st_size, status.st_mtime_ns, digest, lambda found: ModelError("record")
+    )
     pull.check_pin(VAE, path, pins[VAE], pinned, None, load=True)
     assert hashed == []
     with pytest.raises(ModelError) as error:
         pinned.proved(path, "1" * 64, status)
-    assert str(error.value) == (
+    assert cli_words(error.value) == (
         f"{path}: SHA-256 {'1' * 64}, where hekmon/seedvr2x's {VAE} at {REVISION[:8]} has"
         f" {digest}: not the file seedvr2x pins, left as it is; fetch it again from {url(VAE)},"
         f" {INTO_MODEL_DIR}"
@@ -509,7 +509,7 @@ def test_a_sha256_known_before_the_load_is_checked_at_once_and_proved_by_it(
     assert hashed == [path]
     with pytest.raises(ModelError) as error:
         read.proved(path, "1" * 64, status)
-    assert str(error.value) == (
+    assert cli_words(error.value) == (
         f"{path}: changed since its SHA-256 was read, before its load ended: run again, which"
         " checks it again"
     )
@@ -590,12 +590,25 @@ def test_pinned_name_in_the_other_role_refused(hub: Hub) -> None:
     # saying which option takes it and what this one takes.
     with pytest.raises(ModelError) as error:
         pull.resolve(None, "seedvr2x_ema_vae_fp16.safetensors", "seedvr2x_ema_7b_fp16.safetensors")
-    assert str(error.value).splitlines() == [
+    assert cli_words(error.value).splitlines() == [
         "--dit-model seedvr2x_ema_vae_fp16.safetensors: seedvr2x's VAE, which --vae-model takes"
         f" (--dit-model: {DITS})",
         "--vae-model seedvr2x_ema_7b_fp16.safetensors: one of seedvr2x's DiTs, which --dit-model"
         " takes (--vae-model: seedvr2x_ema_vae_fp16.safetensors)",
     ]
+    # Several files refused at once: each a refusal of its own, of the kind unknown, and the
+    # library's own words naming no option.
+    refused = error.value
+    assert isinstance(refused, ModelsRefused) and refused.kind == "several"
+    assert [(part.kind, part.role, part.found) for part in refused.parts] == [
+        ("unknown", "dit", "vae"),
+        ("unknown", "vae", "dit"),
+    ]
+    assert [part.file for part in refused.parts] == [
+        "seedvr2x_ema_vae_fp16.safetensors",
+        "seedvr2x_ema_7b_fp16.safetensors",
+    ]
+    assert "--" not in str(refused) and str(refused).splitlines()[0].startswith("DiT file seedvr2x")
     assert hub.calls == hub.lookups == []
 
 
@@ -637,7 +650,9 @@ def test_detector_pulled_with_the_others(
     pull.check_pinned(found)
     said = f"{pull.DETECTOR}: its size and SHA-256 as seedvr2x pins them, {SHORT}"
     assert said in caplog.messages
-    assert pull.advice(found)["detector"] == from_the_cache(pull.DETECTOR, snapshot, hub.cache)
+    assert worded(pull.advice(found)["detector"])(cli_say) == from_the_cache(
+        pull.DETECTOR, snapshot, hub.cache
+    )
     hub.calls.clear()
     assert pull.resolve(None, DIT, VAE, detector=True).detector == found.detector
     assert hub.calls == []
@@ -657,11 +672,14 @@ def test_detector_counted_in_the_space(
     monkeypatch.setattr(shutil, "disk_usage", lambda path: SimpleNamespace(free=free[0]))
     with pytest.raises(ModelError) as error:
         pull.resolve(None, DIT, VAE, detector=True)
-    assert str(error.value) == (
+    assert cli_words(error.value) == (
         f"Hugging Face's cache, {hub.cache}: {free[0]:,} bytes free on its disk, where downloading"
         f" {DIT}, {VAE} and {pull.DETECTOR} needs {free[0] + 1:,} bytes: free some space there,"
         f" set HF_HOME (or HF_HUB_CACHE) to a directory on a disk with room, {ELSEWHERE}"
     )
+    assert isinstance(error.value, ModelNoRoom) and error.value.kind == "no-room"
+    assert (error.value.free, error.value.need) == (free[0], free[0] + 1)
+    assert "--" not in str(error.value)
     assert hub.calls == []
     free[0] += 1
     pull.resolve(None, DIT, VAE, detector=True)
@@ -686,7 +704,7 @@ def test_detector_from_model_dir(
     assert found.detector == pull.ModelFile(pull.DETECTOR, path) and found.cache is None
     with pytest.raises(ModelError) as error:
         pull.check_pinned(found)
-    assert str(error.value) == (
+    assert cli_words(error.value) == (
         f"{path}: {detector_pin.size + 1:,} bytes, where hekmon/seedvr2x's {pull.DETECTOR} at"
         f" {REVISION[:8]} has {detector_pin.size:,}: not the file seedvr2x pins, left as it is;"
         f" fetch it again from {url(pull.DETECTOR)}, {INTO_MODEL_DIR}"
@@ -721,7 +739,7 @@ def test_detector_header_refusal_says_how_to_fetch_again(
         if directory is None
         else f"fetch it again from {url(pull.DETECTOR)}, {INTO_MODEL_DIR}"
     )
-    lines = str(error.value).splitlines()
+    lines = cli_words(error.value).splitlines()
     # The cache's command is on a line of its own (DESIGN.md, What it prints, 2026-10-29): the
     # refusal takes two lines there, the second the command.
     assert len(lines) == (6 if directory is None else 3)
@@ -743,7 +761,7 @@ def test_detector_missing_from_model_dir_said_for_what_it_is(
         weights.check_models(
             found.dit.path, found.vae.path, pull.advice(found), found.detector.path
         )
-    assert str(error.value).splitlines()[-1] == (
+    assert cli_words(error.value).splitlines()[-1] == (
         f"{directory / pull.DETECTOR}: no such model file: the shot detector's weights,"
         " TransNetV2's, which a run that detects its shots reads in --model-dir (--cuts, a cut"
         f" list, runs without them); fetch it from {url(pull.DETECTOR)}, {INTO_MODEL_DIR}"
@@ -751,7 +769,9 @@ def test_detector_missing_from_model_dir_said_for_what_it_is(
     # Without the advice (a name of the user's own): what it is, all the same.
     with pytest.raises(ModelError) as error:
         weights.check_models(found.dit.path, found.vae.path, None, found.detector.path)
-    assert str(error.value).splitlines()[-1].endswith("(--cuts, a cut list, runs without them)")
+    assert (
+        cli_words(error.value).splitlines()[-1].endswith("(--cuts, a cut list, runs without them)")
+    )
 
 
 def test_detector_named_in_another_role_refused(hub: Hub) -> None:
@@ -759,7 +779,7 @@ def test_detector_named_in_another_role_refused(hub: Hub) -> None:
     # download, saying what takes it.
     with pytest.raises(ModelError) as error:
         pull.resolve(None, pull.DETECTOR, pull.DETECTOR)
-    assert str(error.value).splitlines() == [
+    assert cli_words(error.value).splitlines() == [
         "--dit-model transnetv2.safetensors: TransNetV2's weights, which seedvr2x's shot detection"
         f" takes (--dit-model: {DITS})",
         "--vae-model transnetv2.safetensors: TransNetV2's weights, which seedvr2x's shot detection"
@@ -808,12 +828,15 @@ def test_transformers_offline_named(monkeypatch: pytest.MonkeyPatch, hub: Hub) -
     monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)
     with pytest.raises(ModelError) as error:
         pull.resolve(None, DIT, VAE)
-    assert str(error.value) == (
+    assert cli_words(error.value) == (
         f"{DIT} and {VAE}: not in Hugging Face's cache, {hub.cache}, and TRANSFORMERS_OFFLINE,"
         " which huggingface_hub takes for HF_HUB_OFFLINE, keeps the network out: unset it to"
         f" download 1,040 bytes, set HF_HOME (or HF_HUB_CACHE) to a cache holding them,"
         f" {ELSEWHERE}"
     )
+    assert isinstance(error.value, ModelUnreachable) and error.value.why == "offline"
+    assert error.value.kind == "unreachable" and error.value.expected == 1040
+    assert "--" not in str(error.value)
     assert hub.calls == []
 
 
@@ -839,7 +862,7 @@ def test_refusal_names_the_endpoint(monkeypatch: pytest.MonkeyPatch, hub: Hub, k
             f" the Hub's headers ({no_commit(mirror)}): check HF_ENDPOINT, if set, and any proxy on"
             f" the way to the Hub, {ELSEWHERE}"
         )
-    assert str(error.value) == said
+    assert cli_words(error.value) == said
 
 
 # hf_xet's two errors for a file its storage doesn't have or won't give, raised by the library's
@@ -878,7 +901,11 @@ pull.PINNED = {
 try:
     pull.resolve(None, "small_dit.safetensors", "small_vae.safetensors")
 except ModelError as error:
-    print(error)
+    print(
+        error.words(
+            lambda s: "--" + s.name.replace("_", "-") + (f" {s.value}" if s.value else "")
+        )
+    )
 """
 
 
@@ -941,7 +968,11 @@ assert "hf_xet" not in sys.modules, "imported already"
 try:
     pull.resolve(None, "small_dit.safetensors", "small_vae.safetensors")
 except ModelError as error:
-    print(error)
+    print(
+        error.words(
+            lambda s: "--" + s.name.replace("_", "-") + (f" {s.value}" if s.value else "")
+        )
+    )
 print("hf_xet imported" if "hf_xet" in sys.modules else "hf_xet not imported")
 """
 
@@ -1030,10 +1061,12 @@ def test_changed_after_its_hash_refused(tmp_path: Path) -> None:
         change()
         with pytest.raises(ModelError) as error:
             hashes.unchanged(path)
-        assert str(error.value) == (
+        assert cli_words(error.value) == (
             f"{path}: changed since its SHA-256 was read, before its load ended: run again, which"
             " checks it again"
         )
+        assert isinstance(error.value, ModelChanged) and error.value.kind == "changed"
+        assert error.value.file == "w.safetensors" and "--" not in str(error.value)
         path.write_bytes(b"hashed")
         os.utime(path, ns=(state.st_atime_ns, state.st_mtime_ns))
         hashes = pull.Hashes()
@@ -1085,7 +1118,7 @@ def test_load_refuses_a_file_changed_since_its_hash(
         touch(paths[touched])
     with pytest.raises(ModelError) as error:
         model.load_models(dit, vae, torch.device("cpu"), hashes)
-    assert str(error.value) == (
+    assert cli_words(error.value) == (
         f"{paths[touched]}: changed since its SHA-256 was read, before its load ended: run again,"
         " which checks it again"
     )
@@ -1106,7 +1139,12 @@ def test_load_refuses_a_file_whose_bytes_are_not_those_expected(
     paths = {"dit": dit, "vae": vae}
     hashes = pull.Hashes()
     for role, path in paths.items():
-        hashes.expect(path, f"{role} pinned", lambda found, role=role: f"{role}: not {found}", "ok")
+        hashes.expect(
+            path,
+            f"{role} pinned",
+            lambda found, role=role: ModelError(f"{role}: not {found}"),
+            "ok",
+        )
     done: list[str] = []
 
     def load_weights(module: object, path: Path, *args: object, **more: Any) -> dict[str, object]:
@@ -1118,7 +1156,7 @@ def test_load_refuses_a_file_whose_bytes_are_not_those_expected(
     monkeypatch.setattr(model, "_load_weights", load_weights)
     with pytest.raises(ModelError) as error:
         model.load_models(dit, vae, torch.device("cpu"), hashes)
-    assert str(error.value) == f"{wrong}: not another"
+    assert cli_words(error.value) == f"{wrong}: not another"
     assert done == (["vae"] if wrong == "vae" else ["vae", "dit"])
 
 

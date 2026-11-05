@@ -6,7 +6,7 @@ before torch is imported."""
 import math
 from fractions import Fraction
 
-from seedvr2x.errors import Refusal
+from seedvr2x.errors import Say, Setting, TargetTooSmall
 
 
 def target_size(
@@ -86,19 +86,25 @@ def check_target(target: tuple[int, int], resolution: int) -> None:
     height, width = target
     rows, columns = padding(target)
     if rows >= height or columns >= width:
-        # The message is the command line's; the parts are the image server's (kind "too-small",
-        # errors.Refusal): the reason names no option, the way is the option the message names.
+        # The message words the resolution as an application's setting; the parts are the image
+        # server's (kind "too-small", errors.TargetTooSmall): the reason names no option, the way
+        # is the setting the message names.
         need = (
             f"for the padding, at least {REFLECTED} rows reflected from the picture under it,"
             f" up to a multiple of {MULTIPLE}, and columns alike: it takes 17 rows and 16"
             " columns at least"
         )
-        way = f"--resolution {resolution}"
-        raise Refusal(
-            f"{way}: the frames resized to {width}x{height} are too small {need}",
-            kind="too-small",
+        asked = Setting("resolution", str(resolution))
+
+        def message(say: Say) -> str:
+            return f"{say(asked)}: the frames resized to {width}x{height} are too small {need}"
+
+        raise TargetTooSmall(
+            message,
             reason=f"the picture resized to {width}x{height} is too small {need}",
-            way=way,
+            resolution=resolution,
+            size=(height, width),
+            least=(17, 16),
         )
 
 

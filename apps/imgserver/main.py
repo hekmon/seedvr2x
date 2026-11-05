@@ -426,6 +426,7 @@ def serve(
     tests' stand-in): listening, the start, serving until SIGTERM or Ctrl-C, the stop. Exit 0
     once stopped, 1 for a start refused, FAILED_EXIT once a CUDA error failed the server (in the
     warm-up too), after the pictures running are answered."""
+    import reservation
     import service as services
     from seedvr2x.errors import Refusal
 
@@ -464,7 +465,7 @@ def serve(
         if stop.during_start:
             logger.info("asked to stop while starting: nothing was served")
     except (Refusal, services.Failed) as error:
-        logger.error("%s; the server stops", error)
+        logger.error("%s; the server stops", reservation.worded(error))
         # A CUDA error in the warm-up is the card's, not a refusal that a restart would repeat.
         code = FAILED_EXIT if isinstance(error, services.Failed) and error.fatal else 1
     except Exception as error:

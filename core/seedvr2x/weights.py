@@ -18,23 +18,30 @@ import logging
 import os
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Literal, cast
 
 from seedvr2x import gguf_file
-from seedvr2x.errors import Refusal
+from seedvr2x.errors import (
+    Message,
+    ModelDamaged,
+    ModelError,
+    ModelMissing,
+    ModelsRefused,
+    ModelUnknown,
+    ModelUnreadable,
+    Say,
+    Setting,
+    aside,
+    worded,
+)
 from seedvr2x.gguf_file import GgufError
 
 logger = logging.getLogger(__name__)
 
 Role = Literal["dit", "vae", "detector"]
-
-
-class ModelError(Refusal):
-    """A model file seedvr2x refuses: the message says what the file is, or what is wrong with
-    it."""
 
 
 # The device buffers a DiT's swapped blocks stream through, one computing, one being filled
@@ -393,12 +400,19 @@ V1 = (
 SHOTS = "seedvr2x detects shots with TransNetV2 in fp32, as its own transnetv2.safetensors holds it"
 # What a safetensors file of other tensors is not.
 NONE_OF_THEM = "neither SeedVR2's DiT, its VAE nor TransNetV2"
-# How each role's refusal names it, when the file is a model of another role.
-GIVEN: dict[Role, str] = {
-    "dit": "given as the DiT (--dit-model)",
-    "vae": "given as the VAE (--vae-model)",
-    "detector": "given as the shot detector",
-}
+
+
+def given_as(role: Role, say: Say) -> str:
+    """How a refusal names the role a file was given as, when the file is a model of another
+    role: "given as the DiT (--dit-model)", the option after it only where an application words
+    the settings."""
+    if role == "dit":
+        return f"given as the DiT{aside(say, f' ({say(Setting("dit_model"))})')}"
+    if role == "vae":
+        return f"given as the VAE{aside(say, f' ({say(Setting("vae_model"))})')}"
+    return "given as the shot detector"
+
+
 # The end of a refusal of a file missing data (_read): for one of seedvr2x's own files in its own
 # role, check_models says where from instead (seedvr2x/pull.py, advice).
 AGAIN = "fetch it again"
@@ -407,10 +421,15 @@ AGAIN = "fetch it again"
 # which --model-dir holds under seedvr2x's own name for it (pull.DETECTOR).
 MISSING = "no such model file"
 FETCH = "fetch it"
-UNNAMED: dict[Role, str] = {
-    "detector": (
+UNNAMED: dict[Role, Callable[[Say], str]] = {
+    "detector": lambda say: (
         "the shot detector's weights, TransNetV2's, which a run that detects its shots reads in"
-        " --model-dir (--cuts, a cut list, runs without them)"
+        f" {say(Setting('model_dir'))}"
+        + aside(
+            say,
+            f" ({say(Setting('cuts'))}, a cut list, runs without them)",
+            " (a cut list runs without them)",
+        )
     ),
 }
 
@@ -470,19 +489,35 @@ def check(path: Path, role: Role) -> Architecture:
     TransNetV2 as the shot detector, every tensor F32 but its BatchNorm counters (COUNTER), I64.
     Anything else raises ModelError, saying what the file is (describe)."""
     tail = SHOTS if role == "detector" else V1
-    read = _read(path)
+    try:
+        read = _read(path)
+    except ModelError as error:
+        error.role = role  # the role is the caller's, not the file's
+        raise
     if isinstance(read, str):
-        raise ModelError(f"{path}: {read}: {tail}")
+        raise ModelUnknown(f"{path}: {read}: {tail}", role=role, file=path.name, found=read)
     found = _architecture(read)
     if found in ACCEPTED[role] and _as_run(read, found):
         assert found is not None
         unmarked = _unmarked(path, read) if found.layout == INT8 else None
         if unmarked is None:
             return found
-        raise ModelError(f"{path}: {found.name} in comfy-kitchen's INT8 layout, {unmarked}: {tail}")
+        raise ModelUnknown(
+            f"{path}: {found.name} in comfy-kitchen's INT8 layout, {unmarked}: {tail}",
+            role=role,
+            file=path.name,
+            found=found.name,
+        )
     owner = _role(read, found)
-    given = f", {GIVEN[role]}" if owner is not None and owner != role else ""
-    raise ModelError(f"{path}: {_what(read, found)}{given}: {tail}")
+    what = _what(read, found)
+    if owner is not None and owner != role:
+        settings = (Setting(f"{role}_model"),) if role != "detector" else ()
+
+        def message(say: Say) -> str:
+            return f"{path}: {what}, {given_as(role, say)}: {tail}"
+
+        raise ModelUnknown(message, role=role, file=path.name, found=what, settings=settings)
+    raise ModelUnknown(f"{path}: {what}: {tail}", role=role, file=path.name, found=what)
 
 
 def in_words(architecture: Architecture) -> str:
@@ -499,7 +534,7 @@ def in_words(architecture: Architecture) -> str:
 def check_models(
     dit: Path | None,
     vae: Path | None,
-    advice: Mapping[Role, str] | None = None,
+    advice: Mapping[Role, Message] | None = None,
     detector: Path | None = None,
 ) -> None:
     """Check the DiT file at dit, the VAE file at vae and, given, the shot detector's file at
@@ -514,7 +549,7 @@ def check_models(
 
     The CPU tests' stand-in replaces this function (tests/test_cli_run.py, stand_in_model): for
     tests only, never a way around the check for users."""
-    refusals: list[str] = []
+    refused: list[tuple[Role, ModelError]] = []
     files: list[tuple[str, Role, Path | None]] = [("DiT", "dit", dit), ("VAE", "vae", vae)]
     if detector is not None:
         files.append(("Shot detector", "detector", detector))
@@ -524,18 +559,28 @@ def check_models(
         try:
             found = check(path, role)
         except ModelError as error:
-            said = str(error)
-            missing = said.endswith(MISSING)
-            if missing and role in UNNAMED:
-                said = f"{said}: {UNNAMED[role]}"
-            if advice is not None and role in advice:
-                how = advice[role].replace(AGAIN, FETCH, 1) if missing else advice[role]
-                said = f"{said.removesuffix(f'; {AGAIN}')}; {how}"
-            refusals.append(said)
+            refused.append((role, error))
             continue
         logger.info("%s %s: %s", label, path.name, in_words(found))
-    if refusals:
-        raise ModelError("\n".join(refusals))
+    if not refused:
+        return
+    hows = {role: worded(how) for role, how in (advice or {}).items()}
+
+    def line(role: Role, error: ModelError, say: Say) -> str:
+        said = error.words(say)
+        missing = isinstance(error, ModelMissing)
+        if missing and role in UNNAMED:
+            said = f"{said}: {UNNAMED[role](say)}"
+        if role in hows:
+            how = hows[role](say)
+            how = how.replace(AGAIN, FETCH, 1) if missing else how
+            said = f"{said.removesuffix(f'; {AGAIN}')}; {how}"
+        return said
+
+    def message(say: Say) -> str:
+        return "\n".join(line(role, error, say) for role, error in refused)
+
+    raise ModelsRefused([error for _, error in refused], message)
 
 
 def describe(path: Path) -> str:
@@ -604,7 +649,7 @@ def _unmarked(path: Path, tensors: Mapping[str, TensorInfo]) -> str | None:
                     shown = raw.decode(errors="backslashreplace")
                     return f"its {name.removesuffix(MARK)} marked {shown}, not {json.dumps(MARKER)}"
     except OSError as error:
-        raise ModelError(f"{path}: {error.strerror}") from None
+        raise ModelUnreadable(f"{path}: {error.strerror}", file=path.name) from None
     return None
 
 
@@ -631,8 +676,8 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
     regular file, empty, cut short or damaged."""
     if not path.is_file():
         if os.path.lexists(path):
-            raise ModelError(f"{path}: not a regular file")
-        raise ModelError(f"{path}: {MISSING}")
+            raise ModelUnreadable(f"{path}: not a regular file", file=path.name)
+        raise ModelMissing(f"{path}: {MISSING}", file=path.name)
     try:
         with path.open("rb") as file:
             size = os.fstat(file.fileno()).st_size
@@ -640,16 +685,21 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
             # kind, so refused as one cut short is, without V1's tail. wget -O truncates its
             # file at once (GNU Wget's manual, -O), and leaves it empty on a 404 (Wget 1.21.4).
             if size == 0:
-                raise ModelError(f"{path}: empty (0 bytes); {AGAIN}")
+                raise ModelDamaged(
+                    f"{path}: empty (0 bytes); {AGAIN}", file=path.name, figure="size", found=0
+                )
             # 1 to 8 bytes: too few for a safetensors header's length and the brace that tell the
             # format (below), and for any model file's header (GGUF's 24 bytes, ggml's
             # docs/gguf.md; a zip's local file header 30, APPNOTE.TXT 4.3.7): what a download cut
             # short leaves, refused as one, its size said, without V1's tail. "GGUF" or "PK" 3 4
             # alone is such a file, not a GGUF file or a checkpoint.
             if size < 9:
-                raise ModelError(
+                raise ModelDamaged(
                     f"{path}: cut short, {_count(size, 'byte')}, too few for any model file;"
-                    f" {AGAIN}"
+                    f" {AGAIN}",
+                    file=path.name,
+                    figure="size",
+                    found=size,
                 )
             # The header's length, then the header, which begins with its JSON object's brace,
             # as safetensors' format requires. GGUF's signature is told first: read as a header's
@@ -671,17 +721,27 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
                     f"a header of {length:,} bytes, where safetensors takes 1 to {HEADER_LIMIT:,}",
                 )
             if 8 + length > size:
-                raise ModelError(
+                raise ModelDamaged(
                     f"{path}: cut short inside its header, {size:,} bytes of at least"
-                    f" {8 + length:,}; {AGAIN}"
+                    f" {8 + length:,}; {AGAIN}",
+                    file=path.name,
+                    figure="size",
+                    expected=8 + length,
+                    found=size,
                 )
             header = start[8:] + file.read(length - 1)
     except OSError as error:
-        raise ModelError(f"{path}: {error.strerror}") from None
+        raise ModelUnreadable(f"{path}: {error.strerror}", file=path.name) from None
     tensors, data = _parse(path, header)
     end = 8 + length + data
     if size < end:
-        raise ModelError(f"{path}: cut short, {size:,} of {end:,} bytes; {AGAIN}")
+        raise ModelDamaged(
+            f"{path}: cut short, {size:,} of {end:,} bytes; {AGAIN}",
+            file=path.name,
+            figure="size",
+            expected=end,
+            found=size,
+        )
     if size > end:
         raise _damaged(path, f"{_count(size - end, 'byte')} after its tensors' data")
     return tensors
@@ -697,10 +757,10 @@ def _gguf(path: Path, file: BinaryIO, size: int) -> GgufTensors | str:
         header = gguf_file.header_of(file, size)
     except GgufError as error:
         if error.kind == "cut":
-            raise ModelError(f"{path}: {error}; {AGAIN}") from None
+            raise ModelDamaged(f"{path}: {error}; {AGAIN}", file=path.name) from None
         if error.kind in ("version", "type"):
             return str(error)
-        raise ModelError(f"{path}: a damaged GGUF file: {error}") from None
+        raise ModelDamaged(f"{path}: a damaged GGUF file: {error}", file=path.name) from None
     return GgufTensors(
         {each.name: TensorInfo(each.type, each.shape, each.offset) for each in header.tensors}
     )
@@ -813,7 +873,7 @@ def _whole_numbers(value: object) -> list[int] | None:
 
 
 def _damaged(path: Path, what: str) -> ModelError:
-    return ModelError(f"{path}: a damaged safetensors file: {what}")
+    return ModelDamaged(f"{path}: a damaged safetensors file: {what}", file=path.name)
 
 
 def _what(tensors: Mapping[str, TensorInfo], found: Architecture | None) -> str:

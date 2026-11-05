@@ -17,6 +17,7 @@ from typing import Any
 
 from job import QUALITY, kept_bytes, shot_runs
 from seedvr2x import memory, peaks, pull
+from seedvr2x.errors import PinRefused, Refusal, Setting
 from seedvr2x.frames import output_size, padded_size
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Plan, Shapes, Tiles
@@ -31,7 +32,6 @@ from seedvr2x.shot_plan import (
     _count,  # pyright: ignore[reportPrivateUsage]
     _early_said,  # pyright: ignore[reportPrivateUsage]
     _gib,  # pyright: ignore[reportPrivateUsage]
-    _held_note,  # pyright: ignore[reportPrivateUsage]
     _held_under,  # pyright: ignore[reportPrivateUsage]
     _host_hundredths,  # pyright: ignore[reportPrivateUsage]
     _Job,  # pyright: ignore[reportPrivateUsage]
@@ -40,12 +40,21 @@ from seedvr2x.shot_plan import (
     _left,  # pyright: ignore[reportPrivateUsage]
     _named,  # pyright: ignore[reportPrivateUsage]
     _resident_said,  # pyright: ignore[reportPrivateUsage]
+    held_note,
     plan,
 )
 from seedvr2x.shots import SHARED, Shot
 from seedvr2x.weights import Architecture
 
 logger = logging.getLogger("cli.planner")
+
+
+def option(setting: Setting) -> str:
+    """The command line's option for a setting a library refusal names as its way out
+    (errors.Setting): "--" and the setting's name with its underscores as hyphens, then its value
+    ("--window 6", "--decode-tile 512", "--resolution" for a setting named with none). The say
+    that every library refusal's words (Refusal.words) reach the user through."""
+    return "--" + setting.name.replace("_", "-") + (f" {setting.value}" if setting.value else "")
 
 
 # The compilation's time, said by --plan and the plan's line: a new job's and a resume's (its
@@ -153,6 +162,20 @@ def recorded_dit_model(memory_record: dict[str, Any]) -> Architecture:
     return DIT_FORMATS[memory_record.get("dit_format", "fp16")]
 
 
+def worded(error: BaseException) -> str:
+    """An error's text as the command line says it: a library refusal's message with the
+    settings it names worded as options (Refusal.words, option), any other error's own."""
+    return error.words(option) if isinstance(error, Refusal) else str(error)
+
+
+def pin_named(refused: PlanError) -> bool:
+    """Whether a refusal ends with the pin that fits (PlanError.instead is a window, a block
+    count or a tile). The floor refusal's instead is the resolution that fits, which a smaller
+    DiT file can still serve, so plan_naming adds its way out to it as it did when that refusal
+    carried none."""
+    return refused.instead is not None and refused.instead.name != "resolution"
+
+
 def plan_naming(
     free: int | Reading,
     target: tuple[int, int],
@@ -165,10 +188,10 @@ def plan_naming(
     **options: Any,
 ) -> tuple[Plan, Peaks]:
     """`plan` for a new job whose DiT file is dit_file (`model_dir`: the run was given
-    --model-dir, which the way out then says, pull.smaller_way), a refusal for memory adding the
+    --model-dir, which the way out then says, smaller_way), a refusal for memory adding the
     way out of a smaller DiT file: the same job planned again in int8's figures and in the GGUF's
     (the smaller formats of the DiT's, pull.smaller_files), and those that plan it named with
-    their option and size (pull.smaller_way), the file never changed by itself (DESIGN.md, Weights,
+    their option and size (smaller_way), the file never changed by itself (DESIGN.md, Weights,
     "The dynamic GGUF before v0.1.0 too"). Left as plan has it: a pin's refusal, which ends with
     the pin that fits (PlanError.instead), a refusal that is no memory's (no phase), the
     compiled VAE's, whose advice has lines of its own, and a recorded shape's (a resume's job
@@ -182,8 +205,8 @@ def plan_naming(
     if (
         options.get("recorded") is not None
         or not refused.phase
-        or refused.instead
-        or "\n" in str(refused)
+        or pin_named(refused)
+        or "\n" in refused.words(option)
     ):
         raise refused
 
@@ -198,17 +221,15 @@ def plan_naming(
     found = pull.smaller_planning(dit_file, dit_model, plans)
     if not found:
         raise refused
-    way = pull.smaller_way([each for each, _ in found], model_dir)
+    way = smaller_way([each for each, _ in found], model_dir)
     # The way out sits beside the refusal's own (a pin's, the fewest blocks that hold it), before
-    # a held run's note on the reserves its figures were found with (_held_note).
-    said, note = str(refused), _held_note()
+    # a held run's note on the reserves its figures were found with (held_note).
+    said, note = refused.words(option), held_note()
     if said.endswith(note):
         said = said[: -len(note)]
     else:
         note = ""
-    raise PlanError(
-        f"{said}; or {way}{note}", shortfall=refused.shortfall, phase=refused.phase
-    ) from None
+    raise refused.reworded(f"{said}; or {way}{note}") from None
 
 
 def smaller_swaps(
@@ -230,30 +251,73 @@ def smaller_swaps(
     if options.get("recorded") is not None:
         return None
 
-    def better(each: Architecture) -> str | None:
+    def better(each: Architecture) -> pull.Swaps | None:
         again: dict[str, Any] = {**options, "dit_model": each}
         try:
             other, other_peaks = plan(*arguments, **again)
         except PlanError:
             return None
         if other.swapped < made.swapped or other_peaks.window > predicted.window:
-            return _swaps_said(other.swapped, other_peaks.window)
+            return pull.Swaps(other.swapped, other_peaks.window)
         return None
 
     found = pull.smaller_planning(dit_file, options.get("dit_model", peaks.FP16), better)
     if not found:
         return None
-    return pull.smaller_line(_swaps_said(made.swapped, predicted.window, "with"), found)
+    return smaller_line(pull.Swaps(made.swapped, predicted.window), found)
 
 
-def _swaps_said(swapped: int, window: int, join: str = "") -> str:
+def swaps_said(swaps: pull.Swaps, join: str = "") -> str:
     """The blocks a plan swaps and the longest window it runs, in latents, as the line of the
-    smaller files says them: "11 blocks with windows of 10 latents" for the plan itself, "19
-    blocks, windows of 17" for a file."""
-    blocks = f"{swapped} block{'' if swapped == 1 else 's'}"
+    smaller files says them: "11 blocks with windows of 10 latents" for the plan itself (`join`
+    "with"), "19 blocks, windows of 17" for a file; the blocks alone for a picture."""
+    blocks = f"{swaps.swapped} block{'' if swaps.swapped == 1 else 's'}"
+    if swaps.window is None:
+        return blocks
     if join:
-        return f"{blocks} {join} windows of {window} latent{'' if window == 1 else 's'}"
-    return f"{blocks}, windows of {window}"
+        return f"{blocks} {join} windows of {swaps.window} latent{'' if swaps.window == 1 else 's'}"
+    return f"{blocks}, windows of {swaps.window}"
+
+
+def smaller_way(found: Sequence[pull.Smaller], model_dir: bool = False) -> str:
+    """The way out a refusal for memory adds when the DiT is not in the smallest format and a
+    smaller file plans the job (pull.smaller_planning), as the command line says it, with its
+    options: "a smaller DiT file that plans this job: int8 (--dit-model F, 8.3 GB) or the dynamic
+    GGUF (--dit-model G, 4.8 GB)"; for a file that is not a pinned one, each 7B's files after "for
+    the sharp 7B," and "for the 7B,", separated by semicolons. Where the run was given --model-dir
+    (`model_dir`), the way out says so once, after "this job": the pinned files are named, but
+    only a file put in that directory is read there, nothing being fetched. The job's file is
+    never changed by itself."""
+    groups: dict[str | None, list[str]] = {}
+    for one in found:
+        file = option(Setting("dit_model", one.name))
+        groups.setdefault(one.model, []).append(f"{one.label} ({file}, {pull.gigabytes(one.size)})")
+    said = [
+        (f"for {model}, " if model else "") + " or ".join(each) for model, each in groups.items()
+    ]
+    here = ", put in --model-dir" if model_dir else ""
+    return f"a smaller DiT file that plans this job{here}: " + "; ".join(said)
+
+
+def smaller_line(this: pull.Swaps, found: Sequence[tuple[pull.Smaller, pull.Swaps]]) -> str:
+    """The plan's line of the smaller DiT files that plan the job better than the plan's own
+    (pull.smaller_planning's pairs, each file with what its plan makes of the job, `this` being
+    what the plan itself makes), as the command line says it: "smaller DiT files plan this job
+    better: this plan swaps 11 blocks with windows of 10 latents; int8 19 blocks, windows of 17;
+    the dynamic GGUF 17 blocks, windows of 19; --dit-model names them". For a file that is not a
+    pinned one, each 7B's files after "for the sharp 7B" and "for the 7B", in brackets, separated
+    by semicolons. The file is never changed by itself."""
+    groups: dict[str | None, list[str]] = {}
+    for one, swaps in found:
+        groups.setdefault(one.model, []).append(f"{one.label} {swaps_said(swaps)}")
+    listed = "; ".join(
+        f"for {model} ({'; '.join(each)})" if model else "; ".join(each)
+        for model, each in groups.items()
+    )
+    return (
+        f"smaller DiT files plan this job better: this plan swaps {swaps_said(this, 'with')};"
+        f" {listed}; {option(Setting('dit_model'))} names them"
+    )
 
 
 # The parts of a shape that plan_again releases for a refused phase, in order (Pins' fields): the
@@ -358,10 +422,11 @@ def check_recorded(
       (_check_tiles)."""
     longest = max(_latents(shot.frames) for shot in shots)
     if recorded.window is not None and recorded.window < min(2 * SHARED + 1, longest):
-        raise PlanError(
+        raise PinRefused(
             f"not a plan as seedvr2x records one: its window, {recorded.window}, with a shot of"
             f" {_count(longest, 'latent')}: a cap that a shot is longer than is"
-            f" {2 * SHARED + 1} latents at least"
+            f" {2 * SHARED + 1} latents at least",
+            why="recorded",
         )
     _check_tiles(padded_size(target), recorded)
 
@@ -932,8 +997,8 @@ def _card_said(card: str, peaks: Peaks) -> list[str]:
             f" it would be refused, and a job that fits with {usual} runs up to 1.5 times as"
             f" long with {tight}; memory freed on the card gives the {usual} back"
         )
-        if peaks.instead:
+        if peaks.instead is not None:
             # The pin that runs with the usual reserve, at full speed (design, 2026-10-21).
-            reserve += f"; {peaks.instead} would run with the full reserve, at full speed"
+            reserve += f"; {option(peaks.instead)} would run with the full reserve, at full speed"
         lines.append(reserve)
     return lines

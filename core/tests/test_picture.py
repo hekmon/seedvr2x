@@ -24,7 +24,7 @@ import pytest
 from PIL import Image, ImageCms
 
 from seedvr2x import picture, png
-from seedvr2x.errors import Refusal
+from seedvr2x.errors import PictureRefused, Refusal
 
 
 def _ffmpeg_reason() -> str | None:
@@ -164,7 +164,11 @@ def held_parts(error: Refusal, name: str) -> None:
     """What the image server relies on: the kind is one of KINDS; the reason is a clause that
     names neither the file, nor ffmpeg, nor an option of the command line; and the message is
     the command line's, made of the file's name, the reason's words and the way out."""
-    assert error.kind in picture.KINDS
+    assert error.kind in picture.KINDS and isinstance(error, PictureRefused)
+    # The facts of the kinds that count them: a frames refusal its frames, a too-large one its
+    # pixels (None where Pillow's message gave none); no other kind has either.
+    assert (error.frames is not None) == (error.kind == "frames")
+    assert (error.pixels is not None) == (error.kind == "too-large")
     reason = error.reason
     assert reason.startswith(("the picture ", "the file "))
     assert name not in reason and "ffmpeg" not in reason and "--" not in reason

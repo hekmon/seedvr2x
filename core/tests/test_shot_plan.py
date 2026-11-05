@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from library_fixtures import cli_say, cli_words
 from test_peaks import (
     BEFORE_ONE_OUTPUT,
     NUMZ_4K,
@@ -30,6 +31,14 @@ from test_peaks import (
 )
 
 from seedvr2x import memory, peaks, shot_plan, weights
+from seedvr2x.errors import (
+    CompileRefused,
+    HostShort,
+    MemoryShort,
+    PinRefused,
+    PlanRefused,
+    Setting,
+)
 from seedvr2x.frames import output_size, padded_length, padded_size
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Phase, Plan, Tiles
@@ -999,7 +1008,7 @@ def fits(
 def refused(*job: object, **options: object) -> str:
     with pytest.raises(PlanError) as error:
         shot_plan.plan(*job, **options)  # pyright: ignore[reportArgumentType]
-    return str(error.value)
+    return cli_words(error.value)
 
 
 def test_window_pin() -> None:
@@ -1380,8 +1389,11 @@ def test_every_plan_fits() -> None:
                         try:
                             made, predicted = shot_plan.plan(*job, split=split)
                         except PlanError as error:
-                            floors += floor_named(str(error), free, target, film, split)
-                            short += "of system memory" in str(error)
+                            # Every refusal of the sweep, in the library's own words, names no
+                            # option (errors.Refusal.words has the application's).
+                            assert "--" not in str(error), str(error)
+                            floors += floor_named(cli_words(error), free, target, film, split)
+                            short += "of system memory" in cli_words(error)
                             continue
                         plans += 1
                         need = needs(made, target, film, split)
@@ -2129,7 +2141,7 @@ def test_a_recorded_shape_refused_says_what_it_falls_short_of_apart() -> None:
     assert untiled.value.shortfall is None
     with pytest.raises(PlanError) as pinned:
         shot_plan.plan(our_free(24), HD, shots(76), Pins(swap_blocks=3), None, recorded=recorded)
-    assert pinned.value.shortfall is None and pinned.value.instead == "--swap-blocks 28"
+    assert pinned.value.shortfall is None and pinned.value.instead == Setting("swap_blocks", "28")
     # A run held to the card: the closest to running, the plan with 2.5, its figures; and whether
     # memory freed on the card gives it back (shot_plan._freeable): the card's figure the smaller,
     # up to the driver's.
@@ -2243,3 +2255,120 @@ def test_resumed_on_another_attention_backend() -> None:
         " latents with 36 blocks swapped and the VAE off the GPU, takes 23.23 GiB of free VRAM"
         " and the driver reports 22.57 GiB free, 0.66 GiB short"
     )
+
+
+# ---- The refusals by kind (errors.PlanRefused) --------------------------------------------------
+
+
+def raised(*job: object, **options: object) -> PlanRefused:
+    """The refusal shot_plan.plan makes of a job, whatever its kind."""
+    with pytest.raises(PlanRefused) as error:
+        shot_plan.plan(*job, **options)  # pyright: ignore[reportArgumentType]
+    return error.value
+
+
+def test_each_refusal_of_the_planner_is_of_its_kind_with_its_facts() -> None:
+    recorded = Plan(17, Tiles(1856), Tiles(1088))
+    # A swap count above the DiT's blocks, and a tile covering the frame: pins that are no pins,
+    # before any memory is counted.
+    error = raised(our_free(24), HD, shots(76), Pins(swap_blocks=40), None)
+    assert type(error) is PinRefused and error.kind == "pin" and error.why == "range"
+    assert error.pin == Setting("swap_blocks", "40") and error.instead is None
+    error = raised(our_free(24), HD, shots(76), Pins(decode_tile=2048), None)
+    assert type(error) is PinRefused and error.why == "covers" and error.phase == ""
+    assert error.pin == Setting("decode_tile", "2048") and error.instead is None
+    assert str(error).endswith("decode tile 0 pins an untiled decode")
+    # A pin the memory doesn't hold, with the pin that does: the window, the swapped blocks, a tile.
+    error = raised(our_free(24), HD, shots(3000), Pins(window=30), None)
+    assert type(error) is PinRefused and error.why == "memory" and error.phase == "dit"
+    assert error.pin == Setting("window", "30")
+    assert error.instead is not None and error.instead.name == "window"
+    assert error.need is not None and error.there is not None and error.need > error.there
+    error = raised(our_free(24), HD, shots(76), Pins(swap_blocks=3), None, recorded=recorded)
+    assert type(error) is PinRefused and error.why == "memory" and error.phase == ""
+    assert error.pin == Setting("swap_blocks", "3")
+    assert error.instead == Setting("swap_blocks", "28")
+    error = raised(our_free(16), HD, shots(76), Pins(decode_tile=0), None)
+    assert type(error) is PinRefused and error.why == "memory" and error.phase == "decode"
+    assert error.pin == Setting("decode_tile", "0")
+    assert error.instead is not None and error.instead.name == "decode_tile"
+    assert error.need is not None and error.there is not None and error.need > error.there
+    assert error.there == our_free(16)
+    # A recorded plan the planner makes for no job.
+    error = raised(our_free(24), HD, shots(76), Pins(), None, recorded=Plan(17, Tiles(2048)))
+    assert type(error) is PinRefused and error.why == "recorded" and error.pin is None
+    # A size that doesn't fit, with no pin to blame: the card's free VRAM, the phase and what
+    # fits, the largest resolution; and a resume's shape, short in the same facts.
+    error = raised(our_free(6), (540, 960), shots(5), Pins(), None)
+    assert type(error) is MemoryShort and error.kind == "memory" and error.phase == "decode"
+    assert error.need is not None and error.there == our_free(6) and error.short is not None
+    assert error.short == error.need - our_free(6) and error.freeable is True
+    assert error.reserve is None and error.instead is not None
+    assert error.instead.name == "resolution" and error.instead.value.isdecimal()
+    error = raised(our_free(16), HD, shots(76), Pins(), None, recorded=recorded)
+    assert type(error) is MemoryShort and error.phase == "encode" and error.instead is None
+    assert error.shortfall == shot_plan.Shortfall("the encode", "7.26", freeable=True)
+    assert error.need is not None and error.short == error.need - our_free(16)
+    # The host's memory.
+    error = raised(our_free(24), HD, shots(76), Pins(), 8 * GIB, recorded=recorded)
+    assert type(error) is HostShort and error.kind == "host" and error.phase == "host"
+    assert error.available == 8 * GIB and error.need is not None and error.need > 8 * GIB
+    assert error.short == error.need - error.available
+    error = raised(our_free(16), HD, shots(76), Pins(window=10), 12 * GIB)
+    assert type(error) is HostShort and error.instead == Setting("window", "6")
+    # A held run's refusal says the reserve it was made with, in bytes: the tight retry's, which
+    # it names, and the kind and facts are kept through the rewording.
+    decode = peaks.decode_peak(padded_size(HD), output_size(HD), None, 0, 36)
+    card = decode + peaks.VAE_ROOM + memory.HELD_BACK + memory.RESERVE_TIGHT - GIB
+    reading = Reading(card + 3 * GIB, card, card - memory.HELD_BACK - memory.RESERVE, True, 0)
+    reading = replace(reading, left=memory.HELD_BACK)
+    error = raised(reading, HD, shots(5), Pins(swap_blocks=36), None, recorded=Plan(5, None, None))
+    assert type(error) is MemoryShort and error.phase == "decode"
+    assert error.reserve == memory.RESERVE_TIGHT and error.freeable is True
+    assert str(error).endswith("whose figures these are") and "--" not in str(error)
+    assert cli_words(error) == str(error)  # worded after the clause that reworded it has ended
+    # The VAE compiled: a pass pinned beyond the shapes measured, and the job the plain plan fits.
+    error = raised(our_free(96), HD, shots(76), Pins(decode_tile=1280), None, compile_vae=True)
+    assert type(error) is CompileRefused and error.kind == "compile" and error.phase == "decode"
+    assert error.within == (Setting("decode_tile", "1152"),)
+    assert str(error).splitlines()[-2:] == [
+        "The same command without compiling fits",
+        "The same command with decode tile 1152 fits, within the shapes measured",
+    ]
+    error = raised(
+        *(our_free(96), HD, shots(76), Pins(decode_tile=1280), None),
+        *(),
+        compile_vae=True,
+        compile_fixed=True,
+    )
+    assert type(error) is PinRefused and error.why == "compile" and error.phase == "decode"
+
+
+def test_a_plan_s_refusal_in_the_library_s_words_names_no_option() -> None:
+    # str() of every kind of refusal above is the library's own words, which name no option of
+    # any application; the command line's say gives back the option each names.
+    recorded = Plan(17, Tiles(1856), Tiles(1088))
+    named = {
+        "--swap-blocks 40": raised(our_free(24), HD, shots(76), Pins(swap_blocks=40), None),
+        "--decode-tile 2048": raised(our_free(24), HD, shots(76), Pins(decode_tile=2048), None),
+        "--window 30": raised(our_free(24), HD, shots(3000), Pins(window=30), None),
+        "--swap-blocks 28": raised(
+            *(our_free(24), HD, shots(76), Pins(swap_blocks=3), None), recorded=recorded
+        ),
+        "--decode-tile 1856": raised(our_free(16), HD, shots(76), Pins(decode_tile=0), None),
+        "--resolution 48": raised(our_free(6), (540, 960), shots(5), Pins(), None),
+        "--compile": raised(
+            *(our_free(96), HD, shots(76), Pins(decode_tile=1280), None), compile_vae=True
+        ),
+    }
+    for option, error in named.items():
+        assert "--" not in str(error), str(error)
+        assert error.words(cli_say) != str(error)
+        assert option.split()[0] in cli_words(error), option
+    # The ones that name no setting are the same in every words.
+    for error in (
+        raised(our_free(24), HD, shots(76), Pins(), 8 * GIB, recorded=recorded),
+        raised(our_free(16), HD, shots(76), Pins(), None, recorded=recorded),
+        raised(our_free(24), HD, shots(76), Pins(), None, recorded=Plan(17, Tiles(2048))),
+    ):
+        assert "--" not in str(error) and cli_words(error) == str(error)

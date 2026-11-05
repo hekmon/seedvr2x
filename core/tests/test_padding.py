@@ -18,6 +18,7 @@ from typing import Any, cast
 
 import pytest
 import torch
+from library_fixtures import cli_words
 from torchvision.transforms import Compose, InterpolationMode, Lambda, Normalize
 from torchvision.transforms import functional as TVF
 
@@ -249,7 +250,7 @@ def test_too_small_to_pad_refused() -> None:
                     check_target((height, width), 7)
     with pytest.raises(Refusal) as refused:
         check_target((16, 21), 16)
-    assert str(refused.value) == (
+    assert cli_words(refused.value) == (
         "--resolution 16: the frames resized to 21x16 are too small for the padding, at least 8"
         " rows reflected from the picture under it, up to a multiple of 16, and columns alike: it"
         " takes 17 rows and 16 columns at least"

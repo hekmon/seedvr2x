@@ -50,7 +50,7 @@ import argparse
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from itertools import product
 from pathlib import Path
@@ -58,7 +58,7 @@ from typing import Any
 
 import seedvr2x
 from seedvr2x import frames, memory, peaks
-from seedvr2x.errors import JobError, Refusal
+from seedvr2x.errors import JobError, Refusal, plain
 from seedvr2x.passes import Phase, Plan, Tiles
 from seedvr2x.shot_plan import Peaks, Pins, PlanError, host_moments, plan
 from seedvr2x.shots import Shot
@@ -74,7 +74,12 @@ DITS = {
     "gguf7sharp": peaks.GGUF_7B_SHARP,
 }
 EXPECTED = (PlanError, JobError, Refusal, ValueError)
-REFUSAL_PARTS = ("instead", "phase", "shortfall")
+# What a refusal is printed with, those it has: the kind and the facts of errors.PlanRefused and
+# its kinds, each as `part=repr`.
+REFUSAL_PARTS = (
+    *("kind", "instead", "phase", "shortfall", "pin", "why", "need", "there", "short"),
+    *("freeable", "reserve", "available", "pixels", "fits", "fits_input", "within"),
+)
 
 
 def gib(count: float) -> int:
@@ -166,17 +171,37 @@ class Matrix:
     def emit(self, text: str) -> None:
         self.lines.append(text.replace("\n", "\\n"))
 
+    def refusal(self, error: Exception) -> tuple[str, str, list[tuple[str, str]]]:
+        """A refusal as the text says it: its class's name, its message and its parts, each as
+        (name, repr). The library's own words (str), whatever the application words (a hook:
+        the CLI's half words them as its options)."""
+        parts = [
+            (part, repr(getattr(error, part))) for part in REFUSAL_PARTS if hasattr(error, part)
+        ]
+        return type(error).__name__, str(error), parts
+
+    def peaks_text(self, made_peaks: Peaks) -> str:
+        """A plan's Peaks as the text says them, its fields printed as they were before the
+        refusals had kinds: `tightened` as the refusal's message, a string, `instead` as the pin's
+        words ('' for none; a hook, the CLI's half words them as its options)."""
+        tightened = made_peaks.tightened
+        instead = made_peaks.instead
+        return repr(
+            replace(
+                made_peaks,
+                tightened=None if tightened is None else str(tightened),  # type: ignore[arg-type]
+                instead="" if instead is None else plain(instead),  # type: ignore[arg-type]
+            )
+        )
+
     def attempt(self, call: Callable[[], Any]) -> tuple[bool, Any]:
         """(True, the result), or (False, the line saying the refusal or the crash)."""
         try:
             return True, call()
         except EXPECTED as error:
-            parts = "".join(
-                f" [{part}={getattr(error, part)!r}]"
-                for part in REFUSAL_PARTS
-                if hasattr(error, part)
-            )
-            return False, f"REFUSED {type(error).__name__}: {error}{parts}"
+            name, message, parts = self.refusal(error)
+            said = "".join(f" [{part}={value}]" for part, value in parts)
+            return False, f"REFUSED {name}: {message}{said}"
         except Exception as error:  # written, so that a tree that crashes differs
             self.crashes += 1
             return False, f"CRASH {type(error).__name__}: {error}"
@@ -275,7 +300,7 @@ class Matrix:
             return
         made, made_peaks = result
         self.emit(f"plan {made!r}")
-        self.emit(f"peaks {made_peaks!r}")
+        self.emit(f"peaks {self.peaks_text(made_peaks)}")
         self.planned(case, made, made_peaks)
 
     def main_grid(self) -> int:
@@ -383,10 +408,10 @@ class Matrix:
                     **options,
                 )
             except EXPECTED as error:
-                self.emit(f"plan REFUSED {type(error).__name__}: {error}")
-                for part in REFUSAL_PARTS:
-                    if hasattr(error, part):
-                        self.emit(f"  {part}={getattr(error, part)!r}")
+                name, message, parts = self.refusal(error)
+                self.emit(f"plan REFUSED {name}: {message}")
+                for part, value in parts:
+                    self.emit(f"  {part}={value}")
                 self.refused(error, kept, case)
                 continue
             except Exception as error:  # written, as attempt's
@@ -394,7 +419,7 @@ class Matrix:
                 self.emit(f"plan CRASH {type(error).__name__}: {error}")
                 continue
             self.emit(f"plan {again!r}")
-            self.emit(f"peaks {again_peaks!r}")
+            self.emit(f"peaks {self.peaks_text(again_peaks)}")
         return index
 
     def bricks(self) -> int:

@@ -15,8 +15,17 @@ import time
 from dataclasses import replace
 
 import pytest
+from library_fixtures import cli_words
 
 from seedvr2x import memory, peaks, still_plan
+from seedvr2x.errors import (
+    HostShort,
+    InputTooLarge,
+    MemoryShort,
+    PinRefused,
+    PlanRefused,
+    Setting,
+)
 from seedvr2x.frames import check_target, output_size, padded_size
 from seedvr2x.memory import Reading
 from seedvr2x.passes import ModelPlan, Phase, Tiles
@@ -691,7 +700,7 @@ def test_the_colour_correction_term_is_counted_when_the_decode_splits() -> None:
 def test_the_floor_refusal_names_the_phase_what_it_takes_and_the_largest_bound_that_fits() -> None:
     with pytest.raises(PlanRefusal) as refused:
         made(EIGHT_K, card(16))
-    words = str(refused.value)
+    words = cli_words(refused.value)
     assert refused.value.phase == "dit"
     assert "pictures within 7680x4320 take" in words and "GiB of free VRAM" in words
     assert "the driver reports 14.51 GiB free" in words
@@ -720,10 +729,10 @@ def test_the_floor_of_a_vae_phase_is_the_proof_at_the_smallest_tiles() -> None:
     assert "its decode in tiles of 512 px or untiled, with the DiT off the GPU" in str(
         refused.value
     )
-    assert "1.25 of room a VAE pass is held to, and 0.60 of margin" in str(refused.value)
+    assert "1.25 of room a VAE pass is held to, and 0.60 of margin" in cli_words(refused.value)
     totals = re.search(
         r"take (\d+\.\d+) GiB of free VRAM \(.*a peak of (\d+\.\d+) GiB, (\d+\.\d+)",
-        str(refused.value),
+        cli_words(refused.value),
     )
     assert totals is not None
     total, peak, room = (float(each) for each in totals.groups())
@@ -733,7 +742,7 @@ def test_the_floor_of_a_vae_phase_is_the_proof_at_the_smallest_tiles() -> None:
 def test_no_output_size_fits_in_a_tiny_card() -> None:
     with pytest.raises(PlanRefusal) as refused:
         made(FOUR_K, Reading(GIB, None, GIB, False))
-    assert refused.value.fits is None and "no output size fits there" in str(refused.value)
+    assert refused.value.fits is None and "no output size fits there" in cli_words(refused.value)
 
 
 def test_a_bound_that_is_no_output_size_is_a_value_error() -> None:
@@ -758,7 +767,7 @@ def test_swap_blocks_pinned_is_taken_exactly() -> None:
 def test_swap_blocks_pinned_that_does_not_hold_the_dit_is_refused_naming_the_fewest() -> None:
     with pytest.raises(PlanRefusal) as refused:
         made(FOUR_K, card(20), pins=Pins(swap_blocks=0))
-    words = str(refused.value)
+    words = cli_words(refused.value)
     assert refused.value.phase == "dit"
     assert (
         "--swap-blocks 0: the DiT's phase, one latent of the largest picture within 3840x2160"
@@ -784,13 +793,14 @@ def test_a_tile_pin_that_covers_the_whole_padded_frame_is_refused() -> None:
     with pytest.raises(PlanRefusal) as refused:
         made(FOUR_K, card(96), pins=Pins(decode_tile=pin))
     height, width = biggest
-    assert str(refused.value) == (
+    assert cli_words(refused.value) == (
         f"--decode-tile {pin}: a tile of {pin} px covers the whole padded frame, {width}x{height}:"
         " --decode-tile 0 pins an untiled decode"
     )
     assert refused.value.phase == "pin"
-    with pytest.raises(PlanRefusal, match="--encode-tile 4096"):
+    with pytest.raises(PlanRefusal) as covered:
         made(FOUR_K, Reading(0, None, 0, False), pins=Pins(encode_tile=4096))
+    assert cli_words(covered.value).startswith("--encode-tile 4096")
 
 
 def test_a_tile_pin_is_proved_for_its_own_tiles_and_smaller_pictures_are_untiled() -> None:
@@ -825,11 +835,12 @@ def test_a_tile_pin_of_0_is_the_untiled_pass_for_every_picture() -> None:
     # whose padded frame (1120x1952) is past the 1104x1920 one frame's untiled decode was measured
     # on: the pin takes the video slice's figure there (peaks.one_frame_ratio 1.0), 38.38 GiB of
     # free VRAM with the DiT off the GPU, far more than an 11 GB card reports free (9.51).
-    with pytest.raises(PlanRefusal, match="--decode-tile 0: the decode untiled") as refused:
+    with pytest.raises(PlanRefusal) as refused:
         made((1920, 1080), card(11), pins=Pins(decode_tile=0))
     assert refused.value.phase == "pin"
-    assert "takes 38.38 GiB of free VRAM, the DiT off the GPU" in str(refused.value)
-    assert "the largest tile that fits is --decode-tile " in str(refused.value)
+    assert cli_words(refused.value).startswith("--decode-tile 0: the decode untiled")
+    assert "takes 38.38 GiB of free VRAM, the DiT off the GPU" in cli_words(refused.value)
+    assert "the largest tile that fits is --decode-tile " in cli_words(refused.value)
 
 
 def test_a_tile_pin_that_does_not_fit_names_the_largest_tile_that_does() -> None:
@@ -838,7 +849,7 @@ def test_a_tile_pin_that_does_not_fit_names_the_largest_tile_that_does() -> None
     free = card(12)
     with pytest.raises(PlanRefusal) as refused:
         made(FOUR_K, free, pins=Pins(encode_tile=2048))
-    words = str(refused.value)
+    words = cli_words(refused.value)
     assert words.startswith(
         "--encode-tile 2048: the encode in tiles of 2048 px, for the pictures within 3840x2160"
     )
@@ -863,7 +874,7 @@ def test_a_pin_that_no_tile_serves_names_the_untiled_pass(monkeypatch: pytest.Mo
         assert max(max(frame) for frame in still_plan._frames((480, 320))) <= 512
         with pytest.raises(PlanRefusal) as refused:
             made((480, 320), card(48), pins=Pins(decode_tile=496))
-        assert "no tile fits, the untiled decode does, --decode-tile 0" in str(refused.value)
+        assert "no tile fits, the untiled decode does, --decode-tile 0" in cli_words(refused.value)
     finally:
         monkeypatch.undo()
         still_plan._worst.cache_clear()
@@ -929,7 +940,7 @@ def test_more_of_the_dit_stays_on_the_gpu_in_the_vae_phases_when_the_host_is_sho
 def test_a_host_that_cannot_hold_the_plan_is_refused_with_its_parts_adding_up() -> None:
     with pytest.raises(PlanRefusal) as refused:
         made(EIGHT_K, card(24), round(12 * GIB))
-    words = str(refused.value)
+    words = cli_words(refused.value)
     assert refused.value.phase == "host"
     numbers = [
         float(each)
@@ -969,7 +980,7 @@ def test_expandable_segments_off_refuses_saying_the_tight_reserve_would_run_it()
     )
     with pytest.raises(PlanRefusal) as refused:
         made((1920, 1080), reading)
-    words = str(refused.value)
+    words = cli_words(refused.value)
     assert "expandable segments" in words and "reserve of 2.50 GiB" in words
     assert refused.value.phase == "decode"
 
@@ -979,7 +990,7 @@ def test_refused_with_both_reserves_says_both() -> None:
     reading = Reading(round(6 * GIB), None, round(1 * GIB), True, round(0.5 * GIB))
     with pytest.raises(PlanRefusal) as refused:
         made((1920, 1080), reading)
-    words = str(refused.value)
+    words = cli_words(refused.value)
     assert "refused with the reserve of 4.50 GiB" in words and "and with 2.50" in words
 
 
@@ -987,7 +998,7 @@ def test_a_tight_reading_is_not_planned_again() -> None:
     tight = memory.tightened(Reading(round(6 * GIB), None, round(1 * GIB), True, round(0.5 * GIB)))
     with pytest.raises(PlanRefusal) as refused:
         made((1920, 1080), tight)
-    assert "refused with the reserve" not in str(refused.value)
+    assert "refused with the reserve" not in cli_words(refused.value)
 
 
 def test_pins_that_need_no_memory_are_refused_even_when_the_run_is_held() -> None:
@@ -1236,7 +1247,7 @@ def test_the_residents_are_lowered_where_the_copies_need_it() -> None:
 def test_a_picture_whose_copies_fit_nowhere_is_refused_naming_the_largest_input_that_does() -> None:
     with pytest.raises(PlanRefusal) as refused:
         made(HD, card(16), input_pixels=1_000_000_000)
-    words = str(refused.value)
+    words = cli_words(refused.value)
     assert refused.value.phase == "encode"
     fits = refused.value.fits_input
     assert fits is not None and fits < 1_000_000_000
@@ -1299,7 +1310,7 @@ def test_no_input_fits_where_the_outputs_own_copies_are_over_the_memory(
     assert "no input fits there, the output's own copies being over the memory" in str(
         refused.value
     )
-    assert "a tensor of the output's size" in str(refused.value)
+    assert "a tensor of the output's size" in cli_words(refused.value)
 
 
 def test_a_small_inputs_size_changes_nothing_of_the_plan() -> None:
@@ -1321,7 +1332,9 @@ def test_a_refusal_for_the_copies_survives_the_tight_retry() -> None:
     with pytest.raises(PlanRefusal) as refused:
         made(HD, held(16.0), input_pixels=2_000_000_000)
     assert refused.value.phase == "encode" and refused.value.fits_input is not None
-    assert "GiB more would have to be freed" in str(refused.value) or "short" in str(refused.value)
+    assert "GiB more would have to be freed" in cli_words(refused.value) or "short" in cli_words(
+        refused.value
+    )
 
 
 def test_an_input_of_no_pixels_is_a_value_error() -> None:
@@ -1641,7 +1654,7 @@ def test_a_landscape_1080p_picture_pinned_untiled_is_taken_where_its_own_plan_is
     with pytest.raises(PlanRefusal) as refused:
         made(HD, TONIGHT, pins=Pins(0, 0))
     assert refused.value.phase == "pin"
-    assert str(refused.value).startswith(
+    assert cli_words(refused.value).startswith(
         "--decode-tile 0: the decode untiled, for the pictures within 1920x1080, takes 38."
     )
 
@@ -1667,7 +1680,7 @@ def test_a_portrait_picture_is_judged_by_its_own_frame() -> None:
     assert still_plan.tiles(own, PORTRAIT_HD).decode is not None
     with pytest.raises(PlanRefusal) as refused:
         made(HD, TONIGHT, pins=Pins(decode_tile=0), picture=PORTRAIT_HD)
-    assert str(refused.value).startswith(
+    assert cli_words(refused.value).startswith(
         "--decode-tile 0: the decode untiled, for the picture, 1080x1920, takes"
     )
     # A portrait picture whose frame is within the one measured, 1072x1920 padded, takes it.
@@ -1742,8 +1755,85 @@ def test_a_picture_refused_for_the_memory_names_the_largest_picture_that_fits() 
             made(HD, 4 * GIB, input_pixels=1000, picture=picture)
         error = refused.value
         assert error.fits is not None
-        assert str(error).startswith(f"the picture, {said}, takes")
+        assert cli_words(error).startswith(f"the picture, {said}, takes")
         long, short = error.fits
         fits = (long, short) if picture[0] > picture[1] else (short, long)
-        assert str(error).endswith(f"the largest picture that fits there is {fits[1]}x{fits[0]}")
+        assert cli_words(error).endswith(
+            f"the largest picture that fits there is {fits[1]}x{fits[0]}"
+        )
         made(error.fits, 4 * GIB, input_pixels=1000, picture=fits)
+
+
+# ---- The refusals by kind (errors.PlanRefused) --------------------------------------------------
+
+
+def refused_by(*job: object, **options: object) -> PlanRefused:
+    """The refusal still_plan.plan makes of a picture, whatever its kind (made's own arguments)."""
+    with pytest.raises(PlanRefused) as error:
+        made(*job, **options)  # pyright: ignore[reportArgumentType]
+    return error.value
+
+
+def test_each_refusal_of_a_picture_is_of_its_kind_with_its_facts() -> None:
+    # Pins that are no pins, before any memory is counted: phase "pin", the pin asked.
+    error = refused_by(FOUR_K, Reading(0, None, 0, False), pins=Pins(swap_blocks=37))
+    assert type(error) is PinRefused and error.kind == "pin" and error.why == "range"
+    assert error.phase == "pin" and error.pin == Setting("swap_blocks", "37")
+    biggest = max(still_plan._frames(FOUR_K), key=max)
+    pin = (max(biggest) + 63) // 64 * 64
+    error = refused_by(FOUR_K, card(96), pins=Pins(decode_tile=pin))
+    assert type(error) is PinRefused and error.why == "covers" and error.phase == "pin"
+    assert error.pin == Setting("decode_tile", str(pin)) and error.instead is None
+    # A pin the memory doesn't hold, with the one that does.
+    error = refused_by((1920, 1080), card(11), pins=Pins(decode_tile=0))
+    assert type(error) is PinRefused and error.why == "memory" and error.phase == "pin"
+    assert error.pin == Setting("decode_tile", "0")
+    assert error.instead is not None and error.instead.name == "decode_tile"
+    assert error.need is not None and error.there is not None and error.need > error.there
+    error = refused_by(FOUR_K, card(20), pins=Pins(swap_blocks=0))
+    assert type(error) is PinRefused and error.why == "memory" and error.phase == "dit"
+    assert error.pin == Setting("swap_blocks", "0") and error.instead == Setting("swap_blocks", "7")
+    # The floor: a bound that doesn't fit, the phase, the figures and the largest that does.
+    error = refused_by(EIGHT_K, card(16))
+    assert type(error) is MemoryShort and error.kind == "memory" and error.phase == "dit"
+    assert error.fits is not None and error.instead is None
+    assert error.need is not None and error.there == int(card(16).counted)
+    assert error.short == error.need - int(card(16).counted) and error.freeable is True
+    assert error.reserve is None
+    # The picture's input, copied to the GPU, which the output's size doesn't bound.
+    error = refused_by(HD, held(16.0), input_pixels=2_000_000_000)
+    assert type(error) is InputTooLarge and error.kind == "input" and error.phase == "encode"
+    assert error.pixels == 2_000_000_000 and error.fits_input is not None
+    assert error.need is not None and error.there is not None and error.need > error.there
+    assert error.instead == Setting("resolution")
+    # The host's memory.
+    error = refused_by(EIGHT_K, card(24), round(12 * GIB))
+    assert type(error) is HostShort and error.kind == "host" and error.phase == "host"
+    assert error.available == round(12 * GIB) and error.need is not None
+    assert error.short == error.need - round(12 * GIB) > 0
+
+
+def test_a_picture_s_refusal_in_the_library_s_words_names_no_option() -> None:
+    # The plain words name no option; the command line's say gives back the option each names
+    # (the input's names a smaller --resolution, which the image server has no option for).
+    error = refused_by(FOUR_K, Reading(0, None, 0, False), pins=Pins(swap_blocks=37))
+    assert str(error).startswith("swapped blocks 37: the DiT has 36 blocks")
+    error = refused_by((1920, 1080), card(11), pins=Pins(decode_tile=0))
+    assert str(error).startswith("decode tile 0: the decode untiled")
+    assert str(error).endswith("the largest tile that fits is decode tile 1088")
+    assert cli_words(error).endswith("the largest tile that fits is --decode-tile 1088")
+    error = refused_by(HD, held(16.0), input_pixels=2_000_000_000)
+    assert "a smaller resolution" in str(error) and "a smaller --resolution" in cli_words(error)
+    for each in (
+        refused_by(EIGHT_K, card(16)),
+        refused_by(EIGHT_K, card(24), round(12 * GIB)),
+        refused_by(FOUR_K, card(20), pins=Pins(swap_blocks=0)),
+        error,
+    ):
+        assert "--" not in str(each)
+    # The tight retry's rewording keeps the kind and the facts (the words are the first's).
+    reading = held(8.5)
+    first = refused_by(HD, replace(reading, tight=True), input_pixels=2_000_000_000)
+    again = refused_by(HD, reading, input_pixels=2_000_000_000)
+    assert type(again) is type(first) and again.phase == first.phase
+    assert str(again).endswith("whose figures these are") and "--" not in str(again)

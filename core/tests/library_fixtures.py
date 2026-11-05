@@ -27,6 +27,20 @@ from collections.abc import Iterator
 import pytest
 
 from seedvr2x import clock, memory
+from seedvr2x.errors import Refusal, Setting
+
+
+def cli_say(setting: Setting) -> str:
+    """The command line's words for a setting: its option, "--" and the setting's name with its
+    underscores as hyphens, then the value (apps/seedvr2x/planner.py, `option`, is the command
+    line's own; this is the tests' copy, so that a library test holds a refusal's text as the
+    command line says it without importing the command line)."""
+    return "--" + setting.name.replace("_", "-") + (f" {setting.value}" if setting.value else "")
+
+
+def cli_words(error: Refusal) -> str:
+    """A refusal's message as the command line words it (Refusal.words with cli_say)."""
+    return error.words(cli_say)
 
 
 @pytest.fixture(autouse=True)

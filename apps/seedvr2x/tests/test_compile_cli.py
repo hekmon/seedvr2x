@@ -169,7 +169,7 @@ def refusal(
     planner.plan(free, target, shots(*lengths), pins, None)
     with pytest.raises(PlanError) as refused:
         planner.plan(free, target, shots(*lengths), pins, None, compile_vae=True)
-    return str(refused.value)
+    return planner.worded(refused.value)
 
 
 def test_a_pass_pinned_beyond_the_measured_range_is_refused_with_its_advice() -> None:

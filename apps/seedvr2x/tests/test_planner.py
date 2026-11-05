@@ -38,7 +38,7 @@ from test_shot_plan import (  # noqa: F401
 )
 
 import planner
-from seedvr2x import memory, peaks, shot_plan, still_plan, weights
+from seedvr2x import memory, peaks, pull, shot_plan, still_plan, weights
 from seedvr2x.frames import output_size, padded_length, padded_size
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Plan, Tiles
@@ -1118,6 +1118,78 @@ def plain(host: int, dit_model: Any, **options: Any) -> PlanError:
     return refused.value
 
 
+def test_the_floor_refusal_names_the_smaller_files_as_it_did() -> None:
+    # An output too large for the card (shot_plan's floor refusal) ends with the resolution that
+    # fits, and the smaller DiT files still serve it: its Setting("resolution") is no pin's
+    # (PlanError.instead is a window, blocks or a tile there), so plan_naming adds its way out
+    # as it did when that refusal carried no instead (a7ffd27; review H1).
+    args = (round(10.5 * GIB), (1440, 2560), shots(9), Pins(), 64 * GIB)
+    with pytest.raises(PlanError) as plain_refusal:
+        planner.plan(*args, dit_model=peaks.FP16, split=True)
+    assert plain_refusal.value.instead is not None
+    assert plain_refusal.value.instead.name == "resolution"
+    with pytest.raises(PlanError) as named:
+        planner.plan_naming(*args, dit_file=SHARP_FILES["fp16"], dit_model=peaks.FP16, split=True)
+    said = planner.worded(named.value)
+    assert said.startswith(planner.worded(plain_refusal.value) + "; or ")
+    assert "is --resolution 1376, about 2446x1376; or " in said
+    # Only the dynamic GGUF plans it on 10.5 GiB, as on main.
+    assert said.endswith("a smaller DiT file that plans this job: " + INT8_WAY[1])
+
+
+def test_the_smaller_files_are_named_with_the_command_lines_options() -> None:
+    # The sentences of the smaller DiT files (planner.smaller_way, planner.smaller_line), which
+    # the library's pull.smaller_files and smaller_planning leave to the apps: moved here from
+    # tests/test_pull.py (core) with the expectations unchanged.
+    sharp_name = "seedvr2x_ema_7b_sharp_fp16.safetensors"
+    planned = pull.smaller_planning(
+        "seedvr2_ema_7b_fp16.safetensors",
+        weights.DIT_7B,
+        lambda each: each.name if each == weights.DIT_7B_SHARP_DYN else None,
+    )
+    int8_sharp = "int8 (--dit-model seedvr2x_ema_7b_sharp_int8_convrot.safetensors, 8.3 GB)"
+    gguf_sharp = "the dynamic GGUF (--dit-model seedvr2x_ema_7b_sharp_dyn.gguf, 4.8 GB)"
+    int8_regular = "int8 (--dit-model seedvr2x_ema_7b_int8_convrot.safetensors, 8.3 GB)"
+    gguf_regular = "the dynamic GGUF (--dit-model seedvr2x_ema_7b_dyn.gguf, 4.8 GB)"
+    way = "a smaller DiT file that plans this job: "
+    assert (
+        planner.smaller_way([one for one, _ in planned]) == f"{way}for the sharp 7B, {gguf_sharp}"
+    )
+    assert (
+        planner.smaller_way(pull.smaller_files(sharp_name, weights.DIT_7B))
+        == f"{way}{int8_sharp} or {gguf_sharp}"
+    )
+    # Where the run was given --model-dir, the way out says so once, after "this job".
+    assert planner.smaller_way(pull.smaller_files(sharp_name, weights.DIT_7B), True) == (
+        f"a smaller DiT file that plans this job, put in --model-dir: {int8_sharp} or {gguf_sharp}"
+    )
+    # The plan's line of those that plan the job better lists them the same way, with the
+    # figures of the plan and of each file.
+    assert planner.smaller_line(
+        pull.Swaps(11, 10),
+        [
+            (one, pull.Swaps(19, 17))
+            for one in pull.smaller_files("seedvr2x_ema_7b_sharp_fp16.safetensors", weights.DIT_7B)
+        ],
+    ) == (
+        "smaller DiT files plan this job better: this plan swaps 11 blocks with windows of 10"
+        " latents; int8 19 blocks, windows of 17; the dynamic GGUF 19 blocks, windows of 17;"
+        " --dit-model names them"
+    )
+    # A picture is one latent: blocks alone.
+    assert planner.smaller_line(
+        pull.Swaps(3), [(one, pull.Swaps(0)) for one in pull.smaller_files("x", weights.DIT_7B)]
+    ) == (
+        "smaller DiT files plan this job better: this plan swaps 3 blocks; for the sharp 7B"
+        " (int8 0 blocks; the dynamic GGUF 0 blocks); for the 7B (int8 0 blocks; the dynamic GGUF"
+        " 0 blocks); --dit-model names them"
+    )
+    assert planner.smaller_way(pull.smaller_files("x", weights.DIT_7B)) == (
+        f"{way}for the sharp 7B, {int8_sharp} or {gguf_sharp};"
+        f" for the 7B, {int8_regular} or {gguf_regular}"
+    )
+
+
 def test_a_refusal_for_memory_names_the_smaller_files_that_plan() -> None:
     # DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too": where the host's memory is short
     # for float16, the refusal's way out names the smaller files that plan the same job, found
@@ -1127,7 +1199,7 @@ def test_a_refusal_for_memory_names_the_smaller_files_that_plan() -> None:
     refused = naming(5, peaks.FP16, SHARP_FILES["fp16"])
     assert str(refused).startswith(str(plain(5, peaks.FP16)) + "; or ")
     assert str(refused).endswith("a smaller DiT file that plans this job: " + " or ".join(INT8_WAY))
-    assert (refused.phase, refused.shortfall, refused.instead) == ("host", None, "")
+    assert (refused.phase, refused.shortfall, refused.instead) == ("host", None, None)
     # 3 GiB: int8 is refused as fp16 is; only the GGUF plans, and only it is named.
     only = naming(3, peaks.FP16, SHARP_FILES["fp16"])
     assert str(only).endswith("a smaller DiT file that plans this job: " + INT8_WAY[1])
@@ -1741,14 +1813,20 @@ def test_a_held_plan_refused_takes_the_reserve_of_2_5(caplog: pytest.LogCaptureF
     levels(caplog, logging.DEBUG)
     made, predicted = planner.plan(reading, HD, film, pins, None)
     # The refusal of the plan with 4.5, which the budget's lines leave out, is said at debug.
+    # In the library's own words, which name no option (it logs them, the command line words
+    # none of its debug lines): the refusal of the plan with 4.5 as str() says it.
+    with pytest.raises(PlanError) as usual:
+        shot_plan.plan(replace(reading, tight=True), HD, film, pins, None)
+    assert alone == planner.worded(usual.value) and "--" not in str(usual.value)
     assert [r.getMessage() for r in caplog.records if r.levelname == "DEBUG"] == [
-        f"the plan with the reserve of 4.50 GiB was refused: {alone}"
+        f"the plan with the reserve of 4.50 GiB was refused: {usual.value}"
     ]
     levels(caplog, logging.INFO)
     assert predicted.reading == memory.tightened(reading) and predicted.reading.tight
     assert predicted.free == predicted.budget == need + GIB
     assert predicted.reading.reserve == memory.RESERVE_TIGHT == round(2.5 * GIB)
-    assert predicted.tightened == alone and made.decode_tiles is None
+    assert predicted.tightened is not None and made.decode_tiles is None
+    assert planner.worded(predicted.tightened) == alone
     assert predicted.record()["reserve"] == memory.RESERVE_TIGHT
     # The VAE's room untouched: the pass is judged with it, as much of the DiT kept beside it as
     # fits under the budget with it.
@@ -1771,7 +1849,9 @@ def test_a_held_plan_refused_takes_the_reserve_of_2_5(caplog: pytest.LogCaptureF
         " reserve, at full speed"
     )
     assert alone not in "".join(lines) and len("".join(lines[:3])) < 900
-    assert predicted.instead == "--decode-tile 1856" and alone.endswith("--decode-tile 1856")
+    assert predicted.instead is not None
+    assert planner.option(predicted.instead) == "--decode-tile 1856"
+    assert alone.endswith("--decode-tile 1856")
     # Two pins short with 4.5, the window's refused first: the window that fits isn't named, the
     # untiled decode pinned beside it being still refused with 4.5 (shot_plan._substituted).
     padded = padded_size(HD)
@@ -1782,10 +1862,9 @@ def test_a_held_plan_refused_takes_the_reserve_of_2_5(caplog: pytest.LogCaptureF
     )
     two, longer = Pins(window=window, swap_blocks=36, decode_tile=0), shots(window)
     made_two, peaks_two = planner.plan(reading, HD, longer, two, None)
-    assert peaks_two.reading.tight and peaks_two.instead == ""
-    assert peaks_two.tightened is not None and peaks_two.tightened.startswith(
-        f"--window {window}: "
-    )
+    assert peaks_two.reading.tight and peaks_two.instead is None
+    assert peaks_two.tightened is not None
+    assert planner.worded(peaks_two.tightened).startswith(f"--window {window}: ")
     assert "would run with the full reserve" not in "".join(
         planner.said(made_two, peaks_two, "a card", HD, longer, two)
     )
@@ -1815,10 +1894,11 @@ def test_a_held_plan_refused_takes_the_reserve_of_2_5(caplog: pytest.LogCaptureF
     recorded = Plan(5, made.encode_tiles, None)
     made, predicted = planner.plan(reading, HD, film, Pins(), None, recorded=recorded)
     assert predicted.reading.tight and made.decode_tiles is None and made.window == 5
-    assert predicted.tightened is not None and predicted.tightened.startswith(
+    assert predicted.tightened is not None
+    assert planner.worded(predicted.tightened).startswith(
         "the recorded plan no longer fits the memory free now: "
     )
-    assert predicted.instead == ""
+    assert predicted.instead is None
     assert "would run with the full reserve" not in "".join(
         planner.said(made, predicted, "a card", HD, film, Pins())
     )

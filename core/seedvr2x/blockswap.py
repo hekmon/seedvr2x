@@ -45,10 +45,10 @@ import torch
 from torch import Tensor
 
 from seedvr2x import gguf_file, memory
-from seedvr2x.errors import Refusal
+from seedvr2x.errors import HostMemoryError, ModelChanged, ModelDamaged
 from seedvr2x.gguf_file import GgufError
 from seedvr2x.passes import Phase
-from seedvr2x.weights import AGAIN, SLOTS, ModelError
+from seedvr2x.weights import AGAIN, SLOTS
 
 logger = logging.getLogger(__name__)
 
@@ -83,10 +83,6 @@ _DTYPES: dict[str, torch.dtype] = {
 }
 
 
-class HostMemoryError(Refusal):
-    """The host can't hold the pinned copies a plan needs: the message names the RAM they take."""
-
-
 class HostCopy:
     """`size` bytes of host memory, page-locked for CUDA when `pin`: a private anonymous mapping
     of its own, registered with cudaHostRegister, so that it takes its size and no more. torch's
@@ -113,7 +109,9 @@ class HostCopy:
             # ffmpeg processes are spawned); a child that did would have no weights to read.
             area.madvise(mmap.MADV_DONTFORK)
         except OSError as error:
-            raise HostMemoryError(f"the host refuses {_gib(length)} of memory: {error}") from error
+            raise HostMemoryError(
+                f"the host refuses {_gib(length)} of memory: {error}", need=length
+            ) from error
         self.bytes: Tensor = torch.frombuffer(area, dtype=torch.uint8)
         self.pinned = False
         if pin:
@@ -125,14 +123,15 @@ class HostCopy:
                 # No binding in this torch, or no CUDA for it to bind: the error says which.
                 raise HostMemoryError(
                     f"{_gib(length)} of host memory can't be pinned: CUDA's cudaHostRegister"
-                    f" isn't to be had from this torch ({torch.__version__}): {error}"
+                    f" isn't to be had from this torch ({torch.__version__}): {error}",
+                    need=length,
                 ) from error
             address: int = self.bytes.data_ptr()
             code: Any = register(address, length, 0)
             if int(code) != 0:
                 # torch names no code but success: CUDA's own words for it.
                 raise HostMemoryError(
-                    f"the host refuses to pin {_gib(length)} of memory: {words(code)}"
+                    f"the host refuses to pin {_gib(length)} of memory: {words(code)}", need=length
                 )
             self.pinned = True
             # Unregistered when this object goes: the mapping itself lives as long as a tensor
@@ -379,7 +378,13 @@ class _Tee:
     def cut(self, at: int, least: int, whole: int | None) -> NoReturn:
         """Refuse the file, cut short at byte `at` where `least` bytes at least were to be read."""
         of = f"at least {least:,}" if whole is None else f"{whole:,}"
-        raise ModelError(f"{self.path}: cut short as it loaded, {at:,} of {of} bytes; {AGAIN}")
+        raise ModelDamaged(
+            f"{self.path}: cut short as it loaded, {at:,} of {of} bytes; {AGAIN}",
+            file=self.path.name,
+            figure="size",
+            expected=whole,
+            found=at,
+        )
 
 
 def read(
@@ -575,8 +580,10 @@ def _gguf_tensors(
     except GgufError as error:
         if error.kind == "cut":
             detail = str(error).removeprefix("cut short")
-            raise ModelError(f"{path}: cut short as it loaded{detail}; {AGAIN}") from None
-        raise ModelError(f"{path}: a damaged GGUF file: {error}") from None
+            raise ModelDamaged(
+                f"{path}: cut short as it loaded{detail}; {AGAIN}", file=path.name
+            ) from None
+        raise ModelDamaged(f"{path}: a damaged GGUF file: {error}", file=path.name) from None
     # The header's bytes, from the 8th to where the data starts (padding included), read through
     # tee from where it is; the data's start is bounded by gguf_file's limits.
     tee.raw.seek(tee.position)
@@ -591,8 +598,9 @@ def _gguf_tensors(
         learned.data_start,
         learned.tensors,
     ):
-        raise ModelError(
-            f"{path}: changed as it loaded, its header read twice differently; {AGAIN}"
+        raise ModelChanged(
+            f"{path}: changed as it loaded, its header read twice differently; {AGAIN}",
+            file=path.name,
         )
     tensors: dict[str, _Entry] = {}
     for each in sorted(header.tensors, key=lambda tensor: tensor.offset):
@@ -607,7 +615,9 @@ def _gguf_tensors(
             # never gets here from a checked file; a refusal in words all the same, not a
             # ZeroDivisionError, for a file read without the check (blockswap.read's own callers).
             if each.shape[0] == 0:
-                raise ModelError(f"{path}: {each.name} is {each.type} with no rows; {AGAIN}")
+                raise ModelDamaged(
+                    f"{path}: {each.name} is {each.type} with no rows; {AGAIN}", file=path.name
+                )
             found, shape = torch.uint8, (each.shape[0], each.nbytes // each.shape[0])
         else:
             raise RuntimeError(f"{path.name}: {each.name} is {each.type}, which isn't read")
@@ -707,7 +717,9 @@ def _make(
     if free is not None and needed > free:
         raise HostMemoryError(
             f"the weights that leave the GPU need {_gib(needed)} of host memory, pinned"
-            f" ({listing(sizes)}), and the host has {_gib(free)} available"
+            f" ({listing(sizes)}), and the host has {_gib(free)} available",
+            need=needed,
+            available=free,
         )
     parts: dict[str, Part] = {}
     try:
@@ -716,7 +728,9 @@ def _make(
     except HostMemoryError as error:
         raise HostMemoryError(
             f"the weights that leave the GPU need {_gib(needed)} of host memory, pinned"
-            f" ({listing(sizes)}): {error}, after {_gib(sum(p.size for p in parts.values()))}"
+            f" ({listing(sizes)}): {error}, after {_gib(sum(p.size for p in parts.values()))}",
+            need=needed,
+            available=free,
         ) from error
     return parts
 

@@ -127,6 +127,7 @@ def run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     """Upscale the picture args.input (of format `kind`, told by its content) to the PNG
     args.output, or with --plan say the picture's plan and stop; the exit status. Every refusal is
     logged here, one line and status 1, as a job's are."""
+    import planner
     from media.ffmpeg import MediaError
     from seedvr2x.errors import Refusal
 
@@ -134,7 +135,7 @@ def run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
         with terminable():
             return _run(args, kind, reads)
     except (MediaError, Refusal) as error:
-        logger.error("%s", error)
+        logger.error("%s", planner.worded(error))
         return 1
     except reads.out_of_memory() as error:
         # The GPU's memory refused before the models loaded, where the run first works on the
@@ -319,13 +320,14 @@ def _planned(
     same 7B (pull.smaller_files) that plan the picture, named with their option and size, and
     the file is never changed by itself (DESIGN.md, Weights, "The dynamic GGUF before v0.1.0
     too"). A pin's refusal (phase "pin") is left as it is."""
+    import planner
     from seedvr2x import pull
     from seedvr2x.still_plan import PlanRefusal
 
     try:
         made = planned(dit_model)
     except PlanRefusal as refused:
-        if refused.phase in ("", "pin") or "\n" in str(refused):
+        if refused.phase in ("", "pin") or "\n" in refused.words(planner.option):
             raise
 
         def plans(each: "Architecture") -> bool | None:
@@ -338,30 +340,23 @@ def _planned(
         found = pull.smaller_planning(dit_file, dit_model, plans)
         if not found:
             raise
-        way = pull.smaller_way([each for each, _ in found], model_dir)
-        raise PlanRefusal(
-            f"{refused}; or {way}", refused.phase, refused.fits, refused.fits_input
-        ) from None
+        way = planner.smaller_way([each for each, _ in found], model_dir)
+        raise refused.reworded(f"{refused.words(planner.option)}; or {way}") from None
     swapped = made.models.swapped
     if not swapped:
         return made, None
 
-    def fewer(each: "Architecture") -> str | None:
+    def fewer(each: "Architecture") -> pull.Swaps | None:
         try:
             other = planned(each).models.swapped
         except PlanRefusal:
             return None
-        return _blocks_said(other) if other < swapped else None
+        return pull.Swaps(other) if other < swapped else None
 
     found = pull.smaller_planning(dit_file, dit_model, fewer)
     if not found:
         return made, None
-    return made, pull.smaller_line(_blocks_said(swapped), found)
-
-
-def _blocks_said(swapped: int) -> str:
-    """The blocks a picture's plan swaps, as the line of the smaller files says them."""
-    return f"{swapped} block{'' if swapped == 1 else 's'}"
+    return made, planner.smaller_line(pull.Swaps(swapped), found)
 
 
 def _record(
@@ -464,16 +459,16 @@ def _check_tile_pins(args: "argparse.Namespace", target: tuple[int, int]) -> Non
     at the same frame; this refuses it before the card is read."""
     from seedvr2x import peaks, still_plan
     from seedvr2x.frames import padded_size
-    from seedvr2x.passes import Tiles
+    from seedvr2x.passes import Phase, Tiles
 
     height, width = padded_size(target)
-    for phase, pin in (("encode", args.encode_tile), ("decode", args.decode_tile)):
+    pins: tuple[tuple[Phase, int | None], ...] = (
+        ("encode", args.encode_tile),
+        ("decode", args.decode_tile),
+    )
+    for phase, pin in pins:
         if pin and peaks.covers((height, width), Tiles(pin)):
-            raise still_plan.PlanRefusal(
-                f"--{phase}-tile {pin}: a tile of {pin} px covers the whole padded frame,"
-                f" {width}x{height}: --{phase}-tile 0 pins an untiled {phase}",
-                phase="pin",
-            )
+            raise still_plan.covering(phase, pin, (height, width))
 
 
 def _check_seed(seed: int) -> None:

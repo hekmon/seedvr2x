@@ -39,6 +39,7 @@ from torch import Tensor
 
 from seedvr2x import blockswap, gguf_file, int8, kquant, model, weights
 from seedvr2x.blockswap import OTHER, HostMemoryError, Part, Placement, dit_parts
+from seedvr2x.errors import ModelChanged, ModelDamaged
 from seedvr2x.passes import ModelPlan
 from seedvr2x.weights import SLOTS
 
@@ -805,6 +806,9 @@ def test_too_little_host_memory_is_refused_before_anything_is_pinned(
         "the weights that leave the GPU need 0.00 GiB of host memory, pinned (36 of the DiT's"
         " blocks, the DiT's other parameters), and the host has 0.00 GiB available"
     )
+    # The facts, in bytes: what was asked to be pinned and what the host has.
+    assert refusal.value.kind == "host-memory" and refusal.value.available == 1000
+    assert (refusal.value.need or 0) > 1000
     assert not hosted
     # What the kernel can't say isn't held against the plan: the pinning itself refuses then.
     monkeypatch.undo()
@@ -1304,6 +1308,10 @@ def test_a_gguf_file_cut_short_is_refused_in_safetensors_words(
     assert str(error.value) == (
         f"{path}: cut short as it loaded, {last - 10:,} of {size:,} bytes; {weights.AGAIN}"
     )
+    # The kind and the facts: damaged, the bytes it has and the bytes it needs.
+    assert isinstance(error.value, ModelDamaged) and error.value.kind == "damaged"
+    assert (error.value.file, error.value.figure) == (path.name, "size")
+    assert (error.value.found, error.value.expected) == (last - 10, size)
     assert not given
     assert not [t for t in threading.enumerate() if t.name.startswith("seedvr2x-sha256")]
 
@@ -1373,8 +1381,9 @@ def test_a_gguf_header_is_parsed_from_the_bytes_that_are_hashed(
         return real(file, length)
 
     monkeypatch.setattr(gguf_file, "header_of", then_damaged)
-    with pytest.raises(weights.ModelError, match="changed as it loaded"):
+    with pytest.raises(weights.ModelError, match="changed as it loaded") as changed:
         blockswap.read(torch.nn.Module(), path, CPU, None, None)
+    assert isinstance(changed.value, ModelChanged) and changed.value.file == path.name
     assert not given
     assert not [t for t in threading.enumerate() if t.name.startswith("seedvr2x-sha256")]
 
@@ -2139,6 +2148,11 @@ def test_a_refused_registration_says_cuda_s_reason(monkeypatch: pytest.MonkeyPat
     with pytest.raises(HostMemoryError) as refusal:
         blockswap.HostCopy(4096, pin=True)
     assert str(refusal.value) == "the host refuses to pin 0.00 GiB of memory: out of memory"
+    assert (refusal.value.kind, refusal.value.need, refusal.value.available) == (
+        "host-memory",
+        4096,
+        None,
+    )
 
 
 def cgroup_tree(root: Path, available_kib: int, groups: str, files: dict[str, str]) -> None:

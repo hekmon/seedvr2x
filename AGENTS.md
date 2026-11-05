@@ -23,6 +23,7 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
     gguf_file.py kquant.py      a dynamic GGUF file: its header read without torch, and the
                          K-quants' dequantisation on the card with the linear that uses it;
                          pull.py also holds the smaller files of a DiT file, which a plan names
+                         (the facts: each file, its size, what its plan swaps; an app words them)
     shots.py shot_plan.py shot_pass.py     a video's shots: a shot and its DiT windows, the
                          job's plan for its shots (the memory planner, no torch at import), and a
                          shot's pass, encode, windows and decode, on models already loaded
@@ -30,7 +31,8 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
                          or lossless WebP, upscaled on models already loaded, its plan for a bound
     record.py            seedvr2x's record in each output: its fields and the AI mark, a picture's
                          XMP packet, a video's stream tags
-    frames.py passes.py peaks.py files.py clock.py errors.py     what the bricks share
+    frames.py passes.py peaks.py files.py clock.py errors.py     what the bricks share (errors.py:
+                         a refusal's message worded by each app, and the plan's refusals by kind)
     vendor/              model layer, vendored from numz (below)
     transnetv2/          the shot detector's model, vendored from TransNetV2 (below)
   tests/                 the library's, with library_fixtures.py, stand_ins.py and conftest.py
@@ -302,15 +304,50 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   GGUF file's blocks swapped giving the bits of the DiT loaded whole; `tests/test_peaks.py` and
   `tests/test_still_plan.py` the GGUF DiT's figures by its own blocks (`peaks.leaving_blocks`)
   and the smaller files' line in a picture's plan; `tests/test_pull.py` the pins and
-  `pull.smaller_files`; `tests/test_planner.py` and `test_gguf_cli.py` (the CLI's) the plan by
+  `pull.smaller_files` (the facts: files, sizes, `pull.Swaps`); `tests/test_planner.py` and
+  `test_gguf_cli.py` (the CLI's) the plan by
   the GGUF's figures and its line, the job's record, a resume judged early, the smaller files
   named in a refusal for memory (with `--model-dir` said once) and in the plan where they swap
   fewer blocks or run a longer window, and the file never
-  changed by itself, for a video and for a picture; the image server's `tests/test_reservation.py`
-  and `test_service.py` the same way out in a refused start, a start that then takes the file,
-  and the start's line of the smaller files (`reservation.smaller_line`, the CLI's words, blocks
+  changed by itself, for a video and for a picture; their sentences are the CLI's
+  (`planner.smaller_way`, `planner.smaller_line`, held by `tests/test_planner.py`); the image
+  server's `tests/test_reservation.py` and `test_service.py` the same way out in a refused
+  start, in the server's own words ("a smaller DiT file that plans this bound";
+  `reservation.smaller_way`), a start that then takes the file, and the start's line of the
+  smaller files (`reservation.smaller_line`, "smaller DiT files plan this bound better", blocks
   alone) at INFO after its blocks-swapped line, and none where the plan swaps none or runs the
   dynamic GGUF already.
+- A refusal's message worded by each app (`seedvr2x/errors.py`): a library refusal names the way
+  out as a `Setting` (`SETTINGS`: the library's name for the window, the swapped blocks, the
+  tiles, the resolution, the DiT file and compiling), never as an option; `str()` of it is the
+  library's own words (`plain`, no `--`), `Refusal.words(say)` the message worded by an app's
+  `say`, the CLI's `planner.option` (`--` and the name with hyphens, then the value), which
+  `planner.worded` applies to any error before it reaches the user. The plan's refusals are
+  `PlanRefused` and its kinds, each carrying its facts apart (`PinRefused`, `MemoryShort`,
+  `HostShort`, `InputTooLarge`, `CompileRefused`; `shot_plan.PlanError` and
+  `still_plan.PlanRefusal` are the base's names). `core/tests/test_errors.py` holds the
+  mechanism, `test_shot_plan.py` and `test_still_plan.py` each kind raised by its sites with its
+  facts and its plain words naming no option; a library test that holds a refusal's text with
+  its options renders it with `library_fixtures.cli_words`, the CLI's own with `planner.worded`.
+  Library logs of a refusal (the plan with the usual reserve refused, said at debug) are in the
+  plain words.
+- The model files', the picture's and the host's refusals are of a kind too (`seedvr2x/errors.py`):
+  `ModelError` and its kinds (`ModelMissing`, `ModelUnknown`, `ModelDamaged`, `ModelChanged`,
+  `ModelNotPinned`, `ModelUnreachable`, `ModelNoRoom`, `ModelUnreadable`, `ModelsRefused` for
+  several at once), carrying the role, the file's name (not its path, which stays in the
+  message), the pinned and the found figure, the settings named as the way out (`vae_model`,
+  `model_dir`, `cuts` among `SETTINGS`) and the command that fetches the file again (`hf download`
+  and Hugging Face's variables stay text, as the library's tools); `HostMemoryError` (need and
+  available, in bytes), `PictureRefused` (kind, reason and way as `picture.KINDS` has them, with
+  the pixels and frames counted) and `TargetTooSmall` (`frames.check_target`: the resolution
+  asked, the frames' size, the least the padding takes). `weights.ModelError` and
+  `blockswap.HostMemoryError` stay importable. `pull.advice` gives a message of `Say` for each
+  role, `Hashes.vouch`'s and `expect`'s refusals are functions returning a `ModelError`, and the
+  server words its start's refusals with `reservation.worded`, the CLI every error with
+  `planner.worded`. `core/tests/test_errors.py` holds the kinds and their plain words (no `--`
+  but in a path or the advised command); `test_weights.py`, `test_pull.py`, `test_blockswap.py`
+  and `test_picture.py` each kind raised by its sites, their texts with options rendered by
+  `cli_words`.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
   `test_pull_cli.py` holds what the command line does over it.
@@ -783,8 +820,13 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   own, with no crash and no torch imported, each format's text its own, and `diff` on two outputs
   made to differ (a plan moved, a case gone, a brick item moved, the recorded cases numbered
   again and compared by what they are, an output unread or cut short). `tests/test_plan_lines.py`
-  (the CLI's) the CLI's: the same, core's text in it unchanged, the smaller files' line alone
-  left out by `--without-smaller`, and a check of a record compared by what it is.
+  (the CLI's) the CLI's: the same, core's text in it unchanged but for the lines that hold a
+  refusal, which this half words as the CLI does (a plan's refusal under `PlanError`, its
+  message in the CLI's options, its parts `instead` as the option string, `phase` and
+  `shortfall`, and the Peaks printed as before): the proof that the CLI's words did not move when
+  the refusals got kinds, core's text printing the kind, the library's words and the kind's
+  facts; the smaller files' line alone left out by `--without-smaller`, and a check of a record
+  compared by what it is.
 - Met running the suite from a worktree: `git read-tree -u --reset` empties the `upstream/`
   submodule directories (link them again); `--compile`'s cache on a Windows drive under WSL2
   costs minutes, so compile times are measured with the job on Linux's disk; `--until` takes
