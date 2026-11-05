@@ -301,8 +301,12 @@ seedvr2x/                the repository
       comfy-aimdo's internals, so the registration stays plain and the cap is seedvr2x's guard.
     - On the card only while a node runs. The plan is made for the card as it would be with
       ComfyUI's models gone (its free memory and what ComfyUI says its own models hold), and
-      ComfyUI is asked to free only the room that plan needs (`free_memory`): its models stay
-      where both fit, and the output never depends on what else was loaded. A long clip on a
+      ComfyUI is asked to free only the room that plan needs (`free_memory`) and 0.25 GiB: its
+      partial unload stops at the free memory asked and keeps a buffer of its own, and an exact
+      ask left the card 0.04 to 0.11 GiB short (impl-nodes, 2026-11-05). Its models stay where
+      both fit, and the output never depends on what else was loaded. No limit is set on torch
+      in ComfyUI's process: it would hold ComfyUI's own nodes too, and under `cudaMallocAsync`
+      it holds nothing ([Allocator](#allocator)). A long clip on a
       consumer card takes it whole; a picture, a short clip or a large card leave room. The
       card is freed when the node ends, on Cancel and on an error too. ComfyUI's nodes run one
       at a time, so nothing of ComfyUI's touches the card meanwhile (read in v0.44.0's
@@ -329,8 +333,10 @@ seedvr2x/                the repository
       correction, the seed (the user, 2026-11-05: a Tuning node first specified would only
       have forwarded them). A number is an INT input, so that any node giving an INT drives
       it, as ComfyUI's flow has it; "auto" is a value no pin takes (0 for a tile side or the
-      window cap, -1 for the blocks swapped, where 0 swaps none), said in its label and its
-      tooltip; min, max and step are the planner's own candidates, so that a pin is always a
+      window cap, -1 for the blocks swapped, where 0 swaps none), and a tile side one step past
+      the planner's largest (2112 px) is untiled, each said in its label and its tooltip, as
+      ComfyUI's frontend (1.57) shows no word for a value; min, max and step are the
+      planner's own candidates, so that a pin is always a
       value the plan could take. One pinned, the plan makes the others around it, as the CLI's
       pins do: that tuning is seedvr2x's first value, and every workflow shows it.
     - The plan is made in the upscale node, at run time, where the input's size, the shots and
@@ -354,8 +360,10 @@ seedvr2x/                the repository
     class of its kind carrying its facts (the phase, what it needs, what the card has, the
     smaller files that would fit), and each app words it and its way out: the CLI with its
     options, the server with no file or command, the nodes in ComfyUI's terms ("choose the
-    int8 file in seedvr2x Models"). The library keeps a plain message for its logs; the CLI's
-    words stay as they are, the plan matrix holding them byte for byte.
+    int8 file in seedvr2x Models"). The library keeps a plain message for its logs, and its
+    log lines name no option of an app (decided 2026-11-05: ComfyUI's console shows them),
+    the CLI's own lines changing where they quoted one; the CLI's refusals stay as they are,
+    the plan matrix holding them byte for byte.
   - **The code:** `core/seedvr2x/clip.py`, one shot from frames in memory through models already
     loaded, the video's counterpart of `still.py`; the refusal classes in `errors.py`;
     `apps/comfyui/`: `nodes.py` (the four nodes and ComfyUI's calls), `models.py` (loading,
@@ -414,9 +422,12 @@ seedvr2x/                the repository
     nothing slows and no bit moves, but its pool takes more of the card than torch's limit
     counts, which the plan counts on the card ([Allocator](#allocator), place-study,
     2026-11-05): on an 8 GB card a picture still fits, a 1080p clip only under torch's own
-    allocator. Under a driver that lends system memory (Windows, WSL2), where seedvr2x itself
-    runs torch's own allocator, not `cudaMallocAsync`, the nodes say once that
-    `--disable-cuda-malloc` gives it, and their README says what it gives on a small card. Its
+    allocator with its expandable segments. Under a driver that lends system memory (Windows,
+    WSL2), where seedvr2x itself runs them, not `cudaMallocAsync`, the nodes say once that
+    `--disable-cuda-malloc` with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` gives them
+    (ComfyUI sets no segments of its own, impl-nodes' reading; without them torch's own
+    allocator plans with the 4.5 GiB alone, as the CLI's does under a user's own such
+    setting), and their README says what they give on a small card. Its
     Desktop app offers torch 2.9.1 to 2.13.0 on
     CUDA 12.6, 12.8 or 13.0, so no list of figures made ahead holds: an environment probe, a
     brick of the library, checks at the first run in an environment that each kernel the
@@ -554,8 +565,12 @@ In steps:
    assembling the same bricks, built by a conductor of their own. Their specification, begun
    on 2026-11-04 (above), waited for two things, both done that day: the measurement of
    ComfyUI's own SeedVR2 and numz's nodes beside seedvr2x, and the shot's pass moved to the
-   library (above). Specified on 2026-11-05 (above). They don't hold v0.1.0; the roadmap
-   shows them under next.
+   library (above). Specified on 2026-11-05 (above) and built that day (impl-nodes): the
+   refusals by kind, the models placed per run from their pinned copies, `clip.py`, the
+   environment probe, the library's caps widened to Pillow 13 and huggingface_hub 2, and the
+   nodes, whose outputs gave the CLI's bits for the same plan and seed in ComfyUI v0.44.0 (the
+   4K picture in float16, int8 and the dynamic GGUF, the 73-frame clip in int8). The Cuts node
+   follows. They don't hold v0.1.0; the roadmap shows them under next.
 
 ## Architecture
 
@@ -3822,6 +3837,14 @@ The GPU's memory refused stops a run in one line, before the models load as afte
       measured for the planner too. ComfyUI's one-frame convolution for a picture (its kernel
       summed over time, a third of the picture's VAE work) gives other bits: after v0.1.0,
       measured first.
+- **The vendored RoPE's tables** (`vendor/models/dit_7b/rope.py:44`, an `lru_cache` of 128,
+  one table on the card per window shape), live since numz's wrapper went
+  ([bug 24](research/bugs/24-rope-wrapper-late-binding.md)): about 2 MB a latent at 1080p,
+  which the planner counts once (`peaks.DIT_BUFFERS`), and which a film of many shot lengths
+  would grow past that (impl-nodes, 2026-11-05). Cleared when a node's run ends (built that
+  day, `model.forget`) and, decided that day, at each shot's start in every app, to be built
+  with the placement: a shot's windows share their shapes, and a table is made again from the
+  same numbers.
 
 ## Pause and resume
 
