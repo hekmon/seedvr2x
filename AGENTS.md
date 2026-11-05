@@ -71,12 +71,13 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          imports, any folder name)
   __init__.py nodes.py   V3 registration (`comfy_entrypoint`, a ComfyExtension; `io.ComfyNode`,
                          `io.Schema`); the three nodes (Models, Upscale Image, Upscale Video: the
-                         settings are the upscale nodes' widgets, no Tuning node) and ComfyUI's
+                         settings are the upscale nodes' widgets, the plan's numbers their
+                         optional inputs, no Tuning node) and ComfyUI's
                          calls (progress, Cancel, the plan said on the node, plan only); the one
                          module that imports `comfy_api` (unstable)
   models.py plans.py     the files, the models kept in pinned memory and the one registration
                          with ComfyUI's model manager, a run's room and placement, keep in RAM
-                         auto/on/off against ComfyUI's cap; the widgets' values as pins and
+                         auto/on/off against ComfyUI's cap; the inputs' values as pins and
                          the plan in the nodes' words
   words.py               the nodes' words for each refusal, with the way out in ComfyUI's terms
   workflows/ README.md   the two example workflows (picture.json, clip.json: ComfyUI's UI format,
@@ -904,9 +905,13 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   counted in the plan's `process`, the alpha rule, the plan said on the node, in the console and
   as text with what each auto became and the host memory beside the host's, the attention,
   colour correction and seed, the probe, a clip as one shot run by one function; `tests/test_plans.py`
-  the DiT files' names, the widgets (every number an INT, 0 or -1 for auto, the grid of tiles,
-  blocks and windows, the untiled value, the seed's fixed control, the linked and typed values
-  refused in the nodes' words at queue time and at the node's start), the settings' pins
+  the DiT files' names, the inputs (the pictures first, then the models, the widgets, then the
+  plan's numbers as optional INT sockets with no widget and no value standing for auto, on the
+  planner's grid of tiles, blocks and windows, the untiled value; every input and output with a
+  label and a tooltip, none in the library's terms; the colour correction a BOOLEAN, split or
+  none, the seed's fixed control; the Models node's model, folder and RAM tooltips; a value the
+  prompt holds or a link gives refused in the nodes' words at queue time and at the node's
+  start, an unwired one not given), the settings' pins
   reaching the plan exactly, the text's lines, the V3 registration (the entrypoint, the three
   ids, names, inputs, outputs and hidden id), `nodes.py` the one user of `comfy_api`;
   `tests/test_keeping.py` keep in RAM auto/on/off against ComfyUI's cap (its MAX_PINNED_MEMORY
@@ -923,8 +928,9 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   read again after torch's cache is emptied; `tests/test_workflows.py` the two example workflows
   (`workflows/picture.json`, `clip.json`, ComfyUI's UI format): each parses, every node seedvr2x's
   or a stock one of a table read from v0.44.0, seedvr2x's sockets, outputs and widgets equal to
-  their V3 schemas' in count, order and defaults, every link joining an output to an input of its
-  type, Models wired into the upscale node and no Tuning node, the plan shown as text. Smoke in the real ComfyUI, CPU only, by hand: the folder
+  their V3 schemas' in count, order and defaults, every optional input unwired, every link
+  joining an output to an input of its type, Models wired into the upscale node and no Tuning
+  node, the plan shown as text. Smoke in the real ComfyUI, CPU only, by hand: the folder
   linked into its `custom_nodes`, then `CUDA_VISIBLE_DEVICES= python main.py --cpu
   --quick-test-for-ci` in its environment with `PYTHONPATH` at `core/`, which lists the nodes
   among the custom nodes imported with no error, and a script that imports ComfyUI's `nodes`

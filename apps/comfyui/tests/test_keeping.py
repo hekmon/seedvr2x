@@ -59,8 +59,8 @@ def test_the_kept_set_is_the_dits_file_and_the_vaes_by_their_pins_sizes(tmp_path
         ("auto", INT8, 12.8 * GIB, True, "kept, 8.2"),
         ("auto", FP16, 12.8 * GIB, False, "not kept: 15."),
         ("on", FP16, 12.8 * GIB, True, "kept, 15."),
-        ("off", INT8, 12.8 * GIB, False, "not kept, as asked"),
-        ("auto", INT8, -1, False, "not kept: ComfyUI pins no memory on this machine"),
+        ("off", INT8, 12.8 * GIB, False, "not kept: the files are read again"),
+        ("auto", INT8, -1, False, "not kept: ComfyUI allows no RAM for this on this computer"),
         ("on", INT8, -1, True, "kept, 8."),
         ("auto", INT8, size_of(INT8), True, "kept, 8.2"),
         ("auto", INT8, size_of(INT8) - 1, False, "not kept: 8."),
@@ -78,14 +78,22 @@ def test_auto_keeps_the_weights_where_the_kept_set_fits_under_comfys_cap(
 
 def test_what_is_said_of_the_decision_has_the_sizes_and_the_cap() -> None:
     kept = plans.Keeping("auto", True, round(7.9 * GIB), round(12.8 * GIB), "x")
-    assert kept.text == "kept, 7.90 GiB (cap 12.80 GiB)"
-    over = plans.Keeping("auto", False, round(15.8 * GIB), round(12.8 * GIB), "x")
-    assert over.text == "not kept: 15.80 GiB is over the cap of 12.80 GiB"
-    forced = plans.Keeping("on", True, round(15.8 * GIB), round(12.8 * GIB), "x")
-    assert "kept, 15.80 GiB (over ComfyUI's cap of 12.80 GiB on pinned memory: kept as asked)" == (
-        forced.text
+    assert kept.text == "kept, 7.90 GiB (ComfyUI allows 12.80 GiB)"
+    assert (
+        kept.line == "keep in RAM between runs: auto -> kept, 7.90 GiB (ComfyUI allows 12.80 GiB)"
     )
-    assert plans.Keeping("off", False, 1, 1, "x").text.startswith("not kept, as asked")
+    over = plans.Keeping("auto", False, round(15.8 * GIB), round(12.8 * GIB), "x")
+    assert over.text == "not kept: 15.80 GiB is over the 12.80 GiB ComfyUI allows"
+    forced = plans.Keeping("on", True, round(15.8 * GIB), round(12.8 * GIB), "x")
+    assert forced.text == "kept, 15.80 GiB, over the 12.80 GiB ComfyUI allows"
+    assert forced.line.startswith("keep in RAM between runs: on -> kept, 15.80 GiB")
+    off = plans.Keeping("off", False, 1, 1, "x")
+    assert (
+        off.line
+        == "keep in RAM between runs: off -> not kept: the files are read again for each run"
+    )
+    nothing = plans.Keeping("on", True, round(8.2 * GIB), -1, "x")
+    assert nothing.text == "kept, 8.20 GiB, though ComfyUI allows no RAM for this on this computer"
 
 
 def test_the_cap_is_comfys_own_value_where_it_exposes_one(
@@ -119,12 +127,12 @@ def test_the_run_says_the_decision_on_the_node_and_in_the_console(
         _, text = upscale_image(
             handle(tmp_path, keep="auto", dit=FP16), SETTINGS, pictures(), RESOLUTION, "6"
         )
-    assert "models: not kept: 15." in text and "GiB is over the cap of 12.80 GiB" in text
+    assert "keep in RAM between runs: auto -> not kept: 15." in text
+    assert "GiB is over the 12.80 GiB ComfyUI allows" in text
     instance = server.PromptServer.instance
     assert instance is not None and instance.texts == [(text, "6")]
-    assert any(line.startswith("seedvr2x: models not kept: 15.") for line in caplog.messages), (
-        "the console says it too"
-    )
+    said = "seedvr2x: keep in RAM between runs: auto -> not kept: 15."
+    assert any(line.startswith(said) for line in caplog.messages), "the console says it too"
     # Not kept: read for the run alone, nothing pinned in the registry, nothing registered.
     assert HELD not in machine.loads and models.kept(handle(tmp_path, dit=FP16)) is None
     assert management.current_loaded_models == []
@@ -137,7 +145,7 @@ def test_auto_that_fits_keeps_them_and_a_second_run_reads_nothing(
     h = handle(tmp_path, keep="auto", dit=INT8)
     _, text = upscale_image(h, SETTINGS, pictures(), RESOLUTION, "1")
     upscale_image(h, SETTINGS, pictures(), RESOLUTION, "1")
-    assert machine.loads == [HELD] and "models: kept, " in text
+    assert machine.loads == [HELD] and "keep in RAM between runs: auto -> kept, " in text
     assert models.kept(h) is not None
 
 
@@ -146,7 +154,7 @@ def test_the_cap_that_is_exceeded_is_not_a_refusal_with_on(machine: StandIn, tmp
     _, text = upscale_image(
         handle(tmp_path, keep="on", dit=INT8), SETTINGS, pictures(), RESOLUTION, "1"
     )
-    assert "kept as asked" in text and machine.loads == [HELD]
+    assert "on -> kept, " in text and "ComfyUI allows" in text and machine.loads == [HELD]
 
 
 def test_the_first_files_pinned_ram_is_freed_before_the_second_is_pinned(

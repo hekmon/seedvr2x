@@ -3,16 +3,19 @@ nodes use, and what the executor does around a node, as the tests need them.
 
 What it keeps of the real one:
 - a type (Boolean, Int, String, Combo, Image, and Custom(io_type) for a node's own) has an `Input`
-  and an `Output` class; an input has an id, a display name, a tooltip, and for a widget (Int,
-  Boolean, String, Combo, a WidgetInput) a default and its options; `as_dict` is the options
-  dictionary the frontend reads, with every field that is None left out, False kept;
+  and an `Output` class; an input has an id, a display name, a tooltip, whether it is optional,
+  and for a widget (Int, Boolean, String, Combo, a WidgetInput) a default and its options, among
+  them `force_input` (forceInput: a socket and no widget) and a BOOLEAN's labels; `as_dict` is
+  the options dictionary the frontend reads, with every field that is None left out, False
+  kept;
 - a Schema lists the inputs and outputs in order (the order the frontend builds its widgets in:
   `v1_inputs`, the INPUT_TYPES the loader reads off a V3 node, keeps it), its hidden inputs, its
   category and description; an output with no id gets `_<index>_<TYPE>_`, and ids must be unique;
 - a node is a class with a `define_schema` and an `execute` classmethod, both required; the
   executor runs `execute` on a clone of the class whose `hidden` holds the values the schema
   asked for (UNIQUE_ID), looked up as `cls.hidden.unique_id` (None for what is not asked), takes
-  the inputs by keyword, and normalises what comes back to a NodeOutput.
+  the inputs by keyword (an optional input left unwired is not given at all), and normalises what
+  comes back to a NodeOutput.
 
 What it leaves out: dynamic inputs, the other types, the clone's lock against setting an
 attribute, lazy and list inputs, the UI outputs, and the validation of values."""
@@ -75,7 +78,8 @@ class Input:
 
 
 class WidgetInput(Input):
-    """An input the frontend draws as a widget, with a default."""
+    """An input the frontend draws as a widget, with a default; with `force_input`, a socket and
+    no widget."""
 
     def __init__(
         self,
@@ -84,14 +88,18 @@ class WidgetInput(Input):
         optional: bool = False,
         tooltip: str | None = None,
         default: Any = None,
+        force_input: bool | None = None,
     ) -> None:
         super().__init__(id, display_name, optional, tooltip)
         self.default = default
+        self.force_input = force_input
 
     def as_dict(self) -> dict[str, Any]:
         found = super().as_dict()
         if self.default is not None:
             found["default"] = self.default
+        if self.force_input is not None:
+            found["forceInput"] = self.force_input
         return found
 
 
@@ -107,12 +115,38 @@ class Output:
         self.display_name = display_name if display_name else id
         self.tooltip = tooltip
 
+    def as_dict(self) -> dict[str, Any]:
+        found = {"display_name": self.display_name, "tooltip": self.tooltip}
+        return {key: value for key, value in found.items() if value is not None}
+
 
 class Boolean:
     io_type = "BOOLEAN"
 
     class Input(WidgetInput):
         io_type = "BOOLEAN"
+
+        def __init__(
+            self,
+            id: str,
+            display_name: str | None = None,
+            optional: bool = False,
+            tooltip: str | None = None,
+            default: bool | None = None,
+            label_on: str | None = None,
+            label_off: str | None = None,
+            force_input: bool | None = None,
+        ) -> None:
+            super().__init__(id, display_name, optional, tooltip, default, force_input)
+            self.label_on = label_on
+            self.label_off = label_off
+
+        def as_dict(self) -> dict[str, Any]:
+            found = super().as_dict()
+            for key in ("label_on", "label_off"):
+                if getattr(self, key) is not None:
+                    found[key] = getattr(self, key)
+            return found
 
     class Output(Output):
         io_type = "BOOLEAN"
@@ -135,8 +169,9 @@ class Int:
             max: int | None = None,
             step: int | None = None,
             control_after_generate: bool | ControlAfterGenerate | None = None,
+            force_input: bool | None = None,
         ) -> None:
-            super().__init__(id, display_name, optional, tooltip, default)
+            super().__init__(id, display_name, optional, tooltip, default, force_input)
             self.min = min
             self.max = max
             self.step = step
@@ -167,8 +202,9 @@ class String:
             tooltip: str | None = None,
             default: str | None = None,
             multiline: bool = False,
+            force_input: bool | None = None,
         ) -> None:
-            super().__init__(id, display_name, optional, tooltip, default)
+            super().__init__(id, display_name, optional, tooltip, default, force_input)
             self.multiline = multiline
 
         def as_dict(self) -> dict[str, Any]:
@@ -318,12 +354,17 @@ class ComfyNode(ABC):
     def EXECUTE_NORMALIZED(
         cls, hidden_inputs: dict[Hidden, Any] | None = None, **inputs: Any
     ) -> NodeOutput:
-        """One run as the executor makes it: the inputs must be the schema's, by name; `execute`
-        is called on the clone; what it returns is a NodeOutput or a tuple of the outputs."""
+        """One run as the executor makes it: the inputs must be the schema's, by name, every
+        required one given and an optional one given only where it is wired; `execute` is called
+        on the clone; what it returns is a NodeOutput or a tuple of the outputs."""
         schema = cls.GET_SCHEMA()
-        expected = {one.id for one in schema.inputs}
-        if set(inputs) != expected:
-            raise TypeError(f"{cls.__name__} takes {sorted(expected)}, given {sorted(inputs)}")
+        known = {one.id for one in schema.inputs}
+        required = {one.id for one in schema.inputs if not one.optional}
+        if not required <= set(inputs) <= known:
+            raise TypeError(
+                f"{cls.__name__} takes {sorted(required)} and optionally"
+                f" {sorted(known - required)}, given {sorted(inputs)}"
+            )
         clone = cls.PREPARE_CLASS_CLONE(hidden_inputs)
         returned: Any = clone.execute(**inputs)
         if isinstance(returned, tuple):

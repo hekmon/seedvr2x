@@ -54,8 +54,8 @@ def test_a_picture_plan_only_gives_the_text_and_blocks_what_follows_the_picture(
     # An execution blocker with no message: the executor passes it to every node that takes the
     # picture, which then does not run, without reporting an error (a message would be one).
     assert isinstance(blocked, ExecutionBlocker) and blocked.message is None
-    assert text.startswith("seedvr2x plan (plan only): 2 pictures")
-    assert "plan only: nothing is loaded and ComfyUI is asked to free nothing" in text
+    assert text.startswith("seedvr2x plan (plan only): 2 images")
+    assert "plan only: nothing is loaded and ComfyUI's models stay as they are" in text
     instance = server.PromptServer.instance
     assert instance is not None and instance.texts == [(text, "12")]
     assert text in caplog.messages
@@ -69,7 +69,7 @@ def test_a_clip_plan_only_gives_the_text_and_blocks_the_frames(machine: StandIn,
         handle(tmp_path), plans.Settings(window=5), pictures(33), RESOLUTION, "3", plan_only=True
     )
     assert isinstance(blocked, ExecutionBlocker) and blocked.message is None
-    assert "(plan only): a clip of 33 frames" in text and "window cap: " in text
+    assert "(plan only): a clip of 33 frames" in text and "window length: " in text
     nothing_was_done(machine)
 
 
@@ -85,7 +85,7 @@ def test_the_plan_only_text_is_the_text_of_the_run(machine: StandIn, tmp_path) -
         return [
             line
             for line in text.splitlines()
-            if line.split(":")[0] in {"attention", "swap blocks", "encode tile", "decode tile"}
+            if line.split(":")[0] in {"attention", "blocks swapped", "encode tile", "decode tile"}
         ]
 
     assert settings_lines(only) == settings_lines(ran) and settings_lines(ran)
@@ -97,8 +97,8 @@ def test_a_plan_only_asks_comfyui_to_free_nothing_and_says_what_a_run_would_need
     resident = comfy_model(20 * GIB)
     _, text = upscale_image(handle(tmp_path), SETTINGS, pictures(), RESOLUTION, "1", plan_only=True)
     assert resident.loaded_size() == 20 * GIB, "ComfyUI's model stays where it is"
-    assert "a run would need" in text and "of free memory for the plan's largest phase" in text
-    assert "ComfyUI's own models hold 20.00 GiB" in text
+    assert "a run would need up to" in text and "free on the card, with a safety margin" in text
+    assert "ComfyUI's own models use 20.00 GiB" in text
     assert not [call for call in management.free_calls if call[2]]
 
 

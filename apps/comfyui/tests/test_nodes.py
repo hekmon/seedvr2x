@@ -63,7 +63,7 @@ def test_each_picture_of_a_batch_is_the_libraries_picture_alone(machine: StandIn
         )
         assert out[index].numpy().tobytes() == expected.tobytes(), index
     assert out[0].numpy().tobytes() != out[1].numpy().tobytes()
-    assert plan.startswith("seedvr2x plan: 3 pictures")
+    assert plan.startswith("seedvr2x plan: 3 images")
 
 
 def test_a_clip_is_the_libraries_clip(machine: StandIn, tmp_path) -> None:
@@ -84,7 +84,8 @@ def test_a_clip_is_the_libraries_clip(machine: StandIn, tmp_path) -> None:
     )
     assert out.shape == (33, 48, 80, 3)
     assert out.numpy().tobytes() == expected.tobytes()
-    assert "3 DiT windows, windows of at most 5 latents" in plan
+    assert "3 windows of the model, the longest" in plan
+    assert "window length: at most 5 groups of 4 frames (about 20 frames), as you set it" in plan
 
 
 def test_a_clips_bar_moves_with_its_steps_and_ends_full(machine: StandIn, tmp_path) -> None:
@@ -152,23 +153,25 @@ def test_the_plan_is_said_on_the_node_in_the_console_and_given_as_text(
     # The plan's parts in the nodes' words: the pictures, the card and ComfyUI's models, what
     # ComfyUI was asked, the DiT's placement and kernel, the passes, the choices, the models' RAM.
     for part in (
-        "1 picture 40x24 to 80x48 (resolution 48)",
-        "card: a stand-in card, 32.00 GiB free; ComfyUI's own models hold 0.00 GiB",
-        "ComfyUI was asked to free nothing",
-        # Each setting and what it came to: a pin as set, the rest as the plan made it.
-        "attention: PyTorch's SDPA, as set",
-        "swap blocks: none, the DiT stays on the card in its phase, as set",
-        "encode tile: auto -> one pass, untiled, predicted peak",
-        "decode tile: auto -> one pass, untiled, predicted peak",
-        "colour correction split, seed 5",
-        "models: kept, ",
+        "1 image 40x24 to 80x48 (resolution 48)",
+        "graphics card: a stand-in card, 32.00 GiB free; ComfyUI's own models use 0.00 GiB",
+        "no need to unload ComfyUI's models",
+        # Each setting and what it came to: a value given as set, the rest as the plan chose.
+        "attention: PyTorch's SDPA, as you set it",
+        "blocks swapped: none, the whole model on the card while it works, as you set it",
+        "encode tile: auto -> no tiles, the whole image at once (needs up to ",
+        "decode tile: auto -> no tiles, the whole image at once (needs up to ",
+        "colour correction: on (split)",
+        "seed: 5",
+        "keep in RAM between runs: on -> kept, ",
     ):
         assert part in text, part
     assert "--" not in text
     _, video = upscale_video(handle(tmp_path), settings, pictures(5), RESOLUTION, "32")
-    assert "a clip of 5 frames 40x24 to 80x48" in video and "1 DiT window" in video
-    assert "window cap: auto -> at most 2 latents" in video and "--" not in video
-    assert "system memory: the plan counts" in video
+    assert "a clip of 5 frames 40x24 to 80x48" in video
+    assert "the whole clip in one window of the model" in video
+    assert "window length: auto -> at most 2 groups of 4 frames (about 8 frames)" in video
+    assert "RAM: this run needs about" in video and "--" not in video
     assert [node for _, node in instance.texts] == ["31", "32"]
 
 
@@ -176,7 +179,7 @@ def test_the_text_names_the_files_not_kept(machine: StandIn, tmp_path) -> None:
     _, text = upscale_image(
         handle(tmp_path, keep=False), plans.Settings(), pictures(1), RESOLUTION, "1"
     )
-    assert "models: not kept, as asked: the files are read for each run and dropped" in text
+    assert "keep in RAM between runs: off -> not kept: the files are read again" in text
 
 
 def test_a_run_without_a_node_id_says_nothing_on_a_node(machine: StandIn, tmp_path) -> None:

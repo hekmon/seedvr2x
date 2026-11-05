@@ -16,12 +16,15 @@ What the V3 schema changes for a node, read in ComfyUI v0.44.0:
 - seedvr2x Models: the DiT file by a name a user reads, a model directory, and whether the weights
   stay in RAM between runs (auto, on, off). Gives a light handle (models.Handle); nothing is read
   here.
-- seedvr2x Upscale Image and seedvr2x Upscale Video: each carries its own settings as widgets,
-  every number an INT so that a node that outputs an INT can drive it (0 is auto for a tile and
-  the window cap, -1 for the blocks swapped). The plan is made at run time, where the input's size
-  and the card are known (models.session), said on the node and in ComfyUI's console and given as
-  text, then the library's pass over the pictures or the frames in memory. With "plan only" the
-  node stops there: the plan is its text output and what follows its pictures is not run.
+- seedvr2x Upscale Image and seedvr2x Upscale Video: the pictures and the models' handle, then
+  the settings as widgets (resolution, attention, colour correction, seed, plan only), then the
+  numbers the plan makes as optional INT inputs with no widget (each pass's tile, the blocks
+  swapped, a clip's window length; the user's Desktop test, 2026-11-05): unwired, the plan
+  chooses; wired, the value is taken exactly. No value stands for auto. The plan is made at run
+  time, where the input's size and the card are known (models.session), said on the node and in
+  ComfyUI's console and given as text, then the library's pass over the pictures or the frames in
+  memory. With "plan only" the node stops there: the plan is its text output and what follows its
+  pictures is not run.
 
 V3 classes hold no state (the executor runs `execute` on a clone of the class, and ignores
 `__init__`): what the nodes keep between runs, the weights in RAM, is in models.py's registry.
@@ -44,7 +47,7 @@ from comfy.utils import ProgressBar
 from comfy_api.latest import ComfyExtension, io
 from comfy_execution.graph_utils import ExecutionBlocker
 
-from seedvr2x import clip, frames, peaks, still, still_plan
+from seedvr2x import clip, frames, peaks, pull, still, still_plan
 from seedvr2x.errors import Refusal
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Plan
@@ -68,6 +71,17 @@ ENCODE_SHARE, WINDOW_SHARE = 100, 700
 DIT_BY_LABEL = {label: name for name, label in plans.DIT_LABELS.items()}
 
 
+def _size(name: str) -> str:
+    """A pinned file's size as the Models node's labels say it ("8.3 GB")."""
+    return pull.gigabytes(pull.PINNED[name].size)
+
+
+_FLOAT16, _INT8, _GGUF = (
+    _size(f"seedvr2x_ema_7b_sharp_{kind}")
+    for kind in ("fp16.safetensors", "int8_convrot.safetensors", "dyn.gguf")
+)
+
+
 # ---- seedvr2x Models -----------------------------------------------------------------------------
 
 
@@ -84,40 +98,70 @@ class Models(io.ComfyNode):
             display_name="seedvr2x Models",
             category=CATEGORY,
             description=(
-                "Chooses seedvr2x's DiT file and where the model files are read from. Nothing is"
-                " loaded here: the upscale nodes load the files, check them and place them on the"
-                " card by a plan."
+                "Chooses seedvr2x's model file and where the model files are read from. Nothing is"
+                " loaded here: the upscale nodes load the files, check them and fit them to your"
+                " graphics card."
             ),
             inputs=[
                 io.Combo.Input(
                     "model",
                     options=list(DIT_BY_LABEL),
                     default=plans.DIT_LABELS[plans.DEFAULT_DIT],
-                    tooltip="The DiT file, with its size and the model card's typical error per"
-                    " weight against the original. Take float16 when the card has room for it,"
-                    " else the 8.3 GB file, else the 4.8 GB one. Pulled from Hugging Face into"
-                    " its cache, at a pinned revision, where missing.",
+                    display_name=plans.LABELS["model"],
+                    # The error per weight as models/hf/README.md defines it ("How to read it")
+                    # and its table gives it, the video column the same table's ("On video").
+                    tooltip="The DiT file, with its size and its error per weight: how far its"
+                    " stored weights are from ByteDance's original, relative to their own size"
+                    " (the median over the 7B's 288 large matrices, as the model card gives it)."
+                    " It measures the file, not the picture: on video, the int8 file upscales as"
+                    " close to float16 as a second seed does; the dynamic GGUF drifts further at"
+                    " 1080p on some content, cartoons above all. Take float16 when the card has"
+                    f" room for it, else the {_INT8} file, else the {_GGUF} one. Downloaded from"
+                    " Hugging Face into its cache where missing, always the same version of the"
+                    " file.",
                 ),
                 io.String.Input(
                     "model_dir",
                     default="",
                     multiline=False,
-                    tooltip="A directory holding the model files under their names, read there"
-                    " and nothing downloaded. Empty: Hugging Face's cache, where the command line"
-                    " finds the same files.",
+                    display_name=plans.LABELS["model_dir"],
+                    tooltip="Leave empty to download the files from Hugging Face the first time"
+                    " they are needed, into its cache, where seedvr2x's command line finds them"
+                    " too. To use files you already have, give their folder, and nothing is"
+                    f" downloaded: it must have the VAE, {plans.VAE_FILE} (which turns images into"
+                    " what the model works on, and back), and the model file under seedvr2x's"
+                    f" name for it: {plans.DEFAULT_DIT} for {plans.DIT_LABELS[plans.DEFAULT_DIT]};"
+                    " _int8_convrot.safetensors or _dyn.gguf in place of _fp16.safetensors for"
+                    " the int8 and dynamic GGUF files; no _sharp for the 7B. These are the names"
+                    " seedvr2x's command line reads from a folder too; they are not in ComfyUI's"
+                    " own models folders.",
                 ),
                 io.Combo.Input(
                     "keep_in_ram_between_runs",
                     options=list(plans.KEEP_MODES),
                     default="auto",
-                    display_name="keep in RAM between runs",
-                    tooltip="Keep the weights in pinned system memory between runs, on the card"
-                    " only while a node runs. auto: kept where they fit under ComfyUI's own cap"
-                    " on pinned memory (the node says the sizes); on: kept whatever the cap; off:"
-                    " the next run reads the files again and holds only what leaves the card.",
+                    display_name=plans.LABELS["keep_in_ram_between_runs"],
+                    # ComfyUI's cap on pinned memory, v0.44.0's model_management.py: 40% of the
+                    # RAM on Windows (models.pinned_cap reads it); "on" keeps past it.
+                    tooltip="After a run, keep the model in your computer's RAM, so that the next"
+                    " run starts in seconds instead of reading the files again (the float16 file"
+                    f" is {_FLOAT16}). The graphics card is used only while a seedvr2x node runs,"
+                    " whatever you choose. auto: keep it if it fits in the RAM ComfyUI allows for"
+                    " this (on Windows, 40% of your RAM); the upscale node says how much it kept."
+                    " on: always keep it, even past that limit: Windows may refuse, or your"
+                    " computer may slow down. off: free that RAM after each run; the next run"
+                    " reads the files again. ComfyUI's Unload models frees it too, and under"
+                    " ComfyUI's --disable-smart-memory nothing is kept.",
                 ),
             ],
-            outputs=[ModelsType.Output("models")],
+            outputs=[
+                ModelsType.Output(
+                    "models",
+                    display_name="models",
+                    tooltip="The model file chosen and where it is read from, for seedvr2x's"
+                    " upscale nodes. Nothing is loaded yet.",
+                )
+            ],
         )
 
     @classmethod
@@ -192,41 +236,71 @@ def _checked(handle: models_module.Handle) -> None:
 
 # ---- The settings an upscale node carries --------------------------------------------------------
 
-# Every number an INT, so that any node that outputs an INT can drive it (ComfyUI's widget-to-input
-# flow). Auto is a value no pin can take (plans.py has the grid and why untiled is the value past
-# the largest tile): the labels and the tooltips say it, ComfyUI_frontend 1.57's INT widget having
-# a min, a max, a step and a display type and no word for a special value.
+# The widgets are the choices with a default the user reads (resolution, attention, colour
+# correction, seed, plan only). The numbers the plan makes are optional INT inputs with no widget
+# (`force_input`): unwired, the plan chooses, and its text says what; wired, the value is taken
+# exactly. Their min, max and step are the planner's own grid (plans.py), which no value node
+# takes from them in ComfyUI_frontend 1.57.6: its Int node has its own range, and its legacy
+# Primitive, given no widget's config by a socket with none, sends no value at all (read in its
+# bundle, 2026-11-05). So the tooltips name the Int node, and a value a link gives is held to the
+# grid at the node's start, before anything loads; a value the prompt holds, when it is queued
+# (validate_inputs).
+
+
+# How each optional number's tooltip begins: in ComfyUI_frontend 1.57.6 an Int node gives such
+# an input its value, and a Primitive node none (above).
+_OPTIONAL = "Optional: connect a number (from an Int node, for one)"
 
 
 def _tile_input(name: str, pass_: str) -> Any:
     return io.Int.Input(
         name,
-        display_name=f"{pass_} tile, 0 = auto",
-        default=plans.AUTO_TILE,
-        min=plans.AUTO_TILE,
+        display_name=plans.LABELS[name],
+        optional=True,
+        force_input=True,
+        min=peaks.TILE_MIN,
         max=plans.UNTILED_TILE,
         step=peaks.TILE_STEP,
-        tooltip=f"The VAE {pass_}'s tiles, squares of this many output pixels a side, a multiple of"
-        f" {peaks.TILE_STEP} from {peaks.TILE_MIN} to {peaks.TILE_MAX}. 0 = auto: the largest"
-        f" tile that fits the card, or one pass if that fits. {plans.UNTILED_TILE} = one pass,"
-        " untiled. A tile set is taken exactly, and the plan is built around it: a large one"
-        " is faster and takes more of the card, a small one leaves the card to the DiT's"
-        " windows and costs seams' blending time.",
+        tooltip=f"{_OPTIONAL} to set the tile size of the VAE {pass_}, in pixels of the output:"
+        f" {peaks.TILE_MIN} to {peaks.TILE_MAX} in steps of {peaks.TILE_STEP}, or"
+        f" {plans.UNTILED_TILE} for no tiles, the whole image at once. Unconnected, the plan"
+        " chooses: the whole image at once if it fits the card, else the largest tile that does."
+        " A larger tile is faster and takes more of the card; a smaller one leaves more room for"
+        " the model and blends more seams.",
     )
 
 
 def _swap_input() -> Any:
     return io.Int.Input(
         "swap_blocks",
-        display_name="swap blocks, -1 = auto",
-        default=plans.AUTO_SWAP,
-        min=plans.AUTO_SWAP,
+        display_name=plans.LABELS["swap_blocks"],
+        optional=True,
+        force_input=True,
+        min=0,
         max=peaks.BLOCKS,
         step=1,
-        tooltip="The DiT's last blocks that wait in system memory and stream through the card,"
-        f" their memory left to the windows, from 0 to {peaks.BLOCKS}. -1 = auto: the fewest that"
-        " fit. 0 = none, the whole DiT on the card in its phase. More blocks swapped fit a"
-        " smaller card and make each window slower.",
+        tooltip=f"{_OPTIONAL} to set how many of the model's {peaks.BLOCKS} blocks wait in RAM"
+        " and pass through the card in turn, from 0 (none: the whole model on the card) to"
+        f" {peaks.BLOCKS}. Unconnected, the plan chooses the fewest that fit. Swapping more"
+        " blocks lets the model fit a smaller graphics card, and slows the run.",
+    )
+
+
+def _window_input() -> Any:
+    return io.Int.Input(
+        "window",
+        display_name=plans.LABELS["window"],
+        optional=True,
+        force_input=True,
+        min=plans.WINDOW_MIN,
+        max=plans.WINDOW_MAX,
+        step=1,
+        tooltip=f"{_OPTIONAL} to set the longest stretch of the clip the model works on at once,"
+        f" counted in groups of 4 frames: from {plans.WINDOW_MIN} (about"
+        f" {4 * plans.WINDOW_MIN} frames) to {plans.WINDOW_MAX} (about"
+        f" {4 * plans.WINDOW_MAX} frames). Unconnected, the plan chooses the longest that fits"
+        " the card. A longer window keeps more frames consistent with each other and takes more"
+        " of the card; a shorter one is lighter, and the clip is blended across more windows.",
     )
 
 
@@ -235,21 +309,28 @@ def _attention_input() -> Any:
         "attention",
         options=list(plans.ATTENTIONS),
         default=plans.AUTO,
-        tooltip="auto: FlashAttention 2 where ComfyUI's environment has it, else PyTorch's SDPA."
-        " The kernels give slightly different pictures; flash_attn_2 is refused where it is not"
-        " installed.",
+        display_name=plans.LABELS["attention"],
+        # The step's figure: research/docs/small-cards.md, the 4K picture's time, phase by phase
+        # (RTX 5090, the same pins): the DiT step 2.60 s with FlashAttention 2 against 3.26 s
+        # with SDPA, 20% less. No memory claim: the kernels' peaks are to become one figure.
+        tooltip="auto: FlashAttention 2 if it is installed in ComfyUI's environment, else"
+        " PyTorch's SDPA. FlashAttention 2 is faster: about a fifth off the model's step for a"
+        " 4K picture (measured on an RTX 5090). The two round differently, so their pictures"
+        " differ very slightly. flash_attn_2 stops with an error where it is not installed.",
     )
 
 
 def _correction_inputs() -> list[Any]:
     return [
-        io.Combo.Input(
+        io.Boolean.Input(
             "color_correction",
-            options=list(plans.CORRECTIONS),
-            default="split",
-            display_name="colour correction",
-            tooltip="split: the input's coarse lightness and colour under the model's details;"
-            " none: the model's colours, which drift.",
+            default=True,
+            label_on=plans.CORRECTIONS[0],
+            label_off=plans.CORRECTIONS[1],
+            display_name=plans.LABELS["color_correction"],
+            tooltip="On (split): the input's overall colours and brightness, with the model's"
+            " fine detail. Off (none): the model's own colours, which can drift from the"
+            " input's.",
         ),
         io.Int.Input(
             "seed",
@@ -257,8 +338,10 @@ def _correction_inputs() -> list[Any]:
             min=0,
             max=plans.SEED_MAX,
             control_after_generate=io.ControlAfterGenerate.fixed,
+            display_name=plans.LABELS["seed"],
             tooltip="The seed of the model's noise: the same input, settings and seed give the"
-            " same picture. Fixed after each run by default, so that a run again is the same.",
+            " same image on the same computer. Fixed after each run by default, so that running"
+            " again gives the same result.",
         ),
     ]
 
@@ -267,11 +350,11 @@ def _plan_only_input() -> Any:
     return io.Boolean.Input(
         "plan_only",
         default=False,
-        display_name="plan only",
-        tooltip="Make the plan, say it on the node and give it as the plan output, and stop: no"
-        " model is loaded, ComfyUI is asked to free nothing, and the nodes after the picture"
-        " output do not run. The model files are found and their headers read (a file missing"
-        " from Hugging Face's cache is downloaded).",
+        display_name=plans.LABELS["plan_only"],
+        tooltip="Make the plan, show it on the node and give it as the plan output, and stop: no"
+        " model is loaded, ComfyUI's loaded models stay as they are, and the nodes connected to"
+        " the images output are skipped. The model files are found, and one missing from"
+        " Hugging Face's cache is downloaded.",
     )
 
 
@@ -281,26 +364,42 @@ def _resolution_input() -> Any:
         default=plans.RESOLUTION,
         min=plans.RESOLUTION_MIN,
         max=plans.RESOLUTION_MAX,
-        tooltip="The output's short side in pixels, square pixels.",
+        display_name=plans.LABELS["resolution"],
+        tooltip="The output's short side, in pixels; the long side keeps the input's shape.",
+    )
+
+
+def _models_input() -> Any:
+    return ModelsType.Input(
+        "models",
+        display_name="models",
+        tooltip="The output of seedvr2x Models: the model file and where it is read from.",
+    )
+
+
+def _plan_output() -> Any:
+    return io.String.Output(
+        "plan",
+        display_name="plan",
+        tooltip="The plan as text: the settings, what seedvr2x chose for each one left to it, and"
+        " the memory the run needs. Preview as Text shows it.",
     )
 
 
 def _settings(**values: Any) -> plans.Settings:
-    """The widgets' values as the settings of the run, or the node's refusal for a value no
-    widget takes (a linked INT is not held to the grid by the frontend)."""
+    """The inputs' values as the settings of the run, or the node's refusal for a value no input
+    takes (a value a link gives is not held to an input's grid by ComfyUI)."""
     try:
         return plans.Settings.of(**values)
     except plans.BadSetting as error:
-        raise words.Refused(
-            f"{error}. Set it on this node, or on the node that feeds it."
-        ) from error
+        raise words.Refused(f"{error}. Change the number connected to this node.") from error
 
 
 def _validate(**values: int | None) -> bool | str:
-    """validate_inputs of the upscale nodes: the numbers typed in the widgets are checked when the
-    prompt is queued, before anything runs. A linked number is not there to check (the executor
-    hands over the constants only) and is checked at the node's start. The widgets' min and max
-    are checked by ComfyUI itself for the inputs this function does not take."""
+    """validate_inputs of the upscale nodes: the numbers the prompt holds are checked when it is
+    queued, before anything runs. A linked number is not there to check (the executor hands over
+    the constants only) and is checked at the node's start; an unwired one is None. ComfyUI
+    checks the min and max itself for the inputs this function does not take."""
     found = plans.problems(**values)
     return "; ".join(found) if found else True
 
@@ -381,23 +480,35 @@ class UpscaleImage(io.ComfyNode):
             display_name="seedvr2x Upscale Image",
             category=CATEGORY,
             description=(
-                "Upscales each picture of the batch on its own with seedvr2x. The plan, made for"
-                " the card as it would be without ComfyUI's own models, is said on the node and"
-                " given as text; each setting is auto or taken exactly, and the plan is built"
-                " around it."
+                "Upscales each image of the batch on its own with seedvr2x. Each time it runs,"
+                " seedvr2x works out how to fit the job on your graphics card, as if ComfyUI's"
+                " other models were unloaded: the plan, shown on the node and given as the plan"
+                " output. The optional numbers are the plan's: unconnected, it chooses them; a"
+                " number connected is used exactly, and the plan is built around it."
             ),
             inputs=[
-                ModelsType.Input("models"),
-                io.Image.Input("image"),
+                io.Image.Input(
+                    "images",
+                    display_name="images",
+                    tooltip="The images to upscale: each image of the batch on its own.",
+                ),
+                _models_input(),
                 _resolution_input(),
-                _tile_input("encode_tile", "encode"),
-                _tile_input("decode_tile", "decode"),
-                _swap_input(),
                 _attention_input(),
                 *_correction_inputs(),
                 _plan_only_input(),
+                _tile_input("encode_tile", "encode"),
+                _tile_input("decode_tile", "decode"),
+                _swap_input(),
             ],
-            outputs=[io.Image.Output("image"), io.String.Output("plan")],
+            outputs=[
+                io.Image.Output(
+                    "images",
+                    display_name="images",
+                    tooltip="The upscaled images, in the batch's order.",
+                ),
+                _plan_output(),
+            ],
             hidden=[io.Hidden.unique_id],
         )
 
@@ -413,16 +524,16 @@ class UpscaleImage(io.ComfyNode):
     @classmethod
     def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
         cls,
+        images: torch.Tensor,
         models: models_module.Handle,
-        image: torch.Tensor,
         resolution: int,
-        encode_tile: int,
-        decode_tile: int,
-        swap_blocks: int,
         attention: str,
-        color_correction: str,
+        color_correction: bool,
         seed: int,
         plan_only: bool,
+        encode_tile: int | None = None,
+        decode_tile: int | None = None,
+        swap_blocks: int | None = None,
     ) -> io.NodeOutput:
         _checked(models)
         settings = _settings(
@@ -433,7 +544,7 @@ class UpscaleImage(io.ComfyNode):
             color_correction=color_correction,
             seed=seed,
         )
-        batch = _array(image)
+        batch = _array(images)
         count, height, width = batch.shape[:3]
         target = _target(width, height, resolution)
         out_height, out_width = frames.output_size(target)
@@ -472,7 +583,7 @@ class UpscaleImage(io.ComfyNode):
                     )
             except still.NonFinite as error:
                 raise words.non_finite(str(error)) from error
-        logger.info("seedvr2x: %d picture(s) upscaled in %.1f s", count, time.monotonic() - started)
+        logger.info("seedvr2x: %d image(s) upscaled in %.1f s", count, time.monotonic() - started)
         return io.NodeOutput(_output(outputs), text)
 
     @staticmethod
@@ -544,35 +655,38 @@ class UpscaleVideo(io.ComfyNode):
             display_name="seedvr2x Upscale Video",
             category=CATEGORY,
             description=(
-                "Upscales the frames of one shot with seedvr2x, in sliding windows of the DiT."
-                " There is no cut detection: a cut inside a window blends two scenes, and nothing"
-                " resumes. The command line has both. Each setting is auto or taken exactly, and"
-                " the plan is built around it."
+                "Upscales a clip's frames with seedvr2x as one continuous scene, in overlapping"
+                " windows that fit your graphics card. Scene cuts are not detected, so a cut"
+                " inside a window blends the two scenes, and a stopped run starts again;"
+                " seedvr2x's command line handles both. Each time it runs, seedvr2x works out how"
+                " to fit the job on your card: the plan, shown on the node and given as the plan"
+                " output. The optional numbers are the plan's: unconnected, it chooses them; a"
+                " number connected is used exactly, and the plan is built around it."
             ),
             inputs=[
-                ModelsType.Input("models"),
-                io.Image.Input("images"),
-                _resolution_input(),
-                io.Int.Input(
-                    "window",
-                    display_name="window cap, 0 = auto",
-                    default=plans.AUTO_WINDOW,
-                    min=plans.AUTO_WINDOW,
-                    max=plans.WINDOW_MAX,
-                    step=1,
-                    tooltip="The cap on the DiT's windows, in latents of 4 frames, from"
-                    f" {plans.WINDOW_MIN} to {plans.WINDOW_MAX}. 0 = auto: the longest that fits"
-                    " the card. A longer window blends more frames together and takes more of"
-                    " the card; a shorter one is cheaper and re-blends more often.",
+                io.Image.Input(
+                    "images",
+                    display_name="images",
+                    tooltip="The clip's frames, in order, upscaled as one continuous scene.",
                 ),
-                _tile_input("encode_tile", "encode"),
-                _tile_input("decode_tile", "decode"),
-                _swap_input(),
+                _models_input(),
+                _resolution_input(),
                 _attention_input(),
                 *_correction_inputs(),
                 _plan_only_input(),
+                _window_input(),
+                _tile_input("encode_tile", "encode"),
+                _tile_input("decode_tile", "decode"),
+                _swap_input(),
             ],
-            outputs=[io.Image.Output("images"), io.String.Output("plan")],
+            outputs=[
+                io.Image.Output(
+                    "images",
+                    display_name="images",
+                    tooltip="The upscaled frames, in order, for ComfyUI's video nodes.",
+                ),
+                _plan_output(),
+            ],
             hidden=[io.Hidden.unique_id],
         )
 
@@ -591,17 +705,17 @@ class UpscaleVideo(io.ComfyNode):
     @classmethod
     def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
         cls,
-        models: models_module.Handle,
         images: torch.Tensor,
+        models: models_module.Handle,
         resolution: int,
-        window: int,
-        encode_tile: int,
-        decode_tile: int,
-        swap_blocks: int,
         attention: str,
-        color_correction: str,
+        color_correction: bool,
         seed: int,
         plan_only: bool,
+        window: int | None = None,
+        encode_tile: int | None = None,
+        decode_tile: int | None = None,
+        swap_blocks: int | None = None,
     ) -> io.NodeOutput:
         _checked(models)
         settings = _settings(

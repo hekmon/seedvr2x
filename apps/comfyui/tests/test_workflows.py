@@ -1,13 +1,17 @@
 """The example workflows (workflows/*.json), in ComfyUI's UI workflow format: each parses, every
 node is seedvr2x's or a stock node named below, each seedvr2x node's sockets, outputs and widgets
-are those of its V3 schema (count, order, values) at their defaults, every link joins an output to
-an input of its type, seedvr2x Models is wired into each upscale node and no node holds the plan's
-settings but the upscale node (the settings are its widgets).
+are those of its V3 schema (count, order, values) at their defaults, every optional input left
+unwired (the plan chooses), every link joins an output to an input of its type, seedvr2x Models is
+wired into each upscale node and no node holds the plan's settings but the upscale node.
 
-The frontend builds a node's inputs in the order of the schema's input list (the loader hands it
-the schema as INPUT_TYPES with the keys in that order, required before optional, and the executor
-names the arguments of `execute` by id); a socket is an input of a type that is no widget's
-(a custom type or IMAGE), a widget an input with a default (WidgetInput).
+The frontend builds a node's sockets in the order of the schema's input list, required before
+optional (the loader hands it the schema as INPUT_TYPES with the keys in that order, and the
+executor names the arguments of `execute` by id), then its widgets' slots; a socket is an input of
+a type that is no widget's (a custom type or IMAGE) or one with forceInput, a widget an input with
+a default (WidgetInput). The files are in the form ComfyUI_frontend 1.57.6 exports (read in its
+bundle, 2026-11-05): the sockets alone under `inputs` (the unlinked widget slots left out, the
+links' target slots numbered in that list), the widgets' values in their order. Its load rebuilds
+the inputs from the node's definition and takes each saved entry's link by name.
 
 The stock nodes' sockets and widgets are the table below, read from ComfyUI v0.44.0's schemas
 (LoadImage, SaveImage, PreviewAny, LoadVideo, GetVideoComponents, CreateVideo, SaveVideo) and
@@ -94,11 +98,16 @@ def definition(kind: str) -> tuple[list[tuple[str, str]], list[io.WidgetInput]]:
     sockets: list[tuple[str, str]] = []
     widgets: list[io.WidgetInput] = []
     for each in SCHEMAS[kind].inputs:
-        if isinstance(each, io.WidgetInput):
+        if isinstance(each, io.WidgetInput) and not each.force_input:
             widgets.append(each)
         else:
             sockets.append((each.id, each.io_type))
     return sockets, widgets
+
+
+def optional(kind: str) -> list[str]:
+    """A seedvr2x node's optional inputs, by id."""
+    return [each.id for each in SCHEMAS[kind].inputs if each.optional]
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -169,12 +178,17 @@ def test_seedvr2x_widgets_are_those_of_the_schema_at_their_defaults(name: str) -
             else:
                 assert isinstance(value, str)
         if node["type"] != "seedvr2xModels":
-            # Every setting the plan makes is at auto: the workflow shows the plan's own choices.
+            # No widget of a number the plan makes: the workflow shows the plan's own choices.
             by_id_ = {widget.id: value for widget, value in saved if widget is not None}
-            for name in ("window", "encode_tile", "decode_tile"):
-                assert by_id_.get(name, 0) == 0, name
-            assert by_id_["swap_blocks"] == -1 and by_id_["attention"] == "auto"
-            assert by_id_["plan_only"] is False
+            assert set(by_id_) == {
+                "resolution",
+                "attention",
+                "color_correction",
+                "seed",
+                "plan_only",
+            }
+            assert by_id_["attention"] == "auto" and by_id_["color_correction"] is True
+            assert by_id_["plan_only"] is False and by_id_["resolution"] == 1080
         else:
             assert values[-1] == "auto", "keep in RAM between runs is auto"
     assert seen == 2
@@ -188,6 +202,8 @@ def test_seedvr2x_sockets_and_outputs_are_those_of_the_classes(name: str) -> Non
             continue
         sockets, _ = definition(node["type"])
         assert [(each["name"], each["type"]) for each in node["inputs"]] == sockets
+        # No saved label, which the frontend would show in place of the input's own.
+        assert all("label" not in each and "widget" not in each for each in node["inputs"])
         assert [(each["name"], each["type"]) for each in node["outputs"]] == [
             (each.display_name, each.io_type) for each in schema.outputs
         ]
@@ -223,10 +239,14 @@ def test_every_link_joins_an_output_to_an_input_of_its_type(name: str) -> None:
             assert socket["link"] is None or socket["link"] in listed
         for output in node["outputs"]:
             assert set(output["links"] or []) <= listed
-    # A seedvr2x socket is never left open: the nodes take no default for a handle.
+    # A seedvr2x node's required socket is wired (the nodes take no default for a handle or the
+    # pictures), and every optional one left unwired: the plan chooses.
     for node in workflow["nodes"]:
         if node["type"] in SCHEMAS:
-            assert all(socket["link"] is not None for socket in node["inputs"])
+            unwired = optional(node["type"])
+            for socket in node["inputs"]:
+                assert (socket["link"] is None) == (socket["name"] in unwired), socket["name"]
+            assert {each["name"] for each in node["inputs"]} >= set(unwired)
 
 
 def source(workflow: dict[str, Any], node: Node, socket: str) -> Node:
@@ -262,7 +282,7 @@ def test_the_plan_is_shown_as_text(name: str) -> None:
 def test_the_picture_workflow_is_a_picture_in_and_out() -> None:
     workflow = load("picture")
     (upscale,) = of_type(workflow, "seedvr2xUpscaleImage")
-    assert source(workflow, upscale, "image")["type"] == "LoadImage"
+    assert source(workflow, upscale, "images")["type"] == "LoadImage"
     (save,) = of_type(workflow, "SaveImage")
     assert source(workflow, save, "images") is upscale
     assert len(workflow["nodes"]) == 5

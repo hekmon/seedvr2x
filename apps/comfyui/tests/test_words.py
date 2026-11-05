@@ -190,11 +190,11 @@ def test_every_refusal_is_worded_without_an_option_of_the_command_line(name: str
 
 def test_a_setting_is_named_as_the_widget_the_user_sees() -> None:
     say = words.say
-    assert say(Setting("window", "6")) == "window 6 on this node"
-    assert say(Setting("swap_blocks", "30")) == "swap blocks 30 on this node"
+    assert say(Setting("window", "6")) == "window length 6 on this node"
+    assert say(Setting("swap_blocks", "30")) == "blocks swapped 30 on this node"
     assert say(Setting("decode_tile", "512")) == "decode tile 512 on this node"
-    # The library's pin of the untiled pass, 0, is the widget's value past the largest tile.
-    assert say(Setting("encode_tile", "0")) == "encode tile untiled (2112) on this node"
+    # The library's pin of the untiled pass, 0, is the input's value past the largest tile.
+    assert say(Setting("encode_tile", "0")) == "encode tile 2112 (no tiles) on this node"
     assert say(Setting("resolution", "720")) == "resolution 720 on this node"
     assert say(Setting("resolution")) == "resolution on this node"
     assert say(Setting("dit_model", "seedvr2x_ema_7b_sharp_int8_convrot.safetensors")) == (
@@ -205,9 +205,9 @@ def test_a_setting_is_named_as_the_widget_the_user_sees() -> None:
 
 def test_a_pin_that_is_no_pin_names_the_widget_on_the_node() -> None:
     text = str(words.refusal(picture(24 * GIB, swap_blocks=99)))
-    assert text.startswith("swap blocks 99 on this node: the DiT has 36 blocks")
+    assert text.startswith("blocks swapped 99 on this node: the DiT has 36 blocks")
     covers = str(words.refusal(picture(24 * GIB, decode_tile=4096)))
-    assert "decode tile 4096 on this node" in covers and "decode tile untiled (2112)" in covers
+    assert "decode tile 4096 on this node" in covers and "decode tile 2112 (no tiles)" in covers
 
 
 def test_a_memory_refusal_names_the_smaller_files_that_plan_it_and_the_resolution() -> None:
@@ -267,25 +267,22 @@ def test_the_model_files_refusals_name_the_nodes_settings_and_ways() -> None:
         name: str(words.refusal(error, model_dir=name != "model: not pinned"))
         for name, error in models_refused().items()
     }
-    assert "is not in the directory set as model_dir in seedvr2x Models" in said["model: missing"]
+    assert "is not in the folder set as model folder in seedvr2x Models" in said["model: missing"]
     assert "the model in seedvr2x Models: not one of" in said["model: unknown"]
-    assert "give model_dir in seedvr2x Models with a directory" in said["model: unknown"]
+    assert "give model folder in seedvr2x Models with a directory" in said["model: unknown"]
     # From Hugging Face's cache: the file is fetched again once deleted from it, the cache named.
     assert "Delete it from Hugging Face's cache (" in said["model: not pinned"]
     assert "the next run fetches it again" in said["model: not pinned"]
     assert "hf download" not in said["model: not pinned"]
-    # From a directory: the copy there is not the one seedvr2x pins.
-    assert (
-        "in the model directory is not the file seedvr2x pins"
-        in said["model: not pinned, directory"]
-    )
-    assert "leave model_dir empty in seedvr2x Models" in said["model: not pinned, directory"]
+    # From a folder: the copy there is not the one seedvr2x pins.
+    assert "in the model folder is not seedvr2x's own file" in said["model: not pinned, directory"]
+    assert "leave model folder empty in seedvr2x Models" in said["model: not pinned, directory"]
     assert (
         "HF_HUB_OFFLINE" in said["model: offline"]
         and "fetches its files once" in said["model: offline"]
     )
     assert "HF_HUB_OFFLINE" not in said["model: unreachable"]
-    assert "give model_dir in seedvr2x Models" in said["model: unreachable"]
+    assert "give model folder in seedvr2x Models" in said["model: unreachable"]
     assert said["model: several"].count("\n") == 1
     host = str(words.refusal(refusals()["host copies"], keep=True))
     assert "asking 15.00 GiB" in host and "4.00 GiB available" in host
@@ -329,7 +326,7 @@ def test_what_the_nodes_refuse_themselves() -> None:
         words.non_finite("the picture's decode holds NaN or inf"),
     ):
         assert isinstance(refused, words.Refused) and "--" not in str(refused)
-    assert "the 2.00 GiB that ComfyUI's models still hold" in str(
+    assert "the 2.00 GiB that ComfyUI's models still use" in str(
         words.not_freed(need=20 * GIB, there=7 * GIB, comfy=2 * GIB)
     )
     assert "other programs' memory is what is left" in str(
@@ -400,8 +397,8 @@ def test_a_damaged_pinned_file_in_a_directory_keeps_the_way_too(tmp_path: Path) 
     assert isinstance(error, ModelsRefused)
     assert all(isinstance(each, ModelDamaged) for each in error.parts)
     text = str(words.refusal(error, model_dir=True))
-    assert text.count("replace it with the pinned file (https://huggingface.co/") == 2
-    assert "leave model_dir empty in seedvr2x Models to use Hugging Face's cache" in text
+    assert text.count("replace it with seedvr2x's own file (https://huggingface.co/") == 2
+    assert "leave model folder empty in seedvr2x Models to use Hugging Face's cache" in text
     assert "; fetch it again" not in text and " --" not in text
 
 
@@ -414,17 +411,17 @@ def test_a_file_seedvr2x_does_not_pin_keeps_the_librarys_words_when_damaged(
     assert isinstance(error, ModelsRefused)
     lines = str(words.refusal(error, model_dir=True)).splitlines()
     assert lines[0].endswith("; fetch it again") and "mine.safetensors" in lines[0]
-    assert "replace it with the pinned file" in lines[1]
+    assert "replace it with seedvr2x's own file" in lines[1]
 
 
-def test_files_missing_from_a_directory_are_worded_for_model_dir(tmp_path: Path) -> None:
+def test_files_missing_from_a_folder_are_worded_for_the_model_folder(tmp_path: Path) -> None:
     error = refused_by(tmp_path)
     assert isinstance(error, ModelsRefused) and all(
         isinstance(e, ModelMissing) for e in error.parts
     )
     lines = str(words.refusal(error, model_dir=True)).splitlines()
     assert len(lines) == 2
-    assert all("is not in the directory set as model_dir in seedvr2x Models" in x for x in lines)
+    assert all("is not in the folder set as model folder in seedvr2x Models" in x for x in lines)
     assert " --" not in "".join(lines)
 
 
@@ -451,13 +448,13 @@ def test_a_pinned_name_with_other_bytes_is_not_the_pinned_file_in_either_place(
         with pytest.raises(ModelsRefused) as refused:
             pull.check_pinned(files)
         text = str(words.refusal(refused.value, model_dir=where is not None))
-        assert "is not the file seedvr2x pins" in text and " --" not in text
-        assert ("in the model directory" in text) == (where is not None)
+        assert "is not seedvr2x's own file" in text and " --" not in text
+        assert ("in the model folder" in text) == (where is not None)
         assert ("Delete it from Hugging Face's cache" in text) == (where is None)
         assert "hf download" not in text
 
 
-def test_a_cache_the_network_stays_out_of_is_worded_with_the_way_to_set_model_dir(
+def test_a_cache_the_network_stays_out_of_is_worded_with_the_way_to_set_the_model_folder(
     snapshot: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from huggingface_hub import constants
@@ -467,7 +464,7 @@ def test_a_cache_the_network_stays_out_of_is_worded_with_the_way_to_set_model_di
     error = refused_by(None)
     assert isinstance(error, ModelUnreachable) and error.why == "offline"
     text = str(words.refusal(error))
-    assert "HF_HUB_OFFLINE" in text and "set model_dir in seedvr2x Models" in text
+    assert "HF_HUB_OFFLINE" in text and "set model folder in seedvr2x Models" in text
     assert " --" not in text
 
 

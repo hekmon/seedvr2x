@@ -193,7 +193,9 @@ class CudaMachine:
         if not torch.cuda.is_available():
             raise words.no_cuda("torch finds no CUDA device")
         if not torch.cuda.is_bf16_supported():
-            raise words.no_cuda("the GPU doesn't compute in bfloat16, which the models run in")
+            raise words.no_cuda(
+                "this graphics card can't compute in bfloat16, the number format the model runs in"
+            )
         self.torch = torch
         self.device = device
         _startup()
@@ -650,7 +652,7 @@ def _load_kept(
     dropped = handle.key in _dropped
     again = " again, ComfyUI having dropped them" if dropped else ""
     _dropped.discard(handle.key)
-    logger.info("loading %s into pinned system memory%s, to keep between runs", handle.dit, again)
+    logger.info("loading %s into RAM%s, to keep between runs", handle.dit, again)
     note = (
         "ComfyUI's Unload models had dropped seedvr2x's weights from RAM: they are read from the"
         " files again"
@@ -816,7 +818,7 @@ def _session[T](
     _allocator_note(machine_)
     keeping = decide_keeping(handle)
     keep = keeping.kept
-    logger.info("seedvr2x: models %s", keeping.text)
+    logger.info("seedvr2x: %s", keeping.line)
     if not keep and not plan_only:
         # The weights of an earlier run, kept, are freed before this run reads its own: never
         # two sets pinned for one choice.
@@ -876,9 +878,9 @@ def _session[T](
         # card's where NVML reports less.
         wanted = needed + ASK_MARGIN + max(own.reported - _taken(own), 0)
         logger.info(
-            "asking ComfyUI to free %.2f GiB of the card for this run (%.2f GiB free, %.2f GiB"
-            " held by its models; %.2f GiB of that over the plan's room, for the buffer its partial"
-            " unloads keep)",
+            "asking ComfyUI for %.2f GiB free on the card for this run (%.2f GiB free, %.2f GiB"
+            " used by its models; %.2f GiB of that over what the run needs, for what its unloading"
+            " keeps)",
             wanted / memory.GIB,
             _taken(own) / memory.GIB,
             held / memory.GIB,

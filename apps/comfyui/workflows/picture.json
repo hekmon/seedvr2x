@@ -90,19 +90,37 @@
       "mode": 0,
       "inputs": [
         {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 3
+        },
+        {
           "name": "models",
           "type": "SEEDVR2X_MODELS",
           "link": 1
         },
         {
-          "name": "image",
-          "type": "IMAGE",
-          "link": 3
+          "name": "encode_tile",
+          "type": "INT",
+          "shape": 7,
+          "link": null
+        },
+        {
+          "name": "decode_tile",
+          "type": "INT",
+          "shape": 7,
+          "link": null
+        },
+        {
+          "name": "swap_blocks",
+          "type": "INT",
+          "shape": 7,
+          "link": null
         }
       ],
       "outputs": [
         {
-          "name": "image",
+          "name": "images",
           "type": "IMAGE",
           "links": [
             4
@@ -121,11 +139,8 @@
       },
       "widgets_values": [
         1080,
-        0,
-        0,
-        -1,
         "auto",
-        "split",
+        true,
         42,
         "fixed",
         false
@@ -200,7 +215,7 @@
       1,
       0,
       4,
-      0,
+      1,
       "SEEDVR2X_MODELS"
     ],
     [
@@ -208,7 +223,7 @@
       3,
       0,
       4,
-      1,
+      0,
       "IMAGE"
     ],
     [

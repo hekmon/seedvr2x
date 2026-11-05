@@ -212,23 +212,28 @@ def execute(node: type[io.ComfyNode], unique_id: str | None = "1", **inputs: Any
     return node.EXECUTE_NORMALIZED({io.Hidden.unique_id: unique_id}, **inputs)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
 
 
-def widgets(settings: plans.Settings, *, video: bool = False) -> dict[str, Any]:
-    """The widget values of an upscale node for settings (the library's pins, None: auto): 0 is
-    auto for a tile and the window, -1 for the blocks, the largest tile's next is untiled."""
+def inputs(settings: plans.Settings, *, video: bool = False) -> dict[str, Any]:
+    """The inputs an upscale node is given for settings (the library's pins, None: left to the
+    plan): the widgets' values, and a number the plan makes only where it is pinned, as a value
+    wired in (an unwired optional input is not given); a tile pinned untiled is the input's
+    value past the largest tile, the colour correction a BOOLEAN."""
 
-    def tile(pin: int | None) -> int:
-        return plans.AUTO_TILE if pin is None else plans.UNTILED_TILE if pin == 0 else pin
+    def tile(pin: int) -> int:
+        return plans.UNTILED_TILE if pin == 0 else pin
 
     found: dict[str, Any] = {
-        "encode_tile": tile(settings.encode_tile),
-        "decode_tile": tile(settings.decode_tile),
-        "swap_blocks": plans.AUTO_SWAP if settings.swap_blocks is None else settings.swap_blocks,
         "attention": plans.AUTO if settings.attention is None else settings.attention,
-        "color_correction": settings.color_correction,
+        "color_correction": settings.split,
         "seed": settings.seed,
     }
-    if video:
-        found["window"] = plans.AUTO_WINDOW if settings.window is None else settings.window
+    if settings.encode_tile is not None:
+        found["encode_tile"] = tile(settings.encode_tile)
+    if settings.decode_tile is not None:
+        found["decode_tile"] = tile(settings.decode_tile)
+    if settings.swap_blocks is not None:
+        found["swap_blocks"] = settings.swap_blocks
+    if video and settings.window is not None:
+        found["window"] = settings.window
     return found
 
 
@@ -247,11 +252,11 @@ def upscale_image(
     out = execute(
         nodes.UpscaleImage,
         unique_id,
+        images=image,
         models=handle,
-        image=image,
         resolution=resolution,
         plan_only=plan_only,
-        **widgets(settings),
+        **inputs(settings),
     )
     return out[0], out[1]
 
@@ -271,11 +276,11 @@ def upscale_video(
     out = execute(
         nodes.UpscaleVideo,
         unique_id,
-        models=handle,
         images=images,
+        models=handle,
         resolution=resolution,
         plan_only=plan_only,
-        **widgets(settings, video=True),
+        **inputs(settings, video=True),
     )
     return out[0], out[1]
 

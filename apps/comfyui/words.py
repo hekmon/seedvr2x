@@ -8,7 +8,7 @@ MemoryShort, HostShort, InputTooLarge, PinRefused, CompileRefused) and a message
 function of how an application words a setting (errors.Say, Refusal.words). `say` is the nodes'
 words for a setting: the widget as the user sees it and the node it is in. A refusal may be
 worded long after it was raised, by whoever holds it: nothing here reads a state of the run, only
-the refusal and the facts handed in (the DiT file, whether a model directory was set, whether the
+the refusal and the facts handed in (the DiT file, whether a model folder was set, whether the
 models are kept in RAM, the smaller files of the same 7B that would plan the run).
 
 The node raises the result, `Refused`, an exception ComfyUI shows with its message."""
@@ -41,7 +41,8 @@ from seedvr2x.weights import AGAIN
 from . import plans
 
 MODELS = "seedvr2x Models"
-KEEP = "keep in RAM between runs"
+KEEP = plans.LABELS["keep_in_ram_between_runs"]
+FOLDER = plans.LABELS["model_dir"]
 
 
 class Refused(Exception):
@@ -53,14 +54,14 @@ class Refused(Exception):
 
 
 def say(setting: Setting) -> str:
-    """The nodes' words for a setting a library refusal names (errors.Say): the widget by the name
-    it has (its label), its value, and that it is on this node. A tile the library pins at 0 is
-    untiled, which the widget says with plans.UNTILED_TILE (0 being its auto)."""
+    """The nodes' words for a setting a library refusal names (errors.Say): the input by its label,
+    its value, and that it is on this node. A tile the library pins at 0 is untiled, which the
+    input says with plans.UNTILED_TILE."""
     name, value = setting.name, setting.value
     if name in ("window", "swap_blocks", "encode_tile", "decode_tile"):
-        label = name.replace("_", " ")
+        label = plans.LABELS[name]
         if name.endswith("_tile") and value == "0":
-            value = f"untiled ({plans.UNTILED_TILE})"
+            value = f"{plans.UNTILED_TILE} (no tiles)"
         return f"{label} {value} on this node" if value else f"{label} on this node"
     if name == "resolution":
         return f"resolution {value} on this node" if value else "resolution on this node"
@@ -70,7 +71,7 @@ def say(setting: Setting) -> str:
     if name == "vae_model":
         return "the VAE file"
     if name == "model_dir":
-        return f"model_dir in {MODELS}"
+        return f"{FOLDER} in {MODELS}"
     if name == "cuts":
         return "a cut list, which the nodes don't take"
     if name == "compile":
@@ -89,7 +90,7 @@ _FILES = {"int8": "the int8 file", "the dynamic GGUF": "the dynamic GGUF file"}
 
 def _smaller(smaller: Sequence[pull.Smaller], model_dir: bool) -> str:
     """The way out of the smaller files that plan the run, named as the Models node lists them:
-    the file by its kind and size, the node it is chosen in; with a model directory set, the file
+    the file by its kind and size, the node it is chosen in; with a model folder set, the file
     must be there under its name."""
     if not smaller:
         return ""
@@ -99,18 +100,18 @@ def _smaller(smaller: Sequence[pull.Smaller], model_dir: bool) -> str:
     way = f"choose {' or '.join(named)} in {MODELS}, which plans this run"
     if model_dir:
         names = ", ".join(each.name for each in smaller)
-        way += f" (with a model directory set there, the file must be in it: {names})"
+        way += f" (with a {FOLDER} set there, the file must be in it: {names})"
     return way
 
 
 def _host_way(keep: bool) -> str:
-    """The way out of a host short of memory: a smaller file pins less, and a model not kept
-    between runs pins only what leaves the card for the run."""
+    """The way out of a host short of memory: a smaller file takes less, and a model not kept
+    between runs takes only what does not fit on the card, for the run."""
     return (
-        f"set {KEEP} to off in {MODELS}, so that the weights are read for the run and only what"
-        " leaves the card is pinned in system memory"
+        f"set {KEEP} to off in {MODELS}, so that the model is read for each run and only the part"
+        " that does not fit on the card is in RAM"
         if keep
-        else "close programs that hold system memory"
+        else "close programs that use the computer's RAM"
     )
 
 
@@ -129,6 +130,7 @@ def _plan(error: PlanRefused, smaller: Sequence[pull.Smaller], model_dir: bool, 
             ways.append(way)
     elif isinstance(error, HostShort):
         ways.append(_host_way(keep))
+        ways.append("lower the resolution on this node, or give it fewer images")
         way = _smaller(smaller, model_dir)
         if way:
             ways.append(way)
@@ -182,8 +184,8 @@ def _again(error: ModelError, model_dir: bool) -> str:
         return text
     if model_dir:
         way = (
-            f"replace it with the pinned file ({pull.url(error.file)}), or leave model_dir empty"
-            f" in {MODELS} to use Hugging Face's cache"
+            f"replace it with seedvr2x's own file ({pull.url(error.file)}), or leave {FOLDER}"
+            f" empty in {MODELS} to use Hugging Face's cache"
         )
     else:
         way = (
@@ -200,29 +202,31 @@ def _model_files(error: ModelError, model_dir: bool) -> str:
         return "\n".join(_model_files(part, model_dir) for part in error.parts)
     if isinstance(error, ModelMissing):
         return (
-            f"{error.file or 'a model file'} is not in the directory set as model_dir in"
-            f" {MODELS}: put the file there under that name, or leave model_dir empty to use"
-            " Hugging Face's cache, where seedvr2x fetches its files"
+            f"{error.file or 'a model file'} is not in the folder set as {FOLDER} in {MODELS}:"
+            f" put the file there under that name, or leave {FOLDER} empty to use Hugging Face's"
+            " cache, where seedvr2x fetches its files"
         )
     if isinstance(error, ModelNotPinned):
-        found = f"{error.figure} {error.found}, where the pin has {error.expected}"
+        unit = " bytes" if error.figure == "size" else ""
+        found = f"{error.figure} {error.found}{unit}, where seedvr2x's has {error.expected}{unit}"
         if error.command or not model_dir:
             # From Hugging Face's cache: seedvr2x fetches the file again once it is deleted.
             return (
-                f"{error.file} is not the file seedvr2x pins ({found}). Delete it from Hugging"
-                f" Face's cache ({pull.cache()}) and the next run fetches it again."
+                f"{error.file} is not seedvr2x's own file ({found}). Delete it from Hugging Face's"
+                f" cache ({pull.cache()}) and the next run fetches it again."
             )
+        source = f" ({pull.url(error.file)})" if error.file in pull.PINNED else ""
         return (
-            f"{error.file} in the model directory is not the file seedvr2x pins ({found}): replace"
-            f" it with the pinned file, or leave model_dir empty in {MODELS} to use Hugging Face's"
+            f"{error.file} in the {FOLDER} is not seedvr2x's own file ({found}): replace it with"
+            f" seedvr2x's file{source}, or leave {FOLDER} empty in {MODELS} to use Hugging Face's"
             " cache"
         )
     if isinstance(error, ModelUnreachable) and error.why == "offline":
         return (
             f"{error.file or 'a model file'} is not in Hugging Face's cache ({pull.cache()}) and"
-            " the environment keeps the network out (HF_HUB_OFFLINE is set). seedvr2x fetches its"
-            " files once, at the first run: unset HF_HUB_OFFLINE for it, or set model_dir in"
-            f" {MODELS} to a directory that holds them"
+            " Hugging Face's offline mode is on (HF_HUB_OFFLINE is set). seedvr2x fetches its"
+            " files once, at the first run: unset HF_HUB_OFFLINE and restart ComfyUI, or set"
+            f" {FOLDER} in {MODELS} to a folder that holds them"
         )
     if isinstance(error, ModelDamaged | ModelChanged):
         return _again(error, model_dir)
@@ -243,7 +247,7 @@ def refusal(
     way out in the nodes' terms; the probe's; a target too small for the padding; the model
     files' and the host's by their kind and facts; any other by its words. `smaller` are the
     pinned files smaller than the DiT file that plan the run (pull.smaller_planning), `model_dir`
-    whether a model directory was set, `keep` whether the models are kept in RAM between runs."""
+    whether a model folder was set, `keep` whether the models are kept in RAM between runs."""
     if isinstance(error, PlanRefused):
         return Refused(_plan(error, smaller, model_dir, keep))
     if isinstance(error, ProbeRefusal):
@@ -270,33 +274,35 @@ def no_cuda(reason: str) -> Refused:
 def attention_missing() -> Refused:
     return Refused(
         "attention is set to flash_attn_2 on this node, and FlashAttention 2 isn't installed in"
-        " ComfyUI's environment: choose auto, which runs it where it is installed and PyTorch's"
-        " SDPA where it isn't, or sdpa"
+        " ComfyUI's Python: choose auto (FlashAttention 2 where it is installed, else PyTorch's"
+        " SDPA) or sdpa"
     )
 
 
 def not_freed(*, need: int, there: int, comfy: int) -> Refused:
     """The card still short after ComfyUI was asked to free its models: what the plan counts on,
     what is there, and what ComfyUI's models that stay still hold."""
-    left = (
-        "other programs' memory is what is left"
+    left, unload = (
+        ("other programs' memory is what is left", "")
         if comfy == 0
-        else f"the {_gib(comfy)} that ComfyUI's models still hold, and other programs' memory,"
-        " are what is left"
+        else (
+            f"the {_gib(comfy)} that ComfyUI's models still use, and other programs' memory,"
+            " are what is left",
+            " use Unload models in ComfyUI's menu, or",
+        )
     )
     return Refused(
         f"the card has {_gib(there)} free for seedvr2x's plan, which counts on {_gib(need)}, after"
-        f" ComfyUI was asked to free its models; {left}. Close the programs that use the card, or"
-        f" use Unload models in ComfyUI's menu, or choose a smaller DiT file in {MODELS} or a"
-        " lower resolution on this node"
+        f" ComfyUI was asked to free its models; {left}. Close the programs that use the card,"
+        f" or{unload} choose a smaller model file in {MODELS} or a lower resolution on this node"
     )
 
 
 def transparent() -> Refused:
     return Refused(
-        "the image has transparent pixels, and seedvr2x refuses it: the model would redraw the"
-        " colours hidden under them and fringe the edges. Flatten it onto a background before this"
-        " node (a node that composites it onto a colour or another image)"
+        "the image has transparent pixels, which seedvr2x refuses: the model would redraw the"
+        " colours hidden under them and leave coloured edges. Put the image on a background"
+        " first (with an image composite node, for one) and connect the result here"
     )
 
 
@@ -308,7 +314,7 @@ def channels(count: int) -> Refused:
 
 
 def frames_missing() -> Refused:
-    return Refused("the node got no image: its batch is empty")
+    return Refused("the images input is empty: the node got no image")
 
 
 def non_finite(message: str) -> Refused:

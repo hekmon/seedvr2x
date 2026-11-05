@@ -11,33 +11,44 @@ you have, with the plan said on the node and a refusal, where one is due, before
 
 ## The nodes
 
-- **seedvr2x Models** chooses the DiT file by name, with its size and the
-  [model card's](../../models/hf/README.md) typical error per weight: `Sharp 7B, float16
+- **seedvr2x Models** chooses the DiT file by name, with its size and its error per weight, as
+  the [model card](../../models/hf/README.md) gives it (how far its stored weights are from
+  ByteDance's original, the median over the 7B's 288 large matrices): `Sharp 7B, float16
   (16.5 GB, 0.02%)` (the default), `Sharp 7B, int8 (8.3 GB, 0.86%)`, `Sharp 7B, dynamic GGUF
   (4.8 GB, 7.55%)`, and the regular 7B in each. It also chooses where the files are read from
-  (Hugging Face's cache, or a directory) and whether the weights stay in RAM between runs: `auto`,
-  `on` or `off` ([Memory](#memory)). Nothing is loaded here: the first upscale run loads.
+  (`model folder`: empty for Hugging Face's cache, or a folder) and whether the model stays in
+  RAM between runs: `auto`, `on` or `off` ([Memory](#memory)). Nothing is loaded here: the first
+  upscale run loads.
 - **seedvr2x Upscale Image** upscales each picture of a batch on its own, to the output's short
   side given by `resolution` (1080 by default).
 - **seedvr2x Upscale Video** upscales the frames it is given as one shot, in sliding windows of the
-  DiT.
+  model.
 
-Each upscale node carries its own settings as widgets, each at auto: set one and the plan is built
-around it, taken exactly or refused. Every number is an `INT`, so that any node that outputs an
-integer can drive it; the widget's label says what its auto is.
+Each upscale node takes `images` first, then `models`, and gives `images` and `plan`. Its settings
+are widgets, each at its default:
 
-| Widget | Auto | Notes |
+| Widget | Default | Notes |
 | --- | --- | --- |
-| encode tile, decode tile | `0` | The VAE's tiles, squares of this many output pixels a side: a multiple of 64 from 512 to 2048, or `2112` for one pass (untiled). |
-| swap blocks | `-1` | The DiT's last blocks that stream through the card, from `0` (none) to 36. |
-| window cap (Upscale Video) | `0` | The cap on the DiT's windows, in latents of 4 frames, from 5 to 128. |
+| resolution | `1080` | The output's short side, in pixels. |
 | attention | `auto` | FlashAttention 2 where ComfyUI's environment has it, else PyTorch's SDPA. |
-| colour correction | `split` | `split` keeps the input's coarse lightness and colour under the model's details; `none` leaves the model's. |
+| colour correction | on (`split`) | On, `split`, keeps the input's overall colours and brightness with the model's fine detail; off, `none`, leaves the model's own colours, which can drift. |
 | seed | `42` | ComfyUI's seed with its control after generate, `fixed`. |
-| plan only | off | Make the plan, say it and give it as text, and stop: no model is loaded and the nodes after the picture output do not run. |
+| plan only | off | Make the plan, say it and give it as text, and stop: no model is loaded and the nodes after the images output do not run. |
 
-A value typed in a widget is checked when the prompt is queued, and one fed by another node when
-the node starts, before anything loads; a value the plan does not try is refused in these words.
+The numbers the plan makes are optional inputs, sockets with no widget. Unconnected, the plan
+chooses, and its text says what it chose (`encode tile: auto -> 1024 px`); a number connected is
+taken exactly and the plan is built around it, or the run is refused before anything loads.
+
+| Input | Values |
+| --- | --- |
+| encode tile, decode tile | The VAE's tiles, squares of this many output pixels a side: 512 to 2048 in steps of 64, or `2112` for no tiles, the whole image at once. |
+| blocks swapped | The model's blocks that wait in RAM and pass through the card in turn, from `0` (none) to 36. |
+| window length (Upscale Video) | The longest stretch of frames the model works on at once, in groups of 4 frames, from 5 to 128. |
+
+Connect an `Int` node to one to set it. ComfyUI's `Primitive` node, which a double click on such
+an input makes, sends it no value in ComfyUI v0.44.0 (its frontend 1.57.6): the plan's text then
+says `auto`. No value node takes the input's range from it, so a value outside it is refused when
+the node starts, saying the range.
 
 Each upscale node makes its plan at run time, where the input's size and the card are known, and
 says it three ways: on the node, in ComfyUI's console, and as its `plan` output, text that
@@ -61,7 +72,8 @@ pip install "diffusers>=0.42" omegaconf rotary-embedding-torch
   have passed. The library's tests pass with the Pillow 13 and huggingface_hub 2 that ComfyUI's
   installs hold; diffusers past the command line's 0.40 is not yet compared with it bit for bit.
 - The two example workflows, `workflows/picture.json` and `workflows/clip.json`, load by dragging
-  them into ComfyUI. Each has seedvr2x Models wired in; the settings are on the upscale node.
+  them into ComfyUI. Each has seedvr2x Models connected, every widget at its default and every
+  optional input unconnected.
 
 ## Model files
 
@@ -73,8 +85,19 @@ before starting ComfyUI to put the cache on another disk. The command line finds
 there ([its README](../seedvr2x/README.md#model-files)).
 
 Not ComfyUI's `models/` folders: its own SeedVR2 files sit there and are not seedvr2x's. To read
-the files from a directory instead, give it in `model_dir`: they are read there by name and
-nothing is downloaded.
+the files from a folder instead, give it in `model folder`: they are read there by name, nothing
+downloaded: the VAE, `seedvr2x_ema_vae_fp16.safetensors`, and the DiT file chosen, under its name
+in the repository (`seedvr2x_ema_7b_sharp_fp16.safetensors` for the default), the same files and
+names the command line reads from a folder.
+
+**On Windows.** Without Windows' Developer Mode, huggingface_hub can't make the links its cache is
+built of: it copies the files instead, and says so once in ComfyUI's console, in a warning that
+begins "`huggingface_hub` cache-system uses symlinks by default". Setting the environment variable
+`HF_HUB_DISABLE_SYMLINKS_WARNING` silences it. For seedvr2x's files nothing is duplicated: each is
+downloaded once, and only a change of the version seedvr2x pins keeps the earlier copies beside
+the new ones. Developer Mode turns the links on. A cache written under WSL can't be read from
+Windows: its links are WSL's own, and Windows fails on them with "The system cannot access the
+file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
 
 ## Limits
 
@@ -95,7 +118,9 @@ nothing is downloaded.
   where they fit under ComfyUI's own cap on pinned memory (its `MAX_PINNED_MEMORY`: 40% of the
   RAM on Windows, up to 90% of it on Linux, none where pinned memory is off); `on` keeps them
   whatever the cap; `off` reads the files for each run and drops them after it. The plan says
-  which: `kept, 7.90 GiB (cap 12.80 GiB)`, or `not kept: 15.80 GiB is over the cap of 12.80 GiB`.
+  which: `keep in RAM between runs: auto -> kept, 7.90 GiB (ComfyUI allows 12.80 GiB)`, or
+  `auto -> not kept: 15.80 GiB is over the 12.80 GiB ComfyUI allows`. Under ComfyUI's
+  `--disable-smart-memory`, which unloads every model after each prompt, nothing is kept.
   ComfyUI's `Unload models` frees them, and ComfyUI may drop them itself when its own models need
   the room: the next run then reads the files again, and says so on the node. Choosing another
   file frees the first one's memory before the second is pinned.
@@ -113,4 +138,5 @@ nothing is downloaded.
   The nodes set no limit on torch's memory: ComfyUI's process is shared with its other nodes,
   and a limit set there cannot be taken back.
 - **A card too small** is refused before any model loads, with the way out in the nodes' own
-  words: a smaller file in seedvr2x Models, a tile or the blocks swapped on the upscale node.
+  words: a smaller file in seedvr2x Models, a tile or the blocks swapped connected to the upscale
+  node.

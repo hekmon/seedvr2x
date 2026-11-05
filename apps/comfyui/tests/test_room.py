@@ -132,12 +132,12 @@ def test_the_room_is_in_the_plans_text(machine: StandIn, tmp_path) -> None:
     resident = comfy_model(20 * GIB)
     text = upscale(handle(tmp_path))
     assert resident.loaded_size() < 20 * GIB
-    assert "ComfyUI's own models hold 20.00 GiB" in text
-    assert "ComfyUI was asked to free" in text and "asked to free nothing" not in text
+    assert "ComfyUI's own models use 20.00 GiB" in text
+    assert "ComfyUI was asked to unload models until" in text and "no need to" not in text
     management.reset()
     models.reset()
     models.use(machine)
-    assert "asked to free nothing" in upscale(handle(tmp_path))
+    assert "no need to unload ComfyUI's models" in upscale(handle(tmp_path))
 
 
 def test_a_run_refused_for_memory_is_refused_before_the_files_are_read(
@@ -225,9 +225,9 @@ def test_comfys_partial_unload_keeping_a_buffer_still_leaves_the_plans_room(
     assert resident.loaded_size() > 0, "ComfyUI's model is freed partly, not whole"
     # The plan does not count the margin: its text gives the plan's own need.
     margin = models.ASK_MARGIN
-    assert f"asked to free {(need + margin) / GIB:.2f} GiB of free memory (the plan's" in text
-    assert f"the plan's {need / GIB:.2f} GiB for its largest phase" in text
-    assert f"and {margin / GIB:.2f} GiB over it for ComfyUI's partial unload" in text, text
+    assert f"asked to unload models until {(need + margin) / GIB:.2f} GiB was free" in text
+    assert f"the {need / GIB:.2f} GiB this run needs, with a safety margin" in text
+    assert f"and {margin / GIB:.2f} GiB more, as ComfyUI leaves some memory unfreed" in text, text
 
 
 def test_the_margin_is_asked_only_where_comfy_is_asked(machine: StandIn, tmp_path) -> None:

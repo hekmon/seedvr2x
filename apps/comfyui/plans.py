@@ -5,8 +5,8 @@ nodes' words.
 
 Plain Python and the library's planning modules, no torch and nothing of ComfyUI's: the node
 classes (nodes.py) and the run (models.py) build on it, and the tests hold it alone. The nodes'
-words never name an option of the command line: a setting is named as the widget the user sees,
-on the node that has it (words.say)."""
+words never name an option of the command line: a setting is named by the label the user sees
+on the node that has it (LABELS, words.say)."""
 
 from dataclasses import dataclass
 
@@ -48,28 +48,25 @@ DIT_LABELS: dict[str, str] = {
 DEFAULT_DIT = "seedvr2x_ema_7b_sharp_fp16.safetensors"
 VAE_FILE = "seedvr2x_ema_vae_fp16.safetensors"
 
-# The settings of an upscale node, each an INT widget (or a combo) so that any node that outputs
-# an INT can drive it. "Auto" is a value no pin can take: 0 for a tile's side and the window cap,
-# -1 for the blocks swapped (0 is a real pin there: swap none). What the plan tries is the grid
-# of the widget (min, max, step), so that a typed or dragged value lands on it (the frontend
-# rounds an INT to the nearest multiple of its step from its min, ComfyUI_frontend 1.57's
-# useIntWidget): a tile a multiple of peaks.TILE_STEP from peaks.TILE_MIN to peaks.TILE_MAX, the
-# tiles the plan makes; blocks from 0 to the DiT's; a window from 5 latents (shots.SHARED makes
-# shorter ones leave no latent of their own) to 128.
+# The settings of an upscale node. The numbers the plan makes (each pass's tile, the blocks
+# swapped, a clip's window length) are optional INT inputs with no widget (the user's Desktop
+# test, 2026-11-05: a widget whose 0 meant auto let a tile of 64 px be chosen): unwired, the plan
+# chooses; wired, the value is taken exactly. Their min, max and step are the planner's own
+# candidates, so that a value on the grid is one the plan could take: a tile a multiple of
+# peaks.TILE_STEP from peaks.TILE_MIN to peaks.TILE_MAX, the tiles the plan makes; blocks from 0
+# (none swapped) to the DiT's; a window from 5 latents (shots.SHARED makes shorter ones leave no
+# latent of their own) to 128.
 #
-# Untiled is a tile pin of its own in the library (0), which an INT with 0 for auto cannot
-# say, and no side says it: a side that covers the frame is refused there (shot_plan's
-# _covering), the planner taking a covering tile for no tiling. So the widget's one value past the
-# largest tile, TILE_MAX + TILE_STEP, on the same grid, is untiled; the frontend shows no word for
-# a special value of an INT (its widget has a min, a max, a step and a display type), so the label
-# and the tooltip say it.
-AUTO_TILE = 0
-AUTO_WINDOW = 0
-AUTO_SWAP = -1
+# Untiled is a tile pin of its own in the library (0), and no side says it: a side that covers
+# the frame is refused there (shot_plan's _covering), the planner taking a covering tile for no
+# tiling. So the input's one value past the largest tile, TILE_MAX + TILE_STEP, on the same grid,
+# is untiled, which the tooltip says (ComfyUI_frontend 1.57 has no word for a special value of an
+# INT: a min, a max, a step and a display type).
 UNTILED_TILE = peaks.TILE_MAX + peaks.TILE_STEP
 WINDOW_MIN = 2 * shots.SHARED + 1
 WINDOW_MAX = 128
 ATTENTIONS = (AUTO, peaks.SDPA, peaks.FLASH_ATTN_2)
+# The colour correction, a BOOLEAN: on is split, off none (the user, 2026-11-05).
 CORRECTIONS = ("split", "none")
 # The command line's default seed, and the highest seed it takes for a shot at frame 0, which a
 # picture and a clip both are: the seed plus the encode's offset must stay under numz's 2**32
@@ -87,77 +84,107 @@ RESOLUTION_MAX = 16_384
 # pinned memory.
 KEEP_MODES = ("auto", "on", "off")
 
+# The labels the nodes show for their inputs, which the plan's text and the refusals name.
+LABELS = {
+    "window": "window length",
+    "swap_blocks": "blocks swapped",
+    "encode_tile": "encode tile",
+    "decode_tile": "decode tile",
+    "resolution": "resolution",
+    "attention": "attention",
+    "color_correction": "colour correction",
+    "seed": "seed",
+    "plan_only": "plan only",
+    "model": "model",
+    "model_dir": "model folder",
+    "keep_in_ram_between_runs": "keep in RAM between runs",
+}
+
 
 class BadSetting(ValueError):
-    """A setting no widget of the node takes, worded for the node's user (it reaches the user as
-    the node's refusal, at queue time when the value is typed, at the node's start when linked)."""
+    """A value an input of the node does not take, worded for the node's user (it reaches the user
+    as the node's refusal: at queue time for a value the prompt holds, at the node's start for one
+    a link gives)."""
 
 
-def tile_problem(label: str, value: int) -> str | None:
-    """Why `value` is no tile side of the widget `label`, or None: 0 is auto, UNTILED_TILE one
-    pass, else a multiple of peaks.TILE_STEP from peaks.TILE_MIN to peaks.TILE_MAX."""
-    if value in (AUTO_TILE, UNTILED_TILE):
+def tile_problem(name: str, value: int) -> str | None:
+    """Why `value` is no tile side for the input `name` (encode_tile, decode_tile), or None: a
+    multiple of peaks.TILE_STEP from peaks.TILE_MIN to peaks.TILE_MAX, or UNTILED_TILE."""
+    if value == UNTILED_TILE:
         return None
     if peaks.TILE_MIN <= value <= peaks.TILE_MAX and value % peaks.TILE_STEP == 0:
         return None
     return (
-        f"{label} {value}: a tile the plan makes is a multiple of {peaks.TILE_STEP} from"
-        f" {peaks.TILE_MIN} to {peaks.TILE_MAX} px; 0 is auto, {UNTILED_TILE} is one pass"
-        " (untiled)"
+        f"{LABELS[name]} {value}: must be {peaks.TILE_MIN} to {peaks.TILE_MAX} px in steps of"
+        f" {peaks.TILE_STEP}, or {UNTILED_TILE} for no tiles"
     )
 
 
 def swap_problem(value: int) -> str | None:
-    if AUTO_SWAP <= value <= peaks.BLOCKS:
+    if 0 <= value <= peaks.BLOCKS:
         return None
-    return f"swap blocks {value}: from 0 to {peaks.BLOCKS} blocks, or {AUTO_SWAP} for auto"
+    return f"{LABELS['swap_blocks']} {value}: must be from 0 to {peaks.BLOCKS}"
 
 
 def window_problem(value: int) -> str | None:
-    if value == AUTO_WINDOW or WINDOW_MIN <= value <= WINDOW_MAX:
+    if WINDOW_MIN <= value <= WINDOW_MAX:
         return None
-    return (
-        f"window {value}: from {WINDOW_MIN} to {WINDOW_MAX} latents (4 frames each), or 0 for auto"
-    )
+    return f"{LABELS['window']} {value}: must be from {WINDOW_MIN} to {WINDOW_MAX}"
 
 
 def seed_problem(value: int) -> str | None:
     if 0 <= value <= SEED_MAX:
         return None
-    return f"seed {value}: from 0 up to {SEED_MAX:,}"
+    return f"seed {value}: must be from 0 to {SEED_MAX:,}"
+
+
+def _problem(name: str, value: object) -> str | None:
+    """Why `value`, given for the number `name`, is not one the input takes, or None. A link may
+    carry anything: what is no whole number is refused first."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return f"{LABELS[name]} {value!r}: must be a whole number"
+    if name in ("encode_tile", "decode_tile"):
+        return tile_problem(name, value)
+    if name == "swap_blocks":
+        return swap_problem(value)
+    if name == "window":
+        return window_problem(value)
+    return seed_problem(value)
 
 
 def problems(
     *,
-    window: int | None = None,
-    swap_blocks: int | None = None,
-    encode_tile: int | None = None,
-    decode_tile: int | None = None,
-    seed: int | None = None,
+    window: object = None,
+    swap_blocks: object = None,
+    encode_tile: object = None,
+    decode_tile: object = None,
+    seed: object = None,
 ) -> list[str]:
-    """What is wrong with the numbers given (a number left None is not checked): each reason as
-    the node words it. The widgets' own min, max and step cannot refuse a typed or linked value
-    that is on the grid but not a tile (64 to 448 px), nor a window of 1 to 4 latents."""
-    found = [
-        None if encode_tile is None else tile_problem("encode tile", encode_tile),
-        None if decode_tile is None else tile_problem("decode tile", decode_tile),
-        None if swap_blocks is None else swap_problem(swap_blocks),
-        None if window is None else window_problem(window),
-        None if seed is None else seed_problem(seed),
-    ]
+    """What is wrong with the numbers given (a number left None is not given, and not checked):
+    each reason as the node words it. The inputs' own min, max and step hold neither a value that
+    a link gives nor one on the grid but outside the tiles the plan makes."""
+    given = {
+        "encode_tile": encode_tile,
+        "decode_tile": decode_tile,
+        "swap_blocks": swap_blocks,
+        "window": window,
+        "seed": seed,
+    }
+    found = [_problem(name, value) for name, value in given.items() if value is not None]
     return [each for each in found if each is not None]
 
 
-def _tile(value: int) -> int | None:
-    """A tile widget's value as the library's pin: None for auto, 0 for untiled."""
-    return None if value == AUTO_TILE else 0 if value == UNTILED_TILE else value
+def _tile(value: int | None) -> int | None:
+    """A tile input's value as the library's pin: None unwired (the plan's choice), 0 untiled."""
+    return 0 if value == UNTILED_TILE else value
 
 
 @dataclass(frozen=True)
 class Settings:
     """The choices of an upscale node, and nothing of a plan: the pins the plan takes exactly
     (None: left to the plan), the attention kernel (None: whichever the environment runs), the
-    colour correction and the seed. Held by value: a workflow saved and run again gives the same."""
+    colour correction (CORRECTIONS) and the seed. Held by value: a workflow saved and run again
+    gives the same."""
 
     window: int | None = None
     swap_blocks: int | None = None
@@ -171,16 +198,17 @@ class Settings:
     def of(
         cls,
         *,
-        window: int = AUTO_WINDOW,
-        swap_blocks: int = AUTO_SWAP,
-        encode_tile: int = AUTO_TILE,
-        decode_tile: int = AUTO_TILE,
+        window: int | None = None,
+        swap_blocks: int | None = None,
+        encode_tile: int | None = None,
+        decode_tile: int | None = None,
         attention: str = AUTO,
-        color_correction: str = "split",
+        color_correction: bool = True,
         seed: int = SEED,
     ) -> "Settings":
-        """The settings of the widgets' values. BadSetting, worded for the node, for a value the
-        widget does not take."""
+        """The settings of the node's inputs: a number None where its input is unwired, the
+        colour correction's on or off. BadSetting, worded for the node, for a value an input does
+        not take."""
         found = problems(
             window=window,
             swap_blocks=swap_blocks,
@@ -189,18 +217,18 @@ class Settings:
             seed=seed,
         )
         if attention not in ATTENTIONS:
-            found.append(f"attention {attention!r}: one of {', '.join(ATTENTIONS)}")
-        if color_correction not in CORRECTIONS:
-            found.append(f"colour correction {color_correction!r}: one of {', '.join(CORRECTIONS)}")
+            found.append(f"attention {attention!r}: must be one of {', '.join(ATTENTIONS)}")
+        if not isinstance(color_correction, bool):  # pyright: ignore[reportUnnecessaryIsInstance]
+            found.append(f"colour correction {color_correction!r}: must be on or off")
         if found:
             raise BadSetting("; ".join(found))
         return cls(
-            None if window == AUTO_WINDOW else window,
-            None if swap_blocks == AUTO_SWAP else swap_blocks,
+            window,
+            swap_blocks,
             _tile(encode_tile),
             _tile(decode_tile),
             None if attention == AUTO else attention,
-            color_correction,
+            CORRECTIONS[0] if color_correction else CORRECTIONS[1],
             seed,
         )
 
@@ -237,26 +265,26 @@ class Keeping:
 
     @property
     def text(self) -> str:
-        """The decision in the node's words, for the plan and the console."""
+        """The decision in the node's words, after the mode chosen (`line`)."""
         if self.because:
             return f"not kept: {self.because}"
         if self.mode == "off":
-            return "not kept, as asked: the files are read for each run and dropped after it"
+            return "not kept: the files are read again for each run"
         size, cap = gib(self.size), gib(max(self.cap, 0))
         if self.cap <= 0:
             if self.mode == "on":
-                return (
-                    f"kept, {size} (ComfyUI pins no memory on this machine, its cap is 0: kept"
-                    " as asked)"
-                )
-            return (
-                f"not kept: ComfyUI pins no memory on this machine, its cap is 0 ({size} to keep)"
-            )
+                return f"kept, {size}, though ComfyUI allows no RAM for this on this computer"
+            return f"not kept: ComfyUI allows no RAM for this on this computer ({size} to keep)"
         if self.size <= self.cap:
-            return f"kept, {size} (cap {cap})"
+            return f"kept, {size} (ComfyUI allows {cap})"
         if self.mode == "on":
-            return f"kept, {size} (over ComfyUI's cap of {cap} on pinned memory: kept as asked)"
-        return f"not kept: {size} is over the cap of {cap}"
+            return f"kept, {size}, over the {cap} ComfyUI allows"
+        return f"not kept: {size} is over the {cap} ComfyUI allows"
+
+    @property
+    def line(self) -> str:
+        """The plan's line, also ComfyUI's console's: the mode chosen and what it came to."""
+        return f"{LABELS['keep_in_ram_between_runs']}: {self.mode} -> {self.text}"
 
 
 # ---- The plan in the nodes' words ----------------------------------------------------------------
@@ -290,71 +318,74 @@ def gib(count: float) -> str:
 
 def _room(room: Room, reading: Reading) -> list[str]:
     lines = [
-        f"card: {room.card}, {gib(room.free)} free; ComfyUI's own models hold {gib(room.comfy)}"
-        f" of the card, and the plan is made as if they were gone: it counts on"
+        f"graphics card: {room.card}, {gib(room.free)} free; ComfyUI's own models use"
+        f" {gib(room.comfy)} of it, and seedvr2x plans as if they were unloaded, with"
         f" {gib(reading.counted)}"
     ]
     if room.plan_only:
         lines.append(
-            f"plan only: nothing is loaded and ComfyUI is asked to free nothing; a run would need"
-            f" {gib(room.needed)} of free memory for the plan's largest phase"
+            "plan only: nothing is loaded and ComfyUI's models stay as they are; a run would need"
+            f" up to {gib(room.needed)} free on the card, with a safety margin"
         )
     elif room.asked:
         lines.append(
-            f"ComfyUI was asked to free {gib(room.needed + room.margin)} of free memory (the plan's"
-            f" {gib(room.needed)} for its largest phase, and {gib(room.margin)} over it for"
-            f" ComfyUI's partial unload); the card then had {gib(room.after)} free"
+            f"ComfyUI was asked to unload models until {gib(room.needed + room.margin)} was free"
+            f" on the card: the {gib(room.needed)} this run needs, with a safety margin, and"
+            f" {gib(room.margin)} more, as ComfyUI leaves some memory unfreed when it unloads;"
+            f" the card then had {gib(room.after)} free"
         )
     else:
         lines.append(
-            f"ComfyUI was asked to free nothing: the card has the {gib(room.needed)} the plan's"
-            " largest phase needs, so its models stay where they are"
+            f"no need to unload ComfyUI's models: this run needs up to {gib(room.needed)} free on"
+            " the card, with a safety margin, and the card has it"
         )
     return lines
 
 
-def _became(label: str, pinned: bool, outcome: str) -> str:
-    """One setting and what it came to: "encode tile: auto -> tiles of 1024 px", or the outcome
-    "as set" for a pin the plan took exactly."""
-    return f"{label}: {outcome}, as set" if pinned else f"{label}: auto -> {outcome}"
+def _became(name: str, given: bool, outcome: str) -> str:
+    """One setting by its label and what it came to: "encode tile: auto -> 1024 px", or the
+    outcome "as you set it" for a value given, which the plan took exactly."""
+    label = LABELS[name]
+    return f"{label}: {outcome}, as you set it" if given else f"{label}: auto -> {outcome}"
 
 
-def _tiles(label: str, pinned: bool, tiles: Tiles | None, peak: int | None) -> str:
-    how = "one pass, untiled" if tiles is None else f"tiles of {tiles.size} px"
-    said = "" if peak is None else f", predicted peak {gib(peak)}"
-    return _became(label, pinned, f"{how}{said}")
+def _tiles(name: str, given: bool, tiles: Tiles | None, peak: int | None) -> str:
+    how = "no tiles, the whole image at once" if tiles is None else f"{tiles.size} px"
+    said = "" if peak is None else f" (needs up to {gib(peak)})"
+    return _became(name, given, f"{how}{said}")
 
 
-def _swap(pinned: bool, swapped: int) -> str:
+def _swap(given: bool, swapped: int) -> str:
     if not swapped:
-        outcome = "none, the DiT stays on the card in its phase"
+        outcome = "none, the whole model on the card while it works"
     else:
         outcome = (
-            f"{swapped} of the DiT's {peaks.BLOCKS}, which wait in system memory and stream"
-            " through the card"
+            f"{swapped} of the model's {peaks.BLOCKS}, which wait in RAM and pass through the card"
+            " in turn"
         )
-    return _became("swap blocks", pinned, outcome)
+    return _became("swap_blocks", given, outcome)
+
+
+def _frames(length: int) -> str:
+    """A window's length as the node's input counts it, in groups of 4 frames, and in frames."""
+    return f"{length} groups of 4 frames (about {4 * length} frames)"
 
 
 _ATTENTION = {peaks.FLASH_ATTN_2: "FlashAttention 2", peaks.SDPA: "PyTorch's SDPA"}
 
 
-def _common(
-    dit: str,
-    attention: str,
-    swapped: int,
-    settings: Settings,
-    keeping: Keeping,
-) -> list[str]:
+def _common(dit: str, attention: str, swapped: int, settings: Settings) -> list[str]:
     return [
-        f"DiT: {DIT_LABELS.get(dit, dit)}",
+        f"model: {DIT_LABELS.get(dit, dit)}",
         _became(
             "attention",
             settings.attention is not None,
             _ATTENTION.get(attention, attention),
         ),
         _swap(settings.swap_blocks is not None, swapped),
-        f"colour correction {settings.color_correction}, seed {settings.seed}",
+        f"{LABELS['color_correction']}: {'on' if settings.split else 'off'}"
+        f" ({settings.color_correction})",
+        f"seed: {settings.seed}",
     ]
 
 
@@ -364,19 +395,20 @@ def _host(
     held: int,
     plan_counts: list[str],
 ) -> str:
-    """The system memory the plan counts, beside what the host has: `plan_counts` the parts of
-    the run's own, `held` the bytes of the weights already pinned (not in the available figure)."""
-    has = "the host's available memory was not read, so the plan does not check it"
+    """The RAM the plan counts, beside what the computer has: `plan_counts` the parts of the
+    run's own, `held` the bytes of the model already kept (not in the available figure)."""
+    has = "the RAM available was not read, so it is not checked"
     if available is not None:
-        has = f"the host has {gib(available)} available"
-    pinned = (
-        f"the weights kept in RAM, {gib(held)} pinned, are not in that figure"
+        has = f"the computer has {gib(available)} available"
+    kept = (
+        f"the model already kept, {gib(held)}, is not counted in that"
         if keeping.kept and held
-        else f"the weights kept in RAM, {gib(keeping.size)}, will be pinned out of it"
+        else f"keeping the model takes {gib(keeping.size)} of that"
         if keeping.kept
-        else "the weights are not kept: only what leaves the card is pinned, in the plan's count"
+        else "the model is not kept: only the part that does not fit on the card is in RAM"
+        " during the run, counted above"
     )
-    return f"system memory: {'; '.join(plan_counts)}; {has}; {pinned}"
+    return f"RAM: {'; '.join(plan_counts)}; {has}; {kept}"
 
 
 def picture_text(
@@ -396,9 +428,9 @@ def picture_text(
     held: int = 0,
 ) -> str:
     """The plan of a batch of pictures, each upscaled on its own: what they are, the card and what
-    ComfyUI was asked, each setting and what it came to, the system memory. `source` and `output`
-    are (width, height) in pixels; `held` the bytes of the weights already pinned."""
-    what = "1 picture" if count == 1 else f"{count} pictures, each on its own,"
+    ComfyUI was asked, each setting and what it came to, the RAM. `source` and `output` are
+    (width, height) in pixels; `held` the bytes of the model already kept in RAM."""
+    what = "1 image" if count == 1 else f"{count} images, each on its own,"
     inputs = count * source[0] * source[1] * 3 * 4
     outputs = count * output[0] * output[1] * 3 * 4
     lines = [
@@ -406,18 +438,18 @@ def picture_text(
         f" to {output[0]}x{output[1]} (resolution {resolution})",
         *notes,
         *_room(room, plan.reading),
-        *_common(dit, attention, plan.models.swapped, settings, keeping),
-        _tiles("encode tile", settings.encode_tile is not None, tiles.encode, tiles.encode_peak),
-        _tiles("decode tile", settings.decode_tile is not None, tiles.decode, tiles.decode_peak),
-        f"models: {keeping.text}",
+        *_common(dit, attention, plan.models.swapped, settings),
+        _tiles("encode_tile", settings.encode_tile is not None, tiles.encode, tiles.encode_peak),
+        _tiles("decode_tile", settings.decode_tile is not None, tiles.decode, tiles.decode_peak),
+        keeping.line,
         _host(
             room.host,
             keeping,
             held,
             [
-                f"the plan counts {gib(plan.host)}, of which {gib(plan.process)} for this process"
-                f" (the input's {gib(inputs)} as stored, the batch's output {gib(outputs)} and the"
-                " decode's copy of one picture)"
+                f"this run needs about {gib(plan.host)}, {gib(plan.process)} of it for ComfyUI"
+                f" itself and the images (the input's {gib(inputs)}, the output's {gib(outputs)}"
+                " and a working copy of one image)"
             ],
         ),
     ]
@@ -442,35 +474,39 @@ def clip_text(
 ) -> str:
     """The plan of a clip, the frames of one shot in sliding windows, in the same words."""
     windows = len(shots.shot_layout(frames, plan.window))
-    cap = "one window" if plan.window is None else f"windows of at most {plan.window} latents"
     inputs = frames * source[0] * source[1] * 3 * 4
     outputs = frames * output[0] * output[1] * 3 * 4
     counts = [
-        f"the plan counts {gib(expected.host)}"
+        f"this run needs about {gib(expected.host)}"
         + (
             ""
             if expected.scratch == 0
-            else f", {gib(expected.scratch)} of it a tiled pass's scratch"
+            else f", {gib(expected.scratch)} of it for a pass made in tiles"
         ),
-        f"the clip's output, {gib(outputs)}, is taken off what the host has",
+        f"the clip's output, {gib(outputs)}, is taken from what the computer has",
         f"the input's frames, {gib(inputs)}, are already in memory",
     ]
     lines = [
         f"seedvr2x plan{' (plan only)' if room.plan_only else ''}: a clip of {frames} frames"
-        f" {source[0]}x{source[1]} to {output[0]}x{output[1]} (resolution {resolution}): {windows}"
-        f" DiT {'window' if windows == 1 else 'windows'}, {cap}; the longest takes"
-        f" {expected.window} latents",
+        f" {source[0]}x{source[1]} to {output[0]}x{output[1]} (resolution {resolution}): "
+        + (
+            "the whole clip in one window of the model"
+            if windows == 1
+            else f"{windows} windows of the model, the longest {_frames(expected.window)}"
+        ),
         *notes,
         *_room(room, expected.reading),
-        *_common(dit, attention, plan.swapped, settings, keeping),
+        *_common(dit, attention, plan.swapped, settings),
         _became(
-            "window cap",
+            "window",
             settings.window is not None,
-            "one window" if plan.window is None else f"at most {plan.window} latents",
+            "the whole clip in one window"
+            if plan.window is None
+            else f"at most {_frames(plan.window)}",
         ),
-        _tiles("encode tile", settings.encode_tile is not None, plan.encode_tiles, expected.encode),
-        _tiles("decode tile", settings.decode_tile is not None, plan.decode_tiles, expected.decode),
-        f"models: {keeping.text}",
+        _tiles("encode_tile", settings.encode_tile is not None, plan.encode_tiles, expected.encode),
+        _tiles("decode_tile", settings.decode_tile is not None, plan.decode_tiles, expected.decode),
+        keeping.line,
         _host(room.host, keeping, held, counts),
     ]
     return "\n".join(lines)
