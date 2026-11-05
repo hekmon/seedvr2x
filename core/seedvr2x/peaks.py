@@ -619,8 +619,8 @@ def decode_peak(
     encode's), whatever the shot's length too: a decode takes its latents from system memory
     slice by slice; with split, the colour correction too, which corrects a slice of the decode
     at once, `frames` frames of the output's size (frames.output_size): a video's slice holds
-    SLICE at most, which the command line's planner passes, a still picture one. ValueError for
-    tiles of which one covers the whole padded frame, as encode_peak, and for frames under 1.
+    SLICE at most, which the video's planner (shot_plan.py) passes, a still picture one. ValueError
+    for tiles of which one covers the whole padded frame, as encode_peak, and for frames under 1.
 
     The untiled decode, streamed, corrects each slice while it holds its working memory, and its
     peak is the two together: at 1080p with every weight on the GPU, 50.98 GiB measured for

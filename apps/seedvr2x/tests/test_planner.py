@@ -931,7 +931,7 @@ def test_the_shot_that_holds_the_most() -> None:
 
 def test_recorded_cap_checked() -> None:
     # A cap under 5 latents is the planner's own for a job whose longest shot is as short, each
-    # shot one window; with a longer shot no layout exists for it (shot.window_layout), and a
+    # shot one window; with a longer shot no layout exists for it (shots.window_layout), and a
     # record that has one was edited: refused, where the layout would raise.
     made, _ = planner.plan(our_free(96), HD, shots(3, 2), Pins(), None)
     assert made.window == 3

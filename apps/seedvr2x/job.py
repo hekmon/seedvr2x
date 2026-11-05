@@ -17,7 +17,7 @@ from seedvr2x.shots import Shot
 
 # numz seeds Python's, NumPy's and torch's generators with each seed (common/seed.py), and NumPy
 # takes seeds in [0, 2**32). numz seeds again before the VAE encode, with the seed plus
-# ENCODE_SEED_OFFSET (seedvr2x/passes.py): shot.py does the same.
+# ENCODE_SEED_OFFSET (seedvr2x/passes.py): seedvr2x/shot_pass.py does the same.
 SEED_LIMIT = 2**32
 
 # --resolution's default, the output's short side: numz's (DESIGN.md, Options kept and dropped). The

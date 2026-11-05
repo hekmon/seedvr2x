@@ -5,8 +5,8 @@ split's reference. Held bit for bit to research/scripts/numerics_patch.py's Pad,
 variant measured (NUM_PAD=reflect>=8+black+16), and the vendored DivisiblePad to numz's. The
 GPU's side is test_regression.py's.
 
-The padding as the shot pipeline applies it (shot.py's encoder inputs, the decode's trim, the
-reference) is test_padding_cli.py's (apps/seedvr2x/tests/)."""
+The padding as the shot pipeline applies it (seedvr2x/shot_pass.py's encoder inputs, the
+decode's trim, the reference) is test_padding_cli.py's (apps/seedvr2x/tests/)."""
 
 import importlib.util
 import os

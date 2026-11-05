@@ -1,7 +1,7 @@
-"""The frames' padding before the model, as the shot pipeline applies it (shot.py; DESIGN.md,
-Pipeline step 0), on the CPU: the encoder's slices padded as asked, the decode trimmed, split's
-reference the picture. The padding itself, held bit for bit to research/scripts/numerics_patch.py's
-Pad, is test_padding.py's (core/tests/)."""
+"""The frames' padding before the model, as the shot's pass applies it (seedvr2x/shot_pass.py;
+DESIGN.md, Pipeline step 0), on the CPU: the encoder's slices padded as asked, the decode trimmed,
+split's reference the picture. The padding itself, held bit for bit to
+research/scripts/numerics_patch.py's Pad, is test_padding.py's (core/tests/)."""
 
 import math
 from collections.abc import Iterable

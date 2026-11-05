@@ -156,8 +156,7 @@ def _text(chain: str, options: list[str]) -> str:
 def test_every_chain_on_one_slice() -> None:
     # The decode's chains: every planar format zscale is fed, with each matrix ("gbr" for RGB),
     # both ranges and every chroma location (RGB's always left, as conversion_for gives it).
-    # shot.py's COPY_READ (gbrp16le, gbr, full, left) is one of them, not imported:
-    # shot.py imports torch.
+    # shot.py's COPY_READ (gbrp16le, gbr, full, left) is one of them.
     decodes = [
         Conversion(planar, matrix, color_range, location).filters()
         for planar in sorted({pixel_format.planar for pixel_format in PIXEL_FORMATS.values()})

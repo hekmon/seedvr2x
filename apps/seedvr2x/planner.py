@@ -561,7 +561,6 @@ def said(
 
     The line of the compiled VAE is the plan's own (plan.compile_vae, the setting's, always: a
     job outside the shapes measured is refused, plan)."""
-    # shot.py imports torch, which this module's import mustn't (the module's docstring).
     from seedvr2x.shots import shot_layout
 
     job = _job(

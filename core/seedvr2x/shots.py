@@ -32,10 +32,10 @@ class Shot:
         return seed + self.start
 
 
-# window_layout lives here, in plain Python, and shot.py (torch) imports it, as it does
-# frames.padded_length: the planner's arithmetic needs them before torch is imported (impl-v010,
-# 2026-10-28: a resume's early reading of the card, main._early_memory, runs before the allocator
-# is chosen).
+# window_layout lives here, in plain Python, as frames.padded_length does: the planner's arithmetic
+# (shot_plan.py, the command line's resume.py and manifest.py) needs them before torch is imported
+# (impl-v010, 2026-10-28: a resume's early reading of the card, main._early_memory, runs before the
+# allocator is chosen).
 def window_layout(latents: int, window: int, shared: int = SHARED) -> list[tuple[int, int]]:
     """[start, end) of the windows over a shot of `latents` latents: as few windows as `window`
     allows, their lengths balanced (differing by at most 1, the longer first), consecutive ones

@@ -441,7 +441,7 @@ def _upscaled(
 
 def _process(size: tuple[int, ...], output: tuple[int, int], bits: int) -> int:
     """The process's own resident system memory for a picture of `size` (height, width) made into
-    `output` (height, width) written at `bits`, in bytes: a video run's HOST_RESIDENT (planner.py,
+    `output` (height, width) written at `bits`, in bytes: a video run's HOST_RESIDENT (shot_plan.py,
     2.4 GiB over 6 shots) plus the picture's own arrays, counted from their sizes. PROVISIONAL,
     unmeasured (DESIGN.md, Still images, "Measured before it ships"): the input pixels, (H, W, 3)
     float32; the output and the decode's copy of it on the CPU, 2 of (H', W', 3) float32; the

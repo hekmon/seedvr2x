@@ -2,10 +2,10 @@
 test_still.py's stand-in models and DiT, stand_ins.py's VAE; the library's half is
 tests/test_still.py there.
 
-A picture through seedvr2x.still gives, bit for bit, what the shot pipeline of the command line
-(shot.py) gives for a shot of one frame: encode_shot, sample_windows over the one window
-[(0, 1)], merge_windows, decode_shot, with its Correction when the picture is corrected, tiled or
-not.
+A picture through seedvr2x.still gives, bit for bit, what the shot's pass (seedvr2x/shot_pass.py),
+as the command line runs it, gives for a shot of one frame: encode_shot, sample_windows over the one
+window [(0, 1)], merge_windows, decode_shot, with its Correction when the picture is corrected,
+tiled or not.
 
 Then the command (stills.py, main._run's branch by content): a file told a picture by its content
 and not its name, every option classified as taken or refused on one, -o's rules, the PNG written

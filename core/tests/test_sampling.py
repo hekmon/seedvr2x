@@ -30,7 +30,7 @@ def test_the_draw_is_held_to_its_digest(cpu_models: model.Models) -> None:  # no
     # strides those of a latent so built. The noise keeps the latent's shape, dtype and strides.
     import hashlib
 
-    # One frame: a shot of 1 is not padded to 4n + 1 (shot.py, pad_4n1).
+    # One frame: a shot of 1 is not padded to 4n + 1 (shot_pass.py, pad_4n1).
     frames = np.zeros((1, 32, 48, 3), dtype=np.float32)
     with torch.no_grad():
         video = model.to_input(frames).permute(0, 3, 1, 2).to(torch.float32)

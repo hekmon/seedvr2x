@@ -68,7 +68,7 @@ class Compilation:
 class ModelPlan:
     """What the loaded models follow (model.load_models, Models.enter): the DiT's swapped blocks,
     what of it stays on the GPU in each VAE phase, whether the VAE stays there in the DiT's phase,
-    and whether the VAE is compiled. The command line's job plan gives it (Plan.model_plan);
+    and whether the VAE is compiled. A video job's plan gives it (Plan.model_plan, below);
     the defaults are no plan's: nothing swapped, nothing sent away, nothing compiled."""
 
     swapped: int = 0  # the DiT's last blocks swapped, streamed through the two slots

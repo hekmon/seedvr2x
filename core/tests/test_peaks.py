@@ -802,7 +802,7 @@ def test_split_term() -> None:
 
 def test_split_term_by_frames() -> None:
     # The term counts the frames corrected at once: a video's slice, SLICE (5) at most, the
-    # default and what the command line's planner passes, so a video's figures are unchanged; a
+    # default and what shot_plan.py's plan passes, so a video's figures are unchanged; a
     # still picture, one frame, 2.24 GiB at 8K where a slice is 11.2 (DESIGN.md, Still images).
     assert peaks.SLICE == 5
     output, padded = (4320, 7680), (4336, 7680)

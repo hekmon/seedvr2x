@@ -1,11 +1,11 @@
-"""--compile through the CLI (planner.py's compiled passes, the plan, the manifest and a resume;
-DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0; the DiT, not", decided on
-2026-10-24): the planner holding a compiled pass to 1.1 times its tile's plain peak and keeping to
-the shapes measured, the flag recorded and a resume with the other value another job, the compile
-cache in the job's directory, the environment's modules of inductor counted between two compiled
-jobs only, and the plan's words. On the CPU. The library's side (the shapes warmed, the causal
-convolutions left out of the graph, the order of the load) is test_compile.py's (core/tests/),
-whose fixtures these tests use."""
+"""--compile through the CLI (seedvr2x/shot_plan.py's compiled passes, planner.py's shapes, the
+plan, the manifest and a resume; DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in, in
+v0.1.0; the DiT, not", decided on 2026-10-24): the planner holding a compiled pass to 1.1 times its
+tile's plain peak and keeping to the shapes measured, the flag recorded and a resume with the other
+value another job, the compile cache in the job's directory, the environment's modules of inductor
+counted between two compiled jobs only, and the plan's words. On the CPU. The library's side (the
+shapes warmed, the causal convolutions left out of the graph, the order of the load) is
+test_compile.py's (core/tests/), whose fixtures these tests use."""
 
 import json
 import logging
