@@ -228,11 +228,10 @@ seedvr2x/                the repository
   memory model that says what each brick takes. The workflows are the apps': the CLI's for long
   videos (shots, segments, a job's plan, saving and resume), the image server's, ComfyUI's
   nodes. No workflow, nor any part of one, sits in the library: a part two apps would share is
-  discussed when it appears. The first is the shot's pass, its windows and their plan, which
-  moves to the library for ComfyUI's nodes (the user, 2026-11-04; below). The library is not
-  the CLI stripped of its command. It
-  declares version ranges, not exact pins, so that it can run in another program's environment
-  (ComfyUI's, with its own torch).
+  discussed when it appears. The first is the shot's pass, its windows and their plan, moved
+  to the library for ComfyUI's nodes (the user, 2026-11-04; built that night, below). The
+  library is not the CLI stripped of its command. It declares version ranges, not exact pins,
+  so that it can run in another program's environment (ComfyUI's, with its own torch).
 - **Each app is its own uv project, with its own lock**, `core/` by path, so that an app's
   environment changes for its own reasons only. The CLI's is the one every job records and
   checks on a resume: no image server's dependency moves it. The exact pins held today
@@ -304,10 +303,20 @@ seedvr2x/                the repository
     ([Allocator](#allocator)): the GGUF runs 1080p on 16 GB, 25 blocks swapped; 12 and 8 GB are
     refused, the VAE's floor binding. The same cards on Linux, and native Windows' share kept
     back, are the 96 GB card's and v0.2.0's to measure.
-  - **The shot's pass moves to the library.** The sliding windows, their blend and the plan that
-    sizes them, over frames in memory, are the CLI's today; used by two apps, they become
-    bricks of `core/`, the CLI keeping its jobs, cuts, segments and resume, by a change of its
-    own. The picture node comes first, on what the library already has.
+  - **The shot's pass moves to the library.** The sliding windows, their blend and the plan
+    that sizes them, over frames in memory, which the CLI and ComfyUI's nodes both need, are
+    bricks of `core/` since 2026-11-04 (impl-shotpass), moved from the CLI: `shots.py`, a shot
+    and its windows' layout and blend, and `shot_plan.py`, the plan, both importing no torch;
+    `shot_pass.py`, the pass through the models. The CLI keeps its jobs, cuts, segments and
+    resume; `planner.py` keeps the plan's lines, the smaller DiT files it names, the checks on
+    a resume, the compiled shapes and the scratch's place; `shot.py`, the copy of the input
+    the colour correction reads. The CLI hands the pass its tiled store and that copy. A plain
+    move: 87 of its 116 definitions byte for byte, the others the same code but for the names
+    in their docstrings and comments, a logger's name and the two things handed in; the plan
+    matrix's 5,120 cases byte for byte under each DiT file's figures (float16, int8, both
+    GGUFs); on the RTX 5090, the milestone-1 regression bit for bit and the GPU tests passing.
+    The picture node comes first, on what the library already has; the shot's entry for frames
+    in memory waits for the nodes' design.
   - The nodes need Windows and macOS: the library must then import and run there, its Linux-only
     parts kept to the apps. On macOS that is Apple's M chips, with PyTorch's MPS backend and
     the planner of one pool ([Not in the first version](#not-in-the-first-version)). On Windows
@@ -407,7 +416,9 @@ In steps:
    - Built on 2026-11-02 (impl-split), the end state as agreed, file by file: the plan's choices
      the same byte for byte over 5,480 cases and 8,051 bricks' results, the environment record
      and the lock unchanged, the CPU suite passing. Its GPU run is the 96 GB card's first job,
-     before the push.
+     before the push. The shot's pass and its plan have since moved to the library (above):
+     the CLI's `plan.py` is gone, its `shot.py` and `planner.py` keep the input's copy and the
+     plan's lines.
 3. The image upscale, in v0.1.0 (the user, 2026-11-02): the CLI's still images, detected by
    content, then the image server, measured on the 96 GB card, both by
    [Still images](#still-images)'s rules. What the two take alike for one picture is shared
@@ -440,9 +451,9 @@ In steps:
    with the rest; the roadmap shows them under next until then.
 4. ComfyUI's nodes, begun before v0.1.0 and published with v0.2.0 (the user, 2026-11-04),
    assembling the same bricks, built by a conductor of their own. Their specification, begun
-   on 2026-11-04 (above), waits for two things: the measurement of ComfyUI's own SeedVR2 and
-   numz's nodes beside seedvr2x, and the shot's pass moved to the library. They don't hold
-   v0.1.0; the roadmap shows them under next.
+   on 2026-11-04 (above), waited for two things, both done that day: the measurement of
+   ComfyUI's own SeedVR2 and numz's nodes beside seedvr2x, and the shot's pass moved to the
+   library (above). They don't hold v0.1.0; the roadmap shows them under next.
 
 ## Architecture
 
@@ -2592,9 +2603,9 @@ measured that day on test files, against ffmpeg 9.0's decode.
   - The largest picture's tiles don't hold for every smaller one: a cut-off tile is counted
     at its rule plus 0.3 GiB, and measured steps aren't monotone (an encode at 752×896 takes
     8.09 GiB, at 752×960 7.70).
-  - An addition beside the CLI's planner, not a move: the planner's choices take a job's
-    types, and its 5,480-case check would have to hold again. Its margins and its order of
-    choices are the planner's.
+  - An addition beside the shot's plan, the CLI's planner then, not a move: the planner's
+    choices take a job's types, and its plan matrix (5,120 cases since 2026-11-04) would have
+    to hold again. Its margins and its order of choices are the planner's.
   - Measured on the RTX 5090 (2026-11-03, design's agent; SDPA and FlashAttention 2, the
     desktop live):
     - one frame's VAE passes take 0.18 to 0.34 of the video slice's figures the plan counts,
