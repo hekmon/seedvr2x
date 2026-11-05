@@ -382,13 +382,14 @@ seedvr2x/                the repository
     and nothing resumes.
   - **Small cards are the nodes' users,** not a side case: v0.1.0 gives them seedvr2x's own
     smaller files of the 7B (the user, 2026-11-04), int8's 8.3 GB and the dynamic GGUF's
-    4.8 GB, the model card's tiers, in every app ([Weights](#weights)). An 8 GB card stays out
-    at 1080p today by the VAE's floor (8.27 GiB free), which no DiT file moves: how the other
-    two fit one is the measurement's to show. Emulated on the RTX 5090 under WSL2 (2026-11-04,
-    impl-gguf), where a run keeps 5 GiB of the card back from a driver that lends system memory
-    ([Allocator](#allocator)): the GGUF runs 1080p on 16 GB, 25 blocks swapped; 12 and 8 GB are
-    refused, the VAE's floor binding. The same cards on Linux, and native Windows' share kept
-    back, are the 96 GB card's and v0.2.0's to measure.
+    4.8 GB, the model card's tiers, in every app ([Weights](#weights)). Measured by place-study
+    (2026-11-05, smaller cards emulated on the RTX 5090 under WSL2): on 16 and 12 GB the fp16,
+    int8 and GGUF files plan and run alike, a 73-frame 1080p clip in 87 to 95 s, most of it
+    the VAE's, a 4K picture in 12 to 13 s; impl-gguf's 12 GB refusal was its emulation's
+    (10.24 GiB free against 10.69). On 8 GB everything is refused today; with the changes
+    decided that day ([Allocator](#allocator)), the 4K picture ran in 11.9 s and the 1080p
+    clip in 101 s. The same cards on Linux, and native Windows' share kept back, are the
+    96 GB card's and v0.2.0's to measure.
   - **The shot's pass moves to the library.** The sliding windows, their blend and the plan
     that sizes them, over frames in memory, which the CLI and ComfyUI's nodes both need, are
     bricks of `core/` since 2026-11-04 (impl-shotpass), moved from the CLI: `shots.py`, a shot
@@ -409,10 +410,13 @@ seedvr2x/                the repository
     the driver's fallback to system memory, on by default.
   - ComfyUI's process is not seedvr2x's: its Python, its torch and its allocator are its user's.
     ComfyUI's defaults are the nodes' first case, nearly every user's (the user, 2026-11-05):
-    `cudaMallocAsync` on its CUDA 13 builds, its dynamic VRAM on. The plan's figures under them
-    are place-study's to measure (from 2026-11-05). Under a driver that lends system memory
-    (Windows, WSL2), where seedvr2x itself runs torch's own allocator, not `cudaMallocAsync`
-    ([Allocator](#allocator)), the nodes say once that `--disable-cuda-malloc` gives it. Its
+    `cudaMallocAsync` on its CUDA 13 builds, its dynamic VRAM on. Under `cudaMallocAsync`
+    nothing slows and no bit moves, but its pool takes more of the card than torch's limit
+    counts, which the plan counts on the card ([Allocator](#allocator), place-study,
+    2026-11-05): on an 8 GB card a picture still fits, a 1080p clip only under torch's own
+    allocator. Under a driver that lends system memory (Windows, WSL2), where seedvr2x itself
+    runs torch's own allocator, not `cudaMallocAsync`, the nodes say once that
+    `--disable-cuda-malloc` gives it, and their README says what it gives on a small card. Its
     Desktop app offers torch 2.9.1 to 2.13.0 on
     CUDA 12.6, 12.8 or 13.0, so no list of figures made ahead holds: an environment probe, a
     brick of the library, checks at the first run in an environment that each kernel the
@@ -2631,7 +2635,9 @@ measured that day on test files, against ffmpeg 9.0's decode.
     it, at zlib's level 6: in the four cases measured, the smallest file or within 4.5% of
     the smallest, at about 1.3 times the Up filter's time. A grainy 3840×2880 picture at 16
     bits comes out at 46 MB (66 MB before compression), written in about 4 s; level 9 saves
-    0.5 to 4.5% for 2.3 to 7.6 times the time.
+    0.5 to 4.5% for 2.3 to 7.6 times the time. Level 1 wrote the 4K picture of 16 bits in
+    1.26 s against 1.80, for 1% more (place-study, 2026-11-05): decided that day, it is taken
+    if the same four cases grow by 3% at most.
 - **Options taken on a still:** `--resolution`, `--seed`, the model files' (`--model-dir`,
   `--dit-model`, `--vae-model`), the pins (`--encode-tile`, `--decode-tile`, `--swap-blocks`),
   `--color-correction`, `--input-sar`, `-v`, and `--plan` alone, without a file, which says
@@ -3774,6 +3780,48 @@ The GPU's memory refused stops a run in one line, before the models load as afte
     on 2026-10-23). The calibration, run under the job's plan and reserve, measures the job's
     own decode: on that card a pinned 1080p job's decode estimate missed by 1.8% with 2.5 and
     by 0.4% with 4.5.
+  - **Small cards** (place-study, 2026-11-05, [small-cards.md](research/docs/small-cards.md):
+    the RTX 5090 under WSL2, smaller cards emulated, 4 GiB of the card always left to the
+    desktop), decided that day with the user, built by one baton:
+    - The lean attention, a marked change in the vendored 7B: the projection's q, k and v
+      freed once windowed, q and k cast to bfloat16 before the windows' concatenation, the
+      norm, RoPE and cast 4,096 tokens at a time, the windows' outputs written into one
+      tensor, the MLP's GELU in place. A 4K picture's DiT step from 5.53 to 3.08 GiB, a 1080p
+      window of 5 latents from 6.58 to 3.57, the same bits under SDPA and FlashAttention 2 (a
+      cast and a copy commute; the rest acts on each token alone), 0.3 to 0.7 s faster. The
+      attention kernels stay as they are. The milestone-1 regression proves it whole, int8's
+      and the GGUF's windows keep their bits, and the planner's per-token term is measured
+      again (about 0.46 of today's), not scaled.
+    - A third reserve, under the segments, where the 2.5 refuses a job too: max(0.6, 0.1 × P)
+      GiB beyond a DiT step's peak P, max(1.25, 0.2 × P) beyond a VAE pass's, where every step
+      measured kept its speed and its bits. A third rung only: in October the 2.5 ran jobs up
+      to 1.5 times as long beside a nearly full card, which the emulation, its 4 GiB left
+      free, never reached. A night on the whole card, really full (2026-11-05), says whether
+      it keeps its speed there: if it does, it becomes the reserve; else it stays the last,
+      said slow. With it, a desktop that grows during a run stops the run at its next unit,
+      resumable.
+    - The floor, last rungs for a clip that fits no other way: the decoder's blocks after its
+      last temporal upsampling run a frame at a time, its causal memory carried (20 to 27%
+      less at every tile, a decode 3 to 11% longer; the frames the same at 640 px and up,
+      other at 512 and 576, the same in every run, recorded in the plan); then the VAE's room
+      down to 0.5 GiB, where its frames still hold (its decode about 1.2 times as long). With
+      the lean attention and the third reserve, a 1080p clip ran on an emulated 8 GB card in
+      101 s (93 on 16 GB), and the 4K picture in 11.9 s.
+    - Under `cudaMallocAsync` on a driver that lends (ComfyUI's default there, or a user's
+      setting), torch's limit binds the allocated bytes alone: the pool held 0.14 to 0.30
+      × P more of the card, slowing nothing and moving no bit. Every rung counts it on the
+      card, at least max(0.6, 0.2 × P) beyond a DiT step and 0.35 × P beyond a VAE pass, the
+      check between units on the card's figure its only bound. ComfyUI's environment probe
+      measures the pool's share where the nodes run, and the larger figure counts.
+    - The tiles stay the largest that fit, untiled where the frame was measured so (the user:
+      a large card runs as close to ByteDance's untiled code as it holds; quality is not
+      traded on speed alone). 1024-px tiles decode a 4K picture in 2.7 s against 3.6 at
+      2048 px, but each tile is decoded alone and their colours drift apart (the colour study
+      measured it; `split` halves it): a rule by speed waits for the tiles' cost measured
+      against the untiled output (the same night), where the untiled 4K passes' peaks are
+      measured for the planner too. ComfyUI's one-frame convolution for a picture (its kernel
+      summed over time, a third of the picture's VAE work) gives other bits: after v0.1.0,
+      measured first.
 
 ## Pause and resume
 
