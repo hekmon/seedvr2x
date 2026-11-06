@@ -98,6 +98,33 @@ anything loads. Each widget keeps ComfyUI's input socket, so an `Int` node, or a
 an integer, can drive the value through its value node; a number off the node's grid is then
 refused when the value node runs.
 
+## While it runs
+
+The node shows how far it has got, in what ComfyUI gives a node:
+
+- **The bar** is the time the upscale should take, not a count of steps: every tile of the encode,
+  every window of the model and every tile of the decode, of every shot or picture, each by its
+  size. It starts from the speed seedvr2x measured on an RTX 5090, and as soon as the node has made
+  a unit of one kind (an encode tile, a window, a decode tile) it uses your computer's own speed
+  for that kind and spreads the rest of the bar over what is left; it never goes back.
+- **The text on the node** is the plan, then where the run is ("Shot 2 of 4 (frames 121 to 240):
+  upscaling, window 2 of 3", and at enhanced or maximum "Shot 2 of 4, run 3 of 4 (frames 121 to
+  240): upscaling, window 2 of 3"; "Picture 3 of 8: decoding, tile 2 of 4"), then the time so
+  far and, once the first window is done, about how long is left. It updates when a tile, a window or a
+  few frames are done, not between: a long window leaves it unchanged until it is done. At the end
+  it shows the plan and "480 frames in 4 min 32 s".
+- **The preview** is the newest frame decoded, as ComfyUI's samplers show their steps, once for each
+  few frames of a clip and once for each picture of a batch, at ComfyUI's preview size
+  (`--preview-size`, 512 by default).
+- **Before the upscale**, downloading seedvr2x's files and reading them into memory have a bar of
+  their own, in bytes, with a line each ("downloading the sharp 7B (float16): 4.2 of 16.5 GB",
+  "reading the sharp 7B (float16) into memory: 9.0 of 16.5 GB"); the bar starts again at 0 for the
+  upscale. seedvr2x Cuts shows the frames it has scanned.
+- **Cancel** stops the run after the tile or the window being made, or the piece of a file being
+  read, and frees the card. Hugging Face's fast downloader (Xet) reports from a thread of its own,
+  where a Cancel cannot stop it: the node leaves the pressed Cancel as it is and honours it as soon
+  as that file has finished downloading.
+
 ## Install
 
 Nothing is published, so install by hand. Link or copy this folder, `apps/comfyui`, into ComfyUI's

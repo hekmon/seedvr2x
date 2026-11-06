@@ -169,6 +169,7 @@ def encode_shot(
     *,
     tiles: Tiles | None = None,
     store: tiling.Store | None = None,
+    tile_step: tiling.TileStep | None = None,
 ) -> Tensor:
     """The VAE latent of a shot of `count` frames, read as they are needed: (T', h, w, 16)
     bfloat16 in system memory, in the channel-major memory the encode gives it, which the noise
@@ -190,7 +191,7 @@ def encode_shot(
     if tiles is None:
         return model.encode_stream(models, inputs, padded)
     store = tiling.InMemory() if store is None else store
-    return tiling.encode_tiled(models, inputs, padded, tiles, store)
+    return tiling.encode_tiled(models, inputs, padded, tiles, store, tile_step)
 
 
 def encoder_inputs(
@@ -317,6 +318,7 @@ def decode_shot(
     *,
     tiles: Tiles | None = None,
     store: tiling.Store | None = None,
+    tile_step: tiling.TileStep | None = None,
 ) -> None:
     """Decode the shot of `count` frames whose latents are merged (merge_windows), in system
     memory or on the device, in one stream, and write its frames as they come, write(frames)
@@ -332,8 +334,9 @@ def decode_shot(
     in the slices a streamed decode gives, each checked, corrected and written as one of those.
     store is the scratch (tiling.Store; DESIGN.md, Pipeline, per shot, step 3): the command
     line's is scratch.py's Scratch, system memory up to the plan's allowance, a file beyond;
-    None: tiling.InMemory, system memory alone."""
-    with _slices(models, merged, tiles, store) as slices:
+    None: tiling.InMemory, system memory alone. tile_step is told each tile of a tiled decode
+    (tiling.TileStep), before the first slice is written, and only observes."""
+    with _slices(models, merged, tiles, store, tile_step) as slices:
         chunks = _decoded(slices, count, output_size(target), name, first)
         if reference is not None:
             _correct(models, chunks, count, target, write, reference)
@@ -347,7 +350,11 @@ def decode_shot(
 
 @contextmanager
 def _slices(
-    models: Models, merged: Tensor, tiles: Tiles | None, store: tiling.Store | None
+    models: Models,
+    merged: Tensor,
+    tiles: Tiles | None,
+    store: tiling.Store | None,
+    tile_step: tiling.TileStep | None = None,
 ) -> Generator[Iterator[Tensor]]:
     """The VAE's decode of the shot's latents, merged, slice by slice: each (C, t, H', W') in
     [-1, 1], unclamped, on the device; streamed (model.decode_stream), or with tiles, tile by tile
@@ -366,7 +373,7 @@ def _slices(
         slices = model.decode_stream(models, latent)
     else:
         store = tiling.InMemory() if store is None else store
-        slices = tiling.decode_tiled(models, latent, tiles, store)
+        slices = tiling.decode_tiled(models, latent, tiles, store, tile_step)
     try:
         yield slices
     finally:

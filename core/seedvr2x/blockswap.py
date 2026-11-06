@@ -316,11 +316,23 @@ class _Tee:
     measurement of 2026-11-03), the read waits for the hash.
 
     Without `hashing`, nothing is hashed, the bytes not read skipped by a seek (read's callers
-    that ask for no SHA-256: tests)."""
+    that ask for no SHA-256: tests).
 
-    def __init__(self, raw: BufferedReader, path: Path, hashing: bool) -> None:
+    `progress`, when given, is told (bytes of the file read so far, the file's size) after each
+    piece read (read's callback): it only observes, and may raise to stop the read."""
+
+    def __init__(
+        self,
+        raw: BufferedReader,
+        path: Path,
+        hashing: bool,
+        progress: Callable[[int, int], None] | None = None,
+        size: int = 0,
+    ) -> None:
         self.raw = raw
         self.path = path
+        self.progress = progress
+        self.size = size
         self.position = 0
         self.hash = hashlib.sha256() if hashing else None
         self.thread = ThreadPoolExecutor(1, "seedvr2x-sha256") if hashing else None
@@ -349,6 +361,7 @@ class _Tee:
                 self.cut(at + done, at + len(target), whole)
             self.hashed(piece[:got])
             done += got
+            self.told(at + done)
         self.position = at + len(target)
 
     def skip(self, to: int, whole: int | None) -> None:
@@ -363,6 +376,7 @@ class _Tee:
                 self.cut(self.position, to, whole)
             self.hashed(memoryview(data))
             self.position += len(data)
+            self.told(self.position)
         self.position = max(self.position, to)
 
     def finish(self) -> str | None:
@@ -373,8 +387,14 @@ class _Tee:
         while data := self.raw.read(PIECE):
             self.hashed(memoryview(data))
             self.position += len(data)
+            self.told(self.position)
         self.wait()
         return self.hash.hexdigest()
+
+    def told(self, position: int) -> None:
+        """The progress callback told the bytes of the file read, up to byte `position`."""
+        if self.progress is not None:
+            self.progress(position, self.size)
 
     def hashed(self, data: memoryview) -> None:
         """data, just read, hashed on the hash thread after every piece before it."""
@@ -414,6 +434,7 @@ def read(
     *,
     skip: Callable[[str], bool] | None = None,
     hashed: Callable[[str, os.stat_result], None] | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> tuple[dict[str, Tensor], dict[str, Part]]:
     """The tensors of the safetensors or GGUF checkpoint at path (told by its signature; a GGUF
     file's quantised matrices as the uint8 bytes of ggml's blocks, _gguf_tensors), for
@@ -429,7 +450,10 @@ def read(
     header and the tensors skipped included (_Tee), and hashed is called at the end with the
     file's SHA-256, in hex, and the file's status as it was opened (os.fstat): the SHA-256 of the
     very bytes loaded, the file read once (DESIGN.md, Weights, decided on 2026-11-03). Whatever
-    hashed raises (a ModelError: pull.Hashes.proved) ends the load.
+    hashed raises (a ModelError: pull.Hashes.proved) ends the load. With `progress`, it is told the
+    bytes of the file read so far and the file's size after each piece (PIECE with a hash, else
+    each tensor), the header and the bytes skipped included: it only observes, and may raise to
+    stop the read, the pinned copies made so far given up with the exception.
 
     The file is read, never mapped, from its start to its end, each tensor's bytes at the file's
     own offsets: a part's straight into its pinned copy, any other tensor's into one buffer the
@@ -447,7 +471,7 @@ def read(
     parameters = {name for name, _ in model.named_parameters()}
     with open(path, "rb") as raw:
         opened = os.fstat(raw.fileno())
-        tee = _Tee(raw, path, hashed is not None)
+        tee = _Tee(raw, path, hashed is not None, progress, opened.st_size)
         try:
             state, parts = _read(
                 tee, model, parameters, path, device, dtype, part_of, backend, skip

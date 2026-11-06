@@ -18,10 +18,12 @@ import re
 import shlex
 import shutil
 import sys
+import threading
 import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePath
+from typing import Any, cast
 
 from seedvr2x import files, weights
 from seedvr2x.clock import spent, taking, wall
@@ -47,6 +49,15 @@ REPO = "hekmon/seedvr2x"
 # repo's head moved to 502436ca the same day with a new card alone, no model byte changed: the pin
 # stays (DESIGN.md, Weights).
 REVISION = "c14a2bc4aab04cf38ad9b0d324014c4213f07048"
+
+
+# progress(name, done, total), told by a download (fetch, resolve): the bytes of REPO's file `name`
+# received so far of `total`, its pinned size. Told 0 for every file fetch is to download before
+# the first begins, then as huggingface_hub reports its bytes (_Bars): its progress bar is the one
+# thing it offers, whatever it downloads with. It only observes; it may raise to stop a plain
+# download (called on the thread that downloads), but a Xet download reports from huggingface_hub's
+# own thread, where a raise stops nothing (told at its call).
+Download = Callable[[str, int, int], None]
 
 
 @dataclass(frozen=True)
@@ -385,7 +396,12 @@ class ModelFiles:
 
 
 def resolve(
-    model_dir: Path | None, dit: str, vae: str, detector: bool = False, download: bool = True
+    model_dir: Path | None,
+    dit: str,
+    vae: str,
+    detector: bool = False,
+    download: bool = True,
+    progress: Download | None = None,
 ) -> ModelFiles:
     """The run's model files, the DiT's named dit and the VAE's named vae, and with detector the
     shot detector's, DETECTOR (DESIGN.md, Weights: TransNetV2's weights with the shot detector).
@@ -408,7 +424,7 @@ def resolve(
     loads it (DESIGN.md, Pause and resume, decided on 2026-10-16: "a job that loads no model
     fetches none even where its first pass must run again", where it downloaded the DiT's 16.5
     GB for an assembly alone left). A file in the cache is checked as any job's, by its header
-    and its pin."""
+    and its pin. `progress` is told the downloads' bytes (Download)."""
     if model_dir is not None:
         logger.info(
             "model files from %s, a directory given by the user, nothing downloaded", model_dir
@@ -434,7 +450,7 @@ def resolve(
     # The files the run loads, which it fetches: every one, or where it loads no model, the
     # shot detector's alone, where its first pass runs.
     loads = names if download else names[2:]
-    found = fetch({name: PINNED[name] for name in names}, loads)
+    found = fetch({name: PINNED[name] for name in names}, loads, progress)
     where = cache()
 
     def file(name: str) -> ModelFile:
@@ -518,14 +534,19 @@ def cached(name: str) -> Path | None:
     return None if found is None else found[0]
 
 
-def fetch(pins: Mapping[str, Pin], download: Collection[str] | None = None) -> dict[str, Path]:
+def fetch(
+    pins: Mapping[str, Pin],
+    download: Collection[str] | None = None,
+    progress: Download | None = None,
+) -> dict[str, Path]:
     """The files of REPO at REVISION that pins name, by name, each from Hugging Face's cache
     (_cached), or downloaded into it, one at a time, never the repository whole (DESIGN.md,
     Weights). Before each download, the free space of the cache's disk is checked against what
     the downloads need from there on (_check_space); HF_HUB_OFFLINE refuses any. The library's log
     goes through seedvr2x's (_library_logging). ModelError says what to do when a file can't be
     had. With `download`, the names of those that may be downloaded (None: every one): any other
-    the cache doesn't hold is left out, neither downloaded nor refused (resolve)."""
+    the cache doesn't hold is left out, neither downloaded nor refused (resolve). `progress` is told
+    the bytes of each download (Download)."""
     from huggingface_hub import constants
 
     _library_logging()
@@ -564,13 +585,18 @@ def fetch(pins: Mapping[str, Pin], download: Collection[str] | None = None) -> d
             " huggingface_hub",
             REPO,
         )
+    if progress is not None:
+        for name in missing:
+            progress(name, 0, pins[name].size)
     for index, name in enumerate(missing):
         # Provisional (implementation, 2026-10-09; DESIGN.md checks each file's size): against
         # the downloads left, this one's and the next ones', so that a default run short of room
         # is refused before its first 16.5 GB, not after.
         left = {each: pins[each] for each in missing[index:]}
         _check_space(where, left)
-        found[name] = _download(name, pins[name], where, sum(pin.size for pin in left.values()))
+        found[name] = _download(
+            name, pins[name], where, sum(pin.size for pin in left.values()), progress
+        )
     return {name: found[name] for name in pins if name in found}
 
 
@@ -930,12 +956,15 @@ def _check_space(where: Path, downloads: Mapping[str, Pin]) -> None:
     raise ModelNoRoom(refusal, need=needed, free=free, settings=(MODEL_DIR,))
 
 
-def _download(name: str, pin: Pin, where: Path, needed: int) -> Path:
+def _download(
+    name: str, pin: Pin, where: Path, needed: int, progress: Download | None = None
+) -> Path:
     """REPO's file name at REVISION, pinned by pin, downloaded into Hugging Face's cache, where,
     with no token: the repo is public, and token=False keeps a token the user stored from being
     sent (utils/_headers.py:125-133). Each of the library's failures is refused (ModelError),
     saying what to do; needed is what the downloads left need on the cache's disk, in bytes, this
-    one's and the next ones', as _check_space checked it."""
+    one's and the next ones', as _check_space checked it. `progress` is told its bytes (Download),
+    through the progress bar huggingface_hub is given in place of its own (_Bars)."""
     from huggingface_hub import constants, file_download
     from huggingface_hub.errors import (
         HfHubHTTPError,
@@ -958,11 +987,28 @@ def _download(name: str, pin: Pin, where: Path, needed: int) -> Path:
     # those of hf-xet 1.6.0, which downloads Xet files (xet_pkg/src/error.rs:293-318), every one
     # caught by name: no bare Exception. Each message is built from locals bound in its clause
     # (Python unbinds the clause's name at its end, and a message is worded later, by an app).
+    bar: dict[str, Any] = {}
+    if progress is not None:
+        # Read by name: the library's overloads are partly unknown to strict typing.
+        if _takes_bars(vars(file_download)["hf_hub_download"]):
+            bar["tqdm_class"] = _bars(name, pin.size, progress)
+        else:
+            # huggingface_hub before 1.0 (0.36.2 is in ComfyUI's Windows environment) has no
+            # tqdm_class, the one thing it offers to follow a download by: the pin asks for 1.33.
+            logger.warning(
+                "%s: this huggingface_hub (%s) gives no way to follow a download: its progress"
+                " is not shown",
+                name,
+                getattr(importlib.import_module("huggingface_hub"), "__version__", "unknown"),
+            )
     try:
         # Strict typing finds its signature partly unknown, for user_agent's bare dict and
-        # tqdm_class's bare tqdm, neither of which is passed.
-        path = file_download.hf_hub_download(  # pyright: ignore[reportUnknownMemberType]
-            REPO, name, revision=REVISION, cache_dir=where, token=False
+        # tqdm_class's bare tqdm.
+        path = cast(
+            str,
+            file_download.hf_hub_download(  # pyright: ignore[reportUnknownMemberType]
+                REPO, name, revision=REVISION, cache_dir=where, token=False, **bar
+            ),
         )
     except LocalEntryNotFoundError as error:
         # The Hub not reached, or not answering as the Hub, the file not in the cache
@@ -1091,6 +1137,77 @@ def _download(name: str, pin: Pin, where: Path, needed: int) -> Path:
         ) from None
     logger.info("%s: downloaded in %.0f s, %s", name, spent(time.monotonic() - started), path)
     return Path(path)
+
+
+def _takes_bars(download: Callable[..., Any]) -> bool:
+    """Whether hf_hub_download takes a progress bar class (`tqdm_class`, huggingface_hub 1.33.0 and
+    2.4.0), by its signature: named, or any keyword."""
+    import inspect
+
+    parameters = inspect.signature(download).parameters
+    return "tqdm_class" in parameters or any(
+        each.kind is inspect.Parameter.VAR_KEYWORD for each in parameters.values()
+    )
+
+
+def _bars(name: str, total: int, progress: Download) -> Any:
+    """The progress bar class hf_hub_download is given (its `tqdm_class`, in huggingface_hub 1.33.0
+    and 2.4.0, read in their sources) to tell progress of a download of `name`, `total` bytes, in
+    place of its own bar, which would print on the console.
+
+    A plain download makes one bar and calls update(len(chunk)) for each chunk, and update(-n)
+    when it resumes (file_download.py:410-415); a Xet download makes two, the bytes received and
+    the bytes written to the disk, both of the file's size (utils/_xet_progress_reporting.py:
+    98-130). A class that isn't a tqdm gets only the keywords tqdm takes, and none that it
+    rejects (utils/tqdm.py:324-338). So each bar counts its own bytes, and what is told is the
+    most any has counted, never going back: the bytes received lead the bytes written, and both
+    end at the file's size. The methods are those the library calls on a bar (update,
+    set_postfix_str, refresh, close, the context manager, n and total) and no more, so that the
+    bar has no update_transfer, which would make the library route both counts to one bar
+    (_xet_progress_reporting.py:112)."""
+    lock = threading.Lock()
+    counted: list[Any] = []
+    reached = 0
+
+    class Bar:
+        def __init__(self, **kwargs: object) -> None:
+            self.n = cast(int, kwargs.get("initial") or 0)
+            self.total = kwargs.get("total")
+            with lock:
+                counted.append(self)
+            self._tell()
+
+        def update(self, n: float | None = 1) -> bool:
+            self.n += int(n or 0)
+            self._tell()
+            return True
+
+        def _tell(self) -> None:
+            nonlocal reached
+            # Told under the lock, so that two threads' reports reach progress in order.
+            with lock:
+                most = min(max(each.n for each in counted), total)
+                if most <= reached:
+                    return
+                reached = most
+                progress(name, reached, total)
+
+        def set_postfix_str(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def refresh(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def __enter__(self) -> "Bar":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.close()
+
+    return Bar
 
 
 def _unreachable(name: str, why: str, message: Message) -> ModelUnreachable:

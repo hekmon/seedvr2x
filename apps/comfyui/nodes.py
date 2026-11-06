@@ -9,10 +9,11 @@ What the V3 schema changes for a node, read in ComfyUI v0.44.0:
   for: the node's id (`io.Hidden.unique_id`) is `cls.hidden.unique_id`, None on the class itself.
 - The inputs arrive by keyword, named as the schema names them; the outputs are
   `io.NodeOutput(...)` in the schema's order.
-- The progress bar and Cancel are not part of the schema: `comfy.utils.ProgressBar` reports for
-  the node being executed (the executor sets it as the current one), and
+- The progress bar, the text on the node, the previews and Cancel are not part of the schema:
+  `comfy.utils.ProgressBar` reports for the node being executed (the executor sets it as the
+  current one), `PromptServer.send_progress_text` puts a text on it, and
   `comfy.model_management.throw_exception_if_processing_interrupted` raises when Cancel was
-  pressed, as for any node.
+  pressed, as for any node. progress.py says how the nodes use them.
 
 - seedvr2x Models: the DiT file by a name a user reads, a model directory, and whether the weights
   stay in RAM between runs (auto, on, off). Gives a light handle (models.Handle); nothing is read
@@ -40,7 +41,7 @@ carry no seedvr2x record (the CLI's 16-bit PNG has one)."""
 
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, cast, override
@@ -59,12 +60,12 @@ from seedvr2x.errors import Refusal
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Plan
 from seedvr2x.shot_plan import HOST_RESIDENT, PHASES, Peaks
-from seedvr2x.shotruns import QUALITY
+from seedvr2x.shotruns import QUALITY, shot_runs, taken_from
 from seedvr2x.shots import Shot
 from seedvr2x.weights import Architecture
 
 from . import models as models_module
-from . import plans, words
+from . import plans, progress, words
 
 logger = logging.getLogger("seedvr2x_comfyui.nodes")
 
@@ -72,13 +73,6 @@ CATEGORY = "seedvr2x"
 # The value nodes in a subcategory of their own (the user, 2026-11-05): ComfyUI's node library
 # nests a category at each "/".
 SETTINGS_CATEGORY = f"{CATEGORY}/plan settings"
-
-# A node's progress bar is a monotone position, not a measure: the clip's steps are the encode, the
-# DiT's windows and the decode's frames, of unequal lengths. PROVISIONAL (impl-nodes lane 05,
-# 2026-11-05): the bar's thousandths are shared 10 to the encode, 700 to the windows and 290 to
-# the decode, the DiT being the bulk of a clip's time; unmeasured.
-BAR = 1000
-ENCODE_SHARE, WINDOW_SHARE = 100, 700
 
 DIT_BY_LABEL = {label: name for name, label in plans.DIT_LABELS.items()}
 
@@ -224,15 +218,25 @@ def _target(width: int, height: int, resolution: int, *, picture: bool) -> tuple
     return target
 
 
-def _say(text: str, node: str | None) -> None:
-    """The plan on the node (ComfyUI's progress text, which its frontend shows on any node) and in
-    ComfyUI's console, at INFO."""
-    logger.info("%s", text)
+def _show(text: str, node: str | None) -> None:
+    """`text` on the node (ComfyUI's progress text, which its frontend shows on any node, replaced
+    by the next)."""
     import server
 
     instance = server.PromptServer.instance
     if instance is not None and node is not None:
         instance.send_progress_text(text, node)
+
+
+def _say(text: str, node: str | None) -> None:
+    """The plan on the node and in ComfyUI's console, at INFO."""
+    logger.info("%s", text)
+    _show(text, node)
+
+
+def _shower(node: str | None) -> Callable[[str], None]:
+    """What puts a progress text on the node `node` (_show)."""
+    return lambda text: _show(text, node)
 
 
 def _node_id(node: type[io.ComfyNode]) -> str | None:
@@ -544,7 +548,14 @@ class UpscaleImage(io.ComfyNode):
         planner = picture_planner(settings, target, (height, width), count)
 
         started = time.monotonic()
-        with models_module.session(models, settings.attention, planner, plan_only=plan_only) as run:
+        show = _shower(_node_id(cls))
+        with models_module.session(
+            models,
+            settings.attention,
+            planner,
+            plan_only=plan_only,
+            preparing=progress.Preparing(show, plans.file_label),
+        ) as run:
             made, tiles = run.planned.plan
             text = plans.picture_text(
                 count=count,
@@ -564,19 +575,29 @@ class UpscaleImage(io.ComfyNode):
             _say(text, _node_id(cls))
             if plan_only:
                 return _plan_only(text)
-            bar = ProgressBar(3 * count)
+            # The bar over the batch's expected time (progress.Progress), the text and a preview
+            # a picture.
+            moving = progress.Progress(
+                progress.picture_passes(count, target, tiles.encode, tiles.decode),
+                progress.PICTURE,
+                ProgressBar(progress.BAR),
+                show,
+                text,
+            )
             # The batch's output, allocated once and written into picture by picture: a list of
             # the pictures stacked after would hold them twice (the plan counts it once,
             # picture_process).
             outputs = np.empty((count, out_height, out_width, 3), dtype=np.float32)
             try:
                 for index in range(count):
+                    moving.begin(index)
                     outputs[index] = cls._one(
-                        run.models, batch[index], target, settings, tiles, bar
+                        run.models, batch[index], target, settings, tiles, moving
                     )
             except still.NonFinite as error:
                 raise words.non_finite(str(error)) from error
-        logger.info("seedvr2x: %d image(s) upscaled in %.1f s", count, time.monotonic() - started)
+            moving.finish(f"{count} picture{'s' if count > 1 else ''}")
+        logger.info("seedvr2x: %d picture(s) upscaled in %.1f s", count, time.monotonic() - started)
         return io.NodeOutput(_output(outputs), text)
 
     @staticmethod
@@ -586,21 +607,32 @@ class UpscaleImage(io.ComfyNode):
         target: tuple[int, int],
         settings: plans.Settings,
         tiles: still_plan.PictureTiles,
-        bar: ProgressBar,
+        moving: progress.Progress,
     ) -> npt.NDArray[np.float32]:
-        """One picture through the three steps of still.upscale, ComfyUI's Cancel honoured and its
-        bar moved between them: the steps are the library's own (still.upscale composes them)."""
-        latent = still.encoded(loaded, picture, target, settings.seed, tiles=tiles.encode)
-        bar.update(1)
-        management.throw_exception_if_processing_interrupted()
-        latent = still.sampled(loaded, latent, settings.seed)
-        bar.update(1)
-        management.throw_exception_if_processing_interrupted()
-        out = still.decoded(
-            loaded, latent, picture, target, tiles=tiles.decode, correct=settings.split
+        """One picture through the three steps of still.upscale, the bar, the text and ComfyUI's
+        Cancel moved between them and, for a tiled pass, between its tiles: the steps are the
+        library's own (still.upscale composes them), and what is told them only observes."""
+        latent = still.encoded(
+            loaded,
+            picture,
+            target,
+            settings.seed,
+            tiles=tiles.encode,
+            tile=lambda done, total: moving.tile("encode", done, total),
         )
-        bar.update(1)
-        management.throw_exception_if_processing_interrupted()
+        moving.encoded()
+        latent = still.sampled(loaded, latent, settings.seed)
+        moving.window(1)
+        out = still.decoded(
+            loaded,
+            latent,
+            picture,
+            target,
+            tiles=tiles.decode,
+            correct=settings.split,
+            tile=lambda done, total: moving.tile("decode", done, total),
+        )
+        moving.decoded(1, 1, out)
         return out
 
 
@@ -766,8 +798,14 @@ class UpscaleVideo(io.ComfyNode):
         size = words.ClipSize(count, clip.output_bytes(count, target))
 
         started = time.monotonic()
+        show = _shower(_node_id(cls))
         with models_module.session(
-            models, settings.attention, planner, plan_only=plan_only, clip=size
+            models,
+            settings.attention,
+            planner,
+            plan_only=plan_only,
+            clip=size,
+            preparing=progress.Preparing(show, plans.file_label),
         ) as run:
             made, expected = run.planned.plan
             text = plans.clip_text(
@@ -789,7 +827,20 @@ class UpscaleVideo(io.ComfyNode):
             _say(text, _node_id(cls))
             if plan_only:
                 return _plan_only(text)
-            bar = ProgressBar(BAR)
+            moving = progress.Progress(
+                progress.clip_passes(
+                    shot_list,
+                    target,
+                    made.window,
+                    made.encode_tiles,
+                    made.decode_tiles,
+                    QUALITY[quality],
+                ),
+                progress.CLIP,
+                ProgressBar(progress.BAR),
+                show,
+                text,
+            )
             # The clip's one output array, each shot written into its place in it (the plan
             # counts it once, clip.output_bytes), the shots one after the other: the windows of a
             # shot never reach another's frames.
@@ -804,9 +855,10 @@ class UpscaleVideo(io.ComfyNode):
                         each.end - 1,
                     )
                 cls._shot(
-                    *(run.models, clip_frames, each, count, target, settings, made, bar, out),
-                    quality,
+                    *(run.models, clip_frames, each, target, settings, made, moving, out),
+                    *(quality, number),
                 )
+            moving.finish(f"{count} frame{'s' if count > 1 else ''}")
         logger.info("seedvr2x: %d frame(s) upscaled in %.1f s", count, time.monotonic() - started)
         return io.NodeOutput(_output(out), text)
 
@@ -815,41 +867,45 @@ class UpscaleVideo(io.ComfyNode):
         loaded: Any,
         clip_frames: npt.NDArray[np.float32],
         shot: Shot,
-        total: int,
         target: tuple[int, int],
         settings: plans.Settings,
         made: Plan,
-        bar: ProgressBar,
+        moving: progress.Progress,
         out: npt.NDArray[np.float32],
         quality: str = plans.QUALITY_DEFAULT,
+        number: int = 1,
     ) -> None:
         """One shot of the clip, `clip_frames` [start, end) of the (T, H, W, 3) float32 in [0, 1]
-        clip, through the library's clip pass at `quality` in the plan's windows and tiles,
-        written into the same frames of `out`, the bar moved over the clip's `total` frames (a
-        shot's share is its frames', a run's of it one in as many as the shot has runs) and
-        ComfyUI's Cancel honoured between its steps, and before each run."""
-        run, runs = 1, 1
+        clip, through the library's clip pass at `quality` in the plan's windows and tiles, written
+        into the same frames of `out`. The bar, the text, the preview (the newest frame written, a
+        view of `out`) and ComfyUI's Cancel follow the pass's steps and its tiles, and each run's
+        start (several at enhanced and maximum; the shot is its number `number`, from 1, of the
+        clip's): what is told the library only observes. A shot of one run begins here; one of
+        several, as each run starts."""
+        level = QUALITY[quality]
+        offsets = [each.offset for each in shot_runs(Shot(0, shot.frames), level)]
+        taken = taken_from(shot.frames, level)
+        if len(offsets) == 1:
+            moving.run(number - 1, 1)
+        run = 0
 
         def step(stage: clip.Stage, done: int, count: int) -> None:
-            """The shot's steps on the bar, and ComfyUI's Cancel between them."""
-            nonlocal run, runs
+            nonlocal run
             if stage == "run":
-                run, runs, position = done, count, 0
+                run = done - 1
+                moving.run(number - 1, done)
             elif stage == "encode":
-                position = ENCODE_SHARE
+                moving.encoded()
             elif stage == "window":
-                position = ENCODE_SHARE + WINDOW_SHARE * done // count
+                moving.window(done)
             else:
-                position = (
-                    ENCODE_SHARE
-                    + WINDOW_SHARE
-                    + (BAR - ENCODE_SHARE - WINDOW_SHARE) * done // count
-                )
-            # The run's place in the shot's share of the bar: each run is a whole pass of the
-            # shot (the shorter later ones counted as long as the first: an approximation).
-            inside = (BAR * (run - 1) + position) // runs
-            bar.update_absolute((BAR * shot.start + inside * shot.frames) // total, BAR)
-            management.throw_exception_if_processing_interrupted()
+                # The preview is the newest frame decoded so far that this run keeps (the clip's
+                # frames offset to offset + done - 1): the others' are dropped from `out`, where
+                # a run's slice may hold none of its own. Its first frame is always its own.
+                offset = offsets[run]
+                newest_first = range(offset + done - 1, offset - 1, -1)
+                kept = next(i for i in newest_first if taken[i] == offset)
+                moving.decoded(done, count, out[shot.start + kept])
 
         try:
             clip.upscale(
@@ -865,6 +921,7 @@ class UpscaleVideo(io.ComfyNode):
                 start=shot.start,
                 output=out[shot.start : shot.end],
                 quality=quality,
+                tile=moving.tile,
             )
         except clip.NonFinite as error:
             raise words.non_finite(str(error)) from error
@@ -972,7 +1029,7 @@ class Cuts(io.ComfyNode):
                 raise words.Refused(f"threshold {threshold!r}: must be a number")
             if not 0 < threshold <= 1:
                 raise words.Refused(f"threshold {threshold}: must be above 0 and at most 1")
-            found = cls._probabilities(images, model_dir.strip())
+            found = cls._probabilities(images, model_dir.strip(), _shower(_node_id(cls)))
             cuts = shotcuts.detected(found, float(threshold))
             text = plans.cuts_text(
                 count, float(threshold), cuts, shotcuts.possible(found, float(threshold))
@@ -985,17 +1042,22 @@ class Cuts(io.ComfyNode):
         return io.NodeOutput(cut_list, text)
 
     @staticmethod
-    def _probabilities(images: torch.Tensor, model_dir: str) -> npt.NDArray[np.float32]:
+    def _probabilities(
+        images: torch.Tensor, model_dir: str, show: Callable[[str], None]
+    ) -> npt.NDArray[np.float32]:
         """The detector's probability for each frame, (T,) float32: its file found, fetched where
-        it is missing from Hugging Face's cache and checked against its pin, loaded onto the card
-        ComfyUI runs on (the processor where that is not a card), run and given back. Three
-        channels of the images: an alpha is of no use to it."""
+        it is missing from Hugging Face's cache (its download on the node's bar and text) and
+        checked against its pin, loaded onto the card ComfyUI runs on (the processor where that
+        is not a card), run (the frames scanned on a bar of their own, a batch at a time, and
+        ComfyUI's Cancel honoured between batches) and given back. Three channels of the images:
+        an alpha is of no use to it."""
         directory = Path(model_dir) if model_dir else None
         name, pin = pull.DETECTOR, pull.PINNED[pull.DETECTOR]
         hashes = pull.Hashes()
         try:
             if directory is None:
-                path = pull.fetch({name: pin})[name]
+                preparing = progress.Preparing(show, plans.file_label)
+                path = pull.fetch({name: pin}, progress=preparing.download)[name]
             else:
                 path = directory / name
                 if not path.is_file():
@@ -1007,7 +1069,9 @@ class Cuts(io.ComfyNode):
                 device = torch.device("cpu")
             with shot_detector.Detector(path, device, hashes=hashes) as found:
                 return shot_detector.probabilities(
-                    found, images[..., :3].detach().to("cpu", torch.float32)
+                    found,
+                    images[..., :3].detach().to("cpu", torch.float32),
+                    progress.scanned(ProgressBar(int(images.shape[0])), show),
                 )
         except Refusal as error:
             raise words.refusal(error, model_dir=directory is not None, node=words.CUTS) from error

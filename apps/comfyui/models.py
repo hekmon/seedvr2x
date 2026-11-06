@@ -61,6 +61,7 @@ from seedvr2x.pull import ModelFiles
 from seedvr2x.weights import Architecture
 
 from . import plans, words
+from .progress import Preparing, file_size
 
 logger = logging.getLogger("seedvr2x_comfyui.models")
 
@@ -168,7 +169,12 @@ class Machine(Protocol):
     def attention(self) -> str: ...
     def dit_model(self, path: Path) -> Architecture: ...
     def probe(self, architecture: Architecture, attention: str) -> None: ...
-    def load(self, files: ModelFiles, plan: ModelPlan) -> Models: ...
+    def load(
+        self,
+        files: ModelFiles,
+        plan: ModelPlan,
+        progress: Callable[[str, int, int], None] | None = None,
+    ) -> Models: ...
 
 
 class CudaMachine:
@@ -243,8 +249,15 @@ class CudaMachine:
 
         probe.check(self.device, architecture, attention)
 
-    def load(self, files: ModelFiles, plan: ModelPlan) -> Models:
-        return model.load_models(files.dit.path, files.vae.path, self.device, files.hashes, plan)
+    def load(
+        self,
+        files: ModelFiles,
+        plan: ModelPlan,
+        progress: Callable[[str, int, int], None] | None = None,
+    ) -> Models:
+        return model.load_models(
+            files.dit.path, files.vae.path, self.device, files.hashes, plan, progress=progress
+        )
 
 
 # The start of the library's warnings that are the command line's words (memory.startup): about an
@@ -544,13 +557,26 @@ def _read(machine: Machine, ours: Registration | None) -> tuple[Reading, Reading
     return with_comfy_gone(own, held), own, held
 
 
-def _prepare(handle: Handle, machine: Machine) -> tuple[ModelFiles, Architecture]:
+def _prepare(
+    handle: Handle, machine: Machine, preparing: Preparing | None = None
+) -> tuple[ModelFiles, Architecture]:
     """The model files found and checked as the server checks them (service.check_files): the
     directory or Hugging Face's cache, pulled at the pinned revision where missing, their headers
     checked, each pinned file's size checked and its SHA-256 left to the load. The detector is not
-    needed. A refusal is worded for the nodes (words.refusal)."""
+    needed. A refusal is worded for the nodes (words.refusal). The bytes of a download are told to
+    `preparing`, which shows them on the node."""
     try:
-        files = pull.resolve(handle.directory, handle.dit, plans.VAE_FILE, detector=False)
+        files = pull.resolve(
+            handle.directory,
+            handle.dit,
+            plans.VAE_FILE,
+            detector=False,
+            progress=None if preparing is None else preparing.download,
+        )
+        if preparing is not None:
+            # A Cancel pressed during a download that reported from another thread is still
+            # pending: honoured here, on the node's own thread (progress.Preparing).
+            management.throw_exception_if_processing_interrupted()
         dit, vae = (None if each.absent else each.path for each in (files.dit, files.vae))
         weights.check_models(dit, vae, pull.advice(files), None)
         pull.check_pinned(files, load=True)
@@ -641,8 +667,23 @@ def _plan[T](
         ) from refused
 
 
+def _load(
+    machine: Machine, files: ModelFiles, plan: ModelPlan, preparing: Preparing | None
+) -> Models:
+    """machine.load, the bytes it reads told to `preparing` (the sizes of both files first, so that
+    the bar's total is known before the first is read)."""
+    if preparing is None:
+        return machine.load(files, plan)
+    preparing.will_read(file_size(files.dit.path) + file_size(files.vae.path))
+    return machine.load(files, plan, preparing.read)
+
+
 def _load_kept(
-    handle: Handle, machine: Machine, files: ModelFiles, architecture: Architecture
+    handle: Handle,
+    machine: Machine,
+    files: ModelFiles,
+    architecture: Architecture,
+    preparing: Preparing | None = None,
 ) -> tuple[Entry, str]:
     """The models read once, every weight in its pinned host copy and none on the card
     (passes.HELD), the buffers and embeddings the load puts on the card sent back (Models.release),
@@ -663,7 +704,7 @@ def _load_kept(
         else ""
     )
     try:
-        models = machine.load(files, HELD)
+        models = _load(machine, files, HELD, preparing)
     except Refusal as error:
         raise words.refusal(error, model_dir=bool(handle.model_dir)) from error
     models.release()
@@ -808,6 +849,7 @@ def session[T](
     *,
     plan_only: bool = False,
     clip: words.ClipSize | None = None,
+    preparing: Preparing | None = None,
 ) -> Generator[Run[T]]:
     """One run of a node (the module's docstring): yields the models placed for the plan the
     planner makes, and frees the card whatever happens after. The Refused of words.py for a
@@ -820,10 +862,13 @@ def session[T](
     or placed, ComfyUI is asked to free nothing and the run's `models` is refused.
 
     `clip`: the size of the clip the run upscales, for its refusals to be worded with (a host
-    that can't hold it whole is told what the command line does instead)."""
+    that can't hold it whole is told what the command line does instead).
+
+    `preparing`: where the bytes of a download of seedvr2x's files and of their reading into memory
+    are told (progress.Preparing), for the node to show; observing only."""
     restore_rng = rng_states()
     try:
-        with _session(handle, attention, planner, plan_only, clip) as run:
+        with _session(handle, attention, planner, plan_only, clip, preparing) as run:
             yield run
     finally:
         restore_rng()
@@ -836,6 +881,7 @@ def _session[T](
     planner: Planner[T],
     plan_only: bool,
     clip: words.ClipSize | None,
+    preparing: Preparing | None = None,
 ) -> Generator[Run[T]]:
     """session, less the random generators."""
     machine_ = machine()
@@ -851,7 +897,17 @@ def _session[T](
     entry = kept(handle) if keep else None
     notes: list[str] = []
     if entry is None:
-        files, architecture = _prepare(handle, machine_)
+        if preparing is not None and not plan_only:
+            # The reading's bytes are on the bar before the first download's, so that its total
+            # holds: the pinned files' sizes (a file of a model folder is announced by its load).
+            preparing.will_read(
+                sum(
+                    pull.PINNED[each].size
+                    for each in (handle.dit, plans.VAE_FILE)
+                    if each in pull.PINNED
+                )
+            )
+        files, architecture = _prepare(handle, machine_, preparing)
     else:
         files, architecture = entry.files, entry.architecture
     chosen = _attention(machine_, attention)
@@ -884,7 +940,7 @@ def _session[T](
         # copies not counted (the host is checked by the plan that follows).
         early, _, _ = _read(machine_, None)
         _plan(planner, early, None, chosen, architecture, True, handle, clip)
-        entry, note = _load_kept(handle, machine_, files, architecture)
+        entry, note = _load_kept(handle, machine_, files, architecture, preparing)
         if note:
             notes.append(note)
     ours = None if entry is None else entry.patcher
@@ -944,7 +1000,7 @@ def _session[T](
                 assert models is not None
                 models.place(planned.models)
             else:
-                models = machine_.load(files, planned.models)
+                models = _load(machine_, files, planned.models, preparing)
         except Refusal as error:
             raise words.refusal(error, model_dir=bool(handle.model_dir), keep=keep) from error
         _set_attention(models, chosen)

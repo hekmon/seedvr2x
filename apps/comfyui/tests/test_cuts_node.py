@@ -73,7 +73,9 @@ def scripted(
     for frame, value in values.items():
         probabilities[frame] = value
     monkeypatch.setattr(shot_detector, "Detector", Recording)
-    monkeypatch.setattr(shot_detector, "probabilities", lambda found, images: probabilities)
+    monkeypatch.setattr(
+        shot_detector, "probabilities", lambda found, images, progress=None: probabilities
+    )
     return made
 
 
@@ -171,7 +173,9 @@ def test_the_text_is_said_on_the_node_and_the_alpha_is_left_out(
 ) -> None:
     seen: list[tuple[int, ...]] = []
 
-    def probabilities(found: object, images: torch.Tensor) -> npt.NDArray[np.float32]:
+    def probabilities(
+        found: object, images: torch.Tensor, progress: object = None
+    ) -> npt.NDArray[np.float32]:
         seen.append(tuple(images.shape))
         return np.zeros(len(images), np.float32)
 
@@ -190,7 +194,7 @@ def test_the_detectors_file_is_fetched_from_hugging_faces_cache_and_checked_agai
     monkeypatch.setattr(
         pull,
         "fetch",
-        lambda pins, download=None: {name: weights_dir / name for name in pins},
+        lambda pins, download=None, progress=None: {name: weights_dir / name for name in pins},
     )
 
     def check(name: str, path: Path, pin: pull.Pin, hashes, cache, role=None, **kwargs):  # type: ignore[no-untyped-def]
@@ -229,7 +233,7 @@ def test_a_file_that_cannot_be_had_or_is_damaged_names_the_cuts_node_and_its_own
 ) -> None:
     name = pull.DETECTOR
 
-    def offline(pins: Any, download: Any = None) -> Any:
+    def offline(pins: Any, download: Any = None, progress: Any = None) -> Any:
         raise ModelUnreachable("offline", file=name, why="offline")
 
     monkeypatch.setattr(pull, "fetch", offline)

@@ -10,6 +10,7 @@ import weakref
 import comfy.model_management as management
 import numpy as np
 import pytest
+import server
 import torch
 from comfy.utils import ProgressBar
 from comfyui import models, plans, words
@@ -103,13 +104,13 @@ def test_cancel_between_a_clips_runs_frees_the_card_and_makes_no_run_after(
         return sample(*args, **kwargs)
 
     monkeypatch.setattr(model, "sample", counting)
-    # The bar's value as a second run is told: a quarter of the shot's share, which the first run's
-    # last slice of the decode has put there already; Cancel on its second sight.
-    seen: list[float] = []
 
+    # The node's text as the second run starts ("Frames 1 to 33, run 2 of 4: encoding"), said
+    # before the bar is moved for it: Cancel as that update is made.
     def hook(value: float) -> None:
-        seen.append(value)
-        if seen.count(250) == 2:
+        instance = server.PromptServer.instance
+        assert instance is not None
+        if "run 2 of 4" in instance.texts[-1][0]:
             management.interrupt_current_processing()
 
     ProgressBar.on_update = hook
@@ -119,7 +120,7 @@ def test_cancel_between_a_clips_runs_frees_the_card_and_makes_no_run_after(
         )
     freed(machine, h)
     # The first run's 3 windows (33 frames, windows of at most 17): none of the second's.
-    assert len(windows) == 3 and seen.count(250) == 2
+    assert len(windows) == 3
     # The flag was cleared as it raised: the next run goes through, at any level.
     ProgressBar.on_update = None
     out, _ = upscale_video(h, plans.Settings(), clip_frames(5), RESOLUTION, "1", quality="enhanced")
@@ -160,7 +161,7 @@ class ToyMachine(StandIn):
     toy: Files
     card: Card
 
-    def load(self, files, plan):  # type: ignore[no-untyped-def,override]
+    def load(self, files, plan, progress=None):  # type: ignore[no-untyped-def,override]
         self.loads.append(plan)
         loaded = self.toy.load(plan)
         self.card.put(loaded)
@@ -251,8 +252,8 @@ def test_models_not_kept_drop_what_they_keep_on_the_device_besides_parameters(
     Rope.get_axial_freqs.cache_clear()
     real_load = machine.load
 
-    def load(files: ModelFiles, plan: ModelPlan) -> model.Models:
-        loaded = real_load(files, plan)
+    def load(files: ModelFiles, plan: ModelPlan, progress: object = None) -> model.Models:
+        loaded = real_load(files, plan, progress)  # type: ignore[arg-type]
         rope = Rope()
         loaded.runner.dit.append(rope)  # type: ignore[attr-defined]
         rope.get_axial_freqs(2, 3)

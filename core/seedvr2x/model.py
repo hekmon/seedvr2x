@@ -247,6 +247,7 @@ def load_models(
     hashes: Hashes | None = None,
     model_plan: ModelPlan | None = None,
     compilation: Compilation | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> Models:
     """Build and load the DiT in the file at dit_file and the VAE in the file at vae_file, as
     pull.resolve found them, in --model-dir or in Hugging Face's cache, each checked first
@@ -321,6 +322,7 @@ def load_models(
     vae_parts = _load_weights(
         *(vae, vae_file, device, COMPUTE_DTYPE, (lambda key: VAE_PART) if vae_leaves else None),
         hashed=hashed(vae_file),
+        progress=_read_of(progress, vae_file),
     )
     unchanged(vae_file)
     # Out of training mode, the causal convolutions keep their memory across slices
@@ -368,6 +370,7 @@ def load_models(
     dit_parts = _load_weights(
         *(dit, dit_file, device, None, _dit_parts(model_plan, len(dit.blocks)), skip),
         hashed=hashed(dit_file),
+        progress=_read_of(progress, dit_file),
     )
     unchanged(dit_file)
     dit.requires_grad_(False).eval()
@@ -487,6 +490,15 @@ def _marker(key: str) -> bool:
     return key.endswith(weights.MARK)
 
 
+def _read_of(
+    progress: Callable[[str, int, int], None] | None, path: Path
+) -> Callable[[int, int], None] | None:
+    """load_models' progress callback for one file: its name told with the bytes."""
+    if progress is None:
+        return None
+    return lambda done, total: progress(path.name, done, total)
+
+
 def _load_weights(
     model: torch.nn.Module,
     path: Path,
@@ -496,6 +508,7 @@ def _load_weights(
     skip: Callable[[str], bool] | None = None,
     *,
     hashed: Callable[[str, os.stat_result], None] | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Part]:
     """Load a safetensors or GGUF checkpoint into a model built on the meta device, as numz does
     (src/core/model_loader.py:547-616, 777-835): the file's dtypes, or every floating tensor cast
@@ -505,8 +518,11 @@ def _load_weights(
     the file is read by blockswap.read, which says why it is never mapped, as safetensors'
     own load_file maps it. The tensors skip says True of aren't kept (blockswap.read). With
     hashed, every byte of the file is hashed as it is read, and hashed is called with its SHA-256
-    and the file's status as opened, before the model takes the weights (blockswap.read)."""
-    state, parts = blockswap.read(model, path, device, dtype, part_of, skip=skip, hashed=hashed)
+    and the file's status as opened, before the model takes the weights (blockswap.read). progress
+    is told the bytes of the file read so far and its size (blockswap.read)."""
+    state, parts = blockswap.read(
+        model, path, device, dtype, part_of, skip=skip, hashed=hashed, progress=progress
+    )
     # strict=False as numz, but the mismatches are reported, where numz ignores them silently.
     result = model.load_state_dict(state, strict=False, assign=True)
     if result.missing_keys or result.unexpected_keys:

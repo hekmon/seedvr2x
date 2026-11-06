@@ -10,7 +10,7 @@ import pytest
 import server
 import torch
 from comfy.utils import ProgressBar
-from comfyui import models, nodes, plans, words
+from comfyui import models, nodes, plans, progress, words
 from standins import (
     PICTURE,
     RESOLUTION,
@@ -94,10 +94,11 @@ def test_a_clip_is_the_libraries_clip(machine: StandIn, tmp_path) -> None:
 def test_a_clips_bar_moves_with_its_steps_and_ends_full(machine: StandIn, tmp_path) -> None:
     upscale_video(handle(tmp_path), plans.Settings(window=5), pictures(33), RESOLUTION, "4")
     (bar,) = ProgressBar.created
-    assert bar.updates == sorted(bar.updates) and bar.updates[-1] == bar.total == nodes.BAR
-    # The encode, the three windows, and the decode's slices.
-    assert bar.updates[0] == nodes.ENCODE_SHARE
-    assert len(bar.updates) >= 1 + 3 + 1
+    assert bar.updates == sorted(bar.updates) and bar.updates[-1] == bar.total == progress.BAR
+    # The pass beginning, the encode, the three windows, and the decode's slices (tests/
+    # test_progress.py holds the bar's arithmetic).
+    assert bar.updates[0] == 0
+    assert len(bar.updates) >= 1 + 1 + 3 + 1
 
 
 def test_the_color_correction_and_the_seed_reach_the_pass(machine: StandIn, tmp_path) -> None:
@@ -208,7 +209,8 @@ def test_the_plan_is_said_on_the_node_in_the_console_and_given_as_text(
     with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui.nodes"):
         _, text = upscale_image(handle(tmp_path), settings, pictures(1), RESOLUTION, "31")
     instance = server.PromptServer.instance
-    assert instance is not None and instance.texts == [(text, "31")]
+    # The plan is the first text on the node; the run's progress replaces it as it goes.
+    assert instance is not None and instance.texts[0] == (text, "31")
     assert text in caplog.messages
     # The plan's parts in the nodes' words: the pictures, the card and ComfyUI's models, what
     # ComfyUI was asked, the DiT's placement and kernel, the passes, the choices, the models' RAM.
@@ -232,7 +234,7 @@ def test_the_plan_is_said_on_the_node_in_the_console_and_given_as_text(
     assert "the whole clip in one window of the model" in video
     assert "window length: auto -> at most 5 frames" in video
     assert "RAM: this run needs about" in video and "--" not in video
-    assert [node for _, node in instance.texts] == ["31", "32"]
+    assert {node for _, node in instance.texts} == {"31", "32"}
 
 
 def test_the_text_names_the_files_not_kept(machine: StandIn, tmp_path) -> None:
@@ -473,14 +475,16 @@ def test_a_bar_with_several_runs_moves_forward_over_them_and_ends_full(
         quality="maximum",
     )  # fmt: skip
     (bar,) = ProgressBar.created
-    assert bar.updates == sorted(bar.updates) and bar.updates[-1] == bar.total == nodes.BAR
-    first_end = [each for each in bar.updates if each <= nodes.BAR * 9 // 21]
-    assert first_end and max(first_end) == nodes.BAR * 9 // 21
-    # Each run takes a quarter of its shot's share: the first shot's bar passes a quarter of it
-    # (the first run's end) and halves of it before it is full.
-    share = nodes.BAR * 9 // 21
-    assert any(abs(each - share // 4) <= share // 40 for each in bar.updates)
-    assert any(abs(each - share // 2) <= share // 40 for each in bar.updates)
+    assert bar.updates == sorted(bar.updates) and bar.updates[-1] == bar.total == progress.BAR
+    # The bar's units are every run's own (tests/test_progress.py holds the arithmetic): each run
+    # of each shot is said by its label on the node, four runs a shot.
+    instance = server.PromptServer.instance
+    assert instance is not None
+    said = {text.splitlines()[-2].split(":")[0] for text, _ in instance.texts[1:-1]}
+    assert said == {
+        *(f"Shot 1 of 2, run {n} of 4 (frames 1 to 9)" for n in (1, 2, 3, 4)),
+        *(f"Shot 2 of 2, run {n} of 4 (frames 10 to 21)" for n in (1, 2, 3, 4)),
+    }
 
 
 def test_the_shots_are_seeded_as_the_command_line_seeds_them(machine: StandIn, tmp_path) -> None:
@@ -544,10 +548,12 @@ def test_one_output_array_is_allocated_for_the_clip_and_the_shots_written_into_i
 def test_a_clips_bar_runs_over_all_its_shots_and_ends_full(machine: StandIn, tmp_path) -> None:
     run_shots(machine, tmp_path, pictures(21), (Shot(0, 9), Shot(9, 21)), window=5)
     (bar,) = ProgressBar.created
-    assert bar.updates == sorted(bar.updates) and bar.updates[-1] == bar.total == nodes.BAR
-    # Halfway is the first shot's end, its share the frames' (9 of 21).
-    first_end = [each for each in bar.updates if each <= nodes.BAR * 9 // 21]
-    assert first_end and max(first_end) == nodes.BAR * 9 // 21
+    assert bar.updates == sorted(bar.updates) and bar.updates[-1] == bar.total == progress.BAR
+    # One bar over both shots, each said by its label on the node.
+    instance = server.PromptServer.instance
+    assert instance is not None
+    said = {text.splitlines()[-2].split(":")[0] for text, _ in instance.texts[1:-1]}
+    assert said == {"Shot 1 of 2 (frames 1 to 9)", "Shot 2 of 2 (frames 10 to 21)"}
 
 
 def test_the_plan_says_each_shot(

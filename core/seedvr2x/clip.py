@@ -23,6 +23,7 @@ them (plan), at every level."""
 import traceback
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
+from functools import partial
 from typing import Literal
 
 import numpy as np
@@ -49,7 +50,7 @@ from seedvr2x.shotruns import QUALITY, shot_runs, taken_from
 from seedvr2x.shots import Shot, shot_layout
 from seedvr2x.weights import Architecture
 
-__all__ = ["NonFinite", "Stage", "Step", "output_bytes", "plan", "upscale"]
+__all__ = ["NonFinite", "Stage", "Step", "Tile", "output_bytes", "plan", "upscale"]
 
 # The steps a clip is made of, as `step` is told them: the one encode, each DiT window, and the
 # decode's frames, of each run; and, with several runs, the start of each ("run").
@@ -62,6 +63,11 @@ Stage = Literal["run", "encode", "window", "decode"]
 # n-th run's encode, and the steps after it are that run's, counted from its own first frame;
 # with one run, standard's, none is told, and the steps are as they were before runs existed.
 Step = Callable[[Stage, int, int], None]
+
+# tile(pass, done, total), told by a tiled encode or decode of upscale: the tiles done of the
+# pass's grid, 0 before its first (tiling.TileStep, with the pass named). Only tiled passes tell:
+# an untiled one, or a grid of one tile, is told by its step alone. It may raise, as a Step.
+Tile = Callable[[Literal["encode", "decode"], int, int], None]
 
 
 def output_bytes(frames: int, target: tuple[int, int]) -> int:
@@ -190,6 +196,7 @@ def upscale(
     start: int = 0,
     output: npt.NDArray[np.float32] | None = None,
     quality: str = "standard",
+    tile: Tile | None = None,
 ) -> npt.NDArray[np.float32]:
     """The clip upscaled: (T, H', W', 3) float32 in [0, 1] on the CPU, (H', W') =
     frames.output_size(target), one array allocated once, or `output`.
@@ -217,9 +224,11 @@ def upscale(
     after each (Step; and before each run, with several); it may raise anything, BaseException
     included, to stop the clip: nothing is then left on the device by this call, the decode closed
     and the frames of the failing call released, but what the models hold, and the output holds
-    the frames the runs made (a stopped call's output is the caller's to drop). ValueError for
-    frames that aren't (T, H, W, 3) float32 with T >= 1; NonFinite when the encode, a window or
-    the decode holds NaN or inf (shot_pass.finite)."""
+    the frames the runs made (a stopped call's output is the caller's to drop). tile, when given,
+    is told each tile of a tiled encode and decode as it is done (Tile), which `step` is not: a
+    bar can move, and Cancel be honoured, between the tiles of a pass of a run; like step it only
+    observes and may raise. ValueError for frames that aren't (T, H, W, 3) float32 with T >= 1;
+    NonFinite when the encode, a window or the decode holds NaN or inf (shot_pass.finite)."""
     if frames.ndim != 4 or frames.shape[3] != 3 or frames.dtype != np.float32:
         raise ValueError(f"frames {frames.shape} {frames.dtype}, not (T, H, W, 3) float32")
     count = frames.shape[0]
@@ -247,6 +256,7 @@ def upscale(
             _run(
                 *(models, frames, each.offset, target, clip_seed, output),
                 *(window, encode_tiles, decode_tiles, correct, step, start, taken == each.offset),
+                tile,
             )
     except BaseException as error:
         # Whatever stopped the clip, a step's cancel included: the frames of the calls it passed
@@ -271,6 +281,7 @@ def _run(
     step: Step | None,
     start: int,
     mine: npt.NDArray[np.bool_],
+    tile: Tile | None = None,
 ) -> None:
     """The run of the clip from its frame `offset`: frames [offset, T) of the clip through the
     shot's pass, with the shot's `seed` (the runs of a shot share it, shotruns.Run) and its own
@@ -278,7 +289,8 @@ def _run(
     `offset`. Of the frames the decode gives, those whose entry in `mine` (one a frame of the
     clip, True for those taken from this run) is True are written into their place in `output`,
     the others dropped: the one array is all the run keeps. `start` is the clip's first frame in
-    its source, which a refusal for NaN names the frames by."""
+    its source, which a refusal for NaN names the frames by. `tile` is told each tile of the run's
+    tiled passes (upscale)."""
     count = frames.shape[0] - offset
     layout = shot_layout(count, window)
     reference = _Frames(frames, offset) if correct else None
@@ -291,6 +303,7 @@ def _run(
         seed,
         tiles=encode_tiles,
         store=tiling.InMemory(),
+        tile_step=None if tile is None else partial(tile, "encode"),
     )
     finite(latent, "the clip's encode")
     if step is not None:
@@ -327,6 +340,7 @@ def _run(
         reference,
         tiles=decode_tiles,
         store=tiling.InMemory(),
+        tile_step=None if tile is None else partial(tile, "decode"),
     )
 
 

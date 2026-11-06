@@ -16,7 +16,7 @@ cuts)."""
 import hashlib
 import logging
 import os
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
@@ -331,16 +331,25 @@ def shrink(images: torch.Tensor) -> npt.NDArray[np.uint8]:
     return out
 
 
-def probabilities(found: Detector, images: torch.Tensor) -> npt.NDArray[np.float32]:
+def probabilities(
+    found: Detector,
+    images: torch.Tensor,
+    progress: Callable[[int, int], None] | None = None,
+) -> npt.NDArray[np.float32]:
     """Each frame's single-frame probability for a clip held whole, images (T, H, W, 3) float32 in
     [0, 1] (shrink), through found, which must be new: (T,) float32 in [0, 1], the same bits as
     the pushes of its frames shrunk a few at a time, in the CLI's path. found is finished; the
-    caller closes it. These feed shotcuts.detected and shotcuts.possible as the first pass's do."""
+    caller closes it. These feed shotcuts.detected and shotcuts.possible as the first pass's do.
+
+    `progress`, when given, is told (frames pushed so far, T) after each batch of 4 x STEP frames
+    shrunk and pushed: a node's bar, and its Cancel. It only observes, and may raise to stop."""
     if found.pushed:
         raise ValueError("the shot detector has frames already: one clip to a detector")
-    out = [
-        found.push(shrink(images[first : first + 4 * STEP]))
-        for first in range(0, len(images), 4 * STEP)
-    ]
+    out: list[npt.NDArray[np.float32]] = []
+    for first in range(0, len(images), 4 * STEP):
+        batch = images[first : first + 4 * STEP]
+        out.append(found.push(shrink(batch)))
+        if progress is not None:
+            progress(first + len(batch), len(images))
     out.append(found.finish())
     return np.concatenate(out)

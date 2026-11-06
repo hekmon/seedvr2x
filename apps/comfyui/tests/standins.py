@@ -4,6 +4,7 @@ other models on the stand-in card, and the settings every test starts from. Comf
 are tests/comfy_stand_in."""
 
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +30,8 @@ GIB = peaks.GIB
 PICTURE = (24, 40)
 RESOLUTION = 48
 NAME = "w.safetensors"
+# The bytes of a piece the stand-in machine's load reads, a file being two.
+READ_PIECE = 1_000_000
 
 
 @dataclass
@@ -53,6 +56,9 @@ class StandIn:
     headers: list[Path] = field(default_factory=list[Path])
     events: list[Any] = field(default_factory=list[Any])
     refuse_load: BaseException | None = None
+    # Whether a load tells its progress callback the bytes it reads (two pieces a file), as the
+    # library's does: off, so that the tests that count the bar's updates count the upscale's.
+    reads: bool = False
     device: Any = field(default_factory=lambda: management.get_torch_device())
 
     def name(self) -> str:
@@ -88,10 +94,20 @@ class StandIn:
     def probe(self, architecture: Architecture, attention: str) -> None:
         self.probes.append((architecture.name, attention))
 
-    def load(self, files: ModelFiles, plan: ModelPlan) -> model.Models:
+    def load(
+        self,
+        files: ModelFiles,
+        plan: ModelPlan,
+        progress: Callable[[str, int, int], None] | None = None,
+    ) -> model.Models:
         if self.refuse_load is not None:
             raise self.refuse_load
         self.loads.append(plan)
+        # The library's callback per piece read: two pieces a file, the VAE's first.
+        if progress is not None and self.reads:
+            for each in (files.vae, files.dit):
+                progress(each.name, READ_PIECE, 2 * READ_PIECE)
+                progress(each.name, 2 * READ_PIECE, 2 * READ_PIECE)
         loaded = standin_models(self.vae_models, self.events, held=plan == passes_held())
         loaded.attention = self.attention_name  # pyright: ignore[reportAttributeAccessIssue]
         self.made.append(loaded)

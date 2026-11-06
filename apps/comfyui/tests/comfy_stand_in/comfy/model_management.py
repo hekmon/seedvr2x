@@ -16,6 +16,7 @@ the node under test holds while it runs (`running`, set by the tests' machine); 
 the total less those and the bytes the loaded models say they have on it. Every call is recorded."""
 
 import sys
+import threading
 import weakref
 from typing import Any
 
@@ -81,16 +82,28 @@ class InterruptProcessingException(BaseException):
     pass
 
 
+# ComfyUI v0.44.0 guards the flag with a re-entrant lock (model_management.py:2209-2230): a thread
+# that must leave a pressed Cancel for another holds it while it reads the flag.
+interrupt_processing_mutex = threading.RLock()
+
+
 def interrupt_current_processing(value: bool = True) -> None:
     global interrupt_processing
-    interrupt_processing = value
+    with interrupt_processing_mutex:
+        interrupt_processing = value
+
+
+def processing_interrupted() -> bool:
+    with interrupt_processing_mutex:
+        return interrupt_processing
 
 
 def throw_exception_if_processing_interrupted() -> None:
     global interrupt_processing
-    if interrupt_processing:
-        interrupt_processing = False
-        raise InterruptProcessingException()
+    with interrupt_processing_mutex:
+        if interrupt_processing:
+            interrupt_processing = False
+            raise InterruptProcessingException()
 
 
 def get_torch_device() -> Any:

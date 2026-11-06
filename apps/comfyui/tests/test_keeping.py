@@ -130,7 +130,8 @@ def test_the_run_says_the_decision_on_the_node_and_in_the_console(
     assert "keep in RAM between runs: auto -> not kept: 15." in text
     assert "GiB is over the 12.80 GiB ComfyUI allows" in text
     instance = server.PromptServer.instance
-    assert instance is not None and instance.texts == [(text, "6")]
+    # The plan is the first text on the node; the run's progress replaces it as it goes.
+    assert instance is not None and instance.texts[0] == (text, "6")
     said = "seedvr2x: keep in RAM between runs: auto -> not kept: 15."
     assert any(line.startswith(said) for line in caplog.messages), "the console says it too"
     # Not kept: read for the run alone, nothing pinned in the registry, nothing registered.
@@ -166,12 +167,12 @@ def test_the_first_files_pinned_ram_is_freed_before_the_second_is_pinned(
     seen: list[bool] = []
     real_load = machine.load
 
-    def load(files, plan):  # type: ignore[no-untyped-def]
+    def load(files, plan, progress=None):  # type: ignore[no-untyped-def]
         # At the moment the second set is read into pinned memory: the first is gone.
         machine.made.clear()
         gc.collect()
         seen.append(alive() is None and models.kept(first) is None)
-        return real_load(files, plan)
+        return real_load(files, plan, progress)
 
     machine.load = load  # type: ignore[method-assign]
     upscale_image(second, SETTINGS, pictures(), RESOLUTION, "1")

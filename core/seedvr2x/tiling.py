@@ -37,7 +37,7 @@ So nothing on the device grows with the shot (DESIGN.md, Memory planner).
 
 import contextlib
 import logging
-from collections.abc import Generator, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from typing import Protocol
 
 import torch
@@ -58,6 +58,13 @@ from seedvr2x.tilegrid import largest as largest
 from seedvr2x.tilegrid import latent_size, latent_tiles, scratch_bytes
 
 logger = logging.getLogger(__name__)
+
+# step(done, total), told by a tiled pass (encode_tiled, decode_tiled) with done = 0 once its
+# scratch is ready and before its first tile, then after each tile of its grid, total being the
+# grid's tiles: a caller's bar and its Cancel. It only observes (it may raise, BaseException
+# included, to stop the pass, which then leaves nothing but what a stopped pass leaves); a pass of
+# one tile, the untiled one, tells nothing.
+TileStep = Callable[[int, int], None]
 
 
 class Store(Protocol):
@@ -105,7 +112,12 @@ class InMemory:
 
 @torch.no_grad()
 def encode_tiled(
-    models: Models, slices: Iterable[Tensor], frames: int, tiles: Tiles, scratch: Store
+    models: Models,
+    slices: Iterable[Tensor],
+    frames: int,
+    tiles: Tiles,
+    scratch: Store,
+    step: TileStep | None = None,
 ) -> Tensor:
     """VAE latent of a shot of `frames` frames (4n + 1) fed slice by slice, as model.encode_stream
     takes them (each (C, t, H, W) in [-1, 1], COMPUTE_DTYPE on the device, t following
@@ -124,8 +136,9 @@ def encode_tiled(
     are latents, small, the size of the shot's latent: only the input takes the scratch, which is
     closed before this returns.
 
-    ValueError when the slices don't follow model.encode_slices, differ in size, or aren't in
-    COMPUTE_DTYPE, the scratch's and the VAE's."""
+    `step`, when given, is told the tiles done (TileStep), 0 before the first; its raising stops
+    the pass. ValueError when the slices don't follow model.encode_slices, differ in size, or
+    aren't in COMPUTE_DTYPE, the scratch's and the VAE's."""
     sizes = model.encode_slices(models, frames)
     slices = iter(slices)
     first = next(slices, None)
@@ -139,7 +152,7 @@ def encode_tiled(
     if len(grid(latent_size(padded), tiles)) == 1:
         _untiled("encode", tiles, padded)
         return model.encode_stream(models, slices, frames)
-    sums, count = _means(models, slices, sizes, padded, tiles, scratch)
+    sums, count = _means(models, slices, sizes, padded, tiles, scratch, step)
     divisor = count.to(models.device).clamp(min=1e-6)
     start = 0
     for size in model.latent_slices(models, sums.shape[2]):
@@ -167,6 +180,7 @@ def _means(
     padded: tuple[int, int],
     tiles: Tiles,
     scratch: Store,
+    step: TileStep | None = None,
 ) -> tuple[Tensor, Tensor]:
     """The tiles' weighted means (model.mode) of a shot fed in slices of `sizes` frames, summed,
     (1, 16, T', h, w), and the summed weights, (h, w), on the CPU, in the VAE's dtype
@@ -185,7 +199,9 @@ def _means(
         # (attn_video_vae.py:1353-1360), which the moments share (_encoded).
         like = torch.empty(0, device=models.device, dtype=inputs.dtype)
         ramp = _ramp(overlap, like)
-        for tile in layout:
+        if step is not None:
+            step(0, len(layout))
+        for number, tile in enumerate(layout, 1):
             row_weights = _weights(
                 like, tile.rows, overlap, ramp, tile.top > 0, tile.bottom < height
             )
@@ -218,6 +234,8 @@ def _means(
             count[place].addcmul_(
                 row_weights.to("cpu").view(-1, 1), column_weights.to("cpu").view(1, -1)
             )
+            if step is not None:
+                step(number, len(layout))
     assert sums is not None, "a grid has a tile"
     return sums, count
 
@@ -284,7 +302,9 @@ def _crops(models: Models, inputs: Tensor, tile: Tile, sizes: list[int]) -> Iter
 
 
 @torch.no_grad()
-def decode_tiled(models: Models, latent: Tensor, tiles: Tiles, scratch: Store) -> Generator[Tensor]:
+def decode_tiled(
+    models: Models, latent: Tensor, tiles: Tiles, scratch: Store, step: TileStep | None = None
+) -> Generator[Tensor]:
     """VAE decode of latent (T', h, w, 16), as model.decode_stream takes it, a shot's in system
     memory, tile by tile (grid): frames (C, t, H, W) in [-1, 1], unclamped, on the device, in the
     slices model.decode_stream gives (t following model.decode_slices), handed on once the last
@@ -299,8 +319,11 @@ def decode_tiled(models: Models, latent: Tensor, tiles: Tiles, scratch: Store) -
     and is divided there by the summed weights (:1621-1625).
 
     A generator: the scratch's store is open from the first tile until it ends, is closed or
-    fails, and what it gives are copies, none on the store. ValueError unless the latent is in
-    COMPUTE_DTYPE, the scratch's and the VAE's."""
+    fails, and what it gives are copies, none on the store. `step`, when given, is told the tiles
+    done (TileStep), 0 before the first, as the first slice is asked for: every tile is decoded
+    before the first slice is given, so these come before it; its raising stops the pass, the
+    scratch closed. ValueError unless the latent is in COMPUTE_DTYPE, the scratch's and the
+    VAE's."""
     layout = grid((latent.shape[1], latent.shape[2]), tiles)
     if len(layout) == 1:
         _untiled("decode", tiles, (latent.shape[1] * SCALE, latent.shape[2] * SCALE))
@@ -320,7 +343,9 @@ def decode_tiled(models: Models, latent: Tensor, tiles: Tiles, scratch: Store) -
     count = torch.zeros(padded, dtype=COMPUTE_DTYPE)
     with scratch.store(sum(sizes), padded) as sums:
         _tiled("decode", layout, tiles, sum(sizes), padded, scratch)
-        for tile in layout:
+        if step is not None:
+            step(0, len(layout))
+        for number, tile in enumerate(layout, 1):
             rows = slice(tile.top * SCALE, tile.bottom * SCALE)
             columns = slice(tile.left * SCALE, tile.right * SCALE)
             row_weights = _weights(
@@ -342,6 +367,8 @@ def decode_tiled(models: Models, latent: Tensor, tiles: Tiles, scratch: Store) -
             count[rows, columns].addcmul_(
                 row_weights.to("cpu").view(-1, 1), column_weights.to("cpu").view(1, -1)
             )
+            if step is not None:
+                step(number, len(layout))
         divisor = count.to(models.device).clamp(min=1e-6)
         start = 0
         for size in sizes:

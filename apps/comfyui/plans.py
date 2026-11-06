@@ -50,6 +50,21 @@ DIT_LABELS: dict[str, str] = {
 DEFAULT_DIT = "seedvr2x_ema_7b_sharp_fp16.safetensors"
 VAE_FILE = "seedvr2x_ema_vae_fp16.safetensors"
 
+
+def file_label(name: str) -> str:
+    """A model file as the node's progress text names it: "the sharp 7B (float16)", "the VAE",
+    "the shot detector"; any other file by its name."""
+    if name == VAE_FILE:
+        return "the VAE"
+    if name == pull.DETECTOR:
+        return "the shot detector"
+    label = DIT_LABELS.get(name)
+    if label is None:
+        return name
+    model, kind = label.split(" (")[0].split(", ")
+    return f"the {model.replace('Sharp', 'sharp')} ({kind})"
+
+
 # The settings of an upscale node. The numbers the plan makes (each pass's tile, the blocks
 # swapped, a clip's window length) are optional sockets of seedvr2x's own types, each given by a
 # value node of its own (the user's Desktop test, 2026-11-05: a widget whose 0 meant auto let a

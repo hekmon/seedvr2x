@@ -88,12 +88,17 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          a quality widget: the model's runs over each shot; the settings are the
                          upscale nodes' widgets, the plan's numbers their optional sockets of
                          seedvr2x's own types, no Tuning node) and ComfyUI's
-                         calls (progress, Cancel, the plan said on the node, plan only); the one
+                         calls (the bar and text it gets from progress.py, Cancel, the plan said
+                         on the node, plan only); the one
                          module that imports `comfy_api` (unstable)
   models.py plans.py     the files, the models kept in pinned memory and the one registration
                          with ComfyUI's model manager, a run's room and placement, keep in RAM
                          auto/on/off against ComfyUI's cap; the inputs' values as pins and
                          the plan in the nodes' words
+  progress.py            what the nodes show while they run: the upscale's bar as its expected
+                         time, the text on the node (the plan, where the run is, the time), the
+                         previews, the download and the reading of the files on one bar, the Cuts
+                         node's scan; on the library's callbacks, which only observe
   words.py               the nodes' words for each refusal, with the way out in ComfyUI's terms
   workflows/ README.md   the two example workflows (picture.json, clip.json: ComfyUI's UI format,
                          Models wired in), and the nodes' README, for users
@@ -969,6 +974,20 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   the tests alone), `test_main.py`, `test_names.py` and `test_lock.py` the parts alone. The
   library's three steps (`still.encoded`, `sampled`, `decoded`) are held to `still.upscale` by
   the CLI's `tests/test_still_cli.py`, through `upscale`, which composes them.
+- The library's callbacks for a caller's bar, text and Cancel (`core/tests/test_progress_hooks.py`),
+  all observing only: `tiling.TileStep` told by a tiled encode and decode (0 before the first
+  tile, then each; a decode tells every tile before its first slice), through `shot_pass`,
+  `clip.upscale`'s `tile` and `still.encoded` and `decoded`, the bits of a tiled picture and clip
+  those of the same call without it, an untiled pass telling none, a tile raising a
+  `BaseException` stopping the pass with nothing alive; `blockswap.read`'s `progress` (the bytes of
+  the file read, in order, ending at its size, hashing or not, the tensors equal to a read
+  without); `pull.fetch`'s `progress` through the progress bar class `hf_hub_download` is given
+  (huggingface_hub 1.33.0 and 2.4.0's, read in their sources): a plain download's one bar with its
+  chunks and a resume's negative step, a Xet download's two bars with the keywords the reporter
+  gives them and no `update_transfer`, the most either counted told in order to the file's size,
+  0 told for every file before the first begins, none passed to the library without a callback,
+  and a huggingface_hub without `tqdm_class` (0.36.2) downloading as before with a warning;
+  `detector.probabilities`' `progress` per batch with the same probabilities.
 - The ComfyUI nodes (DESIGN.md, Repository and apps), on the CPU in the CLI's environment, from
   `apps/comfyui/`: `tests/comfy_stand_in/` writes ComfyUI's few modules from the reading of
   v0.44.0, no ComfyUI code (`comfy.model_management`: `current_loaded_models` of weak
@@ -1005,10 +1024,30 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   before a model loads, a picture at resolution 17 refused and a clip at 17 planned, four channels
   with an opaque alpha a view of the same memory and not a copy, the input said in the
   plan's RAM line and out of the comparison, and the INFO line naming the command line said once
-  at import and never by a run; a clip at enhanced and maximum equal to `clip.upscale` at the level shot by shot (the shot of 2
-  frames with one run of its two), a level that is no option refused at the node's start, the
-  runs writing into the one output array, the bar moving forward over the runs and ending full, a
-  Cancel between runs (`test_release.py`) freeing the card with no later run made; `tests/test_cuts_node.py` seedvr2x Cuts over the untrained
+  at import and never by a run; a clip at enhanced and maximum equal to `clip.upscale` at the
+  level shot by shot (the shot of 2 frames with one run of its two), a level that is no option
+  refused at the node's start, the runs writing into the one output array, the bar over the
+  runs' units moving forward and ending full, a Cancel between runs (`test_release.py`) freeing
+  the card with no later run made; `apps/comfyui/tests/test_progress.py` what the nodes show
+  (`progress.py`) on a fake clock and the stand-in bar and text box: the bar the upscale's
+  expected time (each tile, window and decode tile of every run of every shot, or picture, by its
+  size, a run being a pass over the shot from its first frame with its own windows and tiles; a
+  kind's cost the card's figure until its first unit is made, then the run's own, the rest spread
+  again over what remains, monotone, full at the last unit only, an untiled decode moving it by
+  its frames written), the text of each form ("Shot 2 of 4 (frames 121 to 240): encoding, tile 3
+  of 6", "Shot 2 of 4, run 3 of 4 (frames 121 to 240): upscaling, window 2 of 3", "Frames 1 to
+  480, run 2 of 2: ...", a clip of one shot, "Picture 3 of 8: decoding, tile 2 of 4", "Picture:
+  decoding", the time so far and "about ... left" only once a window is measured, the plan and
+  "480 frames in 4 min 32 s" at the end, the box replaced and not appended to), the previews (one
+  a decode slice or a picture, the newest frame, ComfyUI's preview size, a smaller frame at its
+  own), the download and the reading on one bar of a constant total with their lines, Cancel as
+  the real hook raises it (the stand-in bar clears the flag and raises) honoured on the node's
+  thread and, from another thread, left pending under the flag's lock with the bar and text
+  untouched, the Cuts node's scan, and the nodes' runs over the stand-in models with 4 tiles to
+  each VAE pass: the bits the library's, the bar, text and previews through the tiles (at
+  maximum too, each preview a frame the output then holds, the slice's newest that its run keeps),
+  Cancel after a tile freeing the card, the load told on a bar of its own before the upscale's
+  (Cancel between runs is `test_release.py`'s, on the run's text); `tests/test_cuts_node.py` seedvr2x Cuts over the untrained
   detector's weights and scripted probabilities (the cut list and the text of the cuts and the
   possible cuts, one shot mode running no detector, the threshold, the file found in a folder or
   fetched by its pin, the detector closed after, the alpha left out, its refusals, its list into
@@ -1021,8 +1060,9 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   model's grid and given in latents, a number off the grid refused queued or linked, a value no
   value node gives refused at the upscale node's start; every input and output with a
   label and a tooltip, none in the library's terms; the colour correction a BOOLEAN, split or
-  none, `quality` a combo (standard, enhanced, maximum) on Upscale Video alone, its tooltip's points
-  and the plan's quality line (the level and its runs, a short shot's missing runs not counted), the seed's fixed control; the Models node's model, folder and RAM tooltips; a value the
+  none, `quality` a combo (standard, enhanced, maximum) on Upscale Video alone, its tooltip's
+  points and the plan's quality line (the level and its runs, a short shot's missing runs not
+  counted), the seed's fixed control; the Models node's model, folder and RAM tooltips; a value the
   prompt holds or a link gives refused in the nodes' words at queue time and at the node's
   start, an unwired one not given), the settings' pins
   reaching the plan exactly, the text's lines, the V3 registration (the entrypoint, the seven
