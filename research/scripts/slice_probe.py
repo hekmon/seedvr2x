@@ -1,6 +1,8 @@
-"""hold_probe.py with the VAE decode cut finer in time: the first slice, or the decoder's tail.
+"""hold_probe.py with the VAE decode cut finer in time (the first slice, or the decoder's tail),
+or with the DiT's lean attention.
 
-  slice_probe.py [--first N] [--tail-frames] -- HOLD_PROBE ARGS...
+  slice_probe.py [--first N] [--tail-frames] [--lean [--lean-chunk 4096] [--gelu-inplace]] \
+      -- HOLD_PROBE ARGS...
 
 seedvr2x decodes a shot's latents as numz's slicing_decode cuts them: the first latent with the
 next one, 5 frames, then one latent, 4 frames, at a time (seedvr2x/model.py, latent_slices), and
@@ -17,10 +19,17 @@ first slice peaks at 6.39 GiB where a slice of one latent, 1 frame, peaks at 2.3
              runs its SeedVR2 decoder's tail a frame at a time so (comfy/ldm/seedvr/vae.py,
              Decoder3D.tail_frames, read 2026-11-05: described, not copied).
 
-so that its dF/T steps give the peak of such a decode and, against a reference made with the
-original code, whether its frames keep their bits.
+--lean       dit_lean.py's attention (chunks of --lean-chunk tokens), and with --gelu-inplace its
+             MLP's GELU in place: what the window steps (L) need lean.
 
-Written on 2026-11-05 for place-study (Q3)."""
+so that its dF/T steps give the peak of such a decode and, against a reference made with the
+original code, whether its frames keep their bits; its L steps the same of a lean window.
+
+Each of these imports torch before hold_probe.py runs: the allocator's settings hold_probe.py
+would set (its --allocator, --gc, --split and --conf) are set here first, the same string, since
+torch takes its backend once.
+
+Written on 2026-11-05 for place-study (Q3; --lean for the night's Q9)."""
 
 import os
 import runpy
@@ -30,18 +39,32 @@ from typing import Any
 
 def main() -> int:
     args = sys.argv[1:]
-    first, tail = 0, False
+    first, tail, lean, chunk, gelu = 0, False, False, 4096, False
     while args and args[0] != "--":
         if args[0] == "--first":
             first, args = int(args[1]), args[2:]
         elif args[0] == "--tail-frames":
             tail, args = True, args[1:]
+        elif args[0] == "--lean":
+            lean, args = True, args[1:]
+        elif args[0] == "--lean-chunk":
+            chunk, args = int(args[1]), args[2:]
+        elif args[0] == "--gelu-inplace":
+            gelu, args = True, args[1:]
         elif args[0] in ("-h", "--help"):
             print(__doc__)
             return 0
         else:
             raise SystemExit(__doc__)
     rest = args[1:]
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = allocator_conf(rest)
+    if lean:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import dit_lean
+
+        dit_lean.install(lean=True, chunk=chunk)
+        if gelu:
+            dit_lean.gelu_inplace()
     if first:
         from seedvr2x import model
 
@@ -60,6 +83,26 @@ def main() -> int:
     sys.argv = [os.path.join(here, "hold_probe.py"), *rest]
     runpy.run_path(sys.argv[0], run_name="__main__")
     return 0
+
+
+def allocator_conf(rest: list[str]) -> str:
+    """PYTORCH_CUDA_ALLOC_CONF as hold_probe.py builds it from its own options."""
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--allocator", choices=("async", "native"), default="async")
+    parser.add_argument("--gc", type=float)
+    parser.add_argument("--split", type=int)
+    parser.add_argument("--conf")
+    known, _ = parser.parse_known_args(rest)
+    conf = "backend:cudaMallocAsync" if known.allocator == "async" else "backend:native"
+    if known.gc is not None:
+        conf += f",garbage_collection_threshold:{known.gc}"
+    if known.split is not None:
+        conf += f",max_split_size_mb:{known.split}"
+    if known.conf:
+        conf += f",{known.conf}"
+    return conf
 
 
 def install_tail() -> None:

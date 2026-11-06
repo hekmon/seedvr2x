@@ -1,9 +1,10 @@
 # Small cards: where a 4K picture's seconds go, what a step needs beyond its peak under expandable segments, what the VAE's decode and the DiT's step hold
 
-> Status: **measured** (2026-11-05). One card: an RTX 5090 (32 GB) under WSL2, torch
-> 2.14.1+cu130, seedvr2x at `6967542` (its own runtime, the 7B fp16 and the VAE; attention on
-> PyTorch's SDPA unless a column says FlashAttention 2). By day, beside a desktop: seedvr2x's
-> runs counted on the card less the 4 GiB left to the desktop. Through
+> Status: **measured** (2026-11-05, and the night to 11-06). One card: an RTX 5090 (32 GB)
+> under WSL2, torch 2.14.1+cu130, seedvr2x at `6967542` (its own runtime, the 7B fp16 and the
+> VAE; attention on PyTorch's SDPA unless a column says FlashAttention 2). By day, beside a
+> desktop: seedvr2x's runs counted on the card less the 4 GiB left to the desktop; at night
+> (its own section), the whole card with the desktop idle. Through
 > [`scripts/small_card.py`](../scripts/small_card.py) (the emulation),
 > [`scripts/picture_phases.py`](../scripts/picture_phases.py) (a picture's phases),
 > [`scripts/dit_need.py`](../scripts/dit_need.py) and
@@ -12,7 +13,9 @@
 > [`scripts/slice_probe.py`](../scripts/slice_probe.py) (the decode cut finer in time),
 > [`scripts/hold_probe.py`](../scripts/hold_probe.py) (the scans of [hold.md](hold.md)),
 > [`scripts/comfy_nodes.py`](../scripts/comfy_nodes.py) and
-> [`scripts/comfy_wrap.py`](../scripts/comfy_wrap.py) (ComfyUI v0.44.0, node by node).
+> [`scripts/comfy_wrap.py`](../scripts/comfy_wrap.py) (ComfyUI v0.44.0, node by node),
+> [`scripts/tile_times.py`](../scripts/tile_times.py) (a VAE pass's time at each tile side) and
+> [`scripts/tile_cost.py`](../scripts/tile_cost.py) (a tiled output against the untiled one).
 > ComfyUI is GPL-3.0: its code is read and described here in other words, with `file:line`, and
 > none is copied; C below is its `comfy/ldm/seedvr/vae.py`, and the vendored VAE's
 > `causal_inflation_lib.py` and `attn_video_vae.py` are L and A.
@@ -399,12 +402,198 @@ reserve of 0.6 and the VAE's room at its bits' 0.5, lean, tail at its 512 px 0.7
 - **Under cudaMallocAsync** (the table of that section) the pool needs 0.14 to 0.30 x P more on
   the card: the 8 GB picture still fits lean, the 8 GB clip does not.
 
+## The night of 2026-11-05: a really full card, longer lean windows, tile sides, the tiles' cost
+
+The same card, seedvr2x at `6967542` with this repository's scripts, the sharp 7B fp16, SDPA,
+and the lean attention with the in-place GELU (`dit_lean.py`) unless a line says otherwise. The
+scans of longer lean windows, the tile sides and the tiled arms ran by day under the desktop
+rule; the whole jobs, the untiled passes and the largest tile sides ran on the whole card from
+00:02 to 04:24 with the desktop idle (its window manager holding 1.9 GiB, outside every figure
+below), the emulated cards left exactly T: `small_card.py ballast --keep 0 --alarm 0.3`, which
+stops everything under 0.3 GiB free on the card. No alarm in the night.
+
+### Whole jobs on a really full card
+
+Each job planned and run on an emulated card left exactly T, then the same plan (its blocks,
+window and tiles pinned) on the whole card, its twin, for the bits and the time. The reserve:
+4.5 or 2.5 (`RESERVE` and `RESERVE_TIGHT` both set to it), the measured room (`RESERVE` max(0.6,
+0.1 x P) for the DiT's predicted peak P, `VAE_ROOM` making a VAE pass's max(1.25, 0.2 x P),
+both from the plan's own predicted peaks, planned again until the plan held the rule, the room
+only ever growing), and the floor (0.6 and 0.5, the decoder's tail a frame at a time, the plan's
+decode peaks x 0.72, as above). Both times are the command's `upscaled in`: the 4K picture's
+holds its two upscales on the models loaded (the first cold; 16.2 to 18.2 s the two, the twins'
+15.1 to 16.9) and the 16-bit PNG, encoded and written (2.5 to 3.1 s); the 73-frame clip's holds
+its units: the encode, the windows, the decode and the frames' write.
+
+| job | card | reserve (DiT / VAE pass) | plan: swapped, window, tiles | s | twin s | the card's least free | bits |
+|---|---|---|---|---|---|---|---|
+| 4K picture | 16 | 4.5 | 22, -, 1728 / 1280 | 19.7 | 18.5 | 5.19 | the twin's |
+| | 16 | 2.5 | 17, -, 2048 / 1600 | 21.0 | 19.2 | 3.08 | the twin's |
+| | 16 | room, 0.6 / 2.57 | 12, -, 2048 / 1728 | 21.3 | 19.9 | 0.97 | the twin's |
+| | 12 | 2.5 | 26, -, 1344 / 1088 | 19.2 | 18.1 | 2.89 | the twin's |
+| | 12 | room, 0.6 / 1.76 | 22, -, 1728 / 1280 | 19.7 | 18.1 | 1.19 | the twin's |
+| | 8 | room, 0.6 / 1.25 | 31, -, 1088 / 832 | 19.0 | 17.7 | 1.00 | the twin's |
+| 1080p clip | 16 | 4.5 | 30, 11, 768 / 576 | 77.6 | 77.1 | 4.15 | the twin's |
+| | 16 | 2.5 | 34, 19, 896 / 704 | 72.9 | 71.9 | 0.84 | the twin's |
+| | 16 | room, 1.33 / 2.56 | 32, 19, 1024 / 704 | 73.9 | 71.8 | 1.43 | the twin's |
+| | 12 | 2.5 | 35, 11, 640 / 512 | 77.8 | 77.0 | 2.26 | the twin's |
+| | 12 | room, 0.94 / 1.72 | 31, 11, 768 / 576 | 78.2 | 76.1 | 1.02 | the twin's |
+| | 8 | floor, 0.6 / 1.1, tail | 36, 8, 512 / 512 | 89.5 | 87.3 | 0.70 | the twin's |
+
+- **A really full card costs a job 1 to 9%, whatever its reserve**, and no bit. The passes
+  themselves keep their time: the picture's warm encode, DiT step and decode within 0.1 to 0.2 s
+  of the twin's, the clip's encode and decode within 1 to 3%. What differs is the moves between
+  phases: the emulated cards swap blocks, which enter for the DiT and leave for the decode (0.15
+  to 0.44 s each for the picture, 1.2 to 2.2 s a clip), where the twin, on a card with room for
+  the whole DiT beside each pass, moves nothing.
+- **One pass slowed**: the 16 GB clip's window of 19 latents at the measured room, 13.3 s
+  against 11.6 for the twin (+15%; +3% at 2.5). Its room was the plan's 1.33 GiB over a
+  predicted peak of 12.47; the window's measured peak is 10.40, so it had about 3.4 GiB in fact,
+  at the edge of what the next section finds such a window needs. The windows of the 12 GB
+  clip at its room and of the 8 GB floor clip ran +6.7% and +4.6% against their twins, the
+  other three rows -0.7 to +3.4% (each as the command times a window, its phase change in it).
+- **A tighter plan is no faster.** The measured room swaps 12 blocks for the 16 GB picture where
+  4.5 swaps 22, and its larger tiles take back what the blocks save.
+- **On 8 GB both run**: the 4K picture (7.4 s warm, 9 s cold), the clip in 89.5 s (101.4 by day
+  with the desktop's 4 GiB kept).
+
+**October's 1.4 to 1.5 times.** hold.md's whole jobs again, on the whole card really full, the
+shipped code (no lean attention), SDPA:
+
+| job | reserve | plan | s | frames |
+|---|---|---|---|---|
+| 66 frames in two shots at 1080p, windows of 9 latents, tiles 1024 / 832 pinned | 4.5 | 7 blocks swapped | 69.4 | one digest for all four |
+| | 2.5 | none swapped | 69.4, 69.5 | |
+| | 2.5 | 7 swapped, pinned | 68.2 | |
+| 121 frames at 1080p, unpinned | 4.5 | 26 swapped, windows of 17, encode untiled, decode 1152 | 121.2, 121.5 | one digest |
+| | 2.5 | 22 swapped, windows of 17, encode untiled, decode 1280 | 132.2, 132.7 | another (other tiles) |
+
+The 2.5 slows no pass. The 121-frame job's 1.09 times (hold.md: 216 s against 152, 1.42) is its
+decode alone, 81.2 s in 1280-px tiles against 70.9 in 1152 (the encode 27.3 against 26.5, the
+windows 23.7 both): a plan with more room takes larger decode tiles, and at 1080p a decode slows
+past about 1150 px (below). October's further slowdown is not reproduced on this code.
+
+**A hang.** The 66-frame job's second run at 4.5 stopped in its second shot's decode (6 tiles of
+832 px, 33 frames, 17.9 s for the first shot's) and never moved: the GPU at 6%, the card 4.25
+GiB free, the main thread in a timed sleep, CUDA's threads polling, both ffmpeg processes
+waiting on their pipes. SIGTERM was logged 34 minutes after the last line, and the process was
+still there 20 s later: SIGKILL (exit 137). Its first run, three minutes before, took 69.4 s;
+nothing else hung that night. Its cause is not found (no Python stack was taken).
+
+### Lean windows beyond 7 latents
+
+`slice_probe.py --lean --gelu-inplace` (the lean attention installed in `hold_probe.py`'s
+process, the allocator's settings set first), 1080p windows, 36 blocks swapped, the VAE away,
+expandable segments, by day; each window once with room, then one forward a rung down from the
+roomy figure, the cache emptied before each. The room: torch's limit over the allocated peak P.
+
+| window | P (reserved at the peak) | s a forward with room | usual speed down to | under it | the reference's bits down to |
+|---|---|---|---|---|---|
+| 7 latents, lean | 4.56 (5.22) | 4.7 | 0.8 (10.7 s at 1.0, 6.3 at 0.9) | 15-16 s at 0.7-0.5, 12 at 0.4, 29-31 at 0.3-0.1 | 0.1 |
+| 11, lean | 6.53 (7.64) | 7.5 | 1.3 | 19-35 s from 1.2 to 0.5, 31-39 under | 0.1 |
+| 19, lean | 10.40 (12.27) | 13.1 | 3.0 | 16.5-17.2 s (x1.25) at 2.75-2.25, 30-40 at 2.0, 45 at 1.0, 52-65 under | 0.2 (refused at 0.1) |
+| 11, plain | 13.06 (14.02) | 9.0 | 1.0 | 21-25 s from 0.75 to 0.25 | 0.25 |
+
+- **max(0.6, 0.1 x P) keeps a lean window's bits, not its speed**: at the rule's room (0.6,
+  0.65, 1.04 GiB) the three ran 3.2 to 3.4, 2.7 and 3.4 times as long as with room.
+- **The room follows the window's work, not its peak.** A lean window needs what a plain one of
+  its length does: 0.8 GiB at 7 latents against 0.75 plain (the table of the day above), 1.3 at
+  11 against 1.0, 3.0 at 19 where hold.md's plain windows of 16 and 17 latents needed 2.5 and 2.
+  The reserved-over-allocated gap at the peak is 0.65, 1.11 and 1.87 GiB lean, 0.96 plain at 11.
+- **max(0.6, 0.3 x P)** on the lean P covers every lean window measured (1.37, 1.96 and 3.12 GiB
+  asked against 0.8, 1.3 and 3.0 needed).
+
+### A VAE pass's time at each tile side
+
+`tile_times.py`: the models loaded once, the DiT off the GPU, torch held as a run holds it; at
+each side the planner tries (multiples of 64 px from 512 to the largest under the frame's longer
+side), a warm-up on a short shot of the same tile and slice shapes, then three passes, the
+median kept. By day, the card less 4 GiB; the clip's largest sides on the whole card at night.
+
+| side | 4K picture, one frame: encode s (peak GiB) | decode s (peak) | 1080p clip, 73 frames: encode s (peak) | decode s (peak) |
+|---|---|---|---|---|
+| 512 | 1.76 (1.51) | 3.35 (2.35) | 19.47 (4.02) | 40.84 (6.39) |
+| 640 | 1.57 (2.07) | 3.02 (3.01) | 16.75 (5.42) | 37.41 (8.59) |
+| 768 | 1.55 (2.76) | 3.04 (4.10) | 17.06 (7.58) | 37.24 (11.60) |
+| 896 | 1.55 (3.19) | 3.04 (4.39) | 17.54 (9.06) | 38.10 (14.60) |
+| 1024 | 1.44 (4.02) | 2.95 (5.25) | 17.62 (10.97) | 33.73 (17.95), night |
+| 1152 | 1.37 (4.95) | 2.94 (6.06) | 17.12 (13.18) | 33.77 (21.54), night |
+| 1280 | 1.39 (4.95) | 3.01 (6.74) | 17.00 (14.05) | 38.74 (23.66), night |
+| 1472 | 1.55 (5.69) | 3.03 (7.82) | 17.03 (16.08) | 50.54 (26.77), night |
+| 1600 | 1.58 (6.63) | 3.28 (8.78) | 15.56 (16.92), night | refused |
+| 1856 | 1.70 (8.10) | 3.46 (10.79) | 15.90 (19.55), night | - |
+| 2048 | 1.83 (8.84) | 3.52 (12.57) | - | - |
+
+(Every side is in the run's file; by day the clip's encode from 1664 px and its decode from 960
+ran short of room beside the desktop, 2 to 4.5 times as long, and were run again at night.)
+
+- **A trough, not a slope.** The 4K decode is 2.9 to 3.1 s from 640 to 1472 px, slower at 512
+  (45 tiles, each overlap decoded twice) and from 1536 up (3.52 at 2048); the clip's decode
+  fastest from 960 to 1152 px (33.7 to 34.8 s), slower at 1280 (38.7) and beyond. The encodes
+  vary less: 4K 1.34 to 1.55 s from 832 to 1408, the clip 15.6 to 18 s from 576 up.
+- **The first pass at a side costs more** (its convolutions' engines chosen): the 4K decode's
+  warm-up took 3.43, 4.93 and 6.64 s at 512, 1024 and 2048 px.
+- **The moves each side causes**, from the whole card's plan with both passes pinned to the
+  side: the 4K picture swaps no block at any side, the whole DiT staying on the GPU beside both
+  passes up to 1152 px, then leaving 1 block for the decode at 1216 px, 8 at 1472, 15 at 2048
+  (up to 8 for the encode); the clip swaps 6 and runs one window of 19 latents at every side,
+  up to 1152 px, the decode keeping 30 of the DiT's blocks on the GPU to 640 px, 24 at 768, 9
+  at 1024, 1 at 1152 (the encode 30 to 832, 20 at 1152); at 1216 and 1280 px it swaps none and
+  keeps 3 and 1 beside the decode; from 1344 px the decode is refused (25.96 GiB asked).
+
+### What the tiles cost the picture
+
+`tile_cost.py`: each output against the untiled one, both after `split`: the colour study's
+drift (colour.md, VAE tiles at 1080p: the largest |mean luma difference| of a 60x60 block, and
+over the flattest third of blocks, here the untiled output's), PSNR-Y over the frame, inside and
+outside the tiles' overlap zones widened by 16 px, and maps of where the differences sit.
+
+The untiled passes: the 4K picture's encode untiled peaks 14.7 GiB over the models (1.85 s
+warm), its decode 23.7 GiB over them (3.47 to 3.51 s warm), where the plan, which takes no
+untiled decode past the 1080p frame measured, would count 29.0 (its one-frame ratio of 0.21 x
+138.10); it ran outside the plan (`picture_phases.py --then`, 36 blocks swapped), the same bits
+twice. The clip's untiled encode peaks 19.85 GiB (15.4 s); its untiled decode does not fit the
+card (27.64 GiB allocated when refused; 27.23 with the decoder's tail a frame at a time, which
+ran in 81 s with torch's reserve at its limit), so the clip's reference is the untiled encode
+with 1280-px decode tiles.
+
+| encode / decode tiles | 4K picture: drift (flat third), PSNR-Y dB | 1080p clip, against U / 1280 |
+|---|---|---|
+| U / 2048 | 0.16 (0.04), 53.7 | - |
+| U / 1024 | 0.24 (0.07), 48.6 | 0.06 (0.04), 50.8 |
+| U / 768 | 0.30 (0.09), 46.0 | 0.14 (0.08), 46.8 |
+| U / 512 | 0.33 (0.15), 44.4 | 0.13 (0.08), 46.7 |
+| 2048 / U | 0.25 (0.08), 44.6 | - |
+| 1024 / U (clip: / 1280) | 0.40 (0.13), 39.8 | 0.10 (0.06), 47.4 |
+| 768 / U | 0.61 (0.11), 38.3 | 0.20 (0.11), 42.7 |
+| 512 / U | 0.61 (0.14), 37.0 | 0.24 (0.16), 40.1 |
+| both 2048, 1024, 768, 512 | 44.7, 39.8, 38.2, 36.9 | -, 45.9, 42.0, 39.7 |
+
+- **The drift stays a fraction of a level** after `split` (0.06 to 0.61 in the worst block),
+  the colour study's 1080p range.
+- **The encode's tiles cost more than the decode's**, 7 to 9 dB of PSNR-Y on the picture, 3 to
+  7 on the clip: the DiT redraws from a latent the encode's tiles moved, where the decode's
+  tiles only move the pixels they make.
+- **The differences are not at the seams.** The overlap bands hold about their share of the
+  squared error (0.10 to 0.45 of it in 0.07 to 0.38 of the pixels: 0.5 to 1.2 times their share
+  at every side but the picture's 2048-px tiles, decode, encode or both, 1.8 to 2.0 times); the
+  flattest segment's step across a zone (colour.md's measure) stays under 0.21 of a level, the
+  largest over all segments 0.3 to 1.5, the encode's tiles at 512 and 768 px the most. The maps
+  show the differences spread over the picture, strongest in its detail.
+- No ground truth here: a difference from the untiled output is neither a loss nor a gain by
+  itself; the colour study's judgement (its eyes found the tiles invisible after `split`) is the
+  one made against a GT.
+
 ## Not measured
 
 - **No real small card, no Windows-native run.** Every 8, 12 and 16 GB figure above is the RTX
-  5090 under WSL2 with a ballast process holding the rest of the card, beside a desktop kept at
-  4 GiB. Which emulation a real 12 GB card matches is open.
-- **Timings by day.** Runs of one configuration are 5 to 15% apart.
+  5090 under WSL2 with a ballast process holding the rest of the card: by day beside a desktop
+  kept at 4 GiB, at night on the whole card with the desktop idle (its 1.9 GiB outside every
+  figure). Only the memory is emulated: the card's compute, bandwidth and clocks are the 5090's,
+  so a real small card is slower than these times. Which emulation a real 12 GB card matches is
+  open.
+- **Timings by day.** Runs of one configuration are 5 to 15% apart by day; at night, with the
+  desktop idle, 0.1 to 0.4% (three jobs run twice each).
 - **ComfyUI's sharp fp16 clip and its DiT phase on 8 GB.** The clip takes 24.5 GiB, beyond the
   desktop rule by day (its 3B template, with the same VAE, was measured instead); in the DiT
   phase comfy-aimdo reads the card itself, which a ballast by day cannot hide.
@@ -414,8 +603,12 @@ reserve of 0.6 and the VAE's room at its bits' 0.5, lean, tail at its 512 px 0.7
   algorithm for the smaller shapes is the likely one, unproven).
 - **ComfyUI's other bit-keeping VAE items.** Items 3 and 4 of the comparison above, and item 5
   beyond the decoder's tail a frame at a time: read, not built.
-- **The 0.1 x P rule beyond 7 latents.** The scans here stop at windows of 7 latents; above them
-  only hold.md's expandable table speaks to it.
+- **The lean windows' room on a real job past 19 latents**, and under cudaMallocAsync: the
+  night's scans stop at 19 latents and at torch's own allocator.
+- **The hang's cause.** One run of the night's hung in its decode with the GPU idle (the night's
+  section); no Python stack was taken, and it did not come back.
+- **The tiles against a ground truth.** The night's tile costs are against the untiled output;
+  only the colour study judged tiles against a GT, at 1080p.
 - **Three brought-up scripts.** `vae_room.py`, `tile_peaks.py` and `one_output_peaks.py` were
   brought up to the library and checked statically, not run on a GPU; `hold_probe.py`, brought
   up too, ran the scans above.

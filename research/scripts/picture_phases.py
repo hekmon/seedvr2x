@@ -1,7 +1,7 @@
 """One picture's time, phase by phase, through seedvr2x's own command, models loaded once.
 
   picture_phases.py --out FILE.jsonl [--reps 3] [--png-variants] [--lean] [--sdpa-batched] \
-      -- CLI ARGS...
+      [--then E,D [--then-reps 2] [--then-out FILE.png]] -- CLI ARGS...
 
 Run under small_card.py (`small_card.py run --keep 4 -- picture_phases.py ...`), so that the
 command's plan is made in the card's free memory less the desktop's share. The command runs as a
@@ -24,6 +24,11 @@ the finite check), decode (each slice of the decode's generator), reference (the
 the transform in float32, for the colour correction), colour (colour.split), upscale (the three
 steps whole), png:<variant>.
 
+`--then E,D` runs `--then-reps` more pictures after the reps on the same models with the
+encode's and the decode's tiles E and D (0: untiled), outside the plan, held by torch's limit
+alone, the first written as a 16-bit PNG (`--then-out`, png.write, no colour chunks): the
+untiled 4K decode, which the plan refuses (no one-frame untiled decode measured past 1080p).
+
 Written on 2026-11-05 for place-study (the 4K picture's 14 s against ComfyUI's 5 s); the steps it
 wraps are those of seedvr2x/still.py at that date."""
 
@@ -45,6 +50,9 @@ def main() -> int:
     parser.add_argument("--lean", action="store_true", help="dit_lean.py's attention")
     parser.add_argument("--sdpa-batched", action="store_true", help="dit_lean.py's batched SDPA")
     parser.add_argument("--lean-chunk", type=int, default=0, help="dit_lean.py's chunk")
+    parser.add_argument("--then", default="", help="ENCODE,DECODE tiles (0: untiled) for more reps")
+    parser.add_argument("--then-reps", type=int, default=2)
+    parser.add_argument("--then-out", default="", help="the first of those reps as a 16-bit PNG")
     parser.add_argument("cli", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     cli = args.cli[1:] if args.cli[:1] == ["--"] else args.cli
@@ -172,6 +180,25 @@ def main() -> int:
                 state["rep"] = rep
                 result = upscale(*a, **k)
                 emit({"phase": "sha256", "value": hashlib.sha256(result.tobytes()).hexdigest()})
+            if args.then:
+                # The same picture on the same models with other tiles, outside the plan: an
+                # untiled pass the planner takes no figure for, held by torch's limit alone.
+                from seedvr2x.passes import Tiles
+
+                sides = [int(side) for side in args.then.split(",")]
+                other = dict(k)
+                other["encode_tiles"] = Tiles(sides[0]) if sides[0] else None
+                other["decode_tiles"] = Tiles(sides[1]) if sides[1] else None
+                emit({"phase": "then", "encode": sides[0], "decode": sides[1]})
+                for rep in range(args.reps + 1, args.reps + 1 + args.then_reps):
+                    state["rep"] = rep
+                    again = upscale(*a, **other)
+                    digest = hashlib.sha256(again.tobytes()).hexdigest()
+                    emit({"phase": "sha256", "value": digest, "then": True})
+                    if args.then_out and rep == args.reps + 1:
+                        data = write(again, bits=16, grey=False, icc=None, chunks=[])  # untimed
+                        with open(args.then_out, "wb") as handle:
+                            handle.write(data)
             state["rep"] = 0
             return result
 

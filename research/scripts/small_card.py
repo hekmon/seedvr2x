@@ -3,7 +3,8 @@
 Two halves, one method (place-study, 2026-11-05), for seedvr2x's runs and for this repository's
 measuring scripts alike:
 
-  small_card.py ballast --card N|whole [--keep 4] [--watch PIDFILE] --ready FILE [--log FILE]
+  small_card.py ballast --card N|whole [--keep 4] [--alarm GIB] [--watch PIDFILE] --ready FILE
+      [--log FILE]
   small_card.py run [--keep 4] [--attention sdpa] [--pidfile FILE] -- \
       (cli ARGS... | SCRIPT.py ARGS...)
 
@@ -15,7 +16,9 @@ holds F0 - T - keep through the driver API (cuMemAlloc, which NVML counts as ano
 so that the card has T + keep free, then reads the card every second: where the card has less
 than keep - 0.25 GiB free for two readings in a row, it frees what it holds and sends SIGTERM to
 the process whose pid the file `--watch` holds (`run --pidfile`), and logs ALARM (the
-desktop's share is the rule). `--card whole` holds nothing and only watches.
+desktop's share is the rule). `--alarm GIB` sets that floor itself: with `--keep 0`, a card
+left exactly T, nothing kept for a desktop that is idle, `--alarm 0.3` stops everything under
+0.3 GiB free (place-study's night, 2026-11-05). `--card whole` holds nothing and only watches.
 
 `run` starts the measured process: seedvr2x's command (`cli`) or a research script, in this
 process, with seedvr2x's reading of the card through NVML (memory._read_all, which card_free and
@@ -141,20 +144,21 @@ def ballast(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     log = open(args.log, "a") if args.log else None
     low, least = 0, free
+    floor = keep - ALARM_MARGIN if args.alarm is None else round(args.alarm * GIB)
     while not stop.wait(1.0):
         free, used = _nvml()
         least = min(least, free)
         if log:
             log.write(f"{time.time():.1f} {free} {used}\n")
             log.flush()
-        low = low + 1 if free < keep - ALARM_MARGIN else 0
+        low = low + 1 if free < floor else 0
         if low >= 2:
             for pointer in held:
                 driver.free(pointer)  # type: ignore[union-attr]
             held = []
             print(
-                f"small_card: ALARM: the card had {free / GIB:.2f} GiB free, under the desktop's"
-                f" {args.keep:g} GiB: ballast freed",
+                f"small_card: ALARM: the card had {free / GIB:.2f} GiB free, under"
+                f" {floor / GIB:.2f} GiB: ballast freed",
                 flush=True,
             )
             if args.watch:
@@ -265,6 +269,7 @@ def main() -> int:
     b = sub.add_parser("ballast")
     b.add_argument("--card", required=True, help="N (GB) or whole")
     b.add_argument("--keep", type=float, default=4.0, help="GiB left free to the desktop")
+    b.add_argument("--alarm", type=float, help="GiB free under which it stops (keep - 0.25)")
     b.add_argument("--watch", default="", help="a file holding the run's pid, stopped on an alarm")
     b.add_argument("--ready", required=True)
     b.add_argument("--log", default="")
