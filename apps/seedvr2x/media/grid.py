@@ -203,11 +203,11 @@ def spread(
 ) -> npt.NDArray[np.float32]:
     """The decoded frames' shot probabilities over the places, (places,) float32, given each
     frame's own place (`placed`, strictly increasing from 0): the cuts drawn from them
-    (cuts.py: detected, possible) are those drawn from the decoded frames', each at its
+    (shotcuts.py: detected, possible) are those drawn from the decoded frames', each at its
     frame's own place, with the same probability.
 
     TransNetV2 saw the decoded frames alone. A frame's probability speaks of the change from it
-    to the next frame it saw, and a cut is the frame after a run's peak (cuts.py). So,
+    to the next frame it saw, and a cut is the frame after a run's peak (shotcuts.py). So,
     of the places that show frame k, its own and the held ones after it: the last takes k's
     probability, the change to frame k + 1 coming after it; the others take the lower of k's
     and of frame k - 1's (0 before the first frame). A frame followed by no hole keeps its own.

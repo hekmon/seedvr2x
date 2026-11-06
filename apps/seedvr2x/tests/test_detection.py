@@ -44,12 +44,12 @@ from test_detector_cli import CUTS, SHOTS
 from test_index import make
 from test_probe import has_encoder
 
-from cuts import detections
 from media import ffmpeg
 from media import scan as first
 from media.ffmpeg import MediaError
 from seedvr2x import pull
 from seedvr2x.detector import BATCH, Detector
+from seedvr2x.shotcuts import detections
 
 
 def _usable() -> bool:

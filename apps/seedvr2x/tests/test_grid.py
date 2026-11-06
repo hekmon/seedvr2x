@@ -45,7 +45,6 @@ from levels import levels
 from test_index import bounded, needs_ffmpeg, packet_list, reference, run
 from test_probe import has_encoder
 
-from cuts import Cut, detected, detections, possible
 from media.conversion import Conversion, conversion_for
 from media.decode import Decoder
 from media.ffmpeg import MediaError, input_args
@@ -55,6 +54,7 @@ from media.probe import probe
 from media.reader import Reader, read_command, seek_time
 from media.scan import scan
 from media.source import examine, resolved
+from seedvr2x.shotcuts import Cut, detected, detections, possible
 
 NTSC = Fraction(24000, 1001)
 

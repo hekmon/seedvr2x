@@ -32,6 +32,10 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
     clip.py              a clip of one shot's frames in memory, upscaled on models already loaded,
                          its plan (shot_plan's, the output and the windows and scratch kept in
                          system memory counted)
+    shotcuts.py          the cuts drawn from the shot detector's probabilities (Cut, detections,
+                         detected, possible, the default and the possible cuts' thresholds), plain
+                         Python and NumPy; the CLI's cuts.py keeps their timecodes, the cut list
+                         file and the playlists
     record.py            seedvr2x's record in each output: its fields and the AI mark, a picture's
                          XMP packet, a video's stream tags
     probe.py             the environment probe: the kernels a DiT file needs checked on the device
@@ -177,10 +181,10 @@ beside it; the `__init__.py` is seedvr2x's.
   the locked torch unchanged; a change would be marked as `vendor/`'s are, its pin changed with it.
 - `seedvr2x/detector.py` builds it, loads seedvr2x's `transnetv2.safetensors` into it (pinned in
   `seedvr2x/pull.py`, made by `models/transnetv2_weights.py`) and runs measurement's windows on
-  frames pushed to it; the CLI's `media/scan.py` feeds it the frames and `cuts.py` draws the cuts
-  from its probabilities. Its licence is the library's: `core/`'s pyproject says "Apache-2.0 AND
-  MIT" and ships `transnetv2/LICENSE`; `core/`'s NOTICE and `apps/seedvr2x/`'s README.md credit
-  it.
+  frames pushed to it; the CLI's `media/scan.py` feeds it the frames and the library's
+  `shotcuts.py` draws the cuts from its probabilities. Its licence is the library's: `core/`'s
+  pyproject says "Apache-2.0 AND MIT" and ships `transnetv2/LICENSE`; `core/`'s NOTICE and
+  `apps/seedvr2x/`'s README.md credit it.
 
 ## Environment
 
@@ -533,10 +537,11 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   the stand-in model (`tests/test_cli_run.py`'s `StandInDetector`, each frame's probability its
   mean value): its file an empty `transnetv2.safetensors` beside the stand-in's model files,
   pinned so in place of TransNetV2's weights, which the pin's check then checks.
-- The cuts drawn from the probabilities (`cuts.py`) are held by `tests/test_cuts.py` to
-  measurement's own detection (`research/scripts/scd_scores.py`'s `tnet_detections`, copied
-  there, on the float32 values read as float64, as its analysis reads them), the possible cuts
-  and the cut list `--plan` writes with them, read back by `--cuts`. The CLI's
+- The cuts drawn from the probabilities (`seedvr2x/shotcuts.py`) are held by
+  `core/tests/test_shotcuts.py` to measurement's own detection
+  (`research/scripts/scd_scores.py`'s `tnet_detections`, copied there, on the float32 values read
+  as float64, as its analysis reads them), and the possible cuts; the cut list `--plan` writes
+  with them, read back by `--cuts`, is `tests/test_cuts.py`'s (the CLI's). The CLI's
   (`--cut-threshold`, `--plan`, a plan planned again or taken up in another environment) by
   `tests/test_cli_run.py`, a `ScriptedDetector` giving chosen probabilities in place of the
   stand-in's, about 0.25 on its clips, which cut nothing at 0.3; with `SEEDVR2X_MODEL_DIR`,

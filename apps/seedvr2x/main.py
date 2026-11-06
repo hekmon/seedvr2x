@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import stills
 import stop as stopping
-from cuts import PLAYLISTS, POSSIBLE, THRESHOLD, playlist_path, write_playlists
+from cuts import PLAYLISTS, playlist_path, write_playlists
 from disk import RAW_BYTES
 from job import (
     DEFAULT_RESOLUTION,
@@ -42,6 +42,7 @@ from media.writer import FORMATS
 from seedvr2x import waiting
 from seedvr2x.clock import sample, spent, spoken, taking, wall
 from seedvr2x.pull import DETECTOR, REPO
+from seedvr2x.shotcuts import POSSIBLE, THRESHOLD
 from stills import BARE_PLAN, PNG8
 from stop import Deadline, Stop, Stopped, Terminated, deadline, terminable
 
@@ -49,7 +50,6 @@ if TYPE_CHECKING:
     import torch
 
     from calibration import Calibrated
-    from cuts import Cut
     from disk import Disk
     from job import OutputSegment
     from manifest import Manifest
@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from seedvr2x.pull import ModelFile, ModelFiles
     from seedvr2x.record import Record
     from seedvr2x.shot_plan import Pins, PlanError
+    from seedvr2x.shotcuts import Cut
     from seedvr2x.shots import Shot
     from seedvr2x.weights import Architecture
     from timing import Clock, Unit
@@ -5073,7 +5074,7 @@ def _source_cuts(args: argparse.Namespace, listed: list[int], source: "Source") 
     at --cut-threshold from the shot detector's probabilities, its first pass's or its record's
     (DESIGN.md, Shot detection: "the cuts derive from them and the threshold"), with the
     possible ones."""
-    from cuts import Cut, detected, possible
+    from seedvr2x.shotcuts import Cut, detected, possible
 
     if args.cuts is not None:
         return _Cuts([Cut(frame) for frame in listed], [], None, args.cuts)
@@ -5117,7 +5118,7 @@ def _counts(found: _Cuts, shots: int) -> str:
         return f"{cuts} from the cut list {found.listed} ({shots_said})"
     said = f"{cuts} at {found.threshold} ({shots_said})"
     if float(found.threshold) <= POSSIBLE:
-        # No run from POSSIBLE up peaks under such a threshold (cuts.possible).
+        # No run from POSSIBLE up peaks under such a threshold (shotcuts.possible).
         return f"{said}, no possible cuts at a threshold of {POSSIBLE} or under"
     possible = _plural(len(found.possible), "possible cut")
     return f"{said}, {possible} from {POSSIBLE} up to {found.threshold}"

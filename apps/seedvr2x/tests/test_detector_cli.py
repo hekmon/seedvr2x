@@ -1,11 +1,11 @@
-"""Where the cuts fall, over the shot detector's probabilities (cuts.py; seedvr2x/detector.py is the
-library's, test_detector.py's): on a synthetic clip of four shots decoded to 48x27 as TransNetV2's
-official extraction decodes (ffmpeg), with TransNetV2's weights (SEEDVR2X_MODEL_DIR holding
-transnetv2.safetensors, skipped without): each cut's probability peaks on the frame before it,
-above 0.5, every other frame's under 0.05; the cuts at 0.3 are the clip's; the streamed windows
-equal measurement's tnet_predict; the same bits twice. On the GPU (pytest -m gpu): the GPU's
-probabilities against the CPU's, the largest difference printed (-rP), the same detections at 0.3,
-the same bits twice, its memory given back and torch's settings as found."""
+"""Where the cuts fall, over the shot detector's probabilities (seedvr2x/shotcuts.py and
+seedvr2x/detector.py, the library's, test_detector.py's): on a synthetic clip of four shots
+decoded to 48x27 as TransNetV2's official extraction decodes (ffmpeg), with TransNetV2's weights
+(SEEDVR2X_MODEL_DIR holding transnetv2.safetensors, skipped without): each cut's probability peaks
+on the frame before it, above 0.5, every other frame's under 0.05; the cuts at 0.3 are the clip's;
+the streamed windows equal measurement's tnet_predict; the same bits twice. On the GPU (pytest -m
+gpu): the GPU's probabilities against the CPU's, the largest difference printed (-rP), the same
+detections at 0.3, the same bits twice, its memory given back and torch's settings as found."""
 
 import shutil
 import subprocess
@@ -17,8 +17,8 @@ import pytest
 import torch
 from test_detector import MODELS, official, settings, streamed, tnet_predict, trained  # noqa: F401
 
-from cuts import detections
 from seedvr2x.detector import BATCH
+from seedvr2x.shotcuts import detections
 
 # The synthetic clip: four lavfi sources at 25 fps, each moving, 73, 77, 62 and 68 frames, its cuts
 # the first frames of the shots but the first.
