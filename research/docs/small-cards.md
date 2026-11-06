@@ -11,6 +11,7 @@
 > [`scripts/dit_lean.py`](../scripts/dit_lean.py) (what a DiT step holds, and a leaner one),
 > [`scripts/vae_profile.py`](../scripts/vae_profile.py) (where a VAE pass's time goes),
 > [`scripts/slice_probe.py`](../scripts/slice_probe.py) (the decode cut finer in time),
+> [`scripts/tail_probe.py`](../scripts/tail_probe.py) (the shipped decoder tail switched on),
 > [`scripts/hold_probe.py`](../scripts/hold_probe.py) (the scans of [hold.md](hold.md)),
 > [`scripts/comfy_nodes.py`](../scripts/comfy_nodes.py) and
 > [`scripts/comfy_wrap.py`](../scripts/comfy_wrap.py) (ComfyUI v0.44.0, node by node),
@@ -503,6 +504,179 @@ roomy figure, the cache emptied before each. The room: torch's limit over the al
 - **max(0.6, 0.3 x P)** on the lean P covers every lean window measured (1.37, 1.96 and 3.12 GiB
   asked against 0.8, 1.3 and 3.0 needed).
 
+### The lean attention's peak, refitted
+
+The DiT's per-token and per-window terms of `core/seedvr2x/peaks.py` were fitted on the plain
+attention (127.16 KiB a token, 2.726 MiB a window, SDPA 4.69% more a token and 0.141 GiB). On the
+lean attention the step's peak moved, so the terms were measured again: `hold_probe.py` (seedvr2x's
+own forward, one sampling step, the VAE's weights on the GPU, the sharp 7B fp16, an RTX 5090,
+2026-11-06), one window per step at the padded 1080p (1104x1920) and 4K (2192x3840) frames, under
+FlashAttention 2 and under SDPA. Peaks are torch's `max_memory_allocated`, in GiB.
+
+| frame | blocks swapped | latents: peak |
+|---|---|---|
+| 1080p | 36 | 1: 2.115, 3: 3.068, 5: 4.035, 7: 5.031, 9: 5.999, 11: 6.995, 13: 7.933, 15: 8.929, 17: 9.867, 19: 10.864 |
+| 1080p | 0 | 1: 16.464, 3: 17.416, 5: 18.384, 7: 19.380 |
+| 4K | 36 | 1: 3.547, 2: 5.565, 3: 7.582, 4: 9.600 |
+| 4K | 0 | 1: 17.895 |
+
+FlashAttention 2 and SDPA peaked at the same figure to the MiB at every point, although their
+outputs differ in bits (each kernel ran): on the lean code the step's peak is no longer in the
+attention, so one fit serves both backends.
+
+The fit is least squares of the peak less (the loaded DiT less the swapped blocks' saving,
+`peaks.loaded` and `peaks.swapped_saving`) on the tokens and the attention windows
+(`peaks.tokens`, `peaks.attention_windows`), with a constant, the 1-latent 1080p windows left out:
+**61.243 KiB a token, 0.996 MiB an attention window, +0.0068 GiB**. Every fitted point is within
+0.0004 GiB of the line. The 1-latent 1080p windows (swapped or not) peak 0.073 GiB over it, their
+peak being elsewhere in the step, so the constant that bounds every point is **0.081 GiB** (0.0798
+needed and 0.081 taken: 1 MiB over the 1-latent window with the slopes rounded), which
+`peaks.DIT_ATTENTION` holds for both backends.
+
+Checked against the formats that follow the fp16 terms, 5 latents at 1080p, 36 blocks swapped, lean:
+int8 measured 3.649 GiB for 4.063 predicted, the sharp dynamic GGUF 3.433 for 3.576, fp16 4.035
+for 4.108: each under its prediction.
+
+To run it again: `hold_probe.py` once per frame size and placement, with one backend each (its
+`--help` lists the options: the size, the placement, the steps in latents), then
+`apps/seedvr2x/.venv/bin/python research/scripts/lean_fit.py FILE.jsonl ...` on the files it
+wrote. The script prints the table with each point's residual, the fit and the bounding constant.
+
+### The lean windows under cudaMallocAsync
+
+`hold_probe.py --allocator async --under 2.5 --placement 36 --without vae`, SDPA, the lean
+attention, an RTX 5090 under WSL2, 2026-11-06: the
+sharp 7B fp16, 36 blocks swapped, the VAE away, torch's limit 2.5 GiB under the card. Each window
+once with room (the "roomy" step), then one step at every rung of a limit over the allocated peak
+from 3.0 to 0 GiB by 0.25 (`s:N:3.0:0.0:0.25`, 13 rungs). The loaded weights are 1.055 GiB
+allocated; P below is the peak over them. The pool held beyond the allocated peak is the reserved
+peak less the allocated one (torch rounds the reserved figure to 1/32 GiB), the most over the
+rungs.
+
+| window | P (GiB) | pool held beyond the peak, most (GiB) | s with room | s at the rungs, least to most | max(0.85, 0.24 x P) | by how much it covers |
+|---|---|---|---|---|---|---|
+| 1080p, 1 latent | 0.593 | 0.352 | 3.38 | 1.63-1.94 | 0.850 | 0.498 |
+| 1080p, 3 | 1.546 | 0.743 | 7.86 | 3.70-4.91 | 0.850 | 0.107 |
+| 1080p, 5 | 2.513 | 0.713 | 12.33 | 5.65-6.82 | 0.850 | 0.137 |
+| 1080p, 7 | 3.509 | 0.811 | 15.12 | 6.61-8.79 | 0.850 | 0.039 |
+| 1080p, 11 | 5.473 | 1.191 | 19.46 | 9.53-10.26 | 1.314 | 0.123 |
+| 1080p, 19 | 9.342 | 1.697 | 33.21 | 14.67-16.07 | 2.242 | 0.545 |
+| 4K, 1 | 2.025 | 0.795 | 6.86 | 3.65-4.13 | 0.850 | 0.055 |
+
+- **The bits are equal at every rung** to the roomy step's, down to a limit at the allocated
+  peak itself (limit over the peak 0), for all seven windows.
+- **No rung is slower than the step with room.** The roomy step is the slowest of each window;
+  the rungs took 0.44 to 0.62 times its time, with no trend down the ladder. The cause of
+  the roomy step's longer time is not found.
+- **max(0.85, 0.24 x P) covers every window measured**, by 0.039 GiB at the least (7 latents).
+  max(0.6, 0.2 x P) fell short at 3, 5, 7 and 11 latents (by 0.143, 0.113, 0.109 and 0.096 GiB)
+  and at 4K (0.195).
+- **The 4K scan was cut short** after its 1.25 GiB rung (8 rungs of 13): the machine ran out of
+  system memory beside another set of tests. 4K's 2 latents, in the same scan, were never
+  reached; the one 4K window above is the whole 4K evidence.
+- **Other tests ran beside the 1080p scan's first ten minutes**, so its times are not
+  clean (the 1-latent and 3-latent windows, and the roomy steps, at least). The rule above is
+  drawn from the memory figures, which that load does not move.
+
+To run it again: `hold_probe.py --dit DIT --vae VAE --allocator async --under 2.5 --placement 36
+--without vae --size 1080 --steps 1,s:1:3.0:0.0:0.25,3,s:3:3.0:0.0:0.25,...` (its `--help` lists the options),
+SDPA selected.
+
+### The DiT's reserve past 4.5 GiB, in int8
+
+Where 0.3 x P passes 4.5 GiB, the rule leaves more than the old flat reserve: on a 32 GB card the
+default plans take 1080p windows of 46 latents (0.3 x P = 6.9 GiB) and 4K windows of 10 (5.9).
+The longest lean windows the RTX 5090 holds beside its desktop's 4 GiB were scanned (hold_probe.py,
+the sharp 7B in int8, every block swapped, the VAE away, `--allocator native --conf
+expandable_segments:True --under 4.5`, each window's usual step first, then its room over the
+peak lowered by 0.25 GiB, `s:N:FROM:TO:0.25`; nothing else on the machine; P is the peak over the
+0.63 GiB the loaded model holds):
+
+| window, 1080p | P (GiB) | usual step | least room at that speed | share of P | first slower rung |
+|---|---|---|---|---|---|
+| 19 latents | 9.34 | 13.3 s | 3.0 GiB | 0.32 | 2.75 GiB: 15.1 s |
+| 27 latents | 13.21 | 19.1 s | 4.0 GiB | 0.30 | 3.75 GiB: 25.6 s |
+| 31 latents | 15.14 | 25.4 s | 3.25 GiB | 0.21 | 3.0 GiB: 31.8 s |
+
+- **The want stops growing past 27 latents** (4.0 GiB there, 3.25 at 31): the DiT's reserve under
+  the segments is capped at 4.5 GiB, half a GiB over the largest want measured: max(0.6, min(0.3
+  x P, 4.5)). Beyond P = 15 GiB the cap rests on these three windows alone; 35 latents (0.3 x P
+  5.3) could not be scanned to its want beside the desktop.
+- **Slower, then much slower**: at the first rung under its want a window ran 1.13 to 1.34 times
+  as long, at 1.0 GiB of room 2.1 to 2.7 times (2.8 at 0.5 GiB, 19 latents), each rung run once.
+- **One rung changed the bits**: the 31-latent window at 2.75 GiB of room gave other frames than
+  its roomy run (every other rung of the three scans the same bits). That room is under any
+  reserve a plan leaves there (4.5 GiB), but it qualifies "their bits all the way down": below
+  its want, a step's frames are not always the roomy run's.
+
+### The decoder's tail by tile side
+
+The shipped decoder tail (`Decoder3D.tail_frames`, switched on after the models load: the
+decoder's blocks after its last temporal upsampler run a frame at a time, the causal
+convolutions' memory carried between frames) against the plain decoder, on decodes of 5 latents
+at 1080p, `hold_probe.py --allocator native --conf expandable_segments:True --without dit --size
+1080`, steps `d5/SIDE` for SIDE from 512 to 1152 px by 64, the DiT off the GPU, an RTX 5090 under
+WSL2, 2026-11-06. [`tail_probe.py`](../scripts/tail_probe.py) switches the tail on and runs
+`hold_probe.py` with the same arguments, so that the two runs differ by that switch alone; the
+tail's frames are compared with the plain decoder's (`equal`). The VAE's 0.50 GiB allocated is
+under both, and the ratio is taken above it: (tail - 0.50) / (plain - 0.50). Each cell is one run;
+the times are the decode's seconds.
+
+| side (px) | plain GiB (s) | tail GiB (s) | ratio above the VAE's 0.50 | frames equal to the plain decoder's |
+|---|---|---|---|---|
+| 512 | 6.385 (10.68) | 4.704 (11.85) | 0.714 | no |
+| 576 | 7.946 (9.73) | 5.815 (10.70) | 0.714 | no |
+| 640 | 8.587 (8.83) | 6.574 (10.33) | 0.751 | yes |
+| 704 | 10.287 (8.58) | 7.845 (9.87) | 0.750 | yes |
+| 768 | 11.602 (8.60) | 9.237 (9.79) | 0.787 | yes |
+| 832 | 12.797 (8.65) | 10.337 (10.00) | 0.800 | yes |
+| 896 | 14.599 (8.68) | 11.304 (10.16) | 0.766 | yes |
+| 960 | 16.174 (8.85) | 12.890 (10.28) | 0.790 | no |
+| 1024 | 17.949 (8.65) | 14.164 (9.87) | 0.783 | yes |
+| 1088 | 20.147 (12.35) | 15.924 (10.32) | 0.785 | yes |
+| 1152 | not run: 20.491 allocated, out of memory | 17.071 (9.79) | - | - |
+
+- **The tail's frames differ from the plain decoder's at 512, 576 and 960 px** and equal them at
+  640 to 896, 1024 and 1088. 960 contradicts "the same at 640 px and up", which had been drawn
+  from 640, 768 and 1024 alone.
+- **The tail gives the same bits in two runs at every side tried twice** (512, 576, 960, 1088 and
+  1152): the frames that differ from the plain decoder's are the same frames each time.
+- **The ratio runs from 0.714 to 0.800** (the peak at 832 px), which `peaks.py`'s table holds
+  (`TAIL_MEASURED`, the ten sides 512 to 1088).
+- **At 1152 px the plain decode did not fit** beside the desktop's 4 GiB (torch held 4.5 GiB under
+  the card): refused with an out-of-memory error at 20.49 GiB allocated, where the tail ran at
+  17.07 GiB.
+- **The tail's decode took 1.10 to 1.17 times the plain one's** from 512 to 1024 px (1.110, 1.100,
+  1.170, 1.150, 1.138, 1.156, 1.171, 1.162, 1.141), one run of each. In the run that held torch
+  4.5 GiB under the card, 960 px took 10.35 s plain and 10.95 s with the tail (1.058; 10.07 s in
+  its second run), so the cost is 1.06 to 1.17 times, and a single run's difference between two
+  sessions is of that order. At 1088 px the plain decode ran 0.77 GiB from torch's limit and took
+  12.35 s against 10.32 with the tail: the pair is not a cost of the tail.
+- **The first plain run** was made with torch 0.5 GiB under the card (`--under 0.5`) and was
+  stopped by the scan's guard for the desktop's 4 GiB at 1088 px, after 1024. The plain decodes at
+  960, 1088 and 1152 px were made again at `--under 4.5` (the tail's too, twice: the 1088 and 960
+  figures above agree to three decimals between sessions).
+
+### FlashAttention 2 against the lean SDPA
+
+The nodes' attention tooltip said FlashAttention 2 took a fifth off a 4K picture's DiT step
+(2.60 s against 3.26 with SDPA, the plain attention; above). On the lean attention, measured again
+in ComfyUI's setting: `hold_probe.py --allocator async --under 4.5 --without vae`, the sharp 7B
+fp16, each step three times in one process (two seeded calls each, the first call a warm-up),
+nothing else running on the machine; the median of the five warm calls:
+
+| step | FlashAttention 2: allocated peak, s | SDPA: allocated peak, s |
+|---|---|---|
+| the 4K picture's DiT step, one latent, the DiT whole | 17.43 GiB, 2.87 s | 17.43 GiB, 2.80 s |
+| a 1080p window of 11 latents, 12 blocks swapped | 16.66 GiB, 8.16 s | 16.66 GiB, 7.37 s |
+
+- **The same peak to the MiB** (2.03 and 5.47 GiB over the weights loaded), as the refit found at
+  every window: the lean step's peak is no longer in the attention.
+- **No speed for FlashAttention 2**: SDPA was 2% quicker on the picture's step and 10% on the
+  window (warm calls 2.75 to 3.01 s and 2.76 to 3.02 s on the picture; 7.61 to 8.40 s and 7.12 to
+  7.58 s on the window). The tooltip says the two take the same memory and about the same time.
+  One run each: a difference of a few percent is within what a desktop driving the card moves.
+
 ### A VAE pass's time at each tile side
 
 `tile_times.py`: the models loaded once, the DiT off the GPU, torch held as a run holds it; at
@@ -599,12 +773,13 @@ with 1280-px decode tiles.
   phase comfy-aimdo reads the card itself, which a ballast by day cannot hide.
 - **The lean attention through the whole pipeline.** The milestone-1 regression has not run with
   it, and its planner term (`PER_TOKEN` = 59,900 bytes) is today's scaled by 0.46, not refitted.
-- **Why the tail's frames move at 512 and 576 px only.** The cause is not found (another cuDNN
-  algorithm for the smaller shapes is the likely one, unproven).
+- **Why the tail's frames move at 512, 576 and 960 px.** The cause is not found (another cuDNN
+  algorithm for those shapes is the likely one, unproven).
 - **ComfyUI's other bit-keeping VAE items.** Items 3 and 4 of the comparison above, and item 5
   beyond the decoder's tail a frame at a time: read, not built.
-- **The lean windows' room on a real job past 19 latents**, and under cudaMallocAsync: the
-  night's scans stop at 19 latents and at torch's own allocator.
+- **The lean windows' room on a real job past 19 latents**, and 4K's 2 latents and more under
+  cudaMallocAsync: the scans stop at 19 latents at 1080p and, under cudaMallocAsync, at one 4K
+  latent (cut short).
 - **The hang's cause.** One run of the night's hung in its decode with the GPU idle (the night's
   section); no Python stack was taken, and it did not come back.
 - **The tiles against a ground truth.** The night's tile costs are against the untiled output;
