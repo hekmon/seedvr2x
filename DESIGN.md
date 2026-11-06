@@ -311,7 +311,7 @@ seedvr2x/                the repository
       card is freed when the node ends, on Cancel and on an error too. ComfyUI's nodes run one
       at a time, so nothing of ComfyUI's touches the card meanwhile (read in v0.44.0's
       executor, its `async` nodes included, before it is relied on); its Cancel is honoured
-      between steps and its progress bar moves.
+      after each tile, window and run, and its progress is said (below).
   - **Four nodes, and three that give the plan's settings** (the user, 2026-11-05):
     - seedvr2x Models: the DiT file by a name a user reads ("Sharp 7B, int8"), with its size
       and the model card's typical error (0.86% for int8), from Hugging Face's cache or a
@@ -320,14 +320,25 @@ seedvr2x/                the repository
       or taking the clip as one shot; its cut list is wired to Upscale Video (a clip's fact, not
       a setting), and it says the cuts and the possible cuts as text (the user, 2026-11-05: a
       short clip of 3 or 4 shots is handled as the CLI handles a film). The frames are
-      ComfyUI's, already decoded, shrunk to the detector's 48×27 in torch, with no ffmpeg: the
-      cuts at the threshold are checked equal to those of the frames TransNetV2's own
-      extraction gives the CLI, on clips of the shot-detection study, before the node relies on
-      them. The drawing of the cuts from the probabilities moves from the CLI's `cuts.py` to
-      the library.
+      ComfyUI's, already decoded, shrunk to the detector's 48×27 in torch (antialiased
+      bicubic), with no ffmpeg. Checked before the node relied on them (impl-nodes,
+      2026-11-06): on nine films of 240 frames, the study's own sources not at hand, the cuts
+      and the possible cuts at 0.3 equal those of TransNetV2's own extraction, the largest
+      difference in a probability 0.014, from the decode (ffmpeg's 8-bit RGB against
+      ComfyUI's float frames), not the shrink; other thresholds untested. The drawing of the
+      cuts from the probabilities moved from the CLI's `cuts.py` to the library
+      (`shotcuts.py`).
     - seedvr2x Upscale Image, a batch of pictures each upscaled on its own, and seedvr2x
       Upscale Video, a clip's frames shot by shot, each in sliding windows, its cut list a
-      required input.
+      required input, one plan for the shots, each shot seeded by the seed and its first frame
+      as the CLI seeds it. Upscale Video's quality (standard, enhanced, maximum) is the CLI's
+      `--quality` (the user, 2026-11-06: quality isn't the CLI's alone): the model runs once,
+      twice or 4 times over each shot, each frame kept from the run that rebuilds it best, at 2
+      or 4 times the time and no more memory, each run writing only the frames it keeps into
+      the clip's one output; none on Upscale Image, a picture being one frame in a latent of
+      its own. The levels and their runs moved from the CLI to the library (`shotruns.py`). On
+      the RTX 5090 a clip of three shots, and a 35-frame shot at maximum, gave the CLI's frames
+      bit for bit (impl-nodes, 2026-11-06).
     - Each upscale node shows as widgets the choices a user keeps at their default: the
       output's resolution, the attention kernel, the colour correction (a toggle, on `split`,
       off `none`), the seed (ComfyUI's own, fixed) and "plan only" (a Tuning node first
@@ -356,6 +367,23 @@ seedvr2x/                the repository
       says its plan on the node and in ComfyUI's console, what each "auto" became and the host
       memory it counts (the input's frames, the output's, the weights kept) beside the card's,
       and gives it as text.
+    - Progress (the user, 2026-11-06): ComfyUI gives a node one bar, one text box replaced at
+      each message, and one preview. The bar is the upscale's expected time, never a count by
+      phase: its units are the plan's (each encode tile, DiT window and decode tile of every run
+      and shot), weighted by their size, each kind's rate the card's measured figure until a
+      unit of that kind is measured in the run, then the run's own, the rest spread again and
+      the bar never going back. The text says the plan, then where the run is in a user's
+      units ("Shot 2 of 4, run 3 of 4 (frames 121 to 240): upscaling, window 2 of 3"), the time
+      spent and, once measured, the time left; at the end, the plan and the frames made in
+      their time. The download and the read into RAM go on the same bar first, by bytes, and
+      the Cuts node's by the frames scanned, Cancel honoured between its batches. The preview
+      is the newest frame the run keeps, at ComfyUI's preview size. Decided the same day, to
+      be built: a later run names its own frames (run 3 from the shot's third frame, "frames
+      123 to 240"); the time is said each second between events too, so that a long window's
+      text never stands still; and, once a unit's time is measured, the nodes name their units
+      for the waits on the GPU ([Allocator](#allocator), the hang): a wait past its bound is
+      said on the node with the way out, ComfyUI restarted, Cancel leaves such a wait, and the
+      release after it waits on no GPU.
     - A clip is whole in RAM, as ComfyUI's Load Video gives it: the nodes stream nothing, keep
       nothing on disk and resume nothing. The plan counts the clip's frames in host memory and
       refuses past it, saying what the CLI does instead: a film streamed shot by shot, never
@@ -376,6 +404,8 @@ seedvr2x/                the repository
     the plan matrix holding them byte for byte.
   - **The code:** `core/seedvr2x/clip.py`, one shot from frames in memory through models already
     loaded, the video's counterpart of `still.py`; the refusal classes in `errors.py`;
+    `shotcuts.py` and `shotruns.py`, the cuts and the runs of a shot, moved from the CLI;
+    `apps/comfyui/progress.py`, a run's bar, text and preview, beside the nodes' other files;
     `apps/comfyui/`: `nodes.py` (the nodes and ComfyUI's calls), `models.py` (loading,
     the RAM kept, the placement per run), `words.py` (the nodes' words for each refusal), the
     example workflows and a README; its tests against a stand-in for ComfyUI's few calls, in
@@ -393,11 +423,18 @@ seedvr2x/                the repository
     keep their models on another disk. seedvr2x's files stay without the two text-conditioning
     tensors ComfyUI's own SeedVR2 wants in a DiT file (the user, 2026-11-05): seedvr2x holds
     that conditioning in its code, and the nodes read the files with its own loader.
-  - **No cut detection, no ffmpeg:** the frames given are one shot, in sliding windows, and
-    ComfyUI's video nodes load and save. A clip and its output are held in memory, as ComfyUI
-    holds any video (about 100 MB a 4K frame in float32). The full features stay the CLI's, to
-    which the nodes point; the README says the limits: a cut inside a window blends two scenes,
-    and nothing resumes.
+  - **What stays the CLI's is a film's length, not its quality** (the user, 2026-11-06): the
+    nodes have the shots (seedvr2x Cuts, with no ffmpeg), the several runs of a shot and every
+    plan the CLI makes; ComfyUI's video nodes load and save, and a clip and its output are held
+    in memory, as ComfyUI holds any video (about 100 MB a 4K frame in float32). The CLI keeps
+    what a long run needs: a film streamed shot by shot, stopped and resumed, its own reading
+    of the source (16 bits a channel, its rate and missing frames checked), lossless 16-bit
+    masters with seedvr2x's record, `--until` and `--segment-cmd`, and later several GPUs.
+    From an 8-bit YUV video the nodes upscale ComfyUI's own decode, 8 bits a channel, where the
+    CLI converts to 16: the outputs differ by a fraction of a level (0.26 at most on the clip
+    measured), and from an RGB source they are the CLI's bit for bit; the README is to say so.
+    Nothing resumes in ComfyUI: a stopped run starts over, and the README points long films to
+    the CLI.
   - **Small cards are the nodes' users,** not a side case: v0.1.0 gives them seedvr2x's own
     smaller files of the 7B (the user, 2026-11-04), int8's 8.3 GB and the dynamic GGUF's
     4.8 GB, the model card's tiers, in every app ([Weights](#weights)). Measured by place-study
