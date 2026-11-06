@@ -390,6 +390,9 @@ def plan_again(
                 compile_vae=recorded.compile_vae,
                 compile_fixed=True,
                 dit_model=dit_model,
+                # What shapes the output stays as recorded: the decoder's tail a frame at a time
+                # on or off, the room (a rung that changes no bit) free to be taken again.
+                tail_frames=recorded.tail_frames,
             )
         except PlanError as again:
             error = again
@@ -688,10 +691,21 @@ def said(
         ("decode", plan.decode_tiles, pins.decode_tile),
     ):
         lines.append(_vae_pass_said(job, phase, tiles, pin, recorded, predicted.shrunk))
-    lines.append(
-        "the VAE's room: what each VAE pass leaves free, for the large pieces of memory a pass"
-        f" asks for at once: {_gib(VAE_ROOM)} GiB of the budget"
-    )
+    room = VAE_ROOM if plan.vae_floor is None else plan.vae_floor
+    if predicted.reading.allocator in (memory.SEGMENTS, memory.POOL):
+        # The reserve by step (the card line) replaces the flat room there: this is its floor
+        # (peaks.reserve: the larger of the floor and a fifth of the pass's working memory).
+        lines.append(
+            "the VAE's room: what each VAE pass leaves free, for the large pieces of memory a pass"
+            f" asks for at once: at least {_gib(room)} GiB of the budget, the reserve of each"
+            " pass above where a fifth of its working memory is more"
+        )
+    else:
+        lines.append(
+            "the VAE's room: what each VAE pass leaves free, for the large pieces of memory a pass"
+            f" asks for at once: {_gib(room)} GiB of the budget"
+        )
+    lines.extend(_rungs_said(plan))
     if predicted.scratch:
         # A scratch over the allowance goes whole to its file (scratch.Scratch).
         allowed = plan.scratch_allowance
@@ -748,6 +762,31 @@ def said(
         " a choice"
     )
     return [f"plan: {line}" for line in lines]
+
+
+def _rungs_said(plan: Plan) -> list[str]:
+    """The lines of the plan's last rungs (shot_plan.plan, DESIGN.md, Allocator, Small cards,
+    "The floor, last rungs"), one for each taken, with its cost: the decoder's tail a frame at a
+    time (Plan.tail_frames), then, under expandable segments, the VAE passes' reserve floor down
+    to 0.5 GiB (Plan.vae_floor). Neither is taken by a plan that fits without it; the costs are
+    the measured ones (the decode 1.06 to 1.17 times as long with the tail, about 1.2 times as
+    long with the room; the tail's frames other than the plain decoder's at tiles of 512, 576
+    and 960 px, the same in every run: measured 2026-11-06 at every side from 512 to 1152 px)."""
+    lines: list[str] = []
+    if plan.tail_frames:
+        lines.append(
+            "the decoder's tail: its last blocks a frame at a time, taken because the plain decode"
+            " does not fit this card: its peak about a quarter lower, the decode about 1.1 times"
+            " as long, its frames other than the plain decoder's at 512, 576 and 960 px tiles"
+            " (the same in every run)"
+        )
+    if plan.vae_floor is not None:
+        lines.append(
+            "the VAE's least room: taken because the plan does not fit this card without it: the"
+            f" VAE passes' reserve floor lowered to {_gib(plan.vae_floor)} GiB (a pass whose fifth"
+            " of its working memory is more keeps that), the decode about 1.2 times as long"
+        )
+    return lines
 
 
 def _int8_said() -> str:

@@ -552,6 +552,41 @@ def test_untiled_decode_failing_clears_its_memory(stand_in: model.Models) -> Non
     del raised
 
 
+def test_the_tail_is_on_for_the_decode_and_off_after_even_a_raise(
+    stand_in: model.Models, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # decode_shot's tail_frames (the plan's first rung): model.tail_frames(vae, True) before the
+    # decode, False after whatever ends it, the writer's failure included; nothing at all
+    # without it (the models kept across runs by the nodes and the server never keep it on).
+    count = 6
+    latent = shot_latent(count)
+    state: list[bool] = []
+    calls: list[bool] = []
+    monkeypatch.setattr(model, "tail_frames", lambda vae, on: (calls.append(on), state.append(on)))
+
+    seen: list[bool] = []
+
+    def write(frames: npt.NDArray[np.float32]) -> None:
+        seen.append(state[-1])
+
+    decode_shot(stand_in, latent, count, LARGE, write, tail_frames=True)
+    assert calls == [True, False] and seen and all(seen)
+
+    calls.clear()
+
+    def failing(frames: npt.NDArray[np.float32]) -> None:
+        raise Failing("the writer")
+
+    with pytest.raises(Failing):
+        decode_shot(stand_in, latent, count, LARGE, failing, tail_frames=True)
+    assert calls == [True, False]
+
+    calls.clear()
+    decode_shot(stand_in, latent, count, LARGE, write)
+    decode_shot(stand_in, latent, count, LARGE, write, tiles=TILES)
+    assert calls == []
+
+
 def allocated(run: Callable[[], object]) -> tuple[int, int]:
     """(most, left): the most bytes torch allocated in system memory while run() ran, over what
     was allocated before it, and what was left of them at its end, its result still held. By

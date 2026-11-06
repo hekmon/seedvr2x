@@ -3,7 +3,7 @@ a unit is in, the shapes and cache the VAE is compiled with, and what the loaded
 a job's plan (ModelPlan). The library's (DESIGN.md, Repository and apps). Nothing here imports
 torch: the command line plans before it does."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Literal, TypeGuard, cast
 
@@ -132,6 +132,28 @@ class Plan:
     # as recorded.
     compile_dit: bool = False
     compile_vae: bool = False
+    # The plan's last rungs, for a clip that fits no other way (shot_plan.plan, DESIGN.md,
+    # Allocator, Small cards, "The floor, last rungs"). The decoder's tail a frame at a time
+    # (model.tail_frames): its frames differ from the plain decoder's at tiles of 512, 576 and
+    # 960 px (measured 2026-11-06 at every side from 512 to 1152; the same in every run), so it
+    # shapes the output and a resume takes it as recorded; the record holds the key only when it
+    # is on, so that every other plan's record is as before.
+    tail_frames: bool = field(default=False, repr=False)
+
+    # What doesn't shape the output: the floor of the reserve left beyond a VAE pass's peak
+    # (peaks.reserve's vae_floor), in bytes, lowered to peaks.VAE_ROOM_LEAST by the last rung; None,
+    # the rule's own. Recorded under `memory` only when set, planned again on a resume.
+    vae_floor: int | None = field(default=None, repr=False)
+
+    def __repr__(self) -> str:
+        """The dataclass's own repr, but for the two rungs, shown only when taken: every plan
+        without one prints as it did before them (the plan matrix compares the texts)."""
+        shown = [
+            f"{each.name}={getattr(self, each.name)!r}"
+            for each in fields(self)
+            if each.repr or getattr(self, each.name) != each.default
+        ]
+        return f"{type(self).__qualname__}({', '.join(shown)})"
 
     @property
     def model_plan(self) -> ModelPlan:
@@ -176,12 +198,17 @@ class Plan:
             if not isinstance(flag, bool):
                 raise JobError(f"not a plan as seedvr2x records one: its {name}, {flag!r}")
             flags.append(flag)
+        # Absent from a record made before the rung, or without it: off.
+        tail: Any = fields.get("tail_frames", False)
+        if not isinstance(tail, bool):
+            raise JobError(f"not a plan as seedvr2x records one: its tail_frames, {tail!r}")
         return cls(
             window,
             tiles("encode_tiles"),
             tiles("decode_tiles"),
             compile_dit=flags[0],
             compile_vae=flags[1],
+            tail_frames=tail,
         )
 
     def record(self) -> dict[str, Any]:
@@ -191,7 +218,7 @@ class Plan:
         def tiles(tiles: Tiles | None) -> dict[str, int] | None:
             return None if tiles is None else {"size": tiles.size, "overlap": tiles.overlap}
 
-        return {
+        record: dict[str, Any] = {
             "window": self.window,
             "encode_tiles": tiles(self.encode_tiles),
             "decode_tiles": tiles(self.decode_tiles),
@@ -205,6 +232,12 @@ class Plan:
                 "scratch_allowance": self.scratch_allowance,
             },
         }
+        # Only the plans that took a rung hold its key: every other plan's record is as it was.
+        if self.tail_frames:
+            record["tail_frames"] = True
+        if self.vae_floor is not None:
+            record["memory"]["vae_floor"] = self.vae_floor
+        return record
 
 
 def _whole(value: Any) -> TypeGuard[int]:

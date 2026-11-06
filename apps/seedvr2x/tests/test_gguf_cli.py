@@ -216,7 +216,11 @@ def test_a_gguf_resume_is_judged_early_by_the_gguf_s_figures(
 
     monkeypatch.setattr(planner, "plan", planned)
     padded = test_cli_run.PADDED
-    encode = peaks.encode_peak(padded, None, 0, dit_model=peaks.GGUF_7B_SHARP) + planner.VAE_ROOM
+    # The plan's last rung takes a VAE pass's room down to peaks.VAE_ROOM_LEAST (patch 03): the
+    # card is short of that, as test_cli_run's early-reading tests count it.
+    encode = (
+        peaks.encode_peak(padded, None, 0, dit_model=peaks.GGUF_7B_SHARP) + peaks.VAE_ROOM_LEAST
+    )
     early_card(monkeypatch, encode + planner.MARGIN - GIB // 4 + memory.CONTEXT)
     caplog.clear()
     assert cli.main(command(tmp_path, source_path, "out", *JOB, *chosen)) == 0

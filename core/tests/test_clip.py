@@ -913,3 +913,87 @@ def test_in_memory_false_plans_every_job_as_before() -> None:
                     assert str(again.value) == str(error)
                     continue
                 assert shot_plan.plan(*job, split=True, held=held, in_memory=False) == before
+
+
+def decoders(models: model.Models) -> list[Any]:
+    from seedvr2x.vendor.models.video_vae_v3.modules.attn_video_vae import Decoder3D
+
+    return [m for m in models.runner.vae.modules() if isinstance(m, Decoder3D)]  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_the_tail_is_on_for_the_decode_alone_and_off_after(
+    models: model.Models, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The plan's first rung (Plan.tail_frames) reaches the decode and nothing else: off while the
+    # encode and the windows run, on at each step of the decode, off when the clip is done. The
+    # frames are the plain decode's (cpu_models' VAE in bfloat16, bit for bit: test_tail_frames).
+    stand_in_dit(monkeypatch)
+    seen: list[tuple[str, tuple[bool, ...]]] = []
+
+    def step(each: str, done: int, total: int) -> None:
+        seen.append((each, tuple(d.tail_frames for d in decoders(models))))
+
+    plain = upscale(models, clip_of(LONG), window=5)
+    assert all(not d.tail_frames for d in decoders(models)) and decoders(models)
+    tail = clip.upscale(
+        models,
+        clip_of(LONG),
+        TARGET,
+        SEED,
+        window=5,
+        encode_tiles=None,
+        decode_tiles=None,
+        correct=False,
+        step=step,
+        tail_frames=True,
+    )
+    # Not bit for bit at this shape: oneDNN picks its convolution algorithm by the tensor's shape
+    # (as test_tail_frames' fixture notes), so a frame's convolution and the slice's differ by a
+    # bfloat16 step (1/128 near 1) in a few values (2026-11-06: 8% of them, 0.0078 at the most);
+    # the equality at the shapes that hold it is test_tail_frames'.
+    assert tail.shape == plain.shape
+    assert np.abs(tail - plain).max() <= 2 / 128
+    for each, flags in seen:
+        assert set(flags) == {each == "decode"}, each
+    assert {each for each, _ in seen} == {"encode", "window", "decode"}
+    assert all(not d.tail_frames for d in decoders(models))
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("cancelled"), Stop()], ids=["Exception", "BaseException"]
+)
+def test_the_tail_is_off_after_a_step_that_raises_in_the_decode(
+    models: model.Models, monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    stand_in_dit(monkeypatch)
+
+    def step(each: str, done: int, total: int) -> None:
+        if each == "decode":
+            assert all(d.tail_frames for d in decoders(models))
+            raise error
+
+    with pytest.raises(type(error)) as caught:
+        clip.upscale(
+            models,
+            clip_of(LONG),
+            TARGET,
+            SEED,
+            window=5,
+            encode_tiles=None,
+            decode_tiles=None,
+            correct=False,
+            step=step,
+            tail_frames=True,
+        )
+    assert caught.value is error
+    assert all(not d.tail_frames for d in decoders(models))
+
+
+def test_a_plan_without_the_tail_never_touches_the_switch(
+    models: model.Models, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stand_in_dit(monkeypatch)
+    calls: list[bool] = []
+    monkeypatch.setattr(model, "tail_frames", lambda vae, on: calls.append(on))
+    upscale(models, clip_of(LONG), window=5)
+    assert calls == []

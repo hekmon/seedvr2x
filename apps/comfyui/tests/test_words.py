@@ -236,7 +236,7 @@ def test_a_pin_that_does_not_fit_the_card_is_worded_with_the_value_that_does() -
     said = str(words.refusal(swap))
     assert said.startswith("Blocks swapped 0 needs ") and "while the model works" in said
     assert "connect a seedvr2x Blocks Swapped of " in said and " or more to blocks swapped" in said
-    window = clip_refusal(24 * GIB, 33, 64 * GIB, window=9, swap_blocks=0, encode_tile=512)
+    window = clip_refusal(20 * GIB, 33, 64 * GIB, window=9, swap_blocks=0, encode_tile=512)
     said = str(words.refusal(window))
     assert said.startswith("Window length 33 frames needs ")
     assert "connect a seedvr2x Window Length of 21 frames or less to window length" in said
@@ -322,7 +322,7 @@ def test_no_library_term_reaches_the_user_in_the_four_kinds_a_plan_refuses() -> 
         "pin covers": (picture(24 * GIB, decode_tile=4096), None),
         "pin tile": (picture(6 * GIB, decode_tile=1024), None),
         "pin swap": (picture(6 * GIB, swap_blocks=0), None),
-        "pin window": (clip_refusal(24 * GIB, 33, 64 * GIB, window=9, swap_blocks=0), size),
+        "pin window": (clip_refusal(20 * GIB, 33, 64 * GIB, window=9, swap_blocks=0), size),
         "memory": (picture(1 * GIB), None),
         "memory clip": (clip_refusal(2 * GIB, 33, 64 * GIB), size),
         "host": (picture(24 * GIB, host=1 * GIB), None),
@@ -360,9 +360,11 @@ def test_a_memory_refusal_without_a_smaller_file_names_none() -> None:
 
 
 def test_a_memory_refusal_names_the_resolution_that_fits() -> None:
-    video = clip_refusal(8 * GIB, 33, 64 * GIB)
-    assert isinstance(video, MemoryShort) and video.instead == Setting("resolution", "432")
-    assert "set resolution to 432 or lower on this node" in str(words.refusal(video))
+    video = clip_refusal(11 * GIB // 2, 33, 64 * GIB)
+    # (A driver that refuses takes no room rung, the segments' alone: the 224 the tail alone fits,
+    # where the room lowered to 0.5 GiB gave 320.)
+    assert isinstance(video, MemoryShort) and video.instead == Setting("resolution", "224")
+    assert "set resolution to 224 or lower on this node" in str(words.refusal(video))
     still = picture(3 * GIB)
     assert isinstance(still, MemoryShort) and still.fits == (340, 192)
     said = str(words.refusal(still))

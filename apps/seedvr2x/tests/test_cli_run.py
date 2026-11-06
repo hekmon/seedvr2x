@@ -1850,7 +1850,7 @@ def test_plan_tiles_reach_the_passes(
         work.append((tmp_path / "one.mkv.work").is_dir())
         return steps.encode(*arguments, **options)
 
-    def decode(*arguments: Any, tiles: Tiles | None, store: Scratch) -> None:
+    def decode(*arguments: Any, tiles: Tiles | None, store: Scratch, **options: Any) -> None:
         given.append(("decode", tiles, store.directory))
         assert store.allowance == 12_345
         steps.decode(*arguments)
@@ -2017,6 +2017,8 @@ def test_size_and_host_memory_refused(
     there = sorted(path.name for path in tmp_path.iterdir())
     # The stand-in's frames are too small for a tile: their floor is the untiled encode's, with
     # the room a VAE pass is held to (planner.VAE_ROOM).
+    # (A driver that refuses takes no room rung, which was measured under the segments alone: the
+    # room stays 1.25 GiB.)
     encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     with monkeypatch.context() as patch:
         free_memory(patch, encode + planner.MARGIN - 1)
@@ -2253,6 +2255,48 @@ def test_resumed_keeps_its_cap(
     assert indexes(out / "seg_000000.mkv") + indexes(out / "seg_000001.mkv") == list(range(25))
 
 
+def test_a_resume_holding_the_tail_keeps_it_and_runs_its_decodes_with_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The plan's first rung (DESIGN.md, Allocator, Small cards, "The floor, last rungs"): the
+    # decoder's tail a frame at a time shapes the output at 512 and 576 px, so a resume takes it
+    # as recorded. A plan without it never turns the switch on (the first leg); the record of one
+    # with it (the manifest edited, as a plan from a card that needed it records itself) is kept
+    # by the resume, said in its plan, and each decode it runs has the switch on and off after.
+    from seedvr2x import model
+
+    levels(caplog, logging.INFO)
+    source_path = job(tmp_path, monkeypatch)
+    switch: list[bool] = []
+    monkeypatch.setattr(model, "tail_frames", lambda vae, on: switch.append(on))
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
+    assert steps.calls[-1] == "encode 4" and "decode 3" in steps.calls and switch == []
+    assert "decoder's tail" not in caplog.text
+    manifest = tmp_path / "out" / "manifest.json"
+    content = json.loads(manifest.read_text())
+    assert "tail_frames" not in content["plan"]
+    content["plan"]["tail_frames"] = True
+    manifest.write_text(json.dumps(content))
+    steps.stop = None
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls == UNINTERRUPTED[6:]
+    assert "plan: the decoder's tail: its last blocks a frame at a time" in caplog.text
+    assert switch == [True, False]  # the one decode left, on for it and off after
+    done = json.loads(manifest.read_text())
+    assert done["plan"]["tail_frames"] is True
+    assert untimed(done["plan"]) == plan_record(
+        *planner.plan(
+            FREE, TARGET, JOB_SHOTS, Pins(window=5), HOST, recorded=Plan.recorded(done["plan"])
+        )
+    )
+
+
 def test_resumed_with_other_memory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2378,6 +2422,8 @@ def test_recorded_plan_no_longer_fits(
     kept = contents(tmp_path / "out")
     steps.stop = None
     steps.calls.clear()
+    # A driver that refuses takes no room rung (the segments alone, where it was measured): the
+    # room stays 1.25 GiB.
     encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     free_memory(monkeypatch, encode + planner.MARGIN - GIB // 4)
     figures = (
@@ -3021,7 +3067,7 @@ def test_the_early_warning_s_debug_line_says_nvml_s_reading_and_the_context_coun
             return real(*arguments)
 
     monkeypatch.setattr(memory, "early", early)
-    encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    encode = peaks.encode_peak(PADDED, None, 0) + peaks.VAE_ROOM_LEAST
     # Held, the figure counted is NVML's less the context and what torch is held back from, and
     # the encode is judged by its peak and its reserve beyond it, the floor of 1.25 GiB for a
     # frame this small (peaks.reserve; DESIGN.md, Allocator, Small cards, 2026-11-06): the same
@@ -3101,7 +3147,7 @@ def test_the_early_warning_says_what_the_refusal_would_where_no_programs_cure(
 
     real = memory.early
     monkeypatch.setattr(memory, "early", lambda *a: _with_paravirtual(monkeypatch, held, real, *a))
-    encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    encode = peaks.encode_peak(PADDED, None, 0) + peaks.VAE_ROOM_LEAST
     # Held, the figure counted is NVML's less the context and what torch is held back from, and
     # the encode is judged by its peak and its reserve beyond it, the floor of 1.25 GiB for a
     # frame this small (peaks.reserve; DESIGN.md, Allocator, Small cards, 2026-11-06): the same
@@ -3169,7 +3215,7 @@ def test_a_resume_warned_of_is_refused_at_its_place_after_the_checks(
     stopped(tmp_path, source_path, "out", *JOB)
     steps.stop = None
     steps.calls.clear()
-    encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    encode = peaks.encode_peak(PADDED, None, 0) + peaks.VAE_ROOM_LEAST
     short = encode + planner.MARGIN - GIB // 4
     free_memory(monkeypatch, short)
     early_card(monkeypatch, short + memory.CONTEXT)
@@ -3334,7 +3380,7 @@ def tiled_steps(
             assert (scratch / tilegrid.SCRATCH).is_file()
             return steps.encode(*arguments, **options)
 
-    def decode(*arguments: Any, tiles: Tiles | None, store: Scratch) -> None:
+    def decode(*arguments: Any, tiles: Tiles | None, store: Scratch, **options: Any) -> None:
         scratch, allowance = store.directory, store.allowance
         given.append(("decode", tiles, scratch, allowance))
         assert scratch is not None and not (scratch / tilegrid.SCRATCH).exists()

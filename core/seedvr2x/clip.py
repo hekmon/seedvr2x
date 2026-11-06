@@ -197,6 +197,7 @@ def upscale(
     output: npt.NDArray[np.float32] | None = None,
     quality: str = "standard",
     tile: Tile | None = None,
+    tail_frames: bool = False,
 ) -> npt.NDArray[np.float32]:
     """The clip upscaled: (T, H', W', 3) float32 in [0, 1] on the CPU, (H', W') =
     frames.output_size(target), one array allocated once, or `output`.
@@ -216,7 +217,9 @@ def upscale(
     and 2, or 0 to 3 (shotruns.shot_runs; a clip too short to have a run's first frame has no
     such run), each a whole run of its own with its windows and its correction against the same
     input frames from its first frame; the output's frames are those each run gives
-    (shotruns.run_of), written into the one array as each run decodes them.
+    (shotruns.run_of), written into the one array as each run decodes them. tail_frames is the
+    plan's (Plan.tail_frames): each run's decode with its tail a frame at a time, on for the
+    decode and off after it, whatever ends it.
 
     The steps one after the other, a phase entered before each (Models.enter): the encode, each
     window with its output sent to system memory as it is made, the windows merged, and the decode
@@ -257,6 +260,7 @@ def upscale(
                 *(models, frames, each.offset, target, clip_seed, output),
                 *(window, encode_tiles, decode_tiles, correct, step, start, taken == each.offset),
                 tile,
+                tail_frames,
             )
     except BaseException as error:
         # Whatever stopped the clip, a step's cancel included: the frames of the calls it passed
@@ -282,6 +286,7 @@ def _run(
     start: int,
     mine: npt.NDArray[np.bool_],
     tile: Tile | None = None,
+    tail_frames: bool = False,
 ) -> None:
     """The run of the clip from its frame `offset`: frames [offset, T) of the clip through the
     shot's pass, with the shot's `seed` (the runs of a shot share it, shotruns.Run) and its own
@@ -341,6 +346,7 @@ def _run(
         tiles=decode_tiles,
         store=tiling.InMemory(),
         tile_step=None if tile is None else partial(tile, "decode"),
+        tail_frames=tail_frames,
     )
 
 

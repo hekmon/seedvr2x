@@ -1256,3 +1256,121 @@ def test_a_measured_margin_counts_where_it_is_larger_than_the_rules_share() -> N
         assert peaks.reserve(phase, working, memory.PLAIN, 0.9) == peaks.reserve(
             phase, working, memory.PLAIN
         )
+
+
+# The decoder's tail a frame at a time (peaks.tail_ratio, decode_peak's `tail`): the plan's first
+# rung. The shipped tail's allocated peaks against the plain decoder's (an RTX 5090, 2026-11-06,
+# hold_probe.py's decode of 5 latents at 1080p, the DiT off the GPU), GiB, the VAE's 0.50 under
+# both, by tile side: plain, tail; written out here, not read from peaks.py.
+TAIL_TABLE = {
+    512: (6.385, 4.704),
+    576: (7.946, 5.815),
+    640: (8.587, 6.574),
+    704: (10.287, 7.845),
+    768: (11.602, 9.237),
+    832: (12.797, 10.337),
+    896: (14.599, 11.304),
+    960: (16.174, 12.890),
+    1024: (17.949, 14.164),
+    1088: (20.147, 15.924),
+}
+
+
+def table_ratio(side: int) -> float:
+    plain, tail = TAIL_TABLE[side]
+    return (tail - 0.50) / (plain - 0.50)
+
+
+@pytest.mark.parametrize("side", sorted(TAIL_TABLE))
+def test_the_tail_s_ratio_is_the_measured_one_at_each_measured_side(side: int) -> None:
+    assert peaks.tail_ratio(side) == pytest.approx(table_ratio(side), abs=1e-12)
+    # 0.71 to 0.80 of the plain decode's peak above the weights.
+    assert 0.71 <= peaks.tail_ratio(side) <= 0.80
+
+
+def test_the_tail_s_ratio_off_the_measured_sides() -> None:
+    # Above the largest side measured and untiled: the largest ratio measured (832 px's), so that
+    # no prediction there takes less than a measured side does; under 512 px, 512's.
+    largest = max(table_ratio(side) for side in TAIL_TABLE)
+    assert largest == pytest.approx(table_ratio(832), abs=1e-12)
+    for side in (None, 1152, 1280, 2048, 1025):
+        assert peaks.tail_ratio(side) == pytest.approx(largest, abs=1e-12), side
+    assert peaks.tail_ratio(256) == peaks.tail_ratio(1) == pytest.approx(table_ratio(512))
+
+
+@pytest.mark.parametrize("side", sorted(TAIL_TABLE))
+def test_the_tail_s_prediction_is_at_or_over_its_measured_peak(side: int) -> None:
+    # The plan's figure for the measured pass (the DiT away, every block swapped: the VAE's weights
+    # and the DiT's buffers counted, which the measure's 0.50 holds the first of), at or over the
+    # tail's allocated peak at each side.
+    padded, output = padded_size((1080, 1920)), output_size((1080, 1920))
+    predicted = peaks.decode_peak(padded, output, Tiles(side), 0, peaks.BLOCKS, tail=True)
+    assert predicted / GIB >= TAIL_TABLE[side][1], (side, predicted / GIB)
+
+
+@pytest.mark.parametrize("side", [512, 576, 640, 768, 1024, 1280])
+def test_the_tail_takes_the_ratio_of_the_decodes_peak_above_the_weights(side: int) -> None:
+    padded, output = padded_size((1080, 1920)), output_size((1080, 1920))
+    tiles = Tiles(side)
+    # The DiT away (resident 0, every block swapped): the VAE's weights and the DiT's buffers.
+    plain = peaks.decode_peak(padded, output, tiles, 0, peaks.BLOCKS)
+    tail = peaks.decode_peak(padded, output, tiles, 0, peaks.BLOCKS, tail=True)
+    resident = peaks.VAE_WEIGHTS + peaks.dit_on_gpu(0, peaks.BLOCKS)
+    assert tail - resident == pytest.approx((plain - resident) * peaks.tail_ratio(side), abs=1)
+    assert tail < plain
+    # What is resident beside the VAE is no part of the ratio: the DiT kept adds the same bytes.
+    kept = peaks.decode_peak(padded, output, tiles, None, 0, tail=True)
+    assert kept - tail == peaks.dit_on_gpu(None, 0) - peaks.dit_on_gpu(0, peaks.BLOCKS)
+    # The default and tail=False are the plain decode.
+    assert peaks.decode_peak(padded, output, tiles, 0, peaks.BLOCKS, tail=False) == plain
+
+
+def test_the_tail_is_the_measured_512_px_peak_within_a_few_hundredths_of_a_gib() -> None:
+    # place-study's 4.70 GiB allocated (the DiT off the GPU, the VAE's 0.50 in it): the plan's
+    # figure for the same pass, the weights and the DiT's buffers counted.
+    padded, output = padded_size((1080, 1920)), output_size((1080, 1920))
+    figure = peaks.decode_peak(padded, output, Tiles(512), 0, peaks.BLOCKS, tail=True)
+    assert figure / GIB == pytest.approx(4.70, abs=0.10)
+    assert peaks.decode_peak(padded, output, Tiles(512), 0, peaks.BLOCKS) / GIB == pytest.approx(
+        6.39, abs=0.10
+    )
+
+
+def test_the_tail_leaves_the_colour_corrections_term_alone() -> None:
+    padded, output = padded_size((2160, 3840)), output_size((2160, 3840))
+    for tiles in (None, Tiles(1024)):
+        plain = peaks.decode_peak(padded, output, tiles, split=True)
+        tail = peaks.decode_peak(padded, output, tiles, split=True, tail=True)
+        without = peaks.decode_peak(padded, output, tiles, split=False, tail=True)
+        # Untiled, the term is added to the pass's: the tail lowers the pass, not the term.
+        if tiles is None:
+            term = peaks.decode_peak(padded, output, tiles, split=True) - peaks.decode_peak(
+                padded, output, tiles
+            )
+            assert tail - without == term
+        assert tail < plain
+
+
+@pytest.mark.parametrize("allocator", [memory.SEGMENTS, memory.POOL, memory.PLAIN])
+def test_the_least_room_replaces_the_vae_floor_alone(allocator: str) -> None:
+    least = peaks.VAE_ROOM_LEAST
+    assert least == round(0.5 * GIB)
+    for phase in (peaks.ENCODE_PHASE, peaks.DECODE_PHASE):
+        _floor, share = peaks.reserve_terms(phase, allocator)
+        lowered = peaks.reserve_terms(phase, allocator, None, least)
+        assert lowered == (least, share)
+        # P under the floor's edge: 0.5 GiB; over it the share, unchanged.
+        assert peaks.reserve(phase, 0, allocator, None, least) == least
+        big = 40 * GIB
+        assert (
+            peaks.reserve(phase, big, allocator, None, least)
+            == peaks.reserve(phase, big, allocator)
+            or share == 0.0
+        )
+    # A DiT step's rule is not touched, and None is the rule's own.
+    assert peaks.reserve_terms(peaks.DIT_PHASE, allocator, None, least) == peaks.reserve_terms(
+        peaks.DIT_PHASE, allocator
+    )
+    assert peaks.reserve(peaks.DECODE_PHASE, GIB, allocator, None, None) == peaks.reserve(
+        peaks.DECODE_PHASE, GIB, allocator
+    )

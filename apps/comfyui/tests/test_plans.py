@@ -679,6 +679,45 @@ def clip_text(settings: plans.Settings, **kwargs: Any) -> str:
     )
 
 
+def test_a_clip_that_fits_this_card_only_with_the_last_rungs_says_so_in_a_users_words() -> None:
+    # The plan's last rungs (shot_plan.plan): one line, in ComfyUI's terms (no tile, no option).
+    from dataclasses import replace
+
+    settings = plans.Settings()
+    made, expected = clip_plan(settings, 100)
+    assert "slower decode" not in clip_text(settings)
+
+    def text(plan: Any) -> str:
+        return plans.clip_text(
+            cuts=[Shot(0, 100)],
+            source=(1920, 1080),
+            output=(1920, 1080),
+            resolution=1080,
+            dit="seedvr2x_ema_7b_sharp_fp16.safetensors",
+            attention=peaks.SDPA,
+            plan=plan,
+            expected=expected,
+            room=ROOM,
+            settings=settings,
+            keeping=KEPT,
+        )
+
+    tail = [line for line in text(replace(made, tail_frames=True)).splitlines() if "slower" in line]
+    assert tail == [
+        "slower decode to fit this card: the end of the video decoder runs one frame at a time"
+        " (its memory about a quarter lower, the decode about 1.1 times as long; at tiles of 512,"
+        " 576 and 960 px its pictures differ a little from the usual decoder's, the same in every"
+        " run)"
+    ]
+    both = text(replace(made, tail_frames=True, vae_floor=peaks.VAE_ROOM_LEAST))
+    (line,) = [each for each in both.splitlines() if "slower" in each]
+    assert line.endswith(
+        "and the least spare memory kept free around the decode is lowered to 0.50 GiB (the"
+        " decode about 1.2 times as long; a pass that needs more keeps it)"
+    )
+    assert "--" not in line and "tile_" not in line
+
+
 def test_the_text_says_what_each_auto_became_and_what_a_value_wired_in_was_taken_as() -> None:
     text = picture_text(plans.Settings(decode_tile=1024, swap_blocks=0))
     lines = text.splitlines()

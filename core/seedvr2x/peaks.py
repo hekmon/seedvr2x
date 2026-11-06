@@ -425,6 +425,55 @@ MARGIN = round(0.6 * GIB)
 # (MEASURED).
 VAE_ROOM = round(1.25 * GIB)
 
+# The VAE passes' room at the plan's last rung (shot_plan.plan, "the floor"): the reserve floor of
+# a VAE pass, VAE_RESERVE_FLOOR under the segments and the pool and VAE_ROOM elsewhere, lowered to
+# 0.5 GiB for a clip that fits no other way. DESIGN.md (Allocator, Small cards, "The floor, last
+# rungs"): "the VAE's room down to 0.5 GiB, where its frames still hold (its decode about 1.2
+# times as long)". PROVISIONAL: the 0.5 is design's figure, the frames and the time to be measured
+# again on the GPU for each tile side.
+VAE_ROOM_LEAST = round(0.5 * GIB)
+
+# The decoder's tail a frame at a time (model.tail_frames; the plan's first rung): the decode's
+# peak above the models resident, times a ratio by tile side. Allocated peaks of the shipped tail
+# against the plain decoder, measured on the RTX 5090 (2026-11-06, research/scripts/hold_probe.py's
+# decode of 5 latents at 1080p, the DiT off the GPU, expandable segments; research/docs/
+# small-cards.md, The decoder's tail by tile side), in GiB, the VAE's 0.50 allocated before the
+# step under both, by tile side: plain, tail. The ratio is taken on the part above the weights,
+# (tail - 0.50) / (plain - 0.50), from 0.714 at 512 px to 0.800 at 832. Every tile side the
+# planner takes up to 1088 px is measured (at 1152 px the plain decode does not fit the card
+# beside its desktop's 4 GiB, the tail's 17.07); a side above the largest measured, and the
+# untiled decode, take the largest ratio measured, a side under 512 px 512's (tail_ratio).
+TAIL_MEASURED = (
+    (512, 6.385, 4.704),
+    (576, 7.946, 5.815),
+    (640, 8.587, 6.574),
+    (704, 10.287, 7.845),
+    (768, 11.602, 9.237),
+    (832, 12.797, 10.337),
+    (896, 14.599, 11.304),
+    (960, 16.174, 12.890),
+    (1024, 17.949, 14.164),
+    (1088, 20.147, 15.924),
+)
+TAIL_WEIGHTS_GIB = 0.50
+
+
+def tail_ratio(side: int | None) -> float:
+    """The share of a decode's peak above the models resident that the decoder's tail a frame at
+    a time leaves (decode_peak's `tail`), for tiles of `side` pixels, None for the untiled decode:
+    the ratio measured at that side (TAIL_MEASURED); for a side not measured above 512 px and for
+    the untiled decode, the largest ratio measured; under 512 px, 512's."""
+    ratios = {
+        known: (tail - TAIL_WEIGHTS_GIB) / (plain - TAIL_WEIGHTS_GIB)
+        for known, plain, tail in TAIL_MEASURED
+    }
+    if side is not None and side in ratios:
+        return ratios[side]
+    if side is not None and side < min(ratios):
+        return ratios[min(ratios)]
+    return max(ratios.values())
+
+
 # --compile, the VAE compiled with its causal convolutions left out of the graph (DESIGN.md,
 # Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0; the DiT, not", decided on
 # 2026-10-24; research/docs/compile.md). A compiled pass is held to COMPILE_PEAK times its tile's
@@ -652,6 +701,7 @@ def decode_peak(
     dit_model: weights.Architecture = FP16,
     *,
     frames: int = SLICE,
+    tail: bool = False,
 ) -> int:
     """The predicted peak of the VAE's decode of padded frames, in bytes, its peak above what is
     on the GPU before the call as encode_peak has the encode's (without ENCODE_EXTRA, the
@@ -660,6 +710,10 @@ def decode_peak(
     at once, `frames` frames of the output's size (frames.output_size): a video's slice holds
     SLICE at most, which the video's planner (shot_plan.py) passes, a still picture one. ValueError
     for tiles of which one covers the whole padded frame, as encode_peak, and for frames under 1.
+
+    tail: the decoder's tail a frame at a time (model.tail_frames, a plan's last rungs): the
+    tile's peak above the weights is tail_ratio of its tile side times its plain one, the
+    colour correction's term unchanged (it is a pass of its own after the decoder's).
 
     The untiled decode, streamed, corrects each slice while it holds its working memory, and its
     peak is the two together: at 1080p with every weight on the GPU, 50.98 GiB measured for
@@ -680,6 +734,8 @@ def decode_peak(
     if frames < 1:
         raise ValueError(f"the colour correction's term over {frames} frames")
     fit = _fit(padded, tiles, 1) * (COMPILE_PEAK if compiled else 1.0)
+    if tail:
+        fit *= tail_ratio(None if tiles is None else tiles.size)
     corrected = SPLIT_FRAME_4K * frames * output[0] * output[1] / PIXELS_4K if split else 0
     above = fit + corrected if tiles is None else max(fit, corrected)
     return round(above) + VAE_WEIGHTS + dit_on_gpu(resident, swapped, dit_model)
@@ -720,7 +776,13 @@ DIT_PHASE, ENCODE_PHASE, DECODE_PHASE = "dit", "encode", "decode"
 PHASES = (DIT_PHASE, ENCODE_PHASE, DECODE_PHASE)
 
 
-def reserve(phase: str, working: int, allocator: str, margin: float | None = None) -> int:
+def reserve(
+    phase: str,
+    working: int,
+    allocator: str,
+    margin: float | None = None,
+    vae_floor: int | None = None,
+) -> int:
     """What a held run's plan leaves torch beyond a step's predicted peak, in bytes, for the
     step `phase` (DIT_PHASE, ENCODE_PHASE or DECODE_PHASE; ValueError for another) whose peak
     over the models resident in it is `working` bytes (P: dit_working, vae_working), under
@@ -737,19 +799,26 @@ def reserve(phase: str, working: int, allocator: str, margin: float | None = Non
     margin, probe.Probed.allocator_margin), None where none is: where it is larger than the
     rule's share (SEGMENTS and POOL), it is the share, the plan counting the larger of the two.
     PLAIN's flat reserve takes none.
+    `vae_floor`: the plan's last rung (VAE_ROOM_LEAST), bytes: the floor of a VAE pass's rule
+    (VAE_RESERVE_FLOOR, or VAE_ROOM under PLAIN) replaced by it, the share kept; a DiT step's rule
+    is unchanged; None, the rule's own.
     The step needs its peak plus this under the figure the plan counts on."""
-    floor, share = reserve_terms(phase, allocator, margin)
+    floor, share = reserve_terms(phase, allocator, margin, vae_floor)
     return max(floor, round(share * working))
 
 
-def reserve_terms(phase: str, allocator: str, margin: float | None = None) -> tuple[int, float]:
+def reserve_terms(
+    phase: str, allocator: str, margin: float | None = None, vae_floor: int | None = None
+) -> tuple[int, float]:
     """The floor, in bytes, and the share of P of reserve's rule max(floor, share x P) for the
     step `phase` under `allocator` (ValueError for a name that isn't one): reserve's own table,
     for whoever solves the rule for P (still_plan._largest_input). `margin`: the probe's measured
     share of P (reserve), which replaces the rule's share where larger, under SEGMENTS and POOL;
-    PLAIN's takes none. Nothing builds the measurement yet (probe.py): this is the reading
-    side."""
+    PLAIN's takes none. `vae_floor`: reserve's. Nothing builds the measurement yet (probe.py):
+    this is the reading side."""
     floor, share = _terms(phase, allocator)
+    if vae_floor is not None and phase != DIT_PHASE:
+        floor = vae_floor
     if margin is not None and allocator != PLAIN:
         share = max(share, margin)
     return floor, share

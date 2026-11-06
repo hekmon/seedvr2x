@@ -256,10 +256,13 @@ def test_a_frame_too_small_for_a_tile_has_no_compiled_decode_and_is_refused() ->
 
 
 def test_a_job_that_fits_no_card_plain_is_refused_as_it_was() -> None:
-    # --compile adds no refusal of its own: the plain job's is the one given.
+    # --compile adds no refusal of its own: the plain job's is the one given, as it was before
+    # the last rungs (no rung under --compile: a compiled decode with the tail is not measured),
+    # so that the plain job is judged without them (with them it is refused too, but in the last
+    # rung's figures and words, which a compiled job's refusal does not carry).
     free = round(3 * GIB)
     with pytest.raises(PlanError) as plain:
-        planner.plan(free, HD, shots(76), Pins(), None)
+        planner.plan(free, HD, shots(76), Pins(), None, rungs=False)
     with pytest.raises(PlanError) as compiled:
         planner.plan(free, HD, shots(76), Pins(), None, compile_vae=True)
     assert str(compiled.value) == str(plain.value)
@@ -1032,7 +1035,7 @@ def accepting_tiles(monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:  # n
     def encode(*arguments: Any, tiles: Any, store: Any, **options: Any) -> Any:
         return steps.encode(*arguments, **options)
 
-    def decode(*arguments: Any, tiles: Any, store: Any) -> None:
+    def decode(*arguments: Any, tiles: Any, store: Any, **options: Any) -> None:
         steps.decode(*arguments)
 
     monkeypatch.setattr(run, "encode_shot", encode)

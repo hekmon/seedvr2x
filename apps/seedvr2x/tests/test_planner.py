@@ -1264,7 +1264,7 @@ def test_a_refusal_for_memory_names_the_smaller_files_that_plan() -> None:
     assert pin.value.instead and "smaller DiT file" not in str(pin.value)
     with pytest.raises(PlanError) as card:
         planner.plan_naming(
-            round(6 * GIB), HD, shots(76), Pins(), 64 * GIB, dit_file=SHARP_FILES["fp16"],
+            round(5 * GIB), HD, shots(76), Pins(), 64 * GIB, dit_file=SHARP_FILES["fp16"],
             split=True,
         )  # fmt: skip
     assert "smaller DiT file" not in str(card.value)
@@ -1930,11 +1930,16 @@ def test_a_recorded_shape_planned_again_releases_the_part_the_refusal_names() ->
     def shape(made: Plan) -> tuple[int | None, Tiles | None, Tiles | None]:
         return made.window, made.encode_tiles, made.decode_tiles
 
-    # The encode alone doesn't fit, 0.06 GiB short untiled: its tiles are the planner's, the
+    # The encode alone doesn't fit, a little short untiled (on 23 GiB free: the lean attention and
+    # the reserve by the step let the untiled encode in at 24): its tiles are the planner's, the
     # window and the decode's tiles as recorded.
     untiled = Plan(17, None, Tiles(1088))
-    made, _ = again(our_free(24), untiled)
-    assert shape(made) == (17, Tiles(1856), Tiles(1088))
+    made, _ = again(our_free(23), untiled)
+    # (A driver that refuses takes no room rung, which was measured under the segments alone: the
+    # tiles at the room of 1.25 GiB, 1792 px for the encode and, the two together no longer fitting
+    # the recorded decode's 1088, 1024 px for the decode: not the 1856 and 1088 the room lowered
+    # to 0.5 gave.)
+    assert shape(made) == (17, Tiles(1792), Tiles(1024))
     # The DiT's phase doesn't fit: the cap is the planner's, the tiles recorded kept.
     # (A window of 45: the lean attention's 16 GB card holds 20 and more, the cap the planner
     # gives back is 21.)
@@ -1957,8 +1962,8 @@ def test_a_recorded_shape_planned_again_releases_the_part_the_refusal_names() ->
     assert tiles.value.phase == "encode" and tiles.value.shortfall is not None
     # A pin on one part leaves the others to be released: here the window is the user's, the
     # encode's tiles are released and the decode's are not needed.
-    made, _ = again(our_free(24), untiled, Pins(window=17))
-    assert shape(made) == (17, Tiles(1856), Tiles(1088))
+    made, _ = again(our_free(23), untiled, Pins(window=17))
+    assert shape(made) == (17, Tiles(1792), Tiles(1024))
     # Nothing fits whatever is released: the last round's refusal, a new job's (no shortfall: it
     # has no recorded shape to keep).
     with pytest.raises(PlanError) as nothing:
@@ -2092,3 +2097,84 @@ def test_the_dit_s_fit_is_its_attention_backend_s() -> None:
     sdpa_plan, sdpa_peaks = planner.plan(emulated, UHD, shots(5), Pins(), None, attention=sdpa)
     assert flash_plan == sdpa_plan and flash_peaks.dit == sdpa_peaks.dit
     assert flash_plan.window == 5
+
+
+# ---- The floor, last rungs (DESIGN.md, Allocator, Small cards): the plan's lines ---------------
+
+TAIL_LINE = (
+    "plan: the decoder's tail: its last blocks a frame at a time, taken because the plain decode"
+    " does not fit this card: its peak about a quarter lower, the decode about 1.1 times as long,"
+    " its frames other than the plain decoder's at 512, 576 and 960 px tiles (the same in every"
+    " run)"
+)
+ROOM_LINE = (
+    "plan: the VAE's least room: taken because the plan does not fit this card without it: the"
+    " VAE passes' reserve floor lowered to 0.50 GiB (a pass whose fifth of its working memory is"
+    " more keeps that), the decode about 1.2 times as long"
+)
+
+
+def test_a_plan_that_takes_no_rung_says_none() -> None:
+    made, predicted = planner.plan(_segments_card(9.0), HD, shots(19), NO_PINS, None)
+    assert not made.tail_frames and made.vae_floor is None
+    lines = planner.said(made, predicted, "a card", HD, shots(19), NO_PINS)
+    assert not [line for line in lines if "decoder's tail" in line or "least room" in line]
+    assert any(
+        line.startswith("plan: the VAE's room: ")
+        and "at least 1.25 GiB of the budget, the reserve of each pass above" in line
+        for line in lines
+    )
+
+
+def test_a_plan_says_the_tail_it_takes_and_what_it_costs() -> None:
+    made, predicted = planner.plan(_segments_card(8.0), HD, shots(19), NO_PINS, None)
+    assert made.tail_frames and made.vae_floor is None
+    lines = planner.said(made, predicted, "a card", HD, shots(19), NO_PINS)
+    place = next(
+        number for number, line in enumerate(lines) if line.startswith("plan: the VAE's room")
+    )
+    assert lines[place + 1] == TAIL_LINE
+    assert "at least 1.25 GiB of the budget" in lines[place]
+    assert "least room" not in "".join(lines)
+
+
+def test_a_plan_says_the_room_it_takes_besides_the_tail() -> None:
+    made, predicted = planner.plan(_segments_card(6.25), HD, shots(19), NO_PINS, None)
+    assert made.tail_frames and made.vae_floor == peaks.VAE_ROOM_LEAST
+    lines = planner.said(made, predicted, "a card", HD, shots(19), NO_PINS)
+    place = next(
+        number for number, line in enumerate(lines) if line.startswith("plan: the VAE's room")
+    )
+    assert "at least 0.50 GiB of the budget" in lines[place]
+    assert lines[place + 1 : place + 3] == [TAIL_LINE, ROOM_LINE]
+    # The record holds both: the tail with the shape, the floor under memory.
+    record = made.record()
+    assert record["tail_frames"] is True
+    assert record["memory"]["vae_floor"] == peaks.VAE_ROOM_LEAST
+
+
+def test_a_recorded_plan_with_the_tail_planned_again_keeps_it() -> None:
+    # plan_again (a resume's shape that no longer fits, --accept-env-change) keeps what shapes the
+    # output: the tail as recorded, whatever tiles are released.
+    # (A window of 7 latents: the plan's own on this card, the DiT's phase fits and the decode
+    # is what refuses; a window of 19 was refused in the DiT's phase first.)
+    recorded = Plan(7, Tiles(512), Tiles(768), tail_frames=True)
+    card = _segments_card(6.25)
+    with pytest.raises(PlanError) as refused:
+        planner.plan(card, HD, shots(19), NO_PINS, None, recorded=recorded)
+    assert refused.value.phase == "decode"
+    made, _ = planner.plan_again(
+        card, HD, shots(19), NO_PINS, None, recorded=recorded, refused=refused.value
+    )
+    assert made.tail_frames and made.decode_tiles != Tiles(768)
+    # A recorded plan without it is planned again without it.
+    # (On a card of 9 GiB: a plain decode does not fit the 6.25 GiB card at all, only the tail
+    # does, so that card would refuse the plain shape whatever is released.)
+    plain = Plan(7, Tiles(512), Tiles(768))
+    card = _segments_card(9.0)
+    with pytest.raises(PlanError) as refused:
+        planner.plan(card, HD, shots(19), NO_PINS, None, recorded=plain)
+    made, _ = planner.plan_again(
+        card, HD, shots(19), NO_PINS, None, recorded=plain, refused=refused.value
+    )
+    assert not made.tail_frames

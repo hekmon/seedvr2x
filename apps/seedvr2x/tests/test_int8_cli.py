@@ -205,7 +205,9 @@ def test_an_int8_resume_is_judged_early_by_int8_s_figures(
         return plan(*arguments, **options)
 
     monkeypatch.setattr(planner, "plan", planned)
-    encode = peaks.encode_peak(PADDED, None, 0, dit_model=peaks.INT8) + planner.VAE_ROOM
+    # The plan's last rung takes a VAE pass's room down to peaks.VAE_ROOM_LEAST (patch 03): the
+    # card is short of that, as test_cli_run's early-reading tests count it.
+    encode = peaks.encode_peak(PADDED, None, 0, dit_model=peaks.INT8) + peaks.VAE_ROOM_LEAST
     early_card(monkeypatch, encode + planner.MARGIN - GIB // 4 + memory.CONTEXT)
     caplog.clear()
     assert cli.main(command(tmp_path, source_path, "out", *JOB, *chosen)) == 0

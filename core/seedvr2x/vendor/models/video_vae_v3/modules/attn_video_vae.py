@@ -8,7 +8,7 @@
 # available at http://www.apache.org/licenses/LICENSE-2.0.
 #
 # This modified file is released under the same license.
-# Modified for seedvr2x: no retry on OOM; no sequence parallelism.
+# Modified for seedvr2x: no retry on OOM; no sequence parallelism; an optional decoder tail.
 
 
 from contextlib import nullcontext
@@ -964,6 +964,16 @@ class Decoder3D(nn.Module):
 
         self.gradient_checkpointing = gradient_checkpoint
 
+    # seedvr2x: off, as ByteDance's decoder runs. On, the blocks after the last temporal upsampler
+    # run a frame at a time (_forward_tail), which a plan for a card too small for the plain
+    # decode turns on (model.tail_frames). Measured on the 1080p clip (research/docs/small-cards.md,
+    # The VAE decode at small tiles): the decode's peak 20 to 27% lower at every tile side (6.39 to
+    # 4.70 GiB at 512 px, 17.95 to 14.16 at 1024), its time 6 to 17% longer (2026-11-06); the frames equal the
+    # plain decode's at 640 to 896 px, 1024 and 1088 and differ at 512, 576 and 960 (measured at
+    # every side from 512 to 1152, 2026-11-06), the same in every run. A class attribute, so that a
+    # decoder built or copied any other way than __init__ has it off.
+    tail_frames: bool = False
+
     # Note: Just copy from Decoder.
     def forward(
         self,
@@ -972,6 +982,11 @@ class Decoder3D(nn.Module):
         memory_state: MemoryState = MemoryState.DISABLED,
     ) -> torch.FloatTensor:
         r"""The forward method of the `Decoder` class."""
+
+        # seedvr2x: the tail a frame at a time, never in training with checkpointing (its branch
+        # below is the original's).
+        if self.tail_frames and not (self.training and self.gradient_checkpointing):
+            return self._forward_tail(sample, latent_embeds, memory_state)
 
         sample = self.conv_in(sample, memory_state=memory_state)
 
@@ -1018,6 +1033,41 @@ class Decoder3D(nn.Module):
         sample = self.conv_out(sample, memory_state=memory_state)
 
         return sample
+
+    # seedvr2x: the forward (out of training, the branch seedvr2x runs) with the blocks after the
+    # last temporal upsampler (the up blocks from temporal_up_num on, then the output norm,
+    # activation and convolution) run one frame at a time, each frame after the first with the
+    # causal convolutions' memory (MemoryState.ACTIVE) as the slices themselves follow one
+    # another: the same modules in the same order on each frame. Those are the full-resolution
+    # blocks, the decoder's largest tensors (research/docs/small-cards.md, The VAE decode at
+    # small tiles; the method is slice_probe.py's --tail-frames, DESIGN.md, Small cards).
+    def _forward_tail(
+        self,
+        sample: torch.FloatTensor,
+        latent_embeds: Optional[torch.FloatTensor],
+        memory_state: MemoryState,
+    ) -> torch.FloatTensor:
+        sample = self.conv_in(sample, memory_state=memory_state)
+        sample = self.mid_block(sample, latent_embeds, memory_state=memory_state)
+        split = self.temporal_up_num
+        for up_block in self.up_blocks[:split]:
+            sample = up_block(sample, latent_embeds, memory_state=memory_state)
+
+        if memory_state == MemoryState.DISABLED or sample.shape[2] == 1:
+            frames = [sample]
+        else:
+            frames = list(sample.split(1, dim=2))
+        del sample
+        out = []
+        for index, frame in enumerate(frames):
+            frames[index] = None  # each frame's input dropped as it is taken
+            state = memory_state if index == 0 else MemoryState.ACTIVE
+            for up_block in self.up_blocks[split:]:
+                frame = up_block(frame, latent_embeds, memory_state=state)
+            frame = causal_norm_wrapper(self.conv_norm_out, frame)
+            frame = self.conv_act(frame)
+            out.append(self.conv_out(frame, memory_state=state))
+        return out[0] if len(out) == 1 else torch.cat(out, dim=2)
 
 
 class AutoencoderKL(diffusers.AutoencoderKL):

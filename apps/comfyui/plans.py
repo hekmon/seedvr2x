@@ -652,10 +652,35 @@ def clip_text(
         _quality(cuts, quality),
         _tiles("encode_tile", settings.encode_tile is not None, plan.encode_tiles, expected.encode),
         _tiles("decode_tile", settings.decode_tile is not None, plan.decode_tiles, expected.decode),
+        *_slower(plan),
         keeping.line,
         _host(room.host, keeping, held, counts),
     ]
     return "\n".join(lines)
+
+
+def _slower(plan: Plan) -> list[str]:
+    """The line of the plan's last rungs (shot_plan.plan), in a ComfyUI user's words: what was
+    done to fit this card and what it costs. Nothing for a plan that fits without them. The costs
+    are the measured ones (the decode 1.06 to 1.17 times as long with the tail, about 1.2 times
+    as long with the room; the tail's frames other than the usual decoder's at tiles of 512, 576
+    and 960 px, measured 2026-11-06)."""
+    done: list[str] = []
+    if plan.tail_frames:
+        done.append(
+            "the end of the video decoder runs one frame at a time (its memory about a quarter"
+            " lower, the decode about 1.1 times as long; at tiles of 512, 576 and 960 px its"
+            " pictures differ a little from the usual decoder's, the same in every run)"
+        )
+    if plan.vae_floor is not None:
+        done.append(
+            "the least spare memory kept free around the decode is lowered to"
+            f" {gib(plan.vae_floor)} (the decode about 1.2 times as long; a pass that needs more"
+            " keeps it)"
+        )
+    if not done:
+        return []
+    return ["slower decode to fit this card: " + " and ".join(done)]
 
 
 # ---- The cuts in the nodes' words ----------------------------------------------------------------

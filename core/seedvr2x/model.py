@@ -39,6 +39,7 @@ from seedvr2x.vendor.common.seed import set_seed as vendor_set_seed
 from seedvr2x.vendor.core.infer import VideoDiffusionInfer
 from seedvr2x.vendor.models.dit_3b import attention as attention_3b
 from seedvr2x.vendor.models.dit_7b import attention as attention_7b
+from seedvr2x.vendor.models.video_vae_v3.modules.attn_video_vae import Decoder3D
 from seedvr2x.vendor.models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
 from seedvr2x.vendor.models.video_vae_v3.modules.types import MemoryState
 from seedvr2x.weights import SLOTS
@@ -758,6 +759,25 @@ def forget(models: Models) -> None:
     to the same bits."""
     _forget(models.runner.vae)
     _forget_rope(models.runner.dit)
+
+
+def tail_frames(vae: Any, on: bool) -> None:
+    """Turn the VAE decoder's tail a frame at a time on or off: the blocks after its last temporal
+    upsampler (the up blocks from temporal_up_num on, the output norm, activation and
+    convolution) then run one frame at a time, each after the first with the causal
+    convolutions' memory carried, so that the decode's peak is 20 to 27% lower at every tile
+    side and its time 6 to 17% longer (research/docs/small-cards.md, The VAE decode at small
+    tiles, 1080p clip; the time measured again at every side from 512 to 1152 px on 2026-11-06).
+    The frames are the plain decode's at tiles of 640 to 896 px, 1024 and 1088 and differ at 512,
+    576 and 960 px (measured at every side from 512 to 1152, the same in every run): so a plan
+    decides it, for a card too small for the plain decode, and records it; nothing here wires it
+    into a pass. Off is ByteDance's decode, bit for bit. Takes effect at the next decode, between
+    slices of a decode too; ValueError for a VAE with no Decoder3D, where nothing would change."""
+    found = [m for m in vae.modules() if isinstance(m, Decoder3D)]
+    if not found:
+        raise ValueError("no Decoder3D in the VAE: the decoder's tail has nowhere to be set")
+    for decoder in found:
+        decoder.tail_frames = on
 
 
 def _forget(vae: Any) -> None:

@@ -266,6 +266,7 @@ def calibrate(
                 *(models, latent, count, target, write, "the calibration", 0, correction),
                 tiles=plan.decode_tiles,
                 store=None if plan.decode_tiles is None else Scratch(where, plan.scratch_allowance),
+                tail_frames=plan.tail_frames,
             )
             return time.monotonic() - begun
 

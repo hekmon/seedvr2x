@@ -892,7 +892,7 @@ def test_calibration(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(found, Calibrated)
     assert (FIRST, FRAMES, SHORT) == (5, 13, 2)
     size = TARGET
-    decoding = {"tiles": None, "store": None}
+    decoding = {"tiles": None, "store": None, "tail_frames": False}
     assert steady.called == [
         # Each encode's two lengths right after a window (the warm-up's first, at the encode's
         # largest shape, unmeasured), as a run's encodes come; the second length: 0.88 s a frame

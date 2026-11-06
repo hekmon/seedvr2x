@@ -1029,6 +1029,10 @@ def fits(
 
 
 def refused(*job: object, **options: object) -> str:
+    # The plain plan's refusal, without the last rungs (plan's `rungs`): what these tests hold is
+    # the planner's own choices and refusals, which a card the rungs now run still gives, no rung
+    # taken; the rungs have their own tests (test_a_clip_that_fits_no_other_way_*).
+    options.setdefault("rungs", False)
     with pytest.raises(PlanError) as error:
         shot_plan.plan(*job, **options)  # pyright: ignore[reportArgumentType]
     return cli_words(error.value)
@@ -1338,7 +1342,9 @@ def test_least_pass_is_the_least(monkeypatch: pytest.MonkeyPatch) -> None:
 def needs(made: Plan, target: tuple[int, int], film: list[Shot], split: bool) -> dict[str, int]:
     """What each phase of a plan needs under the budget for a job, in bytes, by the planner's
     public functions and the run's own layout (shots.shot_layout) alone: a VAE pass its peak and
-    its room; the DiT's phase the longest window a shot runs."""
+    its room; the DiT's phase the longest window a shot runs. A plan with the last rungs by their
+    own figures: the decode's tail (peaks.decode_peak's `tail`), the room down to its floor
+    (Plan.vae_floor, peaks.VAE_ROOM_LEAST) in place of VAE_ROOM."""
     padded = padded_size(target)
     lengths = {(padded_length(shot.frames) - 1) // 4 + 1: shot.frames for shot in film}
     window = max(
@@ -1351,8 +1357,10 @@ def needs(made: Plan, target: tuple[int, int], film: list[Shot], split: bool) ->
     decode = peaks.decode_peak(
         *(padded, output_size(target), made.decode_tiles, made.resident_decode, made.swapped),
         split,
+        tail=made.tail_frames,
     )
-    return {"encode": encode + peaks.VAE_ROOM, "dit": dit, "decode": decode + peaks.VAE_ROOM}
+    room = peaks.VAE_ROOM if made.vae_floor is None else made.vae_floor
+    return {"encode": encode + room, "dit": dit, "decode": decode + room}
 
 
 def shot_held(made: Plan, target: tuple[int, int], film: list[Shot]) -> int:
@@ -1414,7 +1422,7 @@ def test_every_plan_fits() -> None:
         Pins(encode_tile=1024, decode_tile=768),
         Pins(encode_tile=2304, decode_tile=2112),  # above TILE_MAX; refused on a frame they cover
     )
-    plans = floors = tiled = short = jobs = 0
+    plans = floors = tiled = short = jobs = rung_plans = 0
     for target in targets:
         for film in films:
             for free in (round(count * GIB) for count in frees):
@@ -1432,6 +1440,7 @@ def test_every_plan_fits() -> None:
                             short += "of system memory" in cli_words(error)
                             continue
                         plans += 1
+                        rung_plans += made.tail_frames
                         need = needs(made, target, film, split)
                         assert max(need.values()) <= free - MARGIN
                         assert need == {phase: predicted.need(phase) for phase in shot_plan.PHASES}
@@ -1454,7 +1463,10 @@ def test_every_plan_fits() -> None:
                         # No plan has a tile that covers the frame, pinned or not.
                         assert tiles is None or not peaks.covers(padded_size(target), tiles)
                         tiled += tiles is not None
-    assert plans > 1500 and floors > 1000 and tiled > 300 and short > 250
+    # A size the floor refused before the rungs is still a floor or a plan with a rung (the
+    # rungs only plan what was refused), so the two together are the floors of before.
+    assert plans > 1500 and floors + rung_plans > 1000 and tiled > 300 and short > 250
+    assert rung_plans > 0
 
 
 def reference(free: int, target: tuple[int, int], film: list[Shot], split: bool) -> Plan | None:
@@ -1509,7 +1521,7 @@ def test_the_plan_is_the_brute_force_one() -> None:
     # finds no plan.
     films = (shots(4), shots(12, 40, 3), shots(76), shots(300, 21, 5))
     frees = (6.54, 10.54, 14.54, 22.54, 30.54, 38.54, 46.54, 62.54, 94.24)
-    found = refusals = 0
+    found = refusals = rungs_planned = 0
     for index, target in enumerate(((540, 960), HD, UHD)):
         for film in films:
             for free in (round(count * GIB) for count in frees):
@@ -1518,6 +1530,14 @@ def test_the_plan_is_the_brute_force_one() -> None:
                 if expected is None:
                     assert refused(free, target, film, Pins(), None, split=split)
                     refusals += 1
+                    # What the rungs plan there fits by their own figures, tail first.
+                    try:
+                        rung, _ = shot_plan.plan(free, target, film, Pins(), None, split=split)
+                    except PlanError:
+                        continue
+                    assert rung.tail_frames
+                    assert max(needs(rung, target, film, split).values()) <= free - MARGIN
+                    rungs_planned += 1
                     continue
                 made, _ = shot_plan.plan(free, target, film, Pins(), None, split=split)
                 assert bare(made) == expected, (free / GIB, target, film, split)
@@ -2174,7 +2194,7 @@ def test_a_recorded_shape_refused_says_what_it_falls_short_of_apart() -> None:
 
     def refusal(free: int | Reading, **options: Any) -> PlanError:
         with pytest.raises(PlanError) as error:
-            shot_plan.plan(free, *job, **options)
+            shot_plan.plan(free, *job, rungs=False, **options)  # the plain plan's refusal
         return error.value
 
     # A driver that refuses: the encode, 7.26 GiB short, which closing programs gives back.
@@ -2216,7 +2236,11 @@ def test_a_recorded_shape_refused_says_what_it_falls_short_of_apart() -> None:
     with pytest.raises(PlanError) as held:
         shot_plan.plan(short, HD, film, Pins(swap_blocks=36), None, recorded=shape)
     assert held.value.shortfall is not None and not held.value.shortfall.host
+    # torch's own allocator without the segments (PLAIN) takes no room rung (only the segments,
+    # where it was measured), and a recorded shape without the tail takes no tail: the plain plan's
+    # refusal, 1.01 short, with nothing counted.
     assert held.value.shortfall == shot_plan.Shortfall("the decode", "1.01", freeable=True)
+    assert "least the plan takes" not in str(held.value)
     # The driver reporting no more than the card has: nothing freed gives it.
     flat = on_card(short.card or 0, short.card or 0)
     with pytest.raises(PlanError) as stuck:
@@ -2231,7 +2255,7 @@ def test_a_refusal_names_the_phase_that_does_not_fit() -> None:
     # pin the pass or the window it refuses; empty for a pin that is no pin.
     def phase_of(free: int, pins: Pins = NO_PINS, host: int | None = None, **options: Any) -> str:
         with pytest.raises(PlanError) as error:
-            shot_plan.plan(free, HD, shots(76), pins, host, **options)
+            shot_plan.plan(free, HD, shots(76), pins, host, rungs=False, **options)
         return error.value.phase
 
     shape = Plan(39, Tiles(1856), Tiles(1088))  # 17 on the plain attention
@@ -2458,6 +2482,7 @@ def test_each_refusal_of_the_planner_is_of_its_kind_with_its_facts() -> None:
     assert error.instead.name == "resolution" and error.instead.value.isdecimal()
     error = raised(our_free(16), HD, shots(76), Pins(), None, recorded=recorded)
     assert type(error) is MemoryShort and error.phase == "encode" and error.instead is None
+    # The recorded shape's need, the room at 1.25 GiB: a driver that refuses takes no room rung.
     assert error.shortfall == shot_plan.Shortfall("the encode", "7.26", freeable=True)
     assert error.need is not None and error.short == error.need - our_free(16)
     # The host's memory.
@@ -2659,3 +2684,347 @@ def test_a_measured_margin_over_the_rule_is_the_reserve_of_every_step_of_the_pla
     plain = shot_plan.plan(reading(memory.PLAIN, 0.6), HD, shots(76), Pins(), None)
     same = shot_plan.plan(reading(memory.PLAIN, None), HD, shots(76), Pins(), None)
     assert plain[0] == same[0] and plain[1].reserves == same[1].reserves
+
+
+# ---- The floor, last rungs (DESIGN.md, Allocator, Small cards): a clip that fits no other way ----
+
+
+def segments_at(free: float, allocator: str = memory.SEGMENTS) -> Reading:
+    """The reading of a held run with `free` GiB reported, LEFT outside torch's limit."""
+    driver = round(free * GIB)
+    counted = driver - LEFT - (memory.RESERVE if allocator == memory.PLAIN else 0)
+    return Reading(driver, None, counted, True, LEFT, allocator)
+
+
+def rung_of(plan: Plan) -> int:
+    """0 no rung, 1 the tail, 2 the tail and the room."""
+    return 0 if not plan.tail_frames else 1 if plan.vae_floor is None else 2
+
+
+def clip_plan(free: float, **options: Any) -> tuple[Plan, Any]:
+    return shot_plan.plan(segments_at(free), HD, shots(19), NO_PINS, None, **options)
+
+
+def test_a_clip_that_fits_without_the_rungs_never_takes_one() -> None:
+    for free in (9.0, 9.5, 12.0, 16.0, 24.0, 32.0, 96.0):
+        made, taken = clip_plan(free)
+        assert rung_of(made) == 0 and made.vae_floor is None, free
+        assert "tail_frames" not in made.record()
+        assert "vae_floor" not in made.record()["memory"]
+        assert taken.reserves["decode"] >= peaks.VAE_RESERVE_FLOOR
+
+
+def test_a_clip_that_fits_no_other_way_takes_the_tail_then_the_room() -> None:
+    # HD, 19 latents, expandable segments: the tail from 7.0 GiB reported free to 8.25, the room
+    # besides below 7.0, nothing from 8.5; refused under 6.5. (The levels are the planner's own,
+    # by the figures of peaks.TAIL_MEASURED, PROVISIONAL.)
+    assert rung_of(clip_plan(8.0)[0]) == 1
+    assert rung_of(clip_plan(7.0)[0]) == 1
+    assert rung_of(clip_plan(6.75)[0]) == 2
+    assert rung_of(clip_plan(6.5)[0]) == 2
+    assert rung_of(clip_plan(9.0)[0]) == 0
+    with pytest.raises(PlanError):
+        clip_plan(6.0)
+
+
+def test_the_rungs_come_in_order_over_the_cards() -> None:
+    levels = [rung_of(clip_plan(free / 4)[0]) for free in range(26, 40)]
+    assert levels == sorted(levels, reverse=True)
+    assert set(levels) == {0, 1, 2}
+    for level, free in zip(levels, range(26, 40), strict=True):
+        # The room is never taken without the tail; and a rung only where the plain plan refuses.
+        made = clip_plan(free / 4)[0]
+        assert (made.vae_floor is None) or made.tail_frames
+        job = shot_plan._job(  # pyright: ignore[reportPrivateUsage]
+            segments_at(free / 4), HD, shots(19), False
+        )
+        if level:
+            with pytest.raises(PlanError):
+                shot_plan._attempt(job, NO_PINS, None, None)  # pyright: ignore[reportPrivateUsage]
+        else:
+            shot_plan._attempt(job, NO_PINS, None, None)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_the_plans_with_rungs_hold_their_figures() -> None:
+    made, taken = clip_plan(6.5)
+    assert made.tail_frames and made.vae_floor == peaks.VAE_ROOM_LEAST
+    padded, output = padded_size(HD), output_size(HD)
+    # The decode's peak is the tail's, the pass's own reserve the share over the least floor.
+    expected = peaks.decode_peak(
+        padded,
+        output,
+        made.decode_tiles,
+        made.resident_decode,
+        made.swapped,
+        split=False,
+        tail=True,
+    )
+    assert taken.decode == expected
+    working = peaks.vae_working(taken.decode, made.resident_decode, made.swapped)
+    assert taken.reserves["decode"] == max(
+        peaks.VAE_ROOM_LEAST, round(peaks.VAE_RESERVE_SHARE * working)
+    )
+    assert taken.reserves["encode"] >= peaks.VAE_ROOM_LEAST
+    assert taken.reserves["encode"] < peaks.VAE_ROOM
+    # The tail alone keeps the rule's floor.
+    tail, taken_tail = clip_plan(8.0)
+    assert tail.vae_floor is None and tail.tail_frames
+    assert taken_tail.reserves["decode"] >= peaks.VAE_RESERVE_FLOOR
+
+
+def test_a_plan_with_rungs_is_recorded_and_read_back() -> None:
+    made, _ = clip_plan(6.5)
+    record = made.record()
+    assert record["tail_frames"] is True  # shapes the output: compared on a resume
+    assert record["memory"]["vae_floor"] == peaks.VAE_ROOM_LEAST  # for information
+    read = Plan.recorded(record)
+    assert read.tail_frames and read.vae_floor is None  # the room is planned again
+    # A record without the key (a plan before the rung, or without it) is without the tail.
+    plain, _ = clip_plan(16.0)
+    assert Plan.recorded(plain.record()).tail_frames is False
+    bad = dict(record, tail_frames="yes")
+    with pytest.raises(Exception, match="tail_frames"):
+        Plan.recorded(bad)
+
+
+def test_a_resume_holding_the_tail_keeps_it_and_one_without_never_takes_it() -> None:
+    tail, _ = clip_plan(8.0)
+    recorded = Plan.recorded(tail.record())
+    # The same card: the tail kept, the shape as recorded.
+    again, _ = clip_plan(8.0, recorded=recorded)
+    assert again.tail_frames and again.vae_floor is None
+    assert (again.window, again.encode_tiles, again.decode_tiles) == (
+        tail.window,
+        tail.encode_tiles,
+        tail.decode_tiles,
+    )
+    # A card with room for the plain decode: the recorded tail still holds (the units made have
+    # its frames), never dropped for the memory.
+    roomy, _ = clip_plan(24.0, recorded=recorded)
+    assert roomy.tail_frames
+    # A smaller card: the room taken too, on the recorded shape (tiles of 512 px, the least).
+    least = Plan(6, Tiles(512), Tiles(512), tail_frames=True)
+    with_room, _ = clip_plan(6.5, recorded=least)
+    assert with_room.tail_frames and with_room.vae_floor == peaks.VAE_ROOM_LEAST
+    assert (with_room.window, with_room.encode_tiles, with_room.decode_tiles) == (
+        6,
+        Tiles(512),
+        Tiles(512),
+    )
+    with pytest.raises(PlanError):  # the shape of the card at 8.0 does not fit a card of 7.0
+        clip_plan(7.0, recorded=recorded)
+    # A plain plan's record on a card that needs a rung: the tail is not taken (it would change
+    # the frames at 512 and 576 px); the room alone may be, which changes no bit; else refused.
+    plain = Plan.recorded(clip_plan(16.0)[0].record())
+    for free in (6.5, 7.0, 8.0, 8.5):
+        try:
+            made, _ = clip_plan(free, recorded=plain)
+        except PlanError:
+            continue
+        assert not made.tail_frames, free
+
+
+def test_no_rung_is_taken_under_compile() -> None:
+    # A compiled decode with the tail is not measured: refused, never run with a rung.
+    with pytest.raises(PlanError):
+        clip_plan(8.0, compile_vae=True)
+
+
+def test_a_pinned_decode_tile_is_helped_by_the_rungs_too() -> None:
+    made, _ = shot_plan.plan(segments_at(8.0), HD, shots(19), Pins(decode_tile=512), None)
+    assert made.tail_frames and made.decode_tiles == Tiles(512)
+    with pytest.raises(PlanError):
+        shot_plan.plan(segments_at(6.0), HD, shots(19), Pins(decode_tile=512), None)
+
+
+def test_the_rungs_are_the_dit_s_and_the_hosts_refusals_no_help() -> None:
+    # A refusal for the system memory is final: no rung lowers the host's figures.
+    with pytest.raises(PlanError) as refused:
+        shot_plan.plan(segments_at(8.0), HD, shots(19), NO_PINS, 1 * GIB)
+    assert refused.value.phase == "host"
+
+
+def test_torch_s_own_allocator_without_the_segments_takes_the_tail_alone() -> None:
+    # The room rung (the VAE passes' floor down to 0.5 GiB) only under the segments, where it was
+    # measured (DESIGN.md: "where its frames still hold"): under PLAIN a pass packed closer than
+    # about 1 GiB can give other frames and say nothing (peaks.VAE_ROOM). The tail stays.
+    seen = {
+        reading_free: rung_of(
+            shot_plan.plan(segments_at(reading_free, memory.PLAIN), HD, shots(19), NO_PINS, None)[0]
+        )
+        for reading_free in (free / 2 for free in range(24, 80))
+        if _planned(segments_at(reading_free, memory.PLAIN))
+    }
+    assert set(seen.values()) >= {0, 1}, "a PLAIN card the tail lifts"
+    assert 2 not in seen.values()
+    for free in seen:
+        assert (
+            shot_plan.plan(segments_at(free, memory.PLAIN), HD, shots(19), NO_PINS, None)[
+                0
+            ].vae_floor
+            is None
+        )
+    # Where the tail alone refuses, the refusal is the tail's, with nothing said of a room.
+    refused = [
+        free / 2 for free in range(10, 24) if not _planned(segments_at(free / 2, memory.PLAIN))
+    ]
+    assert refused
+    with pytest.raises(PlanError) as plain:
+        shot_plan.plan(segments_at(max(refused), memory.PLAIN), HD, shots(19), NO_PINS, None)
+    assert "the VAE passes left" not in str(plain.value)
+    assert str(plain.value).endswith(
+        ", with the decoder's tail a frame at a time, the least the plan takes"
+    )
+
+
+def _planned(reading: Reading) -> bool:
+    try:
+        shot_plan.plan(reading, HD, shots(19), NO_PINS, None)
+    except PlanError:
+        return False
+    return True
+
+
+def test_the_pool_and_a_driver_that_refuses_take_the_tail_alone_never_the_room() -> None:
+    # The pool (cudaMallocAsync) and a driver that refuses (no lending): the tail where the plain
+    # decode is refused, never the room rung, which was measured under the segments alone.
+    found = {
+        rung_of(shot_plan.plan(round(free / 4 * GIB), HD, shots(19), NO_PINS, None)[0])
+        for free in range(20, 80)
+        if _planned_number(round(free / 4 * GIB))
+    }
+    assert 0 in found and 1 in found and 2 not in found
+    for allocator in (memory.POOL,):
+        rungs = {
+            rung_of(
+                shot_plan.plan(segments_at(free / 4, allocator), HD, shots(19), NO_PINS, None)[0]
+            )
+            for free in range(20, 80)
+            if _planned(segments_at(free / 4, allocator))
+        }
+        assert 2 not in rungs, allocator
+    # Refused with the tail alone tried: the words count the tail and no room.
+    with pytest.raises(PlanError) as refused:
+        shot_plan.plan(round(5.0 * GIB), HD, shots(19), NO_PINS, None)
+    assert "the VAE passes left" not in str(refused.value)
+    assert str(refused.value).endswith(
+        ", with the decoder's tail a frame at a time, the least the plan takes"
+    )
+
+
+def _planned_number(free: int) -> bool:
+    try:
+        shot_plan.plan(free, HD, shots(19), NO_PINS, None)
+    except PlanError:
+        return False
+    return True
+
+
+TINY = (96, 128)
+
+
+def test_a_plan_refused_for_the_encode_takes_the_room_alone_never_the_tail() -> None:
+    # Small cards, 2026-11-06: the tail lowers the decode alone, so a plan refused for the ENCODE
+    # takes the room (segments only) and never the tail, whose frames differ at some tile sides.
+    # A 128x96 frame in 6 latents is encode-bound: refused under 4.125 GiB reported free, the
+    # room alone from there to 4.75, nothing from 4.875.
+    def at(free: float) -> Plan:
+        return shot_plan.plan(segments_at(free), TINY, shots(6), NO_PINS, None)[0]
+
+    assert rung_of(at(4.875)) == 0 and at(4.875).vae_floor is None
+    for free in (4.125, 4.25, 4.5, 4.75):
+        made = at(free)
+        assert made.vae_floor == peaks.VAE_ROOM_LEAST and not made.tail_frames, free
+    with pytest.raises(PlanError) as refused:
+        at(4.0)
+    assert refused.value.phase == "encode"
+    assert str(refused.value).endswith(
+        ", with the VAE passes left 0.50 GiB, the least the plan takes"
+    )
+    assert "tail" not in str(refused.value)
+    # Under the pool, the plain allocator and a driver that refuses: no room, so no rung at all.
+    for allocator in (memory.POOL, memory.PLAIN):
+        with pytest.raises(PlanError) as plain:
+            shot_plan.plan(segments_at(4.5, allocator), TINY, shots(6), NO_PINS, None)
+        assert "least the plan takes" not in str(plain.value), allocator
+    with pytest.raises(PlanError) as driver:
+        shot_plan.plan(round(4.5 * GIB), TINY, shots(6), NO_PINS, None)
+    assert "least the plan takes" not in str(driver.value)
+
+
+def test_a_plan_refused_for_the_decode_climbs_the_tail_then_the_tail_with_the_room() -> None:
+    # A decode-bound clip (the 1080p one) as before: the tail, then the tail with the room, the
+    # room only under the segments.
+    assert [rung_of(clip_plan(free)[0]) for free in (9.0, 8.0, 6.75)] == [0, 1, 2]
+    assert rung_of(clip_plan(8.0)[0]) == 1 and clip_plan(8.0)[0].vae_floor is None
+
+
+def test_the_ladder_by_the_phase_refused_and_the_allocator() -> None:
+    ladder = shot_plan._ladder  # pyright: ignore[reportPrivateUsage]
+    least = peaks.VAE_ROOM_LEAST
+    assert [rung[:2] for rung in ladder("decode", None, True)] == [(True, None), (True, least)]
+    assert [rung[:2] for rung in ladder("decode", None, False)] == [(True, None)]
+    assert [rung[:2] for rung in ladder("encode", None, True)] == [(False, least), (True, least)]
+    assert ladder("encode", None, False) == ()
+    # A tail fixed by a resume is no rung; the room alone, under the segments alone.
+    assert [rung[:2] for rung in ladder("decode", True, True)] == [(True, least)]
+    assert [rung[:2] for rung in ladder("encode", False, True)] == [(False, least)]
+    assert ladder("decode", True, False) == () and ladder("decode", False, False) == ()
+
+
+def test_a_compile_job_is_refused_as_it_was_before_the_rungs() -> None:
+    # Under --compile no rung is tried, and the plain plan the compiled refusal is judged by is
+    # the plan without them (plan's `rungs`): a card where the rungs would run the plain job
+    # still gives the plain plan's refusal (MemoryShort at the plain decode's peak), never the
+    # compiled pass's CompileRefused.
+    for free in (6.5, 7.0, 8.0):
+        assert clip_plan(free)[0].tail_frames  # the rungs run it plain
+        with pytest.raises(PlanError) as refused:
+            clip_plan(free, compile_vae=True)
+        assert type(refused.value) is MemoryShort, free
+        with pytest.raises(PlanError) as plain:
+            shot_plan.plan(
+                segments_at(free), HD, shots(19), NO_PINS, None, rungs=False, compile_fixed=True
+            )
+        assert str(refused.value) == str(plain.value) and refused.value.phase == plain.value.phase
+
+
+def test_a_refusal_after_every_rung_is_the_last_rungs_and_says_what_it_counted() -> None:
+    # DESIGN.md, Allocator, Small cards: where every rung was tried and the plan is still refused,
+    # the refusal is the last attempt's, its figures the least the plan takes (less than the
+    # plain plan's), its words saying the rungs it counted.
+    with pytest.raises(PlanError) as plain:
+        clip_plan(6.0, rungs=False)
+    with pytest.raises(PlanError) as last:
+        clip_plan(6.0)
+    assert type(last.value) is type(plain.value) and last.value.phase == plain.value.phase
+    shorter, longer = last.value, plain.value
+    assert isinstance(shorter, MemoryShort) and isinstance(longer, MemoryShort)
+    assert shorter.need is not None and longer.need is not None
+    assert shorter.short is not None and longer.short is not None
+    assert shorter.need < longer.need and shorter.short < longer.short
+    assert str(last.value).endswith(
+        ", with the decoder's tail a frame at a time and the VAE passes left 0.50 GiB, the least"
+        " the plan takes"
+    )
+    assert "least the plan takes" not in str(plain.value)
+    # A resume's recorded shape without the tail: the room alone is counted, and said.
+    with pytest.raises(PlanError) as recorded:
+        clip_plan(6.0, recorded=Plan(6, Tiles(512), Tiles(512)))
+    assert str(recorded.value).endswith(
+        ", with the VAE passes left 0.50 GiB, the least the plan takes"
+    )
+    # With the tail recorded: both, as a new plan's.
+    with pytest.raises(PlanError) as with_tail:
+        clip_plan(6.0, recorded=Plan(6, Tiles(512), Tiles(512), tail_frames=True))
+    assert str(with_tail.value).endswith(
+        ", with the decoder's tail a frame at a time and the VAE passes left 0.50 GiB, the least"
+        " the plan takes"
+    )
+    # A compile job keeps its words, and so does a limit a rung gets the card past (the host's).
+    with pytest.raises(PlanError) as compiled:
+        clip_plan(6.0, compile_vae=True)
+    assert "least the plan takes" not in str(compiled.value)
+    with pytest.raises(PlanError) as host:
+        shot_plan.plan(segments_at(8.0), HD, shots(19), NO_PINS, 1 * GIB)
+    assert host.value.phase == "host" and "least the plan takes" not in str(host.value)

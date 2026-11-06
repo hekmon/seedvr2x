@@ -489,6 +489,7 @@ def _decode(
                 *(models, merged, run.frames, target, write, name, run.start, correction),
                 tiles=plan.decode_tiles,
                 store=_scratch(units, index, plan.decode_tiles, plan.scratch_allowance),
+                tail_frames=plan.tail_frames,
             )
     except CopyError:
         # Derived data: removed, the next run makes it again from the input (_sample).

@@ -171,6 +171,8 @@ is and what numz changed in it.
   it or moves the reference with a measured reason. The sizes are stand-ins chosen so that the
   windows are several and of unequal lengths and the chunks end partial; the pipeline's chunked
   path, the branch without a compute dtype and both under autocast are held.
+  `models/video_vae_v3/modules/attn_video_vae.py` is modified the same way for the decoder's
+  tail a frame at a time (below).
 - **Nothing in it imports numz's runtime** (`src/optimization`, `src/utils`, the rest of
   `src/core`). DESIGN.md (Vendored model code) lists what goes.
 - The StableSR-derived colour code is not vendored: its licence is non-commercial (DESIGN.md,
@@ -1180,6 +1182,41 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   (`apps/seedvr2x/tests/test_planner.py`). A plan refused under `PLAIN` says where the segments
   would run it (`test_a_plan_refused_under_torch_s_own_allocator_says_where_the_segments_would_run_it`).
   The pool's VAE floor (1.25 GiB) is design's open question, not a measure.
+- The floor's last rungs (DESIGN.md, Allocator, Small cards, "The floor, last rungs";
+  `shot_plan.plan`'s `tail_frames` and `rungs`, `Plan.tail_frames` and `Plan.vae_floor`,
+  `peaks.VAE_ROOM_LEAST`, `peaks.TAIL_MEASURED`, `peaks.tail_ratio`, `model.tail_frames`): a clip
+  that fits no other way is planned again, in this order: a plan refused for the decode takes the
+  decoder's tail a frame at a time, then the tail with the VAE passes' room (their reserve floor)
+  lowered to 0.5 GiB, under expandable segments only (where it was measured), elsewhere the tail
+  alone; one refused for the encode takes the room alone, never the tail; the refusal of a plan
+  no rung helps is the last rung's, saying what it counted. The tail shapes the output (its frames
+  differ from the plain decoder's at tiles of 512, 576 and 960 px, the same in every run), so the
+  plan records it and a resume takes it as recorded, the key written only when it is on and
+  every other plan's record as before; the room is planned again. `core/tests/
+  test_tail_frames.py` holds the vendored `Decoder3D.tail_frames` on the CPU against the plain
+  decoder bit for bit, on `cpu_models`' VAE in float32 (with oneDNN's convolutions off for the
+  test: it picks its algorithm by tensor shape, so a frame's convolution and a slice's differ by
+  an ulp) and in bfloat16 (the pipeline's, bit for bit as it runs), in the slices
+  `model.latent_slices` cuts, the causal memory carried slice to slice and frame to frame, the
+  switch on and off again giving today's bits, a VAE without a decoder refused; the cards'
+  sizes are measured on the GPU (`research/scripts/tail_probe.py`, hold_probe.py with the tail
+  switched on), not here. `test_peaks.py` holds `tail_ratio` at each measured side and off
+  them, the prediction at or over each measure, the ratio taken on the part above the weights,
+  the colour correction's term untouched and the least room replacing the VAE floor alone;
+  `test_shot_plan.py` the rungs in order over the cards, none taken where the plain plan fits
+  or under `--compile` (a compiled decode with the tail is not measured: refused as before), a
+  pinned decode tile helped too, the DiT's and the host's refusals no help, `PLAIN` and a
+  refusing driver taking the tail alone and never the room, the record read back, a resume
+  holding the tail keeping it and one without never taking it, the refusal after every rung
+  (`rungs=False` is the plain plan whose refusal a compiled job keeps); `test_shot_pass.py` and
+  `test_clip.py` the
+  switch on for the decode alone and off after, a raise included, and untouched by a plan
+  without it; the CLI's `test_planner.py` the plan's lines saying the tail and the room and what
+  they cost and `test_cli_run.py` a resume run with the tail; the nodes' `test_plans.py` a clip
+  that fits only with the rungs said in a user's words. The tests of refusal scenarios the rungs
+  now plan (`test_every_plan_fits`, the brute force, the floor) were re-picked or extended, with
+  the plan checked to fit by its own needs. The 0.5 GiB floor and the tail's ratios beyond the
+  sides measured are PROVISIONAL (peaks.py).
 - The plan matrix, in two tools ([Checks](#checks)). Core's `tools/plan_matrix.py`, the
   library's alone: `shot_plan.plan` over a fixed matrix, 4,760 cases today (cards, targets, shots,
   system memory, pins, kernels, readings, plans recorded on a larger card planned again on smaller

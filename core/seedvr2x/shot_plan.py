@@ -375,6 +375,11 @@ class _Job:
     # The shot's windows and a tiled pass's scratch are kept in system memory whole, never in a
     # file (plan's in_memory).
     in_memory: bool = False
+    # The plan's last rungs (plan's `tail_frames` and the room's), which only a plan refused
+    # without them takes: the decoder's tail a frame at a time (peaks.decode_peak's `tail`), and
+    # the floor of a VAE pass's reserve (peaks.reserve's `vae_floor`), None: the rule's own.
+    tail: bool = False
+    vae_floor: int | None = None
 
     @property
     def margin(self) -> int:
@@ -421,6 +426,8 @@ def plan(
     dit_model: Architecture = peaks.FP16,
     held: bool = False,
     in_memory: bool = False,
+    tail_frames: bool | None = None,
+    rungs: bool = True,
 ) -> tuple[Plan, Peaks]:
     """The plan of a job of `shots` resized to target (frames.target_size), in the GPU memory it may
     count on, less its margin, and what it is predicted to take; refused (PlanError) when a pin
@@ -528,9 +535,26 @@ def plan(
     DiT's phase's end (host_moments), and the scratch's allowance the whole scratch
     (_allowance), so that a host that can't hold it refuses the plan, or shortens its window,
     as any host short of memory does. Not a word of the plan's record. The default, False, plans
-    as before."""
+    as before.
+
+    The floor, last rungs (DESIGN.md, Allocator, Small cards), for a clip that fits no other way:
+    a plan refused for the memory of a VAE pass is made again, by the pass refused (_ladder): the
+    decode, (1) with the decoder's tail a frame at a time (Plan.tail_frames; peaks.decode_peak's
+    `tail`), then (2) with that and the VAE passes' reserve floor down to peaks.VAE_ROOM_LEAST
+    (Plan.vae_floor), under expandable segments alone; the encode, the room alone (never the tail,
+    which lowers the decode alone). The first plan that fits is the plan, and a job that fits
+    without them never takes one. Where no
+    rung fits it the refusal is the last rung's, whose figures are the least the plan takes, said
+    with the rungs it counted (_rungs_counted). `tail_frames`: None, the ladder above; True, the
+    tail taken (a job resumed whose recorded plan has it, which is what shapes its output:
+    `recorded` says it too); False, never the tail, the room alone as a rung (a resumed job
+    whose plan has not the tail). No rung under --compile: a compiled decode with the tail is
+    not measured. `rungs`: False, no rung at all (the plain plan whose refusal a compiled job's
+    is judged by, _compile_refusal: a job --compile refuses is refused as it was before the
+    rungs)."""
     if recorded is not None:
         compile_vae, compile_fixed = recorded.compile_vae, True
+        tail_frames = recorded.tail_frames
     if compile_vae and not compile_fixed:
         try:
             return plan(
@@ -547,6 +571,7 @@ def plan(
                 dit_model=dit_model,
                 held=held,
                 in_memory=in_memory,
+                tail_frames=tail_frames,
             )
         except PlanError as refused:
             raise _compile_refusal(
@@ -577,6 +602,121 @@ def plan(
     for phase, pin in covering:
         if pin and peaks.covers(job.padded, Tiles(pin)):
             raise _covering(phase, pin, job.padded)
+    return _climbed(job, pins, recorded, host_available, tail_frames, rungs)
+
+
+# A rung of the floor (plan): the decoder's tail a frame at a time, the VAE passes' reserve floor
+# (None: the rule's own) and the phases whose refusal it is tried for.
+_Rung = tuple[bool, int | None, frozenset[str]]
+_ENCODE, _DECODE, _BOTH = (
+    frozenset({"encode"}),
+    frozenset({"decode"}),
+    frozenset({"encode", "decode"}),
+)
+
+
+def _ladder(first: str, tail_fixed: bool | None, segments: bool) -> tuple[_Rung, ...]:
+    """The rungs of the floor for a plan first refused in `first` ("encode" or "decode"), in order,
+    each with the ones before it. The tail lowers the decode alone (small-cards.md, "The VAE decode
+    at small tiles"), so a plan refused for the decode climbs the tail, then the tail with the room,
+    and one refused for the encode takes the room alone and never the tail (the tail, which changes
+    the decoder's frames at some tile sides, is taken for the decode alone); if that fits the
+    encode and the decode then refuses, the tail follows, with the room. The room rung (the VAE
+    passes' floor down to peaks.VAE_ROOM_LEAST) only under expandable segments (`segments`), where
+    it was measured: a pass packed closer than about 1 GiB can give other frames and say nothing
+    under the plain allocator, the pool and a driver that refuses (peaks.VAE_ROOM). `tail_fixed`:
+    the plan resumed has the tail (True) or has not (False): the tail is not a rung then."""
+    if tail_fixed is not None:
+        return ((tail_fixed, peaks.VAE_ROOM_LEAST, _BOTH),) if segments else ()
+    if first == "decode":
+        ladder: tuple[_Rung, ...] = ((True, None, _DECODE),)
+        if segments:
+            ladder += ((True, peaks.VAE_ROOM_LEAST, _BOTH),)
+        return ladder
+    if not segments:
+        return ()
+    return (
+        (False, peaks.VAE_ROOM_LEAST, _BOTH),
+        (True, peaks.VAE_ROOM_LEAST, _DECODE),
+    )
+
+
+def _climbed(
+    job: _Job,
+    pins: Pins,
+    recorded: Plan | None,
+    host_available: int | None,
+    tail_frames: bool | None,
+    climb: bool = True,
+) -> tuple[Plan, Peaks]:
+    """plan's last rungs: `job` planned as it is (_attempt) and, refused for the memory of a VAE
+    pass, again with each rung of the floor in turn (_ladder, by the phase refused); the last
+    rung's refusal if none fits (the least the plan takes, said with the rungs it counted), or the
+    refusal of a rung that the card holds and another limit refuses (the system memory). A job
+    whose tail is fixed (`tail_frames` True: the plan resumed has it) starts with it and has the
+    room alone left; one whose tail is fixed off (False) has the room alone. Only a pass is helped
+    by them: a refusal for the system memory, a window or a pin's range is final, and so is any
+    under --compile (plan)."""
+    if tail_frames is True:
+        job = replace(job, tail=True)
+    segments = job.reading.held and job.reading.allocator == memory.SEGMENTS
+    try:
+        return _attempt(job, pins, recorded, host_available)
+    except PlanRefused as first:
+        if not climb or job.compile_vae or not _helped(first):
+            raise
+        last: tuple[PlanRefused, bool, int | None] | None = None
+        refused = first
+        for tail, floor, phases in _ladder(first.phase, tail_frames, segments):
+            if refused.phase not in phases:
+                break
+            again = replace(job, tail=tail, vae_floor=floor)
+            try:
+                return _attempt(again, pins, recorded, host_available)
+            except PlanRefused as refused_again:
+                refused = refused_again
+                if not _helped(refused):
+                    # The card holds the pass with this rung: what refuses it now is another
+                    # limit (the system memory, say), which is the refusal that matters.
+                    raise
+                last = (refused, tail, floor)
+        if last is None:
+            raise first from None
+        # Every rung tried: the last attempt's refusal, whose figures are the least the plan
+        # takes, said with the rungs it counted (a recorded plan's too: the same rule).
+        refused, tail, floor = last
+        counted = _rungs_counted(tail, floor)
+        words = refused.words
+        raise refused.reworded(lambda say: f"{words(say)}, {counted}") from None
+
+
+def _rungs_counted(tail: bool, floor: int | None) -> str:
+    """What the refusal of a plan with the last rungs says it counted: the decoder's tail a frame
+    at a time (peaks.decode_peak's `tail`) and the VAE passes' room down to `floor` bytes, the
+    least the plan takes."""
+    if floor is None:
+        return "with the decoder's tail a frame at a time, the least the plan takes"
+    room = f"the VAE passes left {floor / peaks.GIB:.2f} GiB"
+    if tail:
+        return f"with the decoder's tail a frame at a time and {room}, the least the plan takes"
+    return f"with {room}, the least the plan takes"
+
+
+def _helped(refused: PlanRefused) -> bool:
+    """Whether a rung of the floor can help the refusal: a VAE pass short of memory, a plan's
+    own (MemoryShort) or a pin's (PinRefused, why "memory")."""
+    if refused.phase not in ("encode", "decode"):
+        return False
+    return isinstance(refused, MemoryShort) or (
+        isinstance(refused, PinRefused) and refused.why == "memory"
+    )
+
+
+def _attempt(
+    job: _Job, pins: Pins, recorded: Plan | None, host_available: int | None
+) -> tuple[Plan, Peaks]:
+    """plan's work on `job` as it is, torch's own allocator without the segments told where the
+    segments would run it."""
     try:
         return _planned(job, pins, recorded, host_available)
     except PlanRefused as refused:
@@ -648,7 +788,7 @@ def _compile_refusal(
     advice."""
     free, target, shots, pins, host_available = job
     try:
-        plan(*job[:5], recorded=None, compile_vae=False, compile_fixed=True, **options)
+        plan(*job[:5], recorded=None, compile_vae=False, compile_fixed=True, rungs=False, **options)
     except PlanRefused as plain_refusal:
         return plain_refusal
     padded = _job(free, target, shots, **options, compile_vae=True).padded
@@ -1124,6 +1264,8 @@ def _chosen(job: _Job, pins: Pins) -> Plan:
         _resident(job, "decode", decode, swapped),
         vae_in_dit,
         compile_vae=job.compile_vae,
+        tail_frames=job.tail,
+        vae_floor=job.vae_floor,
     )
 
 
@@ -1150,6 +1292,8 @@ def _around(job: _Job, recorded: Plan, pins: Pins) -> Plan:
         resident_encode=_resident(job, "encode", recorded.encode_tiles, swapped),
         resident_decode=_resident(job, "decode", recorded.decode_tiles, swapped),
         vae_in_dit=vae_in_dit,
+        tail_frames=job.tail,
+        vae_floor=job.vae_floor,
     )
 
 
@@ -1463,6 +1607,7 @@ def _vae_peak(
         job.compile_vae,
         job.dit_model,
         frames=peaks.SLICE,
+        tail=job.tail,
     )
 
 
@@ -1472,7 +1617,7 @@ def _vae_reserve(job: _Job, phase: Phase, peak: int, resident: int | None, swapp
     (peaks.vae_working), and the allocator the reading names; VAE_ROOM under torch's own
     allocator without the segments and on a driver that refuses, as before."""
     working = peaks.vae_working(peak, resident, swapped, job.dit_model)
-    return peaks.reserve(phase, working, job.reading.allocator, job.reading.margin)
+    return peaks.reserve(phase, working, job.reading.allocator, job.reading.margin, job.vae_floor)
 
 
 def _vae_need(
@@ -1579,18 +1724,21 @@ def _pass(job: _Job, phase: Phase, pin: int | None, swapped: int) -> Tiles | Non
     )
 
 
-# What a refusal adds after the free VRAM a VAE pass takes, its room in it (VAE_ROOM).
-_ROOM_HELD = f", {VAE_ROOM / peaks.GIB:.2f} of them the room a VAE pass is held to"
+# What a refusal adds after the free VRAM a VAE pass takes, its room in it (VAE_ROOM, or the last
+# rung's, Plan.vae_floor).
+def _room_held(job: _Job) -> str:
+    room = VAE_ROOM if job.vae_floor is None else job.vae_floor
+    return f", {room / peaks.GIB:.2f} of them the room a VAE pass is held to"
 
 
 def _reserve_part(job: _Job, phase: Phase, reserve: int) -> str:
     """What a refusal adds after the free VRAM a phase takes, in words, `reserve` bytes of it
     being what the plan leaves beyond the phase's peak: a VAE pass's room under torch's own
-    allocator without the segments and on a driver that refuses (_ROOM_HELD), nothing for a
+    allocator without the segments and on a driver that refuses (_room_held), nothing for a
     window there (its margin is inside the figure counted), the step's reserve elsewhere
     (peaks.reserve)."""
     if job.reading.allocator == memory.PLAIN:
-        return "" if phase == "dit" else _ROOM_HELD
+        return "" if phase == "dit" else _room_held(job)
     return f", {reserve / peaks.GIB:.2f} of them the reserve left beyond its peak"
 
 

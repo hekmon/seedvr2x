@@ -916,6 +916,7 @@ class UpscaleVideo(io.ComfyNode):
                 window=made.window,
                 encode_tiles=made.encode_tiles,
                 decode_tiles=made.decode_tiles,
+                tail_frames=made.tail_frames,
                 correct=settings.split,
                 step=step,
                 start=shot.start,

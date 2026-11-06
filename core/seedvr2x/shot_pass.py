@@ -319,6 +319,7 @@ def decode_shot(
     tiles: Tiles | None = None,
     store: tiling.Store | None = None,
     tile_step: tiling.TileStep | None = None,
+    tail_frames: bool = False,
 ) -> None:
     """Decode the shot of `count` frames whose latents are merged (merge_windows), in system
     memory or on the device, in one stream, and write its frames as they come, write(frames)
@@ -335,8 +336,13 @@ def decode_shot(
     store is the scratch (tiling.Store; DESIGN.md, Pipeline, per shot, step 3): the command
     line's is scratch.py's Scratch, system memory up to the plan's allowance, a file beyond;
     None: tiling.InMemory, system memory alone. tile_step is told each tile of a tiled decode
-    (tiling.TileStep), before the first slice is written, and only observes."""
-    with _slices(models, merged, tiles, store, tile_step) as slices:
+    (tiling.TileStep), before the first slice is written, and only observes.
+
+    tail_frames: the plan's first rung (Plan.tail_frames, shot_plan.plan): the decoder's tail a
+    frame at a time for this decode (model.tail_frames), turned on before it and off after
+    whatever ends it, so that models kept across runs (the nodes', the image server's) are never
+    left with it on; False, the decode as ByteDance's."""
+    with _tail(models, tail_frames), _slices(models, merged, tiles, store, tile_step) as slices:
         chunks = _decoded(slices, count, output_size(target), name, first)
         if reference is not None:
             _correct(models, chunks, count, target, write, reference)
@@ -346,6 +352,21 @@ def decode_shot(
             chunk.clamp_(-1, 1).mul_(0.5).add_(0.5)
             model.synchronize(models.device)
             write(chunk.to("cpu", torch.float32).numpy())
+
+
+@contextmanager
+def _tail(models: Models, on: bool) -> Generator[None]:
+    """The VAE's decoder with its tail a frame at a time while the block runs, if `on`
+    (model.tail_frames); switched off on leaving it, whatever ends the block, even a switch that
+    failed half-way. Nothing is touched when `on` is False."""
+    if not on:
+        yield
+        return
+    try:
+        model.tail_frames(models.runner.vae, True)
+        yield
+    finally:
+        model.tail_frames(models.runner.vae, False)
 
 
 @contextmanager
