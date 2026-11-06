@@ -336,9 +336,11 @@ def test_attention_is_a_combo_and_the_colour_correction_a_boolean_split_or_none(
     spec = schema_inputs(nodes.UpscaleImage)
     assert spec["attention"].options == ["auto", "sdpa", "flash_attn_2"]
     assert spec["attention"].default == "auto"
-    # What helps a user choose: the speed (research/docs/small-cards.md), and no memory claim.
-    assert "about a fifth off the model's step for a 4K picture" in spec["attention"].tooltip
-    assert "memory" not in spec["attention"].tooltip
+    # What helps a user choose, measured on the lean attention (research/docs/small-cards.md,
+    # FlashAttention 2 against the lean SDPA): the same peak and about the same time, so no
+    # speed claim.
+    assert "the same memory and about the same time" in spec["attention"].tooltip
+    assert "faster" not in spec["attention"].tooltip
     correction = spec["color_correction"]
     assert correction.default is True and correction.display_name == "colour correction"
     assert (correction.label_on, correction.label_off) == ("split", "none")

@@ -309,13 +309,16 @@ def _attention_input() -> Any:
         options=list(plans.ATTENTIONS),
         default=plans.AUTO,
         display_name=plans.LABELS["attention"],
-        # The step's figure: research/docs/small-cards.md, the 4K picture's time, phase by phase
-        # (RTX 5090, the same pins): the DiT step 2.60 s with FlashAttention 2 against 3.26 s
-        # with SDPA, 20% less. No memory claim: the kernels' peaks are to become one figure.
+        # On seedvr2x's lean attention the two kernels peak alike and take about the same time:
+        # research/docs/small-cards.md, FlashAttention 2 against the lean SDPA (RTX 5090,
+        # cudaMallocAsync, 2026-11-06): the 4K picture's DiT step 17.43 GiB under both, 2.87 s
+        # with FlashAttention 2 and 2.80 with SDPA; a 1080p window of 11 latents 16.66 GiB, 8.16
+        # and 7.37 s. So no speed claim: the plain attention's fifth off (2.60 s against 3.26)
+        # went with it.
         tooltip="auto: FlashAttention 2 if it is installed in ComfyUI's environment, else"
-        " PyTorch's SDPA. FlashAttention 2 is faster: about a fifth off the model's step for a"
-        " 4K picture (measured on an RTX 5090). The two round differently, so their pictures"
-        " differ very slightly. flash_attn_2 stops with an error where it is not installed.",
+        " PyTorch's SDPA. The two take the same memory and about the same time (measured on an"
+        " RTX 5090). They round differently, so their pictures differ very slightly."
+        " flash_attn_2 stops with an error where it is not installed.",
     )
 
 
