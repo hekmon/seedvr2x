@@ -25,6 +25,7 @@ from typing import Self, cast
 import numpy as np
 import numpy.typing as npt
 import torch
+import torch.nn.functional as functional
 from safetensors.torch import load
 
 from seedvr2x import weights
@@ -50,6 +51,9 @@ WINDOW, STEP, PAD = 100, 50, 25
 # 6.0e-8 with the untrained model's, near 0.5, where float32's step is 6.0e-8
 # (tests/test_detector.py).
 BATCH = 4
+# The frames of decoded video shrunk at a time (shrink): 8 frames of 1080p are 200 MB of float32
+# and their channels-first copy another 200 MB, where the whole clip is the caller's to hold.
+SHRINK_CHUNK = 8
 
 
 class Detector:
@@ -280,3 +284,63 @@ def _exact(device: torch.device) -> Generator[None]:
     finally:
         if tf32:
             matmul.allow_tf32 = True
+
+
+def shrink(images: torch.Tensor) -> npt.NDArray[np.uint8]:
+    """Decoded frames shrunk to TransNetV2's input, with no ffmpeg: images (T, H, W, 3) float32 in
+    [0, 1], RGB, as ComfyUI's IMAGE batches hold a decoded clip, to (T, 27, 48, 3) uint8, what
+    push takes. Values outside [0, 1] (an HDR decode) are clipped. ValueError for another shape or
+    dtype, or a NaN or infinite value, or no pixel.
+
+    The shrink is antialiased bicubic (torch's, centre-aligned: a Catmull-Rom filter widened by the
+    ratio), the filter of the official extraction's scaler (ffmpeg's swscale at its default
+    flags, bicubic with B = 0, C = 0.6: scan.py's _detector_output) but for C. Measured on 9 clips
+    of 240 frames (animation and live action at 1080p, one at 854x480, one 10-bit;
+    2026-11-06), the frames decoded as ComfyUI's Load Video decodes them (float planes by
+    swscale, bt709 from the tags) against the CLI's (yuv420p to 48x27 rgb24 by swscale in one
+    go): the cuts at 0.3 and the possible cuts equal on all 9, the probabilities within 0.014
+    (the mean within 0.0006). Area averaging reached 0.031 on the clip full of near-threshold
+    peaks, bilinear 0.019 on the first four clips; swscale's weights rebuilt in torch (C = 0.6)
+    0.012 on that clip, torch's own within the noise of it. What remains is the decode, not the
+    shrink: swscale's 8-bit rgb24 sits about one level under the float planes (mean signed
+    difference of the frames 1.2 to 1.7 levels on dark content). The rounding is to the nearest
+    code, ties to even (torch.round)."""
+    if images.ndim != 4 or images.shape[3] != 3 or images.dtype != torch.float32:
+        raise ValueError(
+            f"images {tuple(images.shape)} {images.dtype}, where the shot detector takes"
+            " (frames, height, width, 3) float32"
+        )
+    if images.shape[1] == 0 or images.shape[2] == 0:
+        raise ValueError(f"images {tuple(images.shape)}: no pixel")
+    out = np.empty((len(images), HEIGHT, WIDTH, 3), np.uint8)
+    for first in range(0, len(images), SHRINK_CHUNK):
+        chunk = images[first : first + SHRINK_CHUNK]
+        if not bool(torch.isfinite(chunk).all()):
+            raise ValueError(
+                f"images: a NaN or infinite value in frames {first} to {first + len(chunk) - 1}"
+            )
+        small = functional.interpolate(
+            chunk.permute(0, 3, 1, 2),
+            size=(HEIGHT, WIDTH),
+            mode="bicubic",
+            antialias=True,
+            align_corners=False,
+        )
+        codes = (small.permute(0, 2, 3, 1) * 255).round().clamp(0, 255).to(torch.uint8)
+        out[first : first + len(chunk)] = codes.cpu().numpy()
+    return out
+
+
+def probabilities(found: Detector, images: torch.Tensor) -> npt.NDArray[np.float32]:
+    """Each frame's single-frame probability for a clip held whole, images (T, H, W, 3) float32 in
+    [0, 1] (shrink), through found, which must be new: (T,) float32 in [0, 1], the same bits as
+    the pushes of its frames shrunk a few at a time, in the CLI's path. found is finished; the
+    caller closes it. These feed shotcuts.detected and shotcuts.possible as the first pass's do."""
+    if found.pushed:
+        raise ValueError("the shot detector has frames already: one clip to a detector")
+    out = [
+        found.push(shrink(images[first : first + 4 * STEP]))
+        for first in range(0, len(images), 4 * STEP)
+    ]
+    out.append(found.finish())
+    return np.concatenate(out)

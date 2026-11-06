@@ -182,9 +182,11 @@ beside it; the `__init__.py` is seedvr2x's.
 - `seedvr2x/detector.py` builds it, loads seedvr2x's `transnetv2.safetensors` into it (pinned in
   `seedvr2x/pull.py`, made by `models/transnetv2_weights.py`) and runs measurement's windows on
   frames pushed to it; the CLI's `media/scan.py` feeds it the frames and the library's
-  `shotcuts.py` draws the cuts from its probabilities. Its licence is the library's: `core/`'s
-  pyproject says "Apache-2.0 AND MIT" and ships `transnetv2/LICENSE`; `core/`'s NOTICE and
-  `apps/seedvr2x/`'s README.md credit it.
+  `shotcuts.py` draws the cuts from its probabilities. The ComfyUI nodes' frames, already
+  decoded, `detector.shrink` takes to its 48x27 in torch (antialiased bicubic, no ffmpeg) and
+  `detector.probabilities` runs through a new detector, whole. Its licence is the library's:
+  `core/`'s pyproject says "Apache-2.0 AND MIT" and ships `transnetv2/LICENSE`; `core/`'s NOTICE
+  and `apps/seedvr2x/`'s README.md credit it.
 
 ## Environment
 
@@ -308,6 +310,8 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   every known model file there by its header (`tests/test_weights.py`; `test_weights_cli.py` has the
   command line refuse a model, saying what the file is), and runs the shot detector on TransNetV2's
   weights (`tests/test_detector.py`: the windows, and measurement's own run reproduced bit for bit;
+  `tests/test_detector_images.py`: the same detector on frames held in memory, `shrink` and
+  `probabilities` on a clip equal bit for bit to the frames pushed to a `Detector`;
   `test_detector_cli.py`: the cuts of a synthetic clip; `tests/test_detection.py`: the first pass
   recording the module's probabilities bit for bit); without, the detector's windows run on the
   untrained model's weights, written by the test.
