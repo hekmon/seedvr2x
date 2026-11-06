@@ -4,12 +4,22 @@ setting as startup is given it, the allocator said once."""
 
 import logging
 import os
+from dataclasses import replace
 
 import comfy.model_management as management
 import pytest
 import torch
 from comfyui import models, plans, words
-from standins import GIB, PICTURE, RESOLUTION, StandIn, comfy_model, handle, upscale_image
+from standins import (
+    GIB,
+    PICTURE,
+    RESOLUTION,
+    StandIn,
+    comfy_model,
+    handle,
+    upscale_image,
+    upscale_video,
+)
 
 from seedvr2x import memory
 from seedvr2x.memory import Reading
@@ -56,20 +66,28 @@ def test_the_free_memory_a_plan_needs_is_its_phase_its_margin_and_what_the_readi
     plain = Reading(10 * GIB, None, 10 * GIB, False)
     needs = models.Needs(peak=6 * GIB, margin=GIB // 2, reading=plain)
     assert models.needed_free(needs) == 6 * GIB + GIB // 2
-    held = Reading(
-        10 * GIB,
-        9 * GIB,
-        9 * GIB - memory.HELD_BACK - memory.RESERVE,
-        True,
-        memory.HELD_BACK,
-    )
-    assert models.needed_free(models.Needs(6 * GIB, 0, held)) == (
-        6 * GIB + memory.HELD_BACK + memory.RESERVE
-    )
-    tight = memory.tightened(held)
-    assert models.needed_free(models.Needs(6 * GIB, 0, tight)) == (
-        6 * GIB + memory.HELD_BACK + memory.RESERVE_TIGHT
-    )
+    # What a held run holds back depends on the allocator: under torch's own allocator without
+    # the segments the plan counts RESERVE off the card besides torch's limit (memory.counted),
+    # which the room asks for; under the segments and cudaMallocAsync only the limit's share,
+    # the step's own reserve being in the peak the plan's needs carry (Needs.peak).
+    for allocator, reserve in (
+        (memory.PLAIN, memory.RESERVE),
+        (memory.SEGMENTS, 0),
+        (memory.POOL, 0),
+    ):
+        shell = Reading(10 * GIB, 9 * GIB, 0, True, memory.HELD_BACK, allocator)
+        held = Reading(
+            10 * GIB,
+            9 * GIB,
+            memory.counted(9 * GIB, shell),
+            True,
+            memory.HELD_BACK,
+            allocator,
+        )
+        assert held.counted == 9 * GIB - memory.HELD_BACK - reserve
+        assert models.needed_free(models.Needs(6 * GIB, 0, held)) == (
+            6 * GIB + memory.HELD_BACK + reserve
+        ), allocator
 
 
 def test_comfys_models_on_the_card_are_the_loaded_sizes_of_its_own_entries_on_that_device(
@@ -225,3 +243,149 @@ def test_the_cuda_machine_refuses_a_comfyui_that_runs_on_the_cpu_or_without_a_ca
     monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: False)
     with pytest.raises(words.Refused, match="bfloat16"):
         models.CudaMachine()
+
+
+# ---- The reserve by step, said in the nodes' words; the probe's margin carried to the plan ------
+
+
+class Seen(Exception):
+    """Raised by a planner that has seen what it was given."""
+
+
+def spare_lines(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith("spare memory:")]
+
+
+@pytest.mark.parametrize(
+    ("allocator_name", "expandable", "way", "figures"),
+    [
+        # torch's own allocator with its segments, ComfyUI's --disable-cuda-malloc: the floors
+        # of a small picture's steps (peaks.DIT_RESERVE_FLOOR, VAE_RESERVE_FLOOR).
+        (
+            "native",
+            True,
+            "PyTorch's default memory handling",
+            "0.60 GiB while the model works, 1.25 GiB while an image is encoded, 1.25 GiB",
+        ),
+        # cudaMallocAsync, ComfyUI's default: the pool's floors (peaks.POOL_DIT_FLOOR).
+        (
+            "cudaMallocAsync",
+            True,
+            "ComfyUI's cudaMallocAsync setting",
+            "0.85 GiB while the model works, 1.25 GiB while an image is encoded, 1.25 GiB",
+        ),
+    ],
+)
+def test_a_held_plan_says_the_spare_memory_of_each_step_in_the_nodes_words(
+    machine: StandIn, tmp_path, allocator_name: str, expandable: bool, way: str, figures: str
+) -> None:
+    machine.lends = True
+    machine.held_card = 32 * GIB
+    machine.allocator_name = allocator_name
+    machine.expandable = expandable
+    for clip in (False, True):
+        if clip:
+            text = upscale_video(
+                handle(tmp_path),
+                plans.Settings(),
+                torch.zeros(9, *PICTURE, 3),
+                RESOLUTION,
+                "1",
+                plan_only=True,
+            )[1]
+        else:
+            text = upscale_image(
+                handle(tmp_path),
+                plans.Settings(),
+                torch.zeros(1, *PICTURE, 3),
+                RESOLUTION,
+                "1",
+                plan_only=True,
+            )[1]
+        found = spare_lines(text)
+        assert len(found) == 1, text
+        assert way in found[0] and figures in found[0] and "while it is decoded" in found[0]
+        # ComfyUI users' words: no library term, no option.
+        assert "--" not in found[0] and "reserve" not in found[0].replace("spare", "")
+        assert "peak" in found[0]
+
+
+def test_a_plan_without_segments_says_the_flat_spare_memory_and_a_refusing_driver_none(
+    machine: StandIn, tmp_path
+) -> None:
+    machine.lends = True
+    machine.held_card = 32 * GIB
+    machine.allocator_name = "native"
+    machine.expandable = False
+    text = upscale_image(
+        handle(tmp_path),
+        plans.Settings(),
+        torch.zeros(1, *PICTURE, 3),
+        RESOLUTION,
+        "1",
+        plan_only=True,
+    )[1]
+    assert spare_lines(text) == [
+        "spare memory: 4.50 GiB of the card is kept free beyond what any step needs, for PyTorch's"
+        " own use"
+    ]
+    machine.held_card = None  # a driver that refuses: no reserve, no line
+    text = upscale_image(
+        handle(tmp_path),
+        plans.Settings(),
+        torch.zeros(1, *PICTURE, 3),
+        RESOLUTION,
+        "1",
+        plan_only=True,
+    )[1]
+    assert spare_lines(text) == []
+
+
+def test_comfys_models_gone_count_the_card_by_the_allocators_rule() -> None:
+    # with_comfy_gone counts the figure again through memory.counted: the flat reserve off under
+    # torch's own allocator without the segments alone, nothing more elsewhere.
+    for allocator, off in (
+        (memory.PLAIN, memory.RESERVE),
+        (memory.SEGMENTS, 0),
+        (memory.POOL, 0),
+    ):
+        taken = 12 * GIB
+        shell = Reading(taken, taken, 0, True, memory.HELD_BACK, allocator)
+        reading = replace(shell, counted=memory.counted(taken, shell), margin=0.4)
+        shifted = models.with_comfy_gone(reading, 5 * GIB)
+        assert shifted.counted == 17 * GIB - memory.HELD_BACK - off, allocator
+        assert shifted.allocator == allocator and shifted.margin == 0.4  # carried through
+
+
+def test_the_probes_allocator_margin_reaches_the_plan_and_none_is_none(
+    machine: StandIn, tmp_path
+) -> None:
+    # The cache's margin (probe.Probed.allocator_margin, a share of a step's P) rides on the
+    # plan's reading (Reading.margin), where peaks.reserve counts the larger of it and the rule.
+    # Nothing builds the measurement, so a margin is only what a cache holds: here the stand-in's.
+    machine.lends = True
+    machine.held_card = 32 * GIB
+    seen: list[float | None] = []
+
+    def planner(reading, host, attention, architecture, held):  # type: ignore[no-untyped-def]
+        seen.append(reading.margin)
+        raise Seen
+
+    for margin in (None, 0.5, None):
+        models.reset()
+        machine.allocator_margin = margin
+        with pytest.raises(Seen), models.session(handle(tmp_path), None, planner):
+            pass
+        assert seen[-1] == margin
+    # The probe runs once a layout and kernel (reset forgets it); a plan only reads no probe, and
+    # counts the margin an earlier run of the process found.
+    models.reset()
+    machine.allocator_margin = 0.5
+    with pytest.raises(Seen), models.session(handle(tmp_path), None, planner, plan_only=True):
+        pass
+    assert seen[-1] is None
+    with pytest.raises(Seen), models.session(handle(tmp_path), None, planner):
+        pass
+    with pytest.raises(Seen), models.session(handle(tmp_path), None, planner, plan_only=True):
+        pass
+    assert seen[-2:] == [0.5, 0.5]

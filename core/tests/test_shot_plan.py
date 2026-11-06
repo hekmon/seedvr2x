@@ -1682,13 +1682,13 @@ def test_the_host_s_window_is_searched_from_the_next_one_down_to_the_smallest() 
     assert "of system memory" in refused(40 * GIB, UHD, film, replace(pins, window=19), host)
     # The smallest window the job can run. 4K (1080p before the refit: on the lean attention its
     # shot of 45 latents never comes down to 5), a shot of 45 latents, a run held to its card
-    # that counts on 13.125 GiB (8), under SDPA, 18 GiB of system memory: the card alone holds
+    # that counts on 16.95 GiB, under SDPA, 18 GiB of system memory: the card alone holds
     # windows of 6, every part of the weights pinned, 18.66 GiB; windows of 5, the smallest, plan,
     # with the VAE's weights kept on the GPU, and are taken, where the job was refused had the
-    # search stopped a window short. The reading is the plan's last resort already (tight), so
-    # that what is refused is this plan's, not tried again with the reserve of 2.5 GiB
-    # (test_a_held_plan_refused_takes_the_reserve_of_2_5).
-    held = Reading(13 * GIB, None, round(13.125 * GIB), True, round(0.5 * GIB), tight=True)
+    # search stopped a window short. The figure counted is the card's less torch's limit, each
+    # step left its own reserve beyond its peak (peaks.reserve; it was 13.125 GiB when the flat
+    # 4.5 GiB was taken off it, 17.625 less 4.5).
+    held = Reading(13 * GIB, None, round(16.95 * GIB), True, round(0.5 * GIB))
     job = (held, UHD, shots(45))
     alone, _ = shot_plan.plan(*job, Pins(), None, attention=peaks.SDPA)
     made, predicted = shot_plan.plan(*job, Pins(), 18 * GIB, attention=peaks.SDPA)
@@ -2063,16 +2063,19 @@ def test_a_resume_names_the_pin_s_part_of_its_shortfall() -> None:
     )
     # On a run held to the card, after what would have to be freed, where memory freed on the
     # card can give it: the whole card's figure the one the plan is held under, 17 GiB under
-    # the driver's here. The plan counts on its budget, no margin on top. Each reading the plan's
-    # last resort already (tight): its refusal is this plan's.
-    kept = Reading(round(45.05 * GIB), round(28.05 * GIB), free - MARGIN, True, 3 * GIB, True)
+    # the driver's here. The plan counts on its budget, no margin on top. Each reading is torch's
+    # own allocator without the segments, whose window has no reserve beyond its peak: the figures
+    # are those of the plan's words alone.
+    kept = Reading(
+        round(45.05 * GIB), round(28.05 * GIB), free - MARGIN, True, 3 * GIB, memory.PLAIN
+    )
     assert refused(kept, *job, Pins(swap_blocks=0), None, recorded=recorded).endswith(
         ", the run held to the card's own memory, 15.54 GiB short, which would have to be freed"
         " on the card, 14.34 GiB of them --swap-blocks 0's: with every block of the DiT swapped"
         " and the VAE off the GPU, the recorded plan is 1.20 GiB short"
     )
     # Where it can't, the card's figure not read: what it is short of, and no more.
-    kept = Reading(round(28.05 * GIB), None, free - MARGIN, True, 3 * GIB, True)
+    kept = Reading(round(28.05 * GIB), None, free - MARGIN, True, 3 * GIB, memory.PLAIN)
     assert refused(kept, *job, Pins(swap_blocks=0), None, recorded=recorded).endswith(
         ", the run held to the card's own memory, 15.54 GiB short, 14.34 GiB of them"
         " --swap-blocks 0's: with every block of the DiT swapped and the VAE off the GPU, the"
@@ -2151,12 +2154,14 @@ KEPT = round(5.3 * GIB) + MARGIN
 def held(reported: float, card: float | None) -> Reading:
     """The reading of a run held to the card, from figures in GiB: what the driver reports free
     to the process, and what the whole card has free (None: not read); the plan counts on the
-    smaller, less KEPT, LEFT of them what torch's limit leaves. The plan's last resort already
-    (tight), so that its refusals are its own, not tried again with the reserve of 2.5 GiB
-    (test_a_held_plan_refused_takes_the_reserve_of_2_5)."""
+    smaller, less KEPT, LEFT of them what torch's limit leaves. Torch's own allocator without the
+    segments (memory.PLAIN): a window has no reserve beyond its peak and a VAE pass VAE_ROOM,
+    whatever the figure counted, so that the plans these tests compare are the ones the
+    flat reserve gave (the per-step reserve is held by test_the_reserve_is_the_step_s_*)."""
     driver = round(reported * GIB)
     whole = None if card is None else round(card * GIB)
-    return Reading(driver, whole, min(driver, whole or driver) - KEPT, True, LEFT, tight=True)
+    reading = Reading(driver, whole, min(driver, whole or driver) - KEPT, True, LEFT, memory.PLAIN)
+    return reading
 
 
 def test_a_recorded_shape_refused_says_what_it_falls_short_of_apart() -> None:
@@ -2193,9 +2198,9 @@ def test_a_recorded_shape_refused_says_what_it_falls_short_of_apart() -> None:
     with pytest.raises(PlanError) as pinned:
         shot_plan.plan(our_free(24), HD, shots(76), Pins(swap_blocks=3), None, recorded=recorded)
     assert pinned.value.shortfall is None and pinned.value.instead == Setting("swap_blocks", "32")
-    # A run held to the card: the closest to running, the plan with 2.5, its figures; and whether
-    # memory freed on the card gives it back (shot_plan._freeable): the card's figure the smaller,
-    # up to the driver's.
+    # A run held to the card (torch's own allocator without the segments): the plan's figures; and
+    # whether memory freed on the card gives it back (shot_plan._freeable): the card's figure the
+    # smaller, up to the driver's.
     film = shots(5)
     decode = peaks.decode_peak(padded_size(HD), output_size(HD), None, 0, 36)
     need = decode + peaks.VAE_ROOM
@@ -2203,11 +2208,11 @@ def test_a_recorded_shape_refused_says_what_it_falls_short_of_apart() -> None:
 
     def on_card(card: int, driver: int) -> Reading:
         counted = card - memory.HELD_BACK - memory.RESERVE
-        return Reading(driver, card, counted, True, memory.HELD_BACK)
+        return Reading(driver, card, counted, True, memory.HELD_BACK, memory.PLAIN)
 
-    # Short by 1 GiB with 2.5: the driver reports 2 GiB more than the card has, so that memory
-    # freed on the card gives it back.
-    short = on_card(need + memory.HELD_BACK + memory.RESERVE_TIGHT - GIB, need + 3 * GIB)
+    # Short by 1 GiB: the driver reports 2 GiB more than the card has, so that memory freed on
+    # the card gives it back.
+    short = on_card(need + memory.HELD_BACK + memory.RESERVE - GIB, need + 5 * GIB)
     with pytest.raises(PlanError) as held:
         shot_plan.plan(short, HD, film, Pins(swap_blocks=36), None, recorded=shape)
     assert held.value.shortfall is not None and not held.value.shortfall.host
@@ -2245,9 +2250,14 @@ def test_a_held_run_s_choices_for_the_host_take_no_margin_either() -> None:
     # made only for a plan the card holds: judged, on a run held to the card, against what the
     # plan counts on whole, no margin on top (shot_plan._Job.margin), as the plan itself is. A
     # held run counting on N bytes plans as a driver that refuses with N and the margin free:
-    # the same windows, blocks and tiles, on the same host.
+    # the same windows, blocks and tiles, on the same host. Torch's own allocator without the
+    # segments (memory.PLAIN), where a window has no reserve beyond its peak: under the segments
+    # the window's reserve (peaks.reserve) is at least that margin, and the plans differ
+    # (test_the_reserve_is_the_step_s_beyond_its_peak).
     def on_card(counted: int) -> Reading:
-        return Reading(counted + round(5.0 * GIB), None, counted, True, round(0.5 * GIB))
+        return Reading(
+            counted + round(5.0 * GIB), None, counted, True, round(0.5 * GIB), memory.PLAIN
+        )
 
     job = (HD, shots(76), Pins())
     # 1080p on a 24 GB card, a shot of 301 frames, a host one byte short of the plan: 33 blocks
@@ -2458,17 +2468,23 @@ def test_each_refusal_of_the_planner_is_of_its_kind_with_its_facts() -> None:
     # (--window 20 and the window 13 that holds, for the plain attention's 10 and 6.)
     error = raised(our_free(16), HD, shots(76), Pins(window=20), 12 * GIB)
     assert type(error) is HostShort and error.instead == Setting("window", "13")
-    # A held run's refusal says the reserve it was made with, in bytes: the tight retry's, which
-    # it names, and the kind and facts are kept through the rewording.
+    # A held run's refusal says the reserve it was made with, in bytes: under torch's own allocator
+    # without the segments the flat one taken off the figure, under the segments the refused
+    # step's own (peaks.reserve), and the kind and facts are kept through the rewording.
     decode = peaks.decode_peak(padded_size(HD), output_size(HD), None, 0, 36)
-    card = decode + peaks.VAE_ROOM + memory.HELD_BACK + memory.RESERVE_TIGHT - GIB
+    card = decode + peaks.VAE_ROOM + memory.HELD_BACK + memory.RESERVE - GIB
     reading = Reading(card + 3 * GIB, card, card - memory.HELD_BACK - memory.RESERVE, True, 0)
-    reading = replace(reading, left=memory.HELD_BACK)
+    reading = replace(reading, left=memory.HELD_BACK, allocator=memory.PLAIN)
     error = raised(reading, HD, shots(5), Pins(swap_blocks=36), None, recorded=Plan(5, None, None))
     assert type(error) is MemoryShort and error.phase == "decode"
-    assert error.reserve == memory.RESERVE_TIGHT and error.freeable is True
-    assert str(error).endswith("whose figures these are") and "--" not in str(error)
-    assert cli_words(error) == str(error)  # worded after the clause that reworded it has ended
+    assert error.reserve == memory.RESERVE and error.freeable is True
+    assert "--" not in str(error) and cli_words(error) == str(error)
+    working = peaks.vae_working(decode, 0, 36)
+    own = peaks.reserve(peaks.DECODE_PHASE, working, memory.SEGMENTS)
+    segments = replace(reading, allocator=memory.SEGMENTS, counted=card - memory.HELD_BACK - GIB)
+    error = raised(segments, HD, shots(5), Pins(swap_blocks=36), None, recorded=Plan(5, None, None))
+    assert type(error) is MemoryShort and error.phase == "decode" and error.reserve == own
+    assert "the reserve left beyond its peak" in str(error) and "--" not in str(error)
     # The VAE compiled: a pass pinned beyond the shapes measured, and the job the plain plan fits.
     error = raised(our_free(96), HD, shots(76), Pins(decode_tile=1280), None, compile_vae=True)
     assert type(error) is CompileRefused and error.kind == "compile" and error.phase == "decode"
@@ -2514,3 +2530,132 @@ def test_a_plan_s_refusal_in_the_library_s_words_names_no_option() -> None:
         raised(our_free(24), HD, shots(76), Pins(), None, recorded=Plan(17, Tiles(2048))),
     ):
         assert "--" not in str(error) and cli_words(error) == str(error)
+
+
+def test_the_reserve_is_the_step_s_beyond_its_peak() -> None:
+    # A held run is judged phase by phase: a phase needs its peak and its reserve (peaks.reserve)
+    # under the budget, which is the figure counted whole (no margin on top, the reserve's floor
+    # standing for it). DESIGN.md, Allocator, Small cards, decided on 2026-11-06.
+    def reading(allocator: str, counted: float = 24.0) -> Reading:
+        return Reading(
+            round(counted * GIB) + LEFT, None, round(counted * GIB), True, LEFT, allocator
+        )
+
+    for allocator in (memory.SEGMENTS, memory.POOL):
+        for target, latents in ((HD, 76), (UHD, 40)):
+            made, predicted = shot_plan.plan(
+                reading(allocator), target, shots(latents), Pins(), None
+            )
+            padded = padded_size(target)
+            working = peaks.dit_working(padded, predicted.window, predicted.attention)
+            assert predicted.reserves["dit"] == peaks.reserve(peaks.DIT_PHASE, working, allocator)
+            vae_phases: tuple[tuple[Phase, int | None], ...] = (
+                ("encode", made.resident_encode),
+                ("decode", made.resident_decode),
+            )
+            for phase, resident in vae_phases:
+                own = peaks.reserve(
+                    phase,
+                    peaks.vae_working(predicted.peak(phase), resident, made.swapped),
+                    allocator,
+                )
+                assert predicted.reserves[phase] == own, (allocator, phase)
+            assert predicted.budget == predicted.free
+            for phase in shot_plan.PHASES:
+                assert predicted.need(phase) == predicted.peak(phase) + predicted.reserves[phase]
+                assert predicted.need(phase) <= predicted.budget, (allocator, target, phase)
+            assert predicted.reserve_taken() == predicted.reserves
+            assert predicted.record()["reserve"] == predicted.reserves
+    # Both sides of the floors: a small window at 1080p is under the DiT's 0.3 x P = 0.6 GiB, and
+    # its reserve is the floor (MARGIN); a long one at 4K is over it; no cap where 0.3 x P is over
+    # 4.5 GiB (a window of 40 latents at 4K, P of 20 GiB, is left 6 GiB).
+    small = shot_plan.plan(reading(memory.SEGMENTS), HD, shots(1), Pins(), None)[1]
+    assert small.reserves["dit"] == MARGIN
+    large = shot_plan.plan(reading(memory.SEGMENTS, 96.0), UHD, shots(40), Pins(), None)[1]
+    working = peaks.dit_working(padded_size(UHD), large.window)
+    assert MARGIN < large.reserves["dit"] == round(0.3 * working)
+    assert 0.3 * working > memory.RESERVE and large.reserves["dit"] > memory.RESERVE
+    # Torch's own allocator without the segments, and a driver that refuses: as before the reserve
+    # was measured by the step. A window has none beyond its peak, a VAE pass VAE_ROOM, and the
+    # record keeps the flat figure for every phase, or nothing.
+    plain = shot_plan.plan(reading(memory.PLAIN), HD, shots(76), Pins(), None)[1]
+    assert plain.reserves == {"encode": peaks.VAE_ROOM, "dit": 0, "decode": peaks.VAE_ROOM}
+    assert plain.record()["reserve"] == dict.fromkeys(shot_plan.PHASES, memory.RESERVE)
+    refusing = shot_plan.plan(our_free(24), HD, shots(76), Pins(), None)[1]
+    assert refusing.reserves == plain.reserves and refusing.record()["reserve"] is None
+    assert refusing.budget == refusing.free - MARGIN
+    # cudaMallocAsync's pool: a window's max(0.85, 0.24 x P), a VAE pass's max(1.25, 0.35 x P).
+    pool = shot_plan.plan(reading(memory.POOL), UHD, shots(40), Pins(), None)[1]
+    assert pool.reserves["dit"] == round(0.24 * peaks.dit_working(padded_size(UHD), pool.window))
+
+
+def test_the_segments_need_less_than_the_flat_reserve_where_the_step_is_small() -> None:
+    # The same card under both: the flat 4.5 GiB off the figure (PLAIN) and the segments' reserve,
+    # the figure counted being the card's less torch's limit. On a card where each step's reserve
+    # is under 4.5 GiB (0.3 x P under it for the DiT, 0.2 x P for a VAE pass) the plan holds a
+    # window, tiles and a placement at least as large; the cases that need more are over it.
+    def taken(allocator: str, free: float) -> Reading:
+        driver = round(free * GIB)
+        counted = driver - LEFT - (memory.RESERVE if allocator == memory.PLAIN else 0)
+        return Reading(driver, None, counted, True, LEFT, allocator)
+
+    moved = 0
+    for target, latents in ((HD, 76), (HD, 20), (UHD, 17)):
+        for free in (14.0, 16.0, 24.0, 32.0):
+            try:
+                flat, flat_peaks = shot_plan.plan(
+                    taken(memory.PLAIN, free), target, shots(latents), Pins(), None
+                )
+            except PlanError:
+                flat, flat_peaks = None, None
+            try:
+                step, step_peaks = shot_plan.plan(
+                    taken(memory.SEGMENTS, free), target, shots(latents), Pins(), None
+                )
+            except PlanError:
+                step, step_peaks = None, None
+            if flat is None:
+                moved += step is not None  # a card the flat reserve refuses, the segments run
+                continue
+            assert flat_peaks is not None
+            assert step is not None and step_peaks is not None, (target, latents, free)
+            over = max(step_peaks.reserves.values()) > memory.RESERVE
+            if not over:
+                # A longer window may swap more blocks (the planner's choice, window first).
+                assert (step.window or 0) >= (flat.window or 0), (target, latents, free)
+                if step.window == flat.window:
+                    assert step.swapped <= flat.swapped, (target, latents, free)
+            moved += step != flat
+    assert moved
+
+
+def test_a_measured_margin_over_the_rule_is_the_reserve_of_every_step_of_the_plan() -> None:
+    # Reading.margin (the probe's allocator margin, read from its cache): the larger of it and
+    # the rule's share is each step's share of P (peaks.reserve), so a plan with a margin over
+    # the rule reserves more by step and never plans more (longer windows, larger tiles or fewer
+    # blocks swapped), and one under the rule is the rule's plan to the byte. PLAIN takes none.
+    def reading(allocator: str, margin: float | None) -> Reading:
+        counted = round(24 * GIB)
+        return Reading(counted + LEFT, None, counted, True, LEFT, allocator, margin=margin)
+
+    for allocator in (memory.SEGMENTS, memory.POOL):
+        base = shot_plan.plan(reading(allocator, None), UHD, shots(40), Pins(), None)
+        under = shot_plan.plan(reading(allocator, 0.05), UHD, shots(40), Pins(), None)
+        over = shot_plan.plan(reading(allocator, 0.6), UHD, shots(40), Pins(), None)
+        assert under[0] == base[0] and under[1].reserves == base[1].reserves, allocator
+        assert replace(under[1], reading=base[1].reading) == base[1], allocator
+        assert over[1].reserves["dit"] > base[1].reserves["dit"], allocator
+        assert over[1].reserves["dit"] == round(
+            0.6 * peaks.dit_working(padded_size(UHD), over[1].window)
+        )
+        for phase in shot_plan.PHASES:
+            assert over[1].need(phase) <= over[1].budget
+            assert (
+                over[1].reserves[phase] >= base[1].reserves[phase]
+                or over[1].window < base[1].window
+            )
+        # Never planned more: the window no longer, the blocks swapped no fewer.
+        assert over[1].window <= base[1].window and over[0].swapped >= base[0].swapped
+    plain = shot_plan.plan(reading(memory.PLAIN, 0.6), HD, shots(76), Pins(), None)
+    same = shot_plan.plan(reading(memory.PLAIN, None), HD, shots(76), Pins(), None)
+    assert plain[0] == same[0] and plain[1].reserves == same[1].reserves

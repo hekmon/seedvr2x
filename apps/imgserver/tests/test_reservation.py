@@ -636,13 +636,24 @@ FULL_HD: Bound = (1920, 1080)
 NIGHT_INPUT = 1024 * 576
 
 
-def night(dit: Architecture, count: int) -> Asked:
+def night(
+    dit: Architecture, count: int, allocator: str = memory.PLAIN, counted: float = 18.45
+) -> Asked:
     """The RTX 5090 under WSL2 (2026-11-04, the n2 runs' logs): the run held to the card, "the
     plan counts on 18.45 GiB of the GPU's memory, of the 23.45 GiB free on the whole card by NVML
     (its driver reports 30.03 GiB free to this process)", 0.5 left outside torch's limit; SDPA,
-    FlashAttention 2 not installed; two pictures within 1920x1080 from 0.6 MP."""
+    FlashAttention 2 not installed; two pictures within 1920x1080 from 0.6 MP. The 18.45 GiB is
+    the card's 23.45 less the 0.5 and the flat 4.5 GiB reserve: the figure of torch's own
+    allocator without the segments (memory.PLAIN), which is what these tests hold (the plans of
+    that night, unchanged). Under the segments the same card counts 22.95 GiB (memory.counted),
+    and `counted` names another figure for the tests of the per-step rule."""
     held = Reading(
-        round(30.03 * GIB), round(23.45 * GIB), round(18.45 * GIB), True, left=memory.HELD_BACK
+        round(30.03 * GIB),
+        round(23.45 * GIB),
+        round(counted * GIB),
+        True,
+        memory.HELD_BACK,
+        allocator,
     )
     return Asked(FULL_HD, NIGHT_INPUT, count, 8, held, SYSTEM, peaks.SDPA, dit)
 
@@ -739,6 +750,98 @@ def test_one_picture_takes_the_plans_own_tiles(dit: Architecture) -> None:
             True,
         )
         assert reservation.gib(made.reservation) == "18.42"
+
+
+def test_the_wsl2_card_under_the_segments_keeps_more_of_the_dit_than_under_the_flat_reserve() -> (
+    None
+):
+    # The same card, torch's own allocator with its segments (the default on a lending driver):
+    # counted 22.95 GiB, no flat 4.5 off, each phase judged by its peak and its own reserve
+    # (peaks.reserve), no share for torch's slack added to the reservation (Peak.over 0). Every
+    # figure is what the planner gives; the direction: never less of the DiT on the card, never
+    # a smaller tile, a pair refused under the flat reserve served.
+    plain_int8 = reservation.make(night(peaks.INT8, 1))
+    for allocator, count, dit, expected in (
+        (memory.SEGMENTS, 1, peaks.INT8, ((None, None), "18.44")),
+        (memory.SEGMENTS, 1, peaks.FP16, ((None, 28), "22.65")),
+        (memory.POOL, 1, peaks.INT8, ((None, None), "19.71")),
+        (memory.POOL, 1, peaks.FP16, ((35, 25), "22.66")),
+    ):
+        found = reservation.make(night(dit, count, allocator, 22.95))
+        models = found.plan.models
+        assert (
+            (models.resident_encode, models.resident_decode),
+            reservation.gib(found.reservation),
+        ) == expected, (
+            allocator,
+            dit.layout,
+        )
+        assert found.plan.pins == still_plan.NO_PINS and models.swapped == 0
+        assert found.reservation <= found.plan.reading.counted - found.plan.margin
+        assert all(each.over == 0.0 for each in still_plan.bound_peaks(found.plan).values())
+    assert (
+        plain_int8.plan.models.resident_decode == 30
+    )  # the flat reserve's, lowered beside the decode
+    # Two pictures keep the DiT whole in the plan's own tiles on the int8 file (20.03 GiB) where
+    # the flat reserve needed 1088-px tiles (17.36), and the fp16 pair, refused under the flat
+    # reserve, is served in 832-px tiles.
+    two = reservation.make(night(peaks.INT8, 2, memory.SEGMENTS, 22.95))
+    assert two.plan.pins == Pins(swap_blocks=0) and reservation.gib(two.reservation) == "20.03"
+    pooled = reservation.make(night(peaks.INT8, 2, memory.POOL, 22.95))
+    assert (
+        pooled.plan.pins == Pins(swap_blocks=0) and reservation.gib(pooled.reservation) == "21.55"
+    )
+    pair = reservation.make(night(peaks.FP16, 2, memory.SEGMENTS, 22.95))
+    assert pair.plan.pins == Pins(832, 832, swap_blocks=0)
+    assert reservation.gib(pair.reservation) == "22.46"
+    with pytest.raises(ReservationRefused) as flat:
+        reservation.make(night(peaks.FP16, 2))
+    assert flat.value.most == 1 and flat.value.largest == (540, 304)
+
+
+def test_the_mechanism_of_the_tiles_tried_holds_under_the_segments_on_a_card_that_counts_less() -> (
+    None
+):
+    # The int8 pair of the night, on the segments with 19.5 GiB counted (another program holds
+    # about 3.5 GiB of the card): the plan's own tiles keep the DiT whole but reserve more than
+    # the budget, so 1088-px tiles are the first that fit, as under the flat reserve at 18.45.
+    wanted = night(peaks.INT8, 2, memory.SEGMENTS, 19.5)
+    first = reservation._plan(wanted, FULL_HD, 2, wanted.reading, Pins(swap_blocks=0))
+    assert reservation.whole(first)
+    ceiling = reservation.ceilings(first, reservation.picture_budget(first, NIGHT_INPUT))
+    assert reservation.reserved(ceiling, 2) > first.budget
+    with pytest.raises(reservation._Moves, match="the plan moves the models"):
+        reservation._tried(wanted, FULL_HD, 2, Pins(swap_blocks=0))
+    made = reservation.make(wanted)
+    assert made.plan.pins == Pins(1088, 1088, swap_blocks=0)
+    assert reservation.gib(made.reservation) == "16.65"
+    assert made.reservation <= wanted.reading.counted - made.plan.margin
+    # The fp16 pair does not fit there at all (22.46 GiB on 22.95): one picture, or 768x432.
+    with pytest.raises(ReservationRefused) as error:
+        reservation.make(night(peaks.FP16, 2, memory.SEGMENTS, 19.5))
+    assert error.value.most == 1 and error.value.largest == (768, 432)
+
+
+def test_a_reservation_adds_the_slack_over_the_peak_under_torchs_own_allocator_alone() -> None:
+    # Peak.over: RESERVED_OVER where the reserve is the flat 4.5 off the figure (a phase's room
+    # is not the whole of what torch leaves), nothing under the segments and the pool, whose
+    # reserve beyond the peak is the whole of it. The same bound, the same card (24 GiB): the
+    # reservation under the segments is the phases' peaks and reserves, to the byte.
+    for allocator, over in (
+        (memory.PLAIN, peaks.RESERVED_OVER),
+        (memory.SEGMENTS, 0.0),
+        (memory.POOL, 0.0),
+    ):
+        assert still_plan.reserved_share(allocator) == over
+        found = reservation.make(night(peaks.INT8, 1, allocator, 22.0))
+        for phase, each in still_plan.bound_peaks(found.plan).items():
+            assert each.over == over, (allocator, phase)
+            assert each.reserved == each.allocated + each.room + math.ceil(over * each.above)
+    # The growth rate the tries lower the budget by: the allocator's largest share of P.
+    assert reservation._growth(memory.PLAIN) == peaks.RESERVED_OVER
+    assert reservation._growth(memory.SEGMENTS) == peaks.DIT_RESERVE_SHARE
+    assert reservation._growth(memory.POOL) == peaks.POOL_VAE
+    assert reservation._growth(memory.SEGMENTS, 0.5) == 0.5  # a margin the probe measured
 
 
 # ---- The smaller DiT files a refused start names ------------------------------------------------

@@ -168,7 +168,7 @@ class Machine(Protocol):
     def host(self) -> int | None: ...
     def attention(self) -> str: ...
     def dit_model(self, path: Path) -> Architecture: ...
-    def probe(self, architecture: Architecture, attention: str) -> None: ...
+    def probe(self, architecture: Architecture, attention: str) -> float | None: ...
     def load(
         self,
         files: ModelFiles,
@@ -244,10 +244,10 @@ class CudaMachine:
     def dit_model(self, path: Path) -> Architecture:
         return weights.check(path, "dit")
 
-    def probe(self, architecture: Architecture, attention: str) -> None:
+    def probe(self, architecture: Architecture, attention: str) -> float | None:
         from seedvr2x import probe
 
-        probe.check(self.device, architecture, attention)
+        return probe.check(self.device, architecture, attention).allocator_margin
 
     def load(
         self,
@@ -412,7 +412,10 @@ class Entry:
 
 
 _entries: dict[tuple[str, str], Entry] = {}
-_probed: set[tuple[str, str]] = set()
+# The probes done, by DiT layout and attention kernel, and the allocator's margin each found (a
+# share of a step's P, probe.Probed.allocator_margin; None: none measured, the measurement being
+# unbuilt), which the plans of this process count with the rule's share, the larger of the two.
+_probed: dict[tuple[str, str], float | None] = {}
 # The handles whose weights were dropped (Entry.drop): the next load of one says so.
 _dropped: set[tuple[str, str]] = set()
 _told: set[str] = set()
@@ -530,7 +533,7 @@ def with_comfy_gone(reading: Reading, held: int) -> Reading:
         reading,
         reported=reported,
         card=card,
-        counted=max(taken - reading.left - reading.reserve, 0),
+        counted=memory.counted(taken, reading),
     )
 
 
@@ -546,15 +549,19 @@ def comfy_holds(device: Any, ours: Registration | None) -> int:
     return held
 
 
-def _read(machine: Machine, ours: Registration | None) -> tuple[Reading, Reading, int]:
+def _read(
+    machine: Machine, ours: Registration | None, margin: float | None = None
+) -> tuple[Reading, Reading, int]:
     """The card as the plan counts it: ComfyUI's cache of freed blocks given back first (what
     torch keeps cached and unused is free by definition, and the driver's figure leaves it out),
     then the driver's free memory read as the CLI reads it, and ComfyUI's models added to it.
+    `margin`: the allocator's margin the probe found, which the plan's reading carries
+    (Reading.margin) so that its reserves count the larger of it and the rule's share.
     Returns (the reading for the plan, the card's own reading, what ComfyUI's models hold)."""
     management.soft_empty_cache()
     own = machine.reading(machine.free())
     held = comfy_holds(machine.device, ours)
-    return with_comfy_gone(own, held), own, held
+    return with_comfy_gone(replace(own, margin=margin), held), own, held
 
 
 def _prepare(
@@ -615,18 +622,21 @@ def _set_attention(models: Models, attention: str) -> None:
     models.attention = attention
 
 
-def _probe(machine: Machine, architecture: Architecture, attention: str) -> None:
+def _probe(machine: Machine, architecture: Architecture, attention: str) -> float | None:
     """The environment probe, before the first load in this process for this DiT layout and this
     attention kernel (probe.check: each kernel the file needs, held to the CPU's numbers; cached
-    on disk by the environment's fingerprint). A refusal is worded for the nodes."""
+    on disk by the environment's fingerprint). A refusal is worded for the nodes. Returns the
+    allocator's margin the cache holds for the environment (None: none measured, which is every
+    run until the probe measures it; probe.py)."""
     key = (architecture.name, attention)
     if key in _probed:
-        return
+        return _probed[key]
     try:
-        machine.probe(architecture, attention)
+        margin = machine.probe(architecture, attention)
     except Refusal as error:
         raise words.refusal(error) from error
-    _probed.add(key)
+    _probed[key] = margin
+    return margin
 
 
 def _plan[T](
@@ -913,7 +923,8 @@ def _session[T](
     chosen = _attention(machine_, attention)
     if plan_only:
         ours = None if entry is None else entry.patcher
-        reading, own, held = _read(machine_, ours)
+        # No probe runs for a plan only; the margin an earlier run of this process found counts.
+        reading, own, held = _read(machine_, ours, _probed.get((architecture.name, chosen)))
         host = machine_.host()
         # Weights to be pinned by the run come out of the memory the host has available.
         counted = (
@@ -934,11 +945,11 @@ def _session[T](
             None, planned, room, chosen, handle, keeping, (), 0 if entry is None else entry.host
         )
         return
-    _probe(machine_, architecture, chosen)
+    margin = _probe(machine_, architecture, chosen)
     if keep and entry is None:
         # A refusal comes before the read of the files: the plan for the card alone, the pinned
         # copies not counted (the host is checked by the plan that follows).
-        early, _, _ = _read(machine_, None)
+        early, _, _ = _read(machine_, None, margin)
         _plan(planner, early, None, chosen, architecture, True, handle, clip)
         entry, note = _load_kept(handle, machine_, files, architecture, preparing)
         if note:
@@ -948,7 +959,7 @@ def _session[T](
         logger.info("seedvr2x's models are not listed with ComfyUI any more: registering again")
         _register(entry)
 
-    reading, own, held = _read(machine_, ours)
+    reading, own, held = _read(machine_, ours, margin)
     host = machine_.host()
     planned = _plan(planner, reading, host, chosen, architecture, keep, handle, clip)
     needed = needed_free(planned.needs)

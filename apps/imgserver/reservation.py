@@ -25,7 +25,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import cache
 
-from seedvr2x import frames, peaks, pull, still_plan
+from seedvr2x import frames, memory, peaks, pull, still_plan
 from seedvr2x.errors import Refusal, Setting
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Phase
@@ -105,7 +105,7 @@ def ceilings(plan: StillPlan, budget: int) -> dict[Phase, Peak]:
     return {
         phase: peak
         if phase == "dit"
-        else Peak(max(peak.allocated, budget - peak.room), peak.models, peak.room)
+        else Peak(max(peak.allocated, budget - peak.room), peak.models, peak.room, peak.over)
         for phase, peak in found.items()
     }
 
@@ -287,8 +287,8 @@ def _tried(asked: Asked, bound: Bound, count: int, pins: Pins) -> Made:
         budget_of = picture_budget(made, asked.input_pixels)
         peaks_of = ceilings(made, budget_of)
         reservation = reserved(peaks_of, count)
-        # The budget the original reading gives the plan's reserve: the tight reserve, taken by
-        # the plan where the usual one is refused, counts on more.
+        # The budget the original reading gives the plan, less nothing: `short` is what the
+        # lowered reading took off it.
         budget = made.budget + short
         if reservation <= budget:
             # The admission bounds the pictures in flight, `count` of them, each within the
@@ -299,9 +299,12 @@ def _tried(asked: Asked, bound: Bound, count: int, pins: Pins) -> Made:
         # plan chooses less there (smaller tiles, or more blocks swapped): the budget a picture
         # takes moves in steps, the tiles' sides, and a reading lowered by less than a step would
         # change nothing; and at least the shortfall over the rate the reservation grows at with
-        # the budget, 1 + RESERVED_OVER at the most (one picture in the VAE whatever the count).
+        # the budget, 1 + the share of the allocator's rule at the most (one picture in the VAE
+        # whatever the count): RESERVED_OVER under torch's own allocator without the segments, the
+        # largest share of peaks.reserve's rule for the allocator elsewhere (the reserve of a VAE
+        # pass grows with its peak over the models, a share of it, and so does the DiT's).
         # Several pictures at once keep the DiT whole, so only their VAE share is lowered.
-        rate = 1 + peaks.RESERVED_OVER
+        rate = 1 + _growth(asked.reading.allocator, asked.reading.margin)
         dit = peaks_of["dit"]
         vae = max(peaks_of[phase].reserved for phase in ("encode", "decode"))
         binding = made.dit_peak if count == 1 and dit.reserved >= vae else budget_of
@@ -319,6 +322,16 @@ def _tried(asked: Asked, bound: Bound, count: int, pins: Pins) -> Made:
         0,
         None,
     )
+
+
+def _growth(allocator: str, margin: float | None = None) -> float:
+    """How much more a phase's reservation grows than the budget's step it is planned in, as a
+    share: the allocator's reserve share of P at the most (peaks.reserve_terms, over the three
+    phases), or peaks.RESERVED_OVER under torch's own allocator without the segments, where the
+    reserve is flat and the slack torch reserves over what it allocates is the share."""
+    if allocator == memory.PLAIN:
+        return peaks.RESERVED_OVER
+    return max(peaks.reserve_terms(phase, allocator, margin)[1] for phase in peaks.PHASES)
 
 
 def fits(asked: Asked, bound: Bound, count: int) -> bool:

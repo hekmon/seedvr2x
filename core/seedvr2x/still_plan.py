@@ -88,8 +88,9 @@ NO_PINS = Pins()
 
 def _margin(reading: Reading) -> int:
     """What a plan leaves of the memory it may count on, in bytes: MARGIN on a driver that
-    refuses; nothing on a run held to the card, where memory.RESERVE, taken off already, measures
-    the same need (the planner's _Job.margin; DESIGN.md, Allocator)."""
+    refuses; nothing on a run held to the card, where the reserve measures
+    the same need, in the flat reserve taken off the figure or in a window's reserve, whose floor it
+    is (the planner's _Job.margin; DESIGN.md, Allocator)."""
     return 0 if reading.held else MARGIN
 
 
@@ -102,7 +103,7 @@ class StillPlan:
     picture: tuple[int, int] | None  # the one picture, its target (height, width) as stored
     input_pixels: int  # the largest input, H x W as stored: its copies on the GPU are counted
     models: ModelPlan  # swapped, resident_encode, resident_decode, vae_in_dit; compile_vae False
-    reading: Reading  # as made: tightened where the tight retry took it
+    reading: Reading  # as made
     attention: str  # peaks.DIT_ATTENTION's
     dit_model: Architecture  # peaks.DITS'
     split: bool  # whether the decode corrects colours: its term is counted in the decode's phase
@@ -115,7 +116,6 @@ class StillPlan:
     host_available: (
         int | None
     )  # bytes of system memory available as the plan was made; None: unread
-    tightened: str = ""  # the refusal with the usual reserve, where the tight reserve was taken
     held: bool = False  # the weights' pinned copies existed already: `pinned` is 0 (plan's held)
 
     @property
@@ -224,9 +224,10 @@ def plan(
        of the DiT kept on the GPU in the VAE's phases (_dit_kept), as long as the proof holds.
     The input's copies (step 3, _holds) are judged with the proof, and refused at the floor
     (_input_refused).
-    Then, on a held run, a refusal is planned again with memory.RESERVE_TIGHT in
-    memory.RESERVE's place, as the planner's plan does (memory.tightened; DESIGN.md, Allocator),
-    only under torch's own allocator with expandable segments (Reading.expandable).
+    On a held run each phase is judged by its peak and its own reserve beyond it (peaks.reserve,
+    by the phase's P and the allocator the reading names; DESIGN.md, Allocator, Small cards,
+    decided on 2026-11-06), as the planner's plan does; the 2.5 GiB retry retired with it. A
+    refusal under torch's own allocator without the segments says where they would run it.
 
     held: the weights' pinned copies exist already, the models kept in system memory between
     runs (model.Models.place, passes.HELD; DESIGN.md, Repository and apps, the nodes): the plan
@@ -289,40 +290,27 @@ def plan(
             raise covering(phase, pin, largest)
     try:
         return _planned(job)
-    except PlanRefused as error:
-        if not reading.held or reading.tight or memory.RESERVE_TIGHT >= reading.reserve:
+    except PlanRefused as refused:
+        if not reading.held or reading.allocator != memory.PLAIN or reading.counted <= 0:
             raise
-        refused = error
-    tight = replace(job, reading=memory.tightened(reading))
-    refused_words = refused.words
-    if not reading.expandable:
-        # Refused with the usual reserve, as the planner does, saying what torch's default
-        # setting would do where it would run the picture.
+        # A user's allocator without the segments refuses a step short of room: said where torch's
+        # default, with them, would run the picture, whose reserve is the step's (peaks.reserve),
+        # as the planner says it. The reading's figure gets the flat reserve back for it.
+        words = refused.words
+        segments = replace(
+            reading, allocator=memory.SEGMENTS, counted=reading.counted + memory.RESERVE
+        )
         try:
-            _planned(tight)
+            _planned(replace(job, reading=segments))
         except PlanRefused:
             raise refused from None
         raise refused.reworded(
             lambda say: (
-                f"{refused_words(say)}; torch's own allocator with its expandable segments, a"
-                " held run's default, which the allocator's setting in the environment replaces"
-                f" here, would run it with the reserve of {_gib(memory.RESERVE_TIGHT)} GiB,"
-                " slower"
+                f"{words(say)}; torch's own allocator with its expandable segments, a held run's"
+                " default, which the allocator's setting in the environment replaces here, would"
+                " run it"
             )
         ) from None
-    try:
-        made = _planned(tight)
-    except PlanRefused as again:
-        again_words = again.words
-        raise again.reworded(
-            lambda say: (
-                f"{again_words(say)}; refused with the reserve of {_gib(memory.RESERVE)} GiB that"
-                " a held run's plan leaves torch's allocator beyond a step's peak, and with"
-                f" {_gib(memory.RESERVE_TIGHT)}, the one it takes where that is refused, whose"
-                " figures these are"
-            )
-        ) from None
-    return replace(made, tightened=str(refused))
 
 
 def tiles(plan: StillPlan, target: tuple[int, int], budget: int | None = None) -> PictureTiles:
@@ -578,7 +566,7 @@ def _per_window(job: _Job) -> float:
     return peaks.INT8_PER_WINDOW if job.dit_model == peaks.INT8 else peaks.PER_WINDOW
 
 
-def _dit_need(job: _Job, swapped: int, vae_in_dit: bool) -> int:
+def _dit_peak(job: _Job, swapped: int, vae_in_dit: bool) -> int:
     """The predicted peak of the DiT's phase over every picture within the bound, in bytes, one
     latent, `swapped` blocks swapped and the VAE's weights there or not: peaks.dit_peak's, with
     the tokens of the largest padded frame (_most) and the most windows any picture takes
@@ -586,6 +574,26 @@ def _dit_need(job: _Job, swapped: int, vae_in_dit: bool) -> int:
     most = _most(job.bound, job.picture)
     least = peaks.dit_least(most, 1, swapped, vae_in_dit, job.attention, job.dit_model)
     return round(least + _per_window(job) * windows_most(job.bound, job.picture))
+
+
+def _dit_reserve(job: _Job) -> int:
+    """What the plan leaves the DiT's phase beyond its peak, in bytes: the reserve of P, the
+    phase's working set over the weights, at the same tokens and windows as _dit_peak
+    (peaks.dit_working's `windows`), under the allocator the reading names (peaks.reserve)."""
+    working = peaks.dit_working(
+        _most(job.bound, job.picture),
+        1,
+        job.attention,
+        job.dit_model,
+        windows_most(job.bound, job.picture),
+    )
+    return peaks.reserve(peaks.DIT_PHASE, working, job.reading.allocator, job.reading.margin)
+
+
+def _dit_need(job: _Job, swapped: int, vae_in_dit: bool) -> int:
+    """What the plan judges the DiT's phase by against the budget, in bytes: its peak
+    (_dit_peak) and its reserve (_dit_reserve)."""
+    return _dit_peak(job, swapped, vae_in_dit) + _dit_reserve(job)
 
 
 def _fewest(job: _Job) -> tuple[int, bool] | None:
@@ -702,6 +710,15 @@ def _bare(
     return peaks.picture_decode_peak(padded, output, tiles, resident, swapped, split, dit_model)
 
 
+def _vae_reserve(job: _Job, phase: Phase, peak: int, resident: int | None, swapped: int) -> int:
+    """What the plan leaves a VAE pass of predicted `peak` beyond it, in bytes: the reserve of P,
+    the peak over the models resident in the phase (peaks.vae_working), under the allocator the
+    reading names (peaks.reserve); VAE_ROOM under torch's own allocator without the segments and
+    on a driver that refuses, as before the reserve was measured by the step."""
+    working = peaks.vae_working(peak, resident, swapped, job.dit_model)
+    return peaks.reserve(phase, working, job.reading.allocator, job.reading.margin)
+
+
 def _first(
     job: _Job,
     phase: Phase,
@@ -711,11 +728,11 @@ def _first(
     resident: int | None,
 ) -> tuple[Tiles | None] | None:
     """The pass a picture takes: the first of its options (_options) that fits the budget with
-    its room (VAE_ROOM), the planner's _pass, in a 1-tuple (None is the untiled pass); None when
-    none does."""
+    its reserve (_vae_reserve), the planner's _pass, in a 1-tuple (None is the untiled pass); None
+    when none does."""
     for chosen in _options(padded, job.pin(phase), phase):
         peak = _bare(phase, padded, output, chosen, resident, swapped, job.split, job.dit_model)
-        if peak + VAE_ROOM <= job.budget:
+        if peak + _vae_reserve(job, phase, peak, resident, swapped) <= job.budget:
             return (chosen,)
     return None
 
@@ -803,15 +820,35 @@ def _worst(
     return worst
 
 
-def _proof_need(job: _Job, phase: Phase, resident: int | None, swapped: int) -> int:
-    """What the phase takes of the free VRAM at its worst picture within the bound with `resident`
-    blocks of the DiT on the GPU, in bytes, its room with it: the proof's worst pass at resident
-    0 (_worst), whose peak is the pass's own and what of the DiT is on the GPU, plus what the
-    placement keeps there beyond it (peaks.dit_on_gpu; the rest of a pass's peak doesn't depend
-    on it)."""
+def _worst_reserve(job: _Job, phase: Phase, size: int | None) -> int:
+    """What the plan leaves the worst pass (_worst at `size`) beyond its peak, in bytes: the
+    reserve of P, its peak over the models of a phase that keeps nothing of the DiT (_worst is
+    counted at resident 0), under the allocator the reading names."""
+    peak = _worst(job.bound, phase, size, job.split, job.picture)
+    return _vae_reserve(job, phase, peak, 0, 0)
+
+
+def _worst_need(job: _Job, phase: Phase, size: int | None) -> int:
+    """What the worst pass at `size` takes with the DiT away, in bytes, its reserve with it."""
+    peak = _worst(job.bound, phase, size, job.split, job.picture)
+    return peak + _worst_reserve(job, phase, size)
+
+
+def _proof_peak(job: _Job, phase: Phase, resident: int | None, swapped: int) -> int:
+    """The peak of the phase at its worst picture within the bound with `resident` blocks of the
+    DiT on the GPU, in bytes, its reserve apart: the proof's worst pass at resident 0 (_worst),
+    whose peak is the pass's own and what of the DiT is on the GPU, plus what the placement keeps
+    there beyond it (peaks.dit_on_gpu; the rest of a pass's peak doesn't depend on it)."""
     base = _worst(job.bound, phase, job.pin(phase), job.split, job.picture)
     kept = peaks.dit_on_gpu(resident, swapped, job.dit_model)
-    return base + kept - peaks.dit_on_gpu(0, swapped, job.dit_model) + VAE_ROOM
+    return base + kept - peaks.dit_on_gpu(0, swapped, job.dit_model)
+
+
+def _proof_need(job: _Job, phase: Phase, resident: int | None, swapped: int) -> int:
+    """What the phase takes of the free VRAM at its worst picture within the bound with `resident`
+    blocks of the DiT on the GPU, in bytes, its reserve with it (_proof_peak, _vae_reserve)."""
+    peak = _proof_peak(job, phase, resident, swapped)
+    return peak + _vae_reserve(job, phase, peak, resident, swapped)
 
 
 def _resident(
@@ -826,7 +863,7 @@ def _resident(
 
     def holds(resident: int | None) -> bool:
         peak = _bare(phase, padded, output, found[0], resident, swapped, job.split, job.dit_model)
-        return peak + VAE_ROOM <= job.budget
+        return peak + _vae_reserve(job, phase, peak, resident, swapped) <= job.budget
 
     if holds(None):
         return None
@@ -876,11 +913,11 @@ def _floor(job: _Job) -> tuple[Phase, int] | None:
     """The phase that takes the most where every phase takes its least over the pictures within
     the bound, and what it takes there, when that is over the budget, no plan then fitting
     (the planner's _floor); else None. The DiT's: one latent, every block swapped and the VAE
-    away. The VAE's: the unpinned proof (_worst), the DiT away, the room with it."""
+    away. The VAE's: the unpinned proof (_worst), the DiT away, the reserve with it."""
     least: dict[Phase, int] = {
-        "encode": _worst(job.bound, "encode", None, job.split, job.picture) + VAE_ROOM,
+        "encode": _worst_need(job, "encode", None),
         "dit": _dit_need(job, peaks.BLOCKS, vae_in_dit=False),
-        "decode": _worst(job.bound, "decode", None, job.split, job.picture) + VAE_ROOM,
+        "decode": _worst_need(job, "decode", None),
     }
     phase = max(PHASES, key=lambda each: least[each])
     return (phase, least[phase]) if least[phase] > job.budget else None
@@ -932,18 +969,21 @@ def _too_large(job: _Job, phase: Phase, least: int) -> MemoryShort:
     most = "" if job.picture is not None else ", at the most any picture within it takes"
     if phase == "dit":
         how = f"one latent, with every block of the DiT swapped and the VAE off the GPU{most}"
-        room = 0
+        room = _dit_reserve(job)
     else:
         how = (
             f"its {phase} in tiles of {peaks.TILE_MIN} px or untiled, with the DiT off the"
             f" GPU{most}"
         )
-        room = VAE_ROOM
+        room = _worst_reserve(job, phase, None)
     # The room as what is left of the total once the peak and the margin are said, each rounded
     # as the message has it, so that its figures add up.
     total, peak = _hundredths(least + job.margin, up=True), _hundredths(least - room, up=True)
     rest = (total - peak - _hundredths(job.margin, up=True)) / 100
-    held = f", {rest:.2f} of room a VAE pass is held to" if room else ""
+    if job.reading.allocator == memory.PLAIN:
+        held = f", {rest:.2f} of room a VAE pass is held to" if room else ""
+    else:
+        held = f", {rest:.2f} of reserve beyond its peak"
     margin = f", and {_gib(job.margin)} of margin" if job.margin else ""
     fits = _fits(job)
     if fits is None:
@@ -966,10 +1006,19 @@ def _too_large(job: _Job, phase: Phase, least: int) -> MemoryShort:
         there=int(job.reading.counted),
         short=int(need) - int(job.reading.counted),
         freeable=_can_free(job.reading, need),
-        reserve=job.reading.reserve if job.reading.held else None,
+        reserve=_reserve_fact(job, room),
         phase=phase,
         fits=fits,
     )
+
+
+def _reserve_fact(job: _Job, reserve: int) -> int | None:
+    """The reserve a refusal carries (MemoryShort.reserve), in bytes: None on a driver that
+    refuses; the flat memory.RESERVE under torch's own allocator without the segments, which is
+    what the plan took off the figure; the step's own `reserve` (peaks.reserve) elsewhere."""
+    if not job.reading.held:
+        return None
+    return memory.RESERVE if job.reading.allocator == memory.PLAIN else reserve
 
 
 def _pin_refused(job: _Job, phase: Phase) -> PinRefused | None:
@@ -980,20 +1029,21 @@ def _pin_refused(job: _Job, phase: Phase) -> PinRefused | None:
     pin = job.pin(phase)
     if pin is None:
         return None
-    need = _worst(job.bound, phase, pin, job.split, job.picture) + VAE_ROOM
+    need = _worst_need(job, phase, pin)
     if need <= job.budget:
         return None
     sizes = _tile_sizes(max(_frames(job.bound, job.picture), key=max))
     largest = next(
-        (
-            size
-            for size in sizes
-            if _worst(job.bound, phase, size, job.split, job.picture) + VAE_ROOM <= job.budget
-        ),
+        (size for size in sizes if _worst_need(job, phase, size) <= job.budget),
         None,
     )
     asked, fits = Setting(f"{phase}_tile", str(pin)), Setting(f"{phase}_tile", str(largest or 0))
     said = "untiled" if pin == 0 else f"in tiles of {pin} px"
+    reserve = _worst_reserve(job, phase, pin)
+    if job.reading.allocator == memory.PLAIN:
+        room = f"{VAE_ROOM / peaks.GIB:.2f} of them the room a VAE pass is held to"
+    else:
+        room = f"{reserve / peaks.GIB:.2f} of them the reserve left beyond its peak"
     need += job.margin
 
     def refused(say: Say) -> str:
@@ -1004,8 +1054,7 @@ def _pin_refused(job: _Job, phase: Phase) -> PinRefused | None:
         )
         return (
             f"{say(asked)}: the {phase} {said}, for {_whose(job, 'the pictures')} takes"
-            f" {_over(need)} GiB of free VRAM, the DiT off the GPU,"
-            f" {VAE_ROOM / peaks.GIB:.2f} of them the room a VAE pass is held to, and"
+            f" {_over(need)} GiB of free VRAM, the DiT off the GPU, {room}, and"
             f" {_there(job.reading)}: {_to_free(job.reading, need)}{advice}"
         )
 
@@ -1070,7 +1119,10 @@ def _pin_refused(job: _Job, phase: Phase) -> PinRefused | None:
 # is the PADDED frame's, 3 channels. The decode's own working memory is gone: the generator is
 # closed first (still.upscale's `finally`).
 #
-# The moments are judged in their phase like a phase, but without VAE_ROOM and with the margin:
+# The moments are judged in their phase like a phase, but without VAE_ROOM and with the margin
+# (under torch's own allocator without the segments, as before 2026-11-06; under the segments and
+# cudaMallocAsync with the phase's reserve of the copies' P, _copies_reserve, a held run's flat
+# 4.5 GiB having been what stood for it):
 # no VAE pass runs, and the room is a pass's (a convolution whose workspace the allocator refuses
 # runs on another engine and may give other frames: peaks.VAE_ROOM), where here are ATen's resize
 # and copies, which allocate the exact sizes above. The margin stays: it is the desktop's and the
@@ -1168,13 +1220,30 @@ def _on_gpu(job: _Job, resident: int | None, swapped: int) -> int:
     return peaks.VAE_WEIGHTS + peaks.dit_on_gpu(resident, swapped, job.dit_model)
 
 
-def _copies_need(job: _Job, phase: Phase, resident: int | None, swapped: int) -> int:
-    """What the phase takes of the free VRAM at the moment of its copies, in bytes: the models on
-    the GPU there and the copies at the bound's largest padded frame (copies_peak). Judged
-    against the budget without VAE_ROOM."""
+def _copies_peak(job: _Job, phase: Phase, resident: int | None, swapped: int) -> int:
+    """What the phase has on the GPU at the moment of its copies, in bytes: the models there and
+    the copies at the bound's largest padded frame (copies_peak)."""
     return _on_gpu(job, resident, swapped) + copies_peak(
         phase, job.input_pixels, _padded_pixels(job.bound, job.picture)
     )
+
+
+def _copies_reserve(job: _Job, phase: Phase, copies: int) -> int:
+    """What the plan leaves a moment of the copies beyond its peak, in bytes, `copies` being
+    what it takes over the models (copies_peak): nothing under torch's own allocator without the
+    segments and on a driver that refuses, where it is judged without VAE_ROOM; else the
+    reserve of the phase for P = `copies` (peaks.reserve)."""
+    if job.reading.allocator == memory.PLAIN:
+        return 0
+    return peaks.reserve(phase, copies, job.reading.allocator, job.reading.margin)
+
+
+def _copies_need(job: _Job, phase: Phase, resident: int | None, swapped: int) -> int:
+    """What the phase takes of the free VRAM at the moment of its copies, in bytes: the models on
+    the GPU there, the copies at the bound's largest padded frame (copies_peak) and their
+    reserve (_copies_reserve). Judged against the budget without VAE_ROOM."""
+    copies = copies_peak(phase, job.input_pixels, _padded_pixels(job.bound, job.picture))
+    return _on_gpu(job, resident, swapped) + copies + _copies_reserve(job, phase, copies)
 
 
 def _holds(job: _Job, phase: Phase, resident: int | None, swapped: int) -> bool:
@@ -1198,11 +1267,29 @@ def _largest_input(job: _Job) -> int | None:
     room = job.budget - _on_gpu(job, 0, 0)
     fits: int | None = None
     for phase in _copy_phases(job):
+        floor, share = (
+            (0, 0.0)
+            if job.reading.allocator == memory.PLAIN
+            else peaks.reserve_terms(phase, job.reading.allocator, job.reading.margin)
+        )
         for moment in COPIES[phase]:
-            left = room - moment.per_padded * padded - moment.held
+            # copies + max(floor, share x copies) within the room: both terms are linear in the
+            # input's pixels, so the least of their solutions, then settled to the byte against
+            # the rule itself (peaks.reserve rounds the share).
+            base = moment.per_padded * padded + moment.held
+            left = min(room - floor, room / (1 + share)) - base
             if left < moment.per_input:
                 return None
-            most = left // moment.per_input
+            most = int(left // moment.per_input)
+
+            def holds(pixels: int, phase: Phase = phase, moment: Moment = moment) -> bool:
+                copies = moment.at(pixels, padded)
+                return copies + _copies_reserve(job, phase, copies) <= room
+
+            while most > 1 and not holds(most):
+                most -= 1
+            while holds(most + 1):
+                most += 1
             fits = most if fits is None else min(fits, most)
     return fits
 
@@ -1224,7 +1311,9 @@ def _input_refused(job: _Job) -> InputTooLarge | None:
     padded = _padded_pixels(job.bound, job.picture)
     copies = copies_peak(phase, job.input_pixels, padded)
     held = _on_gpu(job, 0, 0)
-    need = held + copies + job.margin
+    reserve = _copies_reserve(job, phase, copies)
+    need = held + copies + reserve + job.margin
+    beyond = "the margin" if job.reading.allocator == memory.PLAIN else "the reserve beyond them"
     fits = _largest_input(job)
     # The resolution that lowers the output's part of it: named without a value.
     lower = Setting("resolution")
@@ -1253,7 +1342,7 @@ def _input_refused(job: _Job) -> InputTooLarge | None:
             f" size, is copied to the GPU and resized there in the {phase}'s phase: its copies"
             f" take {_over(copies)} GiB at the peak ({which.what}, at {_frame_said(job)}) and"
             f" {_short(need, copies)} GiB more for the models on the GPU"
-            f" and the margin, {_over(need)} GiB of free VRAM, and {_there(job.reading)}:"
+            f" and {beyond}, {_over(need)} GiB of free VRAM, and {_there(job.reading)}:"
             f" {_to_free(job.reading, need)}{way(say)}"
         ),
         pixels=job.input_pixels,
@@ -1288,12 +1377,17 @@ def input_copies(plan: StillPlan) -> dict[Phase, int]:
 @dataclass(frozen=True)
 class Peak:
     """What a phase of one picture takes of the GPU, in bytes: its predicted allocated peak,
-    `models` of it what the models have on the GPU in that phase, and the room it is held to
-    beyond the peak (VAE_ROOM for a VAE pass, none for the DiT's)."""
+    `models` of it what the models have on the GPU in that phase, and the reserve it is held to
+    beyond the peak (peaks.reserve, by the phase's P and the allocator the plan was made for;
+    under torch's own allocator without the segments and on a driver that refuses, VAE_ROOM for a
+    VAE pass and none for the DiT's); `over`, the share of what the phase allocates above the models
+    that torch's allocator reserves over it, which the reservation adds only where the reserve is
+    not the step's own (see `reserved`)."""
 
     allocated: int
     models: int
     room: int
+    over: float = peaks.RESERVED_OVER
 
     @property
     def above(self) -> int:
@@ -1302,9 +1396,22 @@ class Peak:
 
     @property
     def reserved(self) -> int:
-        """What torch's allocator is to hold for the phase: the peak, its room, and the share it
-        reserves over what it allocates above the models (peaks.RESERVED_OVER)."""
-        return self.allocated + self.room + math.ceil(peaks.RESERVED_OVER * self.above)
+        """What torch's allocator is to hold for the phase: the peak, its room, and the share
+        (`over`) it reserves over what it allocates above the models. Under the segments and
+        cudaMallocAsync the room is the step's reserve beyond its peak, the whole of what the
+        plan leaves torch (peaks.reserve), and `over` is 0 (reserved_share); under torch's own
+        allocator without the segments it is peaks.RESERVED_OVER, as before."""
+        return self.allocated + self.room + math.ceil(self.over * self.above)
+
+
+def reserved_share(allocator: str) -> float:
+    """The share of what a phase allocates above the models that the reservation adds to the
+    phase's peak and reserve (Peak.over): peaks.RESERVED_OVER under torch's own allocator without
+    the segments (memory.PLAIN, also a driver that refuses), where the reserve is the flat
+    memory.RESERVE off the figure counted and torch's reserved-over-allocated slack is not in it;
+    0 under the segments and cudaMallocAsync, whose per-step reserve beyond the peak (DESIGN.md,
+    Allocator, Small cards, 2026-11-06) is what the plan leaves torch."""
+    return peaks.RESERVED_OVER if allocator == memory.PLAIN else 0.0
 
 
 def _dit_models(plan: StillPlan) -> int:
@@ -1321,17 +1428,34 @@ def bound_peaks(plan: StillPlan) -> dict[Phase, Peak]:
     VAE phase the larger of the worst picture's pass (_proof_need, its room apart) and the
     input's copies (_copies_need, the picture's frame in the decode's included)."""
     job, models = _job_of(plan), plan.models
-    found: dict[Phase, Peak] = {"dit": Peak(plan.dit_peak, _dit_models(plan), 0)}
+    over = reserved_share(plan.reading.allocator)
+    found: dict[Phase, Peak] = {
+        "dit": Peak(plan.dit_peak, _dit_models(plan), _dit_reserve(job), over)
+    }
     pairs: tuple[tuple[Phase, int | None], ...] = (
         ("encode", models.resident_encode),
         ("decode", models.resident_decode),
     )
     for phase, resident in pairs:
-        allocated = _proof_need(job, phase, resident, models.swapped) - VAE_ROOM
+        allocated = _proof_peak(job, phase, resident, models.swapped)
         if phase in _copy_phases(job):
-            allocated = max(allocated, _copies_need(job, phase, resident, models.swapped))
-        found[phase] = Peak(allocated, _on_gpu(job, resident, models.swapped), VAE_ROOM)
+            allocated = max(allocated, _copies_peak(job, phase, resident, models.swapped))
+        room = _vae_reserve(job, phase, allocated, resident, models.swapped)
+        found[phase] = Peak(allocated, _on_gpu(job, resident, models.swapped), room, over)
     return {phase: found[phase] for phase in PHASES}
+
+
+def reserve_taken(plan: StillPlan) -> dict[str, int] | None:
+    """The reserve a held run's plan leaves torch beyond each phase's peak, in bytes, as
+    `memory.hold` takes it (Peaks.reserve_taken's for a picture): each phase's room at the bound
+    (bound_peaks) under the segments and cudaMallocAsync, the flat memory.RESERVE for every phase
+    under torch's own allocator without the segments; None on a driver that refuses, which leaves
+    none."""
+    if not plan.reading.held:
+        return None
+    if plan.reading.allocator == memory.PLAIN:
+        return dict.fromkeys(PHASES, memory.RESERVE)
+    return {phase: found.room for phase, found in bound_peaks(plan).items()}
 
 
 def picture_peaks(
@@ -1350,7 +1474,10 @@ def picture_peaks(
     dit = peaks.dit_peak(
         padded, 1, models.swapped, models.vae_in_dit, plan.attention, plan.dit_model
     )
-    found: dict[Phase, Peak] = {"dit": Peak(dit, _dit_models(plan), 0)}
+    working = peaks.dit_working(padded, 1, plan.attention, plan.dit_model)
+    dit_room = peaks.reserve(peaks.DIT_PHASE, working, plan.reading.allocator, plan.reading.margin)
+    over = reserved_share(plan.reading.allocator)
+    found: dict[Phase, Peak] = {"dit": Peak(dit, _dit_models(plan), dit_room, over)}
     passes: tuple[tuple[Phase, int | None, int], ...] = (
         ("encode", models.resident_encode, found_tiles.encode_peak),
         ("decode", models.resident_decode, found_tiles.decode_peak),
@@ -1360,7 +1487,8 @@ def picture_peaks(
         if phase in _copy_phases(job):
             copies = copies_peak(phase, input_pixels, padded[0] * padded[1])
             peak = max(peak, on_gpu + copies)
-        found[phase] = Peak(peak, on_gpu, VAE_ROOM)
+        room = _vae_reserve(job, phase, peak, resident, models.swapped)
+        found[phase] = Peak(peak, on_gpu, room, over)
     return {phase: found[phase] for phase in PHASES}
 
 
@@ -1417,7 +1545,7 @@ def _account(job: _Job, models: ModelPlan) -> StillPlan:
         job.split,
         job.pins,
         job.process,
-        _dit_need(job, models.swapped, models.vae_in_dit),
+        _dit_peak(job, models.swapped, models.vae_in_dit),
         windows_most(job.bound, job.picture),
         _pinned(models, job.dit_model, job.held),
         0,
@@ -1565,12 +1693,12 @@ def said(
 ) -> list[str]:
     """The plan as --plan prints it and a run logs it, a line per choice in plain words, each
     opening with what it says, "plan: memory: ...", as the planner's lines do (planner.said):
-    the memory (what was read, the margin or the reserve held, the budget, the tight reserve when
-    taken), the picture's size, the attention backend and the DiT's format, the blocks swapped and
-    where the VAE is in the DiT's phase with the DiT's peak, what of the DiT stays on the GPU in
-    each VAE phase, the system memory; and with `target` (frames.target_size's), the picture's
-    encode and decode, untiled or in tiles with the grid and the predicted peaks. `smaller`: the
-    line of the smaller DiT files that plan the picture better (stills.py), put after the blocks
+    the memory (what was read, the margin or the reserve held, the budget), the picture's size, the
+    attention backend and the DiT's format, the blocks swapped and where the VAE is in the DiT's
+    phase with the DiT's peak, what of the DiT stays on the GPU in each VAE phase, the system
+    memory; and with `target` (frames.target_size's), the picture's encode and decode, untiled or
+    in tiles with the grid and the predicted peaks. `smaller`: the line of the smaller DiT files
+    that plan the picture better (stills.py), put after the blocks
     swapped; None says none."""
     frame = _most(plan.bound, plan.picture)
     height, width = frame
@@ -1632,7 +1760,15 @@ def said(
             f"the VAE: off the GPU in the DiT's phase, its {_gib(peaks.VAE_WEIGHTS)} GiB given to"
             " the DiT"
         )
-    under = f"{_gib(plan.budget - plan.dit_peak)} GiB under the budget"
+    job = _job_of(plan)
+    dit_reserve = _dit_reserve(job)
+    if plan.reading.allocator == memory.PLAIN:
+        under = f"{_gib(plan.budget - plan.dit_peak)} GiB under the budget"
+    else:
+        under = (
+            f"its reserve beyond the peak {_gib(dit_reserve)} GiB,"
+            f" {_gib(plan.budget - plan.dit_peak - dit_reserve)} GiB under the budget"
+        )
     if plan.picture is None:
         lines.append(
             f"the DiT's phase: {_gib(plan.dit_peak)} GiB at the most for a picture within the"
@@ -1673,10 +1809,11 @@ def said(
             ("decode", found.decode, found.decode_peak, plan.pins.decode_tile),
         ):
             lines.append(_pass_said(phase, chosen, peak, pin, padded, plan))
-        lines.append(
-            "the VAE's room: what each VAE pass leaves free, for the large pieces of memory a"
-            f" pass asks for at once: {_gib(VAE_ROOM)} GiB of the budget, beside each peak"
-        )
+        if plan.reading.allocator == memory.PLAIN:
+            lines.append(
+                "the VAE's room: what each VAE pass leaves free, for the large pieces of memory a"
+                f" pass asks for at once: {_gib(VAE_ROOM)} GiB of the budget, beside each peak"
+            )
     return [f"plan: {line}" for line in lines]
 
 
@@ -1706,8 +1843,8 @@ def _memory_said(plan: StillPlan) -> list[str]:
     name. On a driver that refuses, one line: what it reports free, the budget that less the
     margin (MARGIN), and no reserve. On a run held to the card (memory.Reading.held), two: the
     free memory the run is held under, with the other figure (_named); then the budget, what the
-    plan counts on; where the plan took memory.RESERVE_TIGHT, the plan with memory.RESERVE
-    refused, a line more."""
+    plan counts on, and the reserve: the flat memory.RESERVE under torch's own allocator without
+    the segments, each step's own beyond its peak (peaks.reserve) elsewhere."""
     reading = plan.reading
     if not reading.held:
         return [
@@ -1716,23 +1853,31 @@ def _memory_said(plan: StillPlan) -> list[str]:
             " reserve, the driver refusing memory the card doesn't have"
         ]
     free = _held_under(reading)
-    lines = [
+    head = (
         f"memory: {_gib(free)} GiB free {_named(reading, _gib, driver=False)}: the run is held"
-        " to the card's own memory, its driver giving more than the card has",
+        " to the card's own memory, its driver giving more than the card has"
+    )
+    if reading.allocator == memory.PLAIN:
+        return [
+            head,
+            f"budget: {_gib(plan.budget)} GiB, the {_gib(free)} GiB free less torch's limit,"
+            f" {_gib(reading.left)} GiB under it, and the reserve of"
+            f" {_gib(free - reading.left - reading.counted)} GiB left to torch's allocator beyond"
+            f" a step's peak; the margin of {_gib(MARGIN)} GiB is in the reserve",
+        ]
+    each = reserve_taken(plan)
+    assert each is not None, "a held reading"
+    allocator = (
+        "cudaMallocAsync's pool" if reading.allocator == memory.POOL else "expandable segments"
+    )
+    return [
+        head,
         f"budget: {_gib(plan.budget)} GiB, the {_gib(free)} GiB free less torch's limit,"
-        f" {_gib(reading.left)} GiB under it, and the reserve of"
-        f" {_gib(free - reading.left - reading.counted)} GiB left to torch's allocator beyond a"
-        f" step's peak; the margin of {_gib(MARGIN)} GiB is in the reserve",
+        f" {_gib(reading.left)} GiB under it; each step is left a reserve beyond its peak, by the"
+        f" size of the peak ({allocator}): {_gib(each['dit'])} GiB for the DiT's phase,"
+        f" {_gib(each['encode'])} for the encode, {_gib(each['decode'])} for the decode, at the"
+        " bound",
     ]
-    if plan.tightened:
-        tight, usual = _gib(memory.RESERVE_TIGHT), _gib(memory.RESERVE)
-        lines.append(
-            f"reserve: {tight} GiB and not {usual}, the plan with {usual} having been refused"
-            " (--verbose says why); slow: a step short of room beyond its peak slows down where"
-            f" it would be refused, and a picture that fits with {usual} runs up to 1.5 times as"
-            f" long with {tight}; memory freed on the card gives the {usual} back"
-        )
-    return lines
 
 
 def _pass_said(
@@ -1757,7 +1902,18 @@ def _pass_said(
             "the whole frame not fitting the budget, the largest tiles that do, up to"
             f" {peaks.TILE_MAX} px"
         )
-    peak_said = f"peak {_gib(peak)} GiB, {_gib(plan.budget - peak - VAE_ROOM)} GiB under the budget"
+    models = plan.models
+    resident = models.resident_encode if phase == "encode" else models.resident_decode
+    room = _vae_reserve(
+        _job_of(plan), "encode" if phase == "encode" else "decode", peak, resident, models.swapped
+    )
+    if plan.reading.allocator == memory.PLAIN:
+        peak_said = f"peak {_gib(peak)} GiB, {_gib(plan.budget - peak - room)} GiB under the budget"
+    else:
+        peak_said = (
+            f"peak {_gib(peak)} GiB, its reserve beyond it {_gib(room)} GiB,"
+            f" {_gib(plan.budget - peak - room)} GiB under the budget"
+        )
     if chosen is None:
         return f"{phase}: untiled, {why}; {peak_said}; {option} PX tiles it"
     rows, columns = peaks.grid_shapes(padded, chosen)

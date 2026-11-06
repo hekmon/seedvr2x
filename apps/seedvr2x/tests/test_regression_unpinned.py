@@ -147,7 +147,7 @@ def test_the_readings_are_those_memory_makes(monkeypatch: pytest.MonkeyPatch) ->
         memory.Reading(
             30 * GIB,
             round(24.8 * GIB),
-            round(24.8 * GIB) - memory.HELD_BACK - memory.RESERVE,
+            round(24.8 * GIB) - memory.HELD_BACK,
             True,
             memory.HELD_BACK,
         )
@@ -462,8 +462,11 @@ def test_a_plan_bound_by_the_system_memory_is_rebuilt_from_the_logged_bytes(
     # A plan bound by the system memory moves at steps of a few MiB, and its lines say the host's
     # figure to 0.01 GiB: two decimals of GiB rebuilt it wrongly near a step (found by a sweep of
     # +-0.005 GiB that missed one). Found: the smallest host with a plan other than the one below
-    # it, to the byte; the bytes of the log rebuild each side of it.
-    free = READINGS["driver"]
+    # it, to the byte; the bytes of the log rebuild each side of it. The card's figure picked
+    # where the plan swaps blocks (20 GiB: 11 to 12 of them by the host; the segments' reserve by
+    # step, which takes no flat 4.5 off the figure, holds the DiT whole at 24.8 GiB, where the
+    # host could bind nothing).
+    free = reg.Free(round(20 * GIB), 30 * GIB, True)
 
     def blocks(host: int) -> str:
         lines = reg.planner_says(reg.readings(free, monkeypatch)[0], inputs(), host)

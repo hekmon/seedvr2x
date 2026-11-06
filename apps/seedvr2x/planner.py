@@ -40,7 +40,6 @@ from seedvr2x.shot_plan import (
     _left,  # pyright: ignore[reportPrivateUsage]
     _named,  # pyright: ignore[reportPrivateUsage]
     _resident_said,  # pyright: ignore[reportPrivateUsage]
-    held_note,
     plan,
 )
 from seedvr2x.shots import SHARED, Shot
@@ -222,14 +221,9 @@ def plan_naming(
     if not found:
         raise refused
     way = smaller_way([each for each, _ in found], model_dir)
-    # The way out sits beside the refusal's own (a pin's, the fewest blocks that hold it), before
-    # a held run's note on the reserves its figures were found with (held_note).
-    said, note = refused.words(option), held_note()
-    if said.endswith(note):
-        said = said[: -len(note)]
-    else:
-        note = ""
-    raise refused.reworded(f"{said}; or {way}{note}") from None
+    # The way out sits beside the refusal's own (a pin's, the fewest blocks that hold it).
+    said = refused.words(option)
+    raise refused.reworded(f"{said}; or {way}") from None
 
 
 def smaller_swaps(
@@ -941,6 +935,23 @@ def card_detail(peaks: Peaks) -> str | None:
     )
 
 
+def _reserves_said(peaks: Peaks) -> str:
+    """The reserve a plan leaves beyond each step's peak, by the step, in GiB, and the allocator
+    it is the rule of: the DiT's window, the encode and the decode, each by its own peak
+    (Peaks.reserves, peaks.reserve). Under cudaMallocAsync it is the pool's, counted on the card."""
+    each = peaks.reserves
+    allocator = (
+        "cudaMallocAsync's pool"
+        if peaks.reading.allocator == memory.POOL
+        else ("expandable segments")
+    )
+    return (
+        f"reserve beyond each step's peak: {_gib(each['dit'])} GiB for the DiT's window,"
+        f" {_gib(each['encode'])} for the encode, {_gib(each['decode'])} for the decode"
+        f" ({allocator})"
+    )
+
+
 def _card_said(card: str, peaks: Peaks) -> list[str]:
     """The plan's first lines (said): the card, its free memory and the budget, with the margin
     and the reserve by their names and figures. On a driver that refuses, one line: what it
@@ -948,10 +959,13 @@ def _card_said(card: str, peaks: Peaks) -> list[str]:
     card (memory.Reading.held), two: the free memory the run is held under, the driver's figure
     or the whole card's, with the other (_named); then the budget, what the plan counts on: that
     less what torch's limit leaves under it (Reading.left) and the reserve the plan leaves
-    torch's allocator beyond a step's peak (memory.RESERVE), two figures that were once given as
-    one (a review's finding, 2026-10-12), the margin counted in the reserve (_Job.margin); where
-    the plan took memory.RESERVE_TIGHT, the plan with memory.RESERVE refused, that refusal and
-    the cost, slow, in a second line (Peaks.tightened)."""
+    torch's allocator beyond a step's peak. Under torch's own allocator without the expandable
+    segments (memory.PLAIN) that is memory.RESERVE, taken off the figure, two figures that were
+    once given as one (a review's finding, 2026-10-12), the margin counted in the reserve
+    (_Job.margin); under the segments and cudaMallocAsync nothing is taken off the figure and the
+    line says the reserve of each step, by its peak (Peaks.reserves; DESIGN.md, Allocator, Small
+    cards, 2026-11-06). There is no second line: the 2.5 GiB reserve and its "up to 1.5 times as
+    long" retired with the segments' reserve measured by the step."""
     reading = peaks.reading
     # An early reading (memory.early) says what NVML read and what was counted off it, never
     # "its driver reports", which it did not ask.
@@ -968,35 +982,22 @@ def _card_said(card: str, peaks: Peaks) -> list[str]:
             " reserve, the driver refusing memory the card doesn't have"
         ]
     free = _held_under(reading)
-    budget = (
-        f"budget: {_gib(peaks.budget)} GiB, the {_gib(free)} GiB free less torch's limit,"
-        f" {_gib(reading.left)} GiB under it, and the reserve of"
-        f" {_gib(free - reading.left - peaks.free)} GiB left to torch's allocator beyond a step's"
-        f" peak; the margin of {_gib(MARGIN)} GiB is in the reserve"
-    )
+    if reading.allocator == memory.PLAIN:
+        budget = (
+            f"budget: {_gib(peaks.budget)} GiB, the {_gib(free)} GiB free less torch's limit,"
+            f" {_gib(reading.left)} GiB under it, and the reserve of"
+            f" {_gib(free - reading.left - peaks.free)} GiB left to torch's allocator beyond a"
+            f" step's peak; the margin of {_gib(MARGIN)} GiB is in the reserve"
+        )
+    else:
+        budget = (
+            f"budget: {_gib(peaks.budget)} GiB, the {_gib(free)} GiB free less torch's limit,"
+            f" {_gib(reading.left)} GiB under it; {_reserves_said(peaks)}"
+        )
     named = _named(reading, _gib, driver=False) if early is None else f"({early})"
     lines = [
         f"card: {card}, {_gib(free)} GiB free {named}: the run is held to the card's own memory,"
         " its driver giving more than the card has",
         budget,
     ]
-    if peaks.tightened is not None:
-        # The plan's last resort (plan; DESIGN.md, Allocator): said slow, on a line of its own,
-        # the budget's second (DESIGN.md, Architecture, What it prints, decided on 2026-10-28:
-        # the budget's line took 851 characters with the usual reserve's refusal inside it, which
-        # plan() now says at debug). PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says "the two
-        # lines a plan's line may take" and leaves the split open): the figures in the first, the
-        # reserve of 2.5, its cost and the pin that runs at full speed in the second, so that the
-        # first reads as any held plan's does.
-        tight, usual = _gib(memory.RESERVE_TIGHT), _gib(memory.RESERVE)
-        reserve = (
-            f"reserve: {tight} GiB and not {usual}, the plan with {usual} having been refused"
-            " (--verbose says why); slow: a step short of room beyond its peak slows down where"
-            f" it would be refused, and a job that fits with {usual} runs up to 1.5 times as"
-            f" long with {tight}; memory freed on the card gives the {usual} back"
-        )
-        if peaks.instead is not None:
-            # The pin that runs with the usual reserve, at full speed (design, 2026-10-21).
-            reserve += f"; {option(peaks.instead)} would run with the full reserve, at full speed"
-        lines.append(reserve)
     return lines

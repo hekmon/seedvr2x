@@ -1219,8 +1219,14 @@ def test_a_driver_that_spills_is_planned_under_and_held(
     # What the plan counts on is its budget, the planner's margin counted in what a held run
     # leaves to torch's allocator: the plan of a driver that refuses and reports that margin
     # more.
-    planned_in = card - memory.HELD_BACK - memory.RESERVE
-    made = planner.plan(planned_in + planner.MARGIN, TARGET, JOB_SHOTS, Pins(window=5), HOST)
+    planned_in = card - memory.HELD_BACK
+    made = planner.plan(
+        memory.Reading(FREE, card, planned_in, True, memory.HELD_BACK),
+        TARGET,
+        JOB_SHOTS,
+        Pins(window=5),
+        HOST,
+    )
     # Held twice: before the first pass, and again once the plan is made, before the models
     # load; the stand-in's card has the same memory free both times.
     assert loads == [(made[0].model_plan, 2)] and limits == [(card - memory.HELD_BACK) / TOTAL] * 2
@@ -1251,12 +1257,17 @@ def test_a_driver_that_spills_is_planned_under_and_held(
     # The driver's figure is no longer in it (design's ruling, baton 3, 2026-10-30): under
     # --verbose only (test_the_drivers_figure_is_said_under_verbose).
     assert "its driver reports" not in caplog.text
+    # Under the segments nothing is taken off the figure, each step is left a reserve by its own
+    # peak (DESIGN.md, Allocator, Small cards, 2026-11-06), said by step.
+    each = made[1].reserves
     assert (
-        "plan: budget: 87.20 GiB, the 92.50 GiB free less torch's limit, 3.00 GiB under it, and the"
-        " reserve of 2.30 GiB left to torch's allocator beyond a step's peak; the margin of"
-        " 0.60 GiB is in the reserve"
+        "plan: budget: 89.50 GiB, the 92.50 GiB free less torch's limit, 3.00 GiB under it;"
+        f" reserve beyond each step's peak: {each['dit'] / GIB:.2f} GiB for the DiT's window,"
+        f" {each['encode'] / GIB:.2f} for the encode, {each['decode'] / GIB:.2f} for the decode"
+        " (expandable segments)"
     ) in caplog.text
-    assert caplog.text.count("plan: budget: 87.20 GiB") == 1
+    assert caplog.text.count("plan: budget: 89.50 GiB") == 1
+    assert recorded["reserve"] == made[1].reserve_taken() == memory._reserve  # pyright: ignore[reportPrivateUsage]
     assert (
         "torch held to 89.50 GiB on the GPU: the 92.50 GiB free on the whole card, less 3.0 GiB,"
         " and what it holds"
@@ -1415,7 +1426,7 @@ def test_a_plan_on_a_driver_that_spills_is_held_for_its_calibration(
     assert upscale(tmp_path, source_path, "out", *JOB, "--plan", "plan.txt") == 0
     assert limits == [(FREE - memory.HELD_BACK_UNREAD) / TOTAL] * 2 and steps.calls == []
     assert "torch held to " in caplog.text
-    planned_in = FREE - memory.HELD_BACK - memory.RESERVE
+    planned_in = FREE - memory.HELD_BACK
     reading = memory.Reading(FREE, None, planned_in, True, memory.HELD_BACK_UNREAD)
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     # And the timings the calibration gave, for information (resume.UNCOMPARED).
@@ -1432,9 +1443,10 @@ def test_a_plan_on_a_driver_that_spills_is_held_for_its_calibration(
         " wasn't read): the run is held to the card's own memory, its driver giving more than"
         " the card has"
     ) in caplog.text
+    each = planner.plan(reading, TARGET, JOB_SHOTS, Pins(window=5), HOST)[1].reserves
     assert (
-        "the 94.50 GiB free less torch's limit, 3.00 GiB under it, and the reserve of 2.30 GiB left"
-        " to torch's allocator"
+        "the 94.50 GiB free less torch's limit, 3.00 GiB under it; reserve beyond each step's"
+        f" peak: {each['dit'] / GIB:.2f} GiB for the DiT's window"
     ) in caplog.text
 
 
@@ -1459,114 +1471,114 @@ def test_resumed_on_a_driver_that_spills_is_held_again(
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native,expandable_segments:True"
     assert limits == [(FREE - memory.HELD_BACK) / TOTAL] * 2
-    planned_in = FREE - memory.HELD_BACK - memory.RESERVE
+    planned_in = FREE - memory.HELD_BACK
     assert json.loads(manifest.read_text())["plan"]["memory"]["free"] == planned_in
     made = [indexes(tmp_path / "out" / f"seg_{number:06d}.mkv") for number in range(2)]
     assert made[0] + made[1] == list(range(25))
 
 
-def test_a_held_run_refused_with_4_5_takes_2_5(
+def test_a_held_run_is_planned_by_each_step_s_reserve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # DESIGN.md, Allocator (decided on 2026-10-13, for a resume's plan on 2026-10-21): a held
-    # run's plan is made with the reserve of 4.5 GiB, and only where that plan would be refused,
-    # with 2.5, said slow in its budget line; a resume's recorded shape too, before the resume
-    # stops. The job pinned whole, its window, blocks and passes, on a card 1 GiB short of its
-    # need with 4.5 and 1 over it with 2.5: a new job, and one stopped on a driver that refuses,
-    # resumed there. The limit set once the plan is made may then lose 2.5 (memory.check).
+    # DESIGN.md, Allocator, Small cards (decided 2026-11-06): under the segments a held run's
+    # plan leaves each step a reserve by its own peak, and there is no second reserve of 2.5
+    # nor a line saying a job runs slower: the job is run or refused by those figures, a new job
+    # and a resume's recorded shape alike. The job pinned whole, its window, blocks and passes, on
+    # a card exactly its need and 1 byte under it. Under a user's torch allocator without the
+    # segments the flat 4.5 stays, and a refusal says where the segments would run it.
     from seedvr2x import memory
 
     levels(caplog, logging.INFO)
     pinned = ("--swap-blocks", "0", "--encode-tile", "0", "--decode-tile", "0")
     pins = Pins(window=5, encode_tile=0, decode_tile=0, swap_blocks=0)
-    # The least the job's plan needs: the fewest bytes a driver that refuses plans it in, less
-    # the margin, bisected.
-    low, high = 0, FREE
-    while high - low > 1:
-        middle = (low + high) // 2
-        try:
-            planner.plan(middle, TARGET, JOB_SHOTS, pins, HOST)
-            high = middle
-        except planner.PlanError:
-            low = middle
-    need = high - planner.MARGIN
     source_path = job(tmp_path, monkeypatch)
     # Stopped with units made, its plan's shape kept from its record on resuming.
     steps.stop = "encode 3"
     stopped(tmp_path, source_path, "resumed", *JOB, *pinned)
     steps.stop = None
     spilling_driver(monkeypatch)
-    # The measured reserve, not the tests' own 2.3, which is under 2.5.
+    # The measured reserve, not the tests' own 2.3.
     monkeypatch.setattr(memory, "RESERVE", round(4.5 * GIB))
-    free = need - GIB + memory.HELD_BACK_UNREAD + memory.RESERVE
-    free_memory(monkeypatch, free)
-    # Both refused with 4.5 by the blocks pinned, the resume for its recorded window, the
-    # recorded plan's (test_planner.py's test_a_held_plan_refused_takes_the_reserve_of_2_5 has a
-    # recorded shape refused as such, unpinned).
-    for output, whose in (("out", "--window 5's longest"), ("resumed", "the recorded plan's")):
-        refused = f"--swap-blocks 0: a window of 4 latents, {whose}, takes"
+
+    def reading(counted: int, allocator: str) -> memory.Reading:
+        return memory.Reading(
+            counted + memory.HELD_BACK_UNREAD,
+            None,
+            counted,
+            True,
+            memory.HELD_BACK_UNREAD,
+            allocator,
+        )
+
+    def least(allocator: str) -> int:
+        """The fewest bytes counted that plan the pinned job under `allocator`, bisected."""
+        low, high = 0, FREE
+        while high - low > 1:
+            middle = (low + high) // 2
+            try:
+                planner.plan(reading(middle, allocator), TARGET, JOB_SHOTS, pins, HOST)
+                high = middle
+            except planner.PlanError:
+                low = middle
+        return high
+
+    need = least(memory.SEGMENTS)
+    # The step's reserve is more than the margin the plan counted before on this job's passes,
+    # and the flat 4.5 less than they together, so that the segments' plan needs more than the
+    # plain one here (a VAE pass of this size reserving 0.2 x P past 1.25), and less than it
+    # with the 4.5 added (the card the plain allocator is refused on and the segments run).
+    plain = least(memory.PLAIN) + memory.RESERVE
+    assert need <= plain
+    made = planner.plan(reading(need, memory.SEGMENTS), TARGET, JOB_SHOTS, pins, HOST)
+    each = made[1].reserves
+    free_memory(monkeypatch, need + memory.HELD_BACK_UNREAD)
+    for output, resumed in (("out", False), ("resumed", True)):
         # Each start a process of its own, which finds no allocator set.
         monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
         caplog.clear()
         assert upscale(tmp_path, source_path, output, *JOB, *pinned) == 0
-        assert (output == "resumed") == any(
+        assert resumed == any(
             line.startswith(f"resuming {tmp_path / output}") for line in caplog.messages
         )
-        # The budget takes two lines (DESIGN.md, Architecture, What it prints, built on
-        # 2026-10-29): its figures, then the reserve of 2.5 and what it costs, the refusal of
-        # the plan with 4.5 said at debug only.
         [budget] = [line for line in caplog.messages if line.startswith("plan: budget: ")]
-        [reserve] = [line for line in caplog.messages if line.startswith("plan: reserve: ")]
         assert budget.endswith(
-            " and the reserve of 2.50 GiB left to torch's allocator beyond a step's peak; the"
-            " margin of 0.60 GiB is in the reserve"
+            f"; reserve beyond each step's peak: {each['dit'] / GIB:.2f} GiB for the DiT's"
+            f" window, {each['encode'] / GIB:.2f} for the encode, {each['decode'] / GIB:.2f} for"
+            " the decode (expandable segments)"
         )
-        assert refused not in budget + reserve
-        assert reserve.startswith("plan: reserve: 2.50 GiB and not 4.50, the plan with 4.50 having")
-        assert reserve.endswith(
-            "; slow: a step short of room beyond its peak slows down where it would be refused,"
-            " and a job that fits with 4.50 runs up to 1.5 times as long with 2.50; memory freed"
-            " on the card gives the 4.50 back; --swap-blocks 5 would run with the full reserve, at"
-            " full speed"
-        )
+        # One line: no second reserve, no slower job.
+        assert not any(line.startswith("plan: reserve: ") for line in caplog.messages)
+        assert "1.5 times" not in caplog.text and "2.50" not in caplog.text
         content = json.loads((tmp_path / output / "manifest.json").read_text())
-        assert content["plan"]["memory"]["reserve"] == memory.RESERVE_TIGHT
-        assert content["plan"]["memory"]["free"] == need + GIB
-        assert memory._reserve == memory.RESERVE_TIGHT  # pyright: ignore[reportPrivateUsage]
-        made = [indexes(tmp_path / output / f"seg_{number:06d}.mkv") for number in range(2)]
-        assert made[0] + made[1] == list(range(25))
-    # 1 GiB short with 2.5 too: refused, by the figures of the plan with 2.5, both tried, the
-    # first pass kept; and with 4.5 to spare nothing is said of 2.5.
-    free_memory(monkeypatch, need - GIB + memory.HELD_BACK_UNREAD + memory.RESERVE_TIGHT)
+        assert content["plan"]["memory"]["reserve"] == made[1].reserve_taken()
+        assert content["plan"]["memory"]["free"] == need
+        assert memory._reserve == made[1].reserve_taken()  # pyright: ignore[reportPrivateUsage]
+        done = [indexes(tmp_path / output / f"seg_{number:06d}.mkv") for number in range(2)]
+        assert done[0] + done[1] == list(range(25))
+    # A byte short: refused by the step's own figures, the first pass kept.
+    free_memory(monkeypatch, need - 1 + memory.HELD_BACK_UNREAD)
     monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
     caplog.clear()
     assert upscale(tmp_path, source_path, "short", *JOB, *pinned) == 1
     [said] = [record.message for record in caplog.records if record.levelname == "ERROR"]
-    assert said.endswith(
-        "; refused with the reserve of 4.50 GiB that a held run's plan leaves torch's allocator"
-        " beyond a step's peak, and with 2.50, the one it takes where that is refused, whose"
-        " figures these are" + kept(tmp_path / "short")
-    )
-    free_memory(monkeypatch, need + memory.HELD_BACK_UNREAD + memory.RESERVE)
-    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
-    caplog.clear()
-    assert upscale(tmp_path, source_path, "room", *JOB, *pinned) == 0
-    assert "not 4.50" not in caplog.text and "2.50" not in caplog.text
-    content = json.loads((tmp_path / "room" / "manifest.json").read_text())
-    assert content["plan"]["memory"]["reserve"] == memory.RESERVE
+    with pytest.raises(planner.PlanError) as direct:
+        planner.plan(reading(need - 1, memory.SEGMENTS), TARGET, JOB_SHOTS, pins, HOST)
+    assert said == planner.worded(direct.value) + kept(tmp_path / "short")
+    assert "2.50" not in said and "refused with the reserve" not in said
     # A user's own torch allocator without expandable segments, where a step short of room is
-    # refused rather than slowed down: refused with 4.5, as before, saying that torch's default
-    # setting would run it with 2.5, slower (design, 2026-10-21).
-    free_memory(monkeypatch, free)
+    # refused rather than slowed down: refused with the flat 4.5, a byte short, saying that
+    # torch's default would run it.
+    free_memory(monkeypatch, plain - 1 + memory.HELD_BACK_UNREAD)
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "backend:native")
     caplog.clear()
     assert upscale(tmp_path, source_path, "native", *JOB, *pinned) == 1
     [said] = [record.message for record in caplog.records if record.levelname == "ERROR"]
-    assert said.startswith("--swap-blocks 0: a window of 4 latents") and said.endswith(
+    assert said.startswith("--") and said.endswith(
         "; torch's own allocator with its expandable segments, a held run's default, which the"
-        " allocator's setting in the environment replaces here, would run it with the reserve of"
-        " 2.50 GiB, slower" + kept(tmp_path / "native")
+        " allocator's setting in the environment replaces here, would run it"
+        + kept(tmp_path / "native")
     )
+    assert "2.50" not in said
 
 
 def test_a_held_run_warns_where_torch_refused_allocations_in_a_vae_unit(
@@ -3010,7 +3022,11 @@ def test_the_early_warning_s_debug_line_says_nvml_s_reading_and_the_context_coun
 
     monkeypatch.setattr(memory, "early", early)
     encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
-    nvml = encode + planner.MARGIN - GIB // 4 + memory.CONTEXT + (3 * GIB if held else 0)
+    # Held, the figure counted is NVML's less the context and what torch is held back from, and
+    # the encode is judged by its peak and its reserve beyond it, the floor of 1.25 GiB for a
+    # frame this small (peaks.reserve; DESIGN.md, Allocator, Small cards, 2026-11-06): the same
+    # 0.25 GiB short as where the driver refuses.
+    nvml = encode - GIB // 4 + memory.CONTEXT + (memory.HELD_BACK if held else planner.MARGIN)
     early_card(monkeypatch, nvml)
     caplog.clear()
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
@@ -3086,7 +3102,11 @@ def test_the_early_warning_says_what_the_refusal_would_where_no_programs_cure(
     real = memory.early
     monkeypatch.setattr(memory, "early", lambda *a: _with_paravirtual(monkeypatch, held, real, *a))
     encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
-    nvml = encode + planner.MARGIN - GIB // 4 + memory.CONTEXT + (3 * GIB if held else 0)
+    # Held, the figure counted is NVML's less the context and what torch is held back from, and
+    # the encode is judged by its peak and its reserve beyond it, the floor of 1.25 GiB for a
+    # frame this small (peaks.reserve; DESIGN.md, Allocator, Small cards, 2026-11-06): the same
+    # 0.25 GiB short as where the driver refuses.
+    nvml = encode - GIB // 4 + memory.CONTEXT + (memory.HELD_BACK if held else planner.MARGIN)
     early_card(monkeypatch, nvml, 4 * GIB if cure else GIB // 10)
     mark_checks(monkeypatch)
     caplog.clear()

@@ -31,7 +31,6 @@ it (until 2026-11-05) did: the text they made, which the tool's proof compares.
 
 import argparse
 import sys
-from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -113,15 +112,6 @@ class Lines(Matrix):
         if error.instead is None or error.instead.name == "resolution":
             return ""
         return planner.option(error.instead)
-
-    def peaks_text(self, made_peaks: Peaks) -> str:
-        """Peaks as they were: the refusal of the usual reserve in the command line's words, the
-        pin that runs with it as an option string ("" for none)."""
-        tightened = made_peaks.tightened
-        words = None if tightened is None else planner.worded(tightened)
-        instead = "" if made_peaks.instead is None else planner.option(made_peaks.instead)
-        # The two fields are strings in what is printed, as they were.
-        return repr(replace(made_peaks, tightened=words, instead=instead))  # type: ignore[arg-type]
 
     def planned(self, case: Case, made: Plan, made_peaks: Peaks) -> None:
         self.kept.append((made, case.target, case.shots))

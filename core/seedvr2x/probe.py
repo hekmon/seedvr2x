@@ -30,8 +30,11 @@ a failure is cached too, so that a second run refuses at once, saying it was mea
 when. A file unreadable or of another format is ignored, logged, and written again.
 
 The allocator's margin: DESIGN.md has the probe measure it "on a few small steps", which waits for
-design's rule (after a study of the allocator). Nothing of it is built: each environment's record
-has a field `allocator_margin`, null today, and `Probed.allocator_margin` is None. Whoever builds
+design's rule (after a study of the allocator). The measurement is not built: each environment's
+record has a field `allocator_margin`, null today, and `Probed.allocator_margin` is None. Its
+reading side is built: a margin there, a share of a step's P, is carried by the app into the
+plan's reading (memory.Reading.margin) and peaks.reserve counts the larger of it and the rule's
+share for that run (SEGMENTS and POOL), the nodes doing it (apps/comfyui/models.py). Whoever builds
 the measurement fills that field through `check`, bumps FORMAT only if the record changes shape
 (a value in a field that is null today needs no new format), and decides whether a margin
 measured is part of "every needed check passed" for the cache to vouch.

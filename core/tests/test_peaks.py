@@ -9,7 +9,7 @@ shapes are counted."""
 import pytest
 from library_fixtures import LEAN_WINDOWS
 
-from seedvr2x import peaks, tilegrid, weights
+from seedvr2x import memory, peaks, tilegrid, weights
 from seedvr2x.frames import output_size, padded_size
 from seedvr2x.passes import Tiles
 from seedvr2x.peaks import GIB
@@ -1066,3 +1066,193 @@ def test_the_video_figures_are_unmoved_by_the_pictures() -> None:
     # One frame's figures are the pictures' own: the video's decode of a frame is not them.
     assert peaks.decode_peak(padded, output, None, 0, 0, True, frames=1) == 38_216_325_239
     assert peaks.picture_decode_peak(padded, output, None, 0, 0, True) != 38_216_325_239
+
+
+# ---- The DiT's and the VAE's working set, and the reserve by the step (DESIGN.md, Allocator, Small
+# cards, decided 2026-11-06) ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dit_model", peaks.DITS, ids=lambda found: found.name)
+@pytest.mark.parametrize("attention", [peaks.FLASH_ATTN_2, peaks.SDPA])
+@pytest.mark.parametrize("swapped", [0, 12, 36])
+@pytest.mark.parametrize("vae_in_dit", [True, False])
+@pytest.mark.parametrize(("padded", "latents"), [(OURS_1080, 1), (OURS_1080, 5), (OURS_4K, 3)])
+def test_the_dits_peak_is_what_is_resident_plus_its_working_set(
+    dit_model: weights.Architecture,
+    attention: str,
+    swapped: int,
+    vae_in_dit: bool,
+    padded: tuple[int, int],
+    latents: int,
+) -> None:
+    resident = peaks.loaded(dit_model) - peaks.swapped_saving(dit_model, swapped)
+    if not vae_in_dit:
+        resident -= peaks.VAE_WEIGHTS
+    working = peaks.dit_working(padded, latents, attention, dit_model)
+    peak = peaks.dit_peak(padded, latents, swapped, vae_in_dit, attention, dit_model)
+    # dit_peak rounds the whole sum, dit_working its own part: within the byte.
+    assert abs(peak - (resident + working)) <= 1
+
+
+@pytest.mark.parametrize("dit_model", peaks.DITS, ids=lambda found: found.name)
+def test_the_working_set_follows_the_tokens_the_windows_and_the_formats_buffers(
+    dit_model: weights.Architecture,
+) -> None:
+    # The same window in each format: the fp16 fit's terms, plus the scratch of int8's or the
+    # GGUF's linear, and no weight in it (the fp16 file's 15 GiB are not in 4 GiB of window).
+    working = peaks.dit_working(OURS_1080, 5, peaks.FLASH_ATTN_2, dit_model)
+    windows = peaks.attention_windows(OURS_1080, 5)
+    buffers = (
+        peaks.INT8_BUFFERS
+        if dit_model == peaks.INT8
+        else peaks.GGUF_BUFFERS
+        if dit_model.layout == weights.GGUF
+        else 0
+    )
+    expected = (
+        peaks.DIT_ATTENTION[peaks.FLASH_ATTN_2][0]
+        + buffers
+        + peaks.PER_TOKEN * peaks.tokens(OURS_1080, 5)
+        + peaks.PER_WINDOW * windows
+    )
+    assert working == round(expected)
+    assert 2 * GIB < working < 6 * GIB
+
+
+def test_the_working_set_refuses_what_the_peak_refuses() -> None:
+    with pytest.raises(ValueError, match="attention"):
+        peaks.dit_working(OURS_1080, 1, "other")
+    with pytest.raises(ValueError, match="DiT"):
+        peaks.dit_working(OURS_1080, 1, peaks.FLASH_ATTN_2, weights.VAE)  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize("dit_model", peaks.DITS, ids=lambda found: found.name)
+@pytest.mark.parametrize("swapped", [0, 12, 36])
+@pytest.mark.parametrize("resident", [None, 0])
+def test_a_vae_passes_working_set_is_its_peak_over_the_models_resident_in_its_phase(
+    dit_model: weights.Architecture, swapped: int, resident: int | None
+) -> None:
+    there = peaks.VAE_WEIGHTS + peaks.dit_on_gpu(resident, swapped, dit_model)
+    encode = peaks.encode_peak(OURS_1080, None, resident, swapped, dit_model=dit_model)
+    decode = peaks.decode_peak(OURS_1080, HD, Tiles(1024), resident, swapped, dit_model=dit_model)
+    assert peaks.vae_working(encode, resident, swapped, dit_model) == encode - there
+    assert peaks.vae_working(decode, resident, swapped, dit_model) == decode - there
+    # The pass's own terms and nothing resident: the encode over the fit and its extra.
+    assert peaks.vae_working(encode, resident, swapped, dit_model) == (
+        round(peaks._fit(OURS_1080, None, 0)) + peaks.ENCODE_EXTRA  # pyright: ignore[reportPrivateUsage]
+    )
+
+
+# The reserve's rule: max(floor, share x P) beyond a step's peak, by the step and the allocator.
+SEGMENT_RULES = {
+    peaks.DIT_PHASE: (peaks.DIT_RESERVE_FLOOR, peaks.DIT_RESERVE_SHARE),
+    peaks.ENCODE_PHASE: (peaks.VAE_RESERVE_FLOOR, peaks.VAE_RESERVE_SHARE),
+    peaks.DECODE_PHASE: (peaks.VAE_RESERVE_FLOOR, peaks.VAE_RESERVE_SHARE),
+}
+
+
+def test_the_reserves_figures_are_designs() -> None:
+    # DESIGN.md, Allocator, Small cards: max(0.6, 0.3 x P) beyond a DiT step, max(1.25, 0.2 x P)
+    # beyond a VAE pass under the segments; the pool's: 0.2 x P (provisional) and 0.35 x P.
+    assert peaks.DIT_RESERVE_FLOOR == round(0.6 * GIB) == peaks.MARGIN
+    assert peaks.VAE_RESERVE_FLOOR == round(1.25 * GIB) == peaks.VAE_ROOM
+    assert (peaks.DIT_RESERVE_SHARE, peaks.VAE_RESERVE_SHARE) == (0.3, 0.2)
+    assert (peaks.POOL_DIT, peaks.POOL_VAE) == (0.24, 0.35)
+    assert peaks.POOL_DIT_FLOOR == round(0.85 * GIB)
+
+
+@pytest.mark.parametrize("phase", peaks.PHASES)
+def test_under_the_segments_a_step_is_left_the_larger_of_its_floor_and_its_share(
+    phase: str,
+) -> None:
+    floor, share = SEGMENT_RULES[phase]
+    # The share passes the floor at P = floor / share: on each side of it.
+    edge = floor / share
+    for working in (0, GIB // 4, round(edge) - 1000):
+        assert peaks.reserve(phase, working, memory.SEGMENTS) == floor
+    for working in (round(edge) + 1000, 8 * GIB, 20 * GIB, 60 * GIB):
+        assert peaks.reserve(phase, working, memory.SEGMENTS) == round(share * working) > floor
+    # Continuous at the edge, to a byte or two.
+    assert abs(peaks.reserve(phase, round(edge), memory.SEGMENTS) - floor) <= 1
+
+
+@pytest.mark.parametrize("phase", peaks.PHASES)
+def test_the_reserve_has_no_cap_where_the_share_passes_4_5_gib(phase: str) -> None:
+    # Design's ruling of 2026-11-06: no cap; 0.3 x P is over 4.5 GiB from P of 15 GiB, 0.2 x P
+    # from 22.5.
+    _, share = SEGMENT_RULES[phase]
+    working = round(4.5 * GIB / share) + GIB
+    assert peaks.reserve(phase, working, memory.SEGMENTS) > round(4.5 * GIB)
+    assert peaks.reserve(phase, 100 * GIB, memory.SEGMENTS) == round(share * 100 * GIB)
+
+
+def test_under_the_pool_a_step_is_left_its_pools_share() -> None:
+    floor_vae = peaks.VAE_RESERVE_FLOOR
+    # The DiT's: max(0.85, 0.24 x P), measured (hold_probe.py's scan, 2026-11-06): the pool held
+    # beyond the peak at each rung is covered, by 0.03 GiB at the least.
+    scan = [(0.59, 0.35), (1.55, 0.74), (2.51, 0.71), (3.51, 0.811), (5.47, 1.22), (9.34, 1.70)]
+    scan.append((2.03, 0.80))
+    for working, held in scan:
+        left = peaks.reserve(peaks.DIT_PHASE, round(working * GIB), memory.POOL)
+        assert left >= round((held + 0.03) * GIB) - GIB // 1000, (working, held)
+    # Its floor met at P = 0.85 / 0.24 = 3.54 GiB, on each side.
+    edge = round(0.85 / 0.24 * GIB)
+    assert peaks.reserve(peaks.DIT_PHASE, edge - 1000, memory.POOL) == round(0.85 * GIB)
+    assert peaks.reserve(peaks.DIT_PHASE, edge + 1000, memory.POOL) == round(0.24 * (edge + 1000))
+    assert peaks.reserve(peaks.DIT_PHASE, 10 * GIB, memory.POOL) == round(2.4 * GIB)
+    # A VAE pass: max(1.25, 0.35 x P), met at P of 3.57 GiB.
+    for phase in (peaks.ENCODE_PHASE, peaks.DECODE_PHASE):
+        assert peaks.reserve(phase, 3 * GIB, memory.POOL) == floor_vae
+        assert peaks.reserve(phase, 4 * GIB, memory.POOL) == round(0.35 * 4 * GIB)
+        assert peaks.reserve(phase, 30 * GIB, memory.POOL) == round(0.35 * 30 * GIB)
+
+
+@pytest.mark.parametrize("working", [0, GIB, 5 * GIB, 40 * GIB])
+def test_under_torchs_own_allocator_without_the_segments_the_plan_leaves_what_it_always_did(
+    working: int,
+) -> None:
+    # The flat memory.RESERVE is off the counted figure already (memory.counted); beyond a
+    # peak a window is left nothing more, and a VAE pass its room, whatever its size.
+    assert peaks.reserve(peaks.DIT_PHASE, working, memory.PLAIN) == 0
+    assert peaks.reserve(peaks.ENCODE_PHASE, working, memory.PLAIN) == peaks.VAE_ROOM
+    assert peaks.reserve(peaks.DECODE_PHASE, working, memory.PLAIN) == peaks.VAE_ROOM
+
+
+def test_the_reserve_refuses_a_phase_or_an_allocator_it_does_not_know() -> None:
+    with pytest.raises(ValueError, match="phase"):
+        peaks.reserve("window", GIB, memory.SEGMENTS)
+    with pytest.raises(ValueError, match="allocator"):
+        peaks.reserve(peaks.DIT_PHASE, GIB, "async")
+
+
+def test_a_measured_margin_counts_where_it_is_larger_than_the_rules_share() -> None:
+    # The probe's allocator margin (a share of P, Reading.margin) is read, not measured (probe.py):
+    # peaks.reserve counts the larger of it and the rule's share for SEGMENTS and POOL, never
+    # under the floor, and PLAIN's flat reserve takes none. P of 10 GiB: the rule's DiT share
+    # is 0.3 (3.0 GiB) under SEGMENTS, 0.24 (2.4) under the pool; the VAE's 0.2 and 0.35.
+    working = 10 * GIB
+    for allocator, phase, rule in (
+        (memory.SEGMENTS, peaks.DIT_PHASE, 0.3),
+        (memory.SEGMENTS, peaks.ENCODE_PHASE, 0.2),
+        (memory.POOL, peaks.DIT_PHASE, 0.24),
+        (memory.POOL, peaks.DECODE_PHASE, 0.35),
+    ):
+        base = peaks.reserve(phase, working, allocator)
+        assert base == round(rule * working)
+        # Under the rule, and equal to it: the plan is the rule's.
+        assert peaks.reserve(phase, working, allocator, rule / 2) == base
+        assert peaks.reserve(phase, working, allocator, rule) == base
+        assert peaks.reserve(phase, working, allocator, None) == base
+        # Over it: the margin's share, in bytes the larger, one way or the other never less.
+        assert peaks.reserve(phase, working, allocator, 0.5) == round(0.5 * working) > base
+        assert peaks.reserve_terms(phase, allocator, 0.5)[1] == 0.5
+        # A small P stays at its floor under a margin that does not lift it above.
+        floor = peaks.reserve_terms(phase, allocator)[0]
+        assert peaks.reserve(phase, GIB // 100, allocator, 0.5) == max(
+            floor, round(0.5 * GIB / 100)
+        )
+        assert peaks.reserve(phase, 0, allocator, 0.5) == floor
+    for phase in peaks.PHASES:
+        assert peaks.reserve(phase, working, memory.PLAIN, 0.9) == peaks.reserve(
+            phase, working, memory.PLAIN
+        )

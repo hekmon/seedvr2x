@@ -51,10 +51,13 @@ def card(gib: float) -> Reading:
     return Reading(free, None, free, False)
 
 
-def held(counted: float, left: float = 0.0) -> Reading:
-    """A run held to the card whose plan counts on `counted` GiB (memory.Reading)."""
+def held(counted: float, left: float = 0.0, allocator: str = memory.PLAIN) -> Reading:
+    """A run held to the card whose plan counts on `counted` GiB (memory.Reading), under torch's
+    own allocator without the segments unless `allocator` says otherwise: a window has no reserve
+    beyond its peak there and a VAE pass VAE_ROOM, whatever the figure counted, which the tests
+    that give the figure whole count on."""
     count = round(counted * GIB)
-    return Reading(count + round(left * GIB), None, count, True, round(left * GIB))
+    return Reading(count + round(left * GIB), None, count, True, round(left * GIB), allocator)
 
 
 def made(
@@ -975,50 +978,67 @@ def test_the_host_is_unchecked_when_it_is_unread() -> None:
     assert made(EIGHT_K, card(24), None).host_available is None
 
 
-# ---- A held run and the tight reserve ------------------------------------------------------------
+# ---- A held run and the reserve by the step ---------------------------------------------------
 
 
-def test_the_tight_reserve_is_taken_where_the_usual_one_is_refused_and_said() -> None:
-    # 7 GiB reported, 0.5 held back: the plan counts on 2 with the reserve of 4.5, 4 with 2.5. The
-    # 1080p bound's decode takes 3.72 GiB (one frame's 512-px tiles, 2.47, and the room), between
-    # them; 11 GiB reported before one frame's passes were measured (7.67 GiB taken, 6 and 8).
-    reading = Reading(round(7 * GIB), None, round(2 * GIB), True, round(0.5 * GIB))
-    with pytest.raises(PlanRefusal):
-        made((1920, 1080), replace(reading, expandable=False))
+def test_the_segments_judge_a_picture_by_each_step_s_reserve_beyond_its_peak() -> None:
+    # 1080p bound, counted 4.5 GiB under the segments (nothing is taken off the figure): each step
+    # needs its peak and its reserve (peaks.reserve) under the budget.
+    reading = held(4.5, 0.5, memory.SEGMENTS)
     plan = made((1920, 1080), reading)
-    assert plan.reading.tight and plan.reading.counted == round(4 * GIB)
-    assert plan.margin == 0 and plan.budget == plan.reading.counted
-    assert plan.tightened.startswith("pictures within 1920x1080 take 3.72 GiB of free VRAM")
-    assert sweep(plan, seed=2) > 100
-    lines = still_plan.said(plan)
-    assert any("reserve: 2.50 GiB and not 4.50" in line for line in lines)
-
-
-def test_expandable_segments_off_refuses_saying_the_tight_reserve_would_run_it() -> None:
-    reading = Reading(
-        round(7 * GIB), None, round(2 * GIB), True, round(0.5 * GIB), expandable=False
+    assert plan.margin == 0 and plan.budget == plan.reading.counted == round(4.5 * GIB)
+    job = still_plan._job_of(plan)
+    assert still_plan._dit_need(job, plan.models.swapped, plan.models.vae_in_dit) <= plan.budget
+    working = peaks.dit_working(
+        still_plan._most(plan.bound, plan.picture),
+        1,
+        plan.attention,
+        plan.dit_model,
+        still_plan.windows_most(plan.bound, plan.picture),
     )
-    with pytest.raises(PlanRefusal) as refused:
-        made((1920, 1080), reading)
-    words = cli_words(refused.value)
-    assert "expandable segments" in words and "reserve of 2.50 GiB" in words
-    assert refused.value.phase == "decode"
+    assert still_plan._dit_reserve(job) == peaks.reserve(peaks.DIT_PHASE, working, memory.SEGMENTS)
+    assert still_plan._dit_need(job, 36, False) == (
+        still_plan._dit_peak(job, 36, False) + still_plan._dit_reserve(job)
+    )
+    for phase in ("encode", "decode"):
+        peak = still_plan._proof_peak(job, phase, 0, 36)
+        own = still_plan._vae_reserve(job, phase, peak, 0, 36)
+        assert own == peaks.reserve(phase, peaks.vae_working(peak, 0, 36), memory.SEGMENTS)
+        assert still_plan._proof_need(job, phase, 0, 36) == peak + own
+    # The same plan under torch's own allocator without the segments, whose figure has the flat 4.5
+    # off it: the VAE passes keep VAE_ROOM and the DiT has none beyond its peak.
+    flat = still_plan._job_of(made((1920, 1080), held(4.5, 0.5)))
+    assert still_plan._dit_reserve(flat) == 0
+    for phase in ("encode", "decode"):
+        peak = still_plan._proof_peak(flat, phase, 0, 36)
+        assert still_plan._vae_reserve(flat, phase, peak, 0, 36) == peaks.VAE_ROOM
 
 
-def test_refused_with_both_reserves_says_both() -> None:
-    # 6 GiB reported: 1 counted with the reserve of 4.5, 3 with 2.5, under the decode's 3.72.
-    reading = Reading(round(6 * GIB), None, round(1 * GIB), True, round(0.5 * GIB))
-    with pytest.raises(PlanRefusal) as refused:
-        made((1920, 1080), reading)
-    words = cli_words(refused.value)
-    assert "refused with the reserve of 4.50 GiB" in words and "and with 2.50" in words
-
-
-def test_a_tight_reading_is_not_planned_again() -> None:
-    tight = memory.tightened(Reading(round(6 * GIB), None, round(1 * GIB), True, round(0.5 * GIB)))
-    with pytest.raises(PlanRefusal) as refused:
-        made((1920, 1080), tight)
-    assert "refused with the reserve" not in cli_words(refused.value)
+def test_a_plan_refused_under_torch_s_own_allocator_says_where_the_segments_would_run_it() -> None:
+    # The 1080p bound's decode needs 3.72 GiB under the flat rule's VAE_ROOM; a figure of 3.3 GiB
+    # counted, the flat 4.5 off it, refuses it, and the segments' rule (a floor of 1.25 beyond the
+    # peak of 2.47, so 3.72 as well) too: nothing to say. At 3.8 the flat rule runs it. A DiT
+    # bound where the segments' reserve is under the flat rule's needs is the case that says it:
+    # found by a sweep below.
+    refusals = 0
+    for tenth in range(20, 120):
+        counted = tenth / 10
+        flat = held(counted)
+        try:
+            made((1920, 1080), flat)
+            continue
+        except PlanRefusal as refused:
+            words = cli_words(refused)
+            segments = held(counted + 4.5, 0.5, memory.SEGMENTS)
+            try:
+                made((1920, 1080), segments)
+                runs = True
+            except PlanRefusal:
+                runs = False
+            assert ("expandable segments" in words) == runs, counted
+            refusals += runs
+            assert "reserve of 2.50 GiB" not in words and "refused with the reserve" not in words
+    assert refusals
 
 
 def test_pins_that_need_no_memory_are_refused_even_when_the_run_is_held() -> None:
@@ -1144,20 +1164,39 @@ def test_said_names_the_pins_and_the_formats() -> None:
 
 
 def test_said_on_a_held_run_names_the_figures() -> None:
-    reading = Reading(round(26 * GIB), round(25 * GIB), round(20 * GIB), True, round(0.5 * GIB))
+    reading = Reading(
+        round(26 * GIB), round(25 * GIB), round(20 * GIB), True, round(0.5 * GIB), memory.PLAIN
+    )
     text = "\n".join(still_plan.said(made(FOUR_K, reading)))
     assert (
         "25.00 GiB free on the whole card by NVML: the run is held to the card's own memory" in text
     )
     assert "budget: 20.00 GiB, the 25.00 GiB free less torch's limit, 0.50 GiB under it" in text
     assert "the reserve of 4.50 GiB left to torch's allocator" in text
+    # Under the segments each step has its own, beyond its peak, which the lines say.
+    segments = replace(reading, allocator=memory.SEGMENTS)
+    text = "\n".join(still_plan.said(made(FOUR_K, segments), (2160, 3840)))
+    assert "each step is left a reserve beyond its peak" in text
+    # By the step, at the bound, as the plan holds torch to them (reserve_taken), and the
+    # allocator named.
+    each = still_plan.reserve_taken(made(FOUR_K, segments))
+    assert each is not None and len(set(each.values())) > 1
+    assert (
+        f"(expandable segments): {each['dit'] / GIB:.2f} GiB for the DiT's phase,"
+        f" {each['encode'] / GIB:.2f} for the encode, {each['decode'] / GIB:.2f} for the decode,"
+        " at the bound"
+    ) in text
+    pooled = "\n".join(still_plan.said(made(FOUR_K, replace(reading, allocator=memory.POOL))))
+    assert "(cudaMallocAsync's pool):" in pooled
+    assert "its reserve beyond the peak" in text and "its reserve beyond it" in text
+    assert "the VAE's room" not in text and "left to torch's allocator" not in text
 
 
 def test_plan_returns_the_models_the_loaders_follow() -> None:
     plan = made(EIGHT_K, card(32))
     assert isinstance(plan.models, ModelPlan) and not plan.models.compile_vae
     assert plan.bound == EIGHT_K and plan.split and plan.attention == peaks.FLASH_ATTN_2
-    assert plan.process == PROCESS and plan.tightened == ""
+    assert plan.process == PROCESS
 
 
 # ---- The picture's own copies on the GPU ---------------------------------------------------------
@@ -1359,7 +1398,7 @@ def test_a_small_inputs_size_changes_nothing_of_the_plan() -> None:
             )
 
 
-def test_a_refusal_for_the_copies_survives_the_tight_retry() -> None:
+def test_a_refusal_for_the_copies_is_still_said_on_a_held_run() -> None:
     with pytest.raises(PlanRefusal) as refused:
         made(HD, held(16.0), input_pixels=2_000_000_000)
     assert refused.value.phase == "encode" and refused.value.fits_input is not None
@@ -1943,9 +1982,98 @@ def test_a_picture_s_refusal_in_the_library_s_words_names_no_option() -> None:
         error,
     ):
         assert "--" not in str(each)
-    # The tight retry's rewording keeps the kind and the facts (the words are the first's).
+    # The words of a refusal under the segments (the step's reserve) name no option either, and
+    # carry the same kind and the phase.
     reading = held(8.5)
-    first = refused_by(HD, replace(reading, tight=True), input_pixels=2_000_000_000)
-    again = refused_by(HD, reading, input_pixels=2_000_000_000)
+    first = refused_by(HD, reading, input_pixels=2_000_000_000)
+    again = refused_by(HD, replace(reading, allocator=memory.SEGMENTS), input_pixels=2_000_000_000)
     assert type(again) is type(first) and again.phase == first.phase
-    assert str(again).endswith("whose figures these are") and "--" not in str(again)
+    assert "the reserve beyond them" in str(again) and "--" not in str(again)
+
+
+def test_the_reserve_a_picture_s_plan_hands_to_the_limit_is_each_phase_s_room() -> None:
+    # still_plan.reserve_taken (what memory.hold takes, as shot_plan.Peaks.reserve_taken does for a
+    # video): each phase's room at the bound under the segments and the pool, the flat
+    # memory.RESERVE for every phase under torch's own allocator without the segments, none on a
+    # driver that refuses.
+    for allocator in (memory.SEGMENTS, memory.POOL):
+        plan = made(HD, held(12.0, 0.5, allocator))
+        found = still_plan.bound_peaks(plan)
+        assert still_plan.reserve_taken(plan) == {phase: each.room for phase, each in found.items()}
+    plain = made(HD, held(12.0, 0.5, memory.PLAIN))
+    assert still_plan.reserve_taken(plain) == dict.fromkeys(
+        ("encode", "dit", "decode"), memory.RESERVE
+    )
+    assert still_plan.reserve_taken(made(HD, card(24))) is None
+
+
+def test_a_phase_s_room_is_its_reserve_and_the_copies_are_judged_by_theirs() -> None:
+    # What a phase takes for a reservation: the room beyond its peak is the step's reserve under
+    # the segments and the pool, the flat room of before under torch's own allocator without them;
+    # and the largest input is the one whose copies and reserve (peaks.reserve for P = the copies)
+    # fit, found to the byte on both sides.
+    for allocator in (memory.SEGMENTS, memory.POOL, memory.PLAIN):
+        plan = made(HD, held(12.0, 0.5, allocator))
+        job = still_plan._job_of(plan)
+        found = still_plan.bound_peaks(plan)
+        assert found["dit"].room == still_plan._dit_reserve(job)
+        for phase in ("encode", "decode"):
+            peak = found[phase]
+            assert (
+                peak.room == peaks.reserve(phase, peak.allocated - peak.models, allocator)
+                or allocator == memory.PLAIN
+            )
+            if allocator == memory.PLAIN:
+                assert peak.room == peaks.VAE_ROOM and found["dit"].room == 0
+    floor = round(1.25 * GIB)
+    for allocator in (memory.SEGMENTS, memory.POOL, memory.PLAIN):
+        plan = made(HD, held(12.0, 0.5, allocator), input_pixels=INPUT)
+        job = still_plan._job_of(plan)
+        fits = still_plan._largest_input(job)
+        assert fits is not None and fits >= INPUT
+        for phase in still_plan._copy_phases(job):
+            inside = replace(job, input_pixels=fits)
+            assert still_plan._copies_need(inside, phase, 0, 0) <= job.budget
+        assert any(
+            still_plan._copies_need(replace(job, input_pixels=fits + 1), phase, 0, 0) > job.budget
+            for phase in still_plan._copy_phases(job)
+        ), allocator
+        if allocator != memory.PLAIN:
+            copies = still_plan.copies_peak("encode", fits, still_plan._padded_pixels(job.bound))
+            assert still_plan._copies_reserve(job, "encode", copies) >= floor
+        else:
+            assert still_plan._copies_reserve(job, "encode", 10**9) == 0
+
+
+def test_a_measured_margin_over_the_rule_is_each_phases_room_in_a_picture_s_plan() -> None:
+    # Reading.margin through still_plan: the larger of the probe's share and the rule's is each
+    # phase's room (peaks.reserve), at the bound (bound_peaks), for a copy (_copies_reserve) and
+    # for the largest input (_largest_input); under the rule the plan is the rule's, PLAIN takes
+    # none, and a plan never has more of the DiT on the card with the larger room.
+    for allocator in (memory.SEGMENTS, memory.POOL):
+        base_reading = held(12.0, 0.5, allocator)
+        base = made(HD, base_reading)
+        under = made(HD, replace(base_reading, margin=0.05))
+        over = made(HD, replace(base_reading, margin=0.6))
+        assert replace(under, reading=base.reading) == base, allocator
+        assert still_plan.bound_peaks(under) == still_plan.bound_peaks(base)
+        found, wider = still_plan.bound_peaks(base), still_plan.bound_peaks(over)
+        for phase in found:
+            assert wider[phase].room >= found[phase].room, (allocator, phase)
+        job = still_plan._job_of(over)
+        working = peaks.dit_working(
+            still_plan._most(job.bound, job.picture),
+            1,
+            job.attention,
+            job.dit_model,
+            still_plan.windows_most(job.bound, job.picture),
+        )
+        assert wider["dit"].room == max(
+            peaks.reserve_terms(peaks.DIT_PHASE, allocator)[0], round(0.6 * working)
+        )
+        assert over.models.swapped >= base.models.swapped
+        assert (still_plan._largest_input(job) or 0) <= (
+            still_plan._largest_input(still_plan._job_of(base)) or 0
+        )
+    plain = held(12.0, 0.5, memory.PLAIN)
+    assert replace(made(HD, replace(plain, margin=0.6)), reading=plain) == made(HD, plain)

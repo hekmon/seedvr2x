@@ -14,7 +14,7 @@ import logging
 import os
 import shlex
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -117,7 +117,8 @@ class Reads:
     # main._load(model_files, device, model plan, reserve, kept): the models, loaded, with the
     # seconds that took; None once a refusal is logged.
     load: Callable[
-        ["ModelFiles", "torch.device", "ModelPlan", int, str], "tuple[Models, float] | None"
+        ["ModelFiles", "torch.device", "ModelPlan", Mapping[str, int] | int | None, str],
+        "tuple[Models, float] | None",
     ]
     refused: Callable[[BaseException], str]  # main._refused: the GPU's memory refused, in words
     out_of_memory: Callable[[], tuple[type[BaseException], ...]]  # main._out_of_memory
@@ -262,7 +263,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
         # No upscale, as a video's --plan: the models are not loaded, nothing is written.
         return 0
     tiles = still_plan.tiles(plan, target)
-    loaded = reads.load(model_files, device, plan.models, plan.reading.reserve, "")
+    loaded = reads.load(model_files, device, plan.models, still_plan.reserve_taken(plan), "")
     if loaded is None:
         return 1
     models, _ = loaded

@@ -14,6 +14,7 @@ from functools import cache
 
 from seedvr2x import tilegrid, weights
 from seedvr2x.frames import padded_length
+from seedvr2x.memory import PLAIN, POOL, SEGMENTS
 from seedvr2x.passes import Phase, Tiles
 
 # The DiT's own window functions, the 7B's: plain Python, and the packages above them hold
@@ -524,6 +525,47 @@ def dit_least(
     return least if vae_in_dit else least - VAE_WEIGHTS
 
 
+def dit_working(
+    padded: tuple[int, int],
+    latents: int,
+    attention: str = FLASH_ATTN_2,
+    dit_model: weights.Architecture = FP16,
+    windows: int | None = None,
+) -> int:
+    """P of a DiT step, in bytes: what one window of `latents` latents of padded frames takes of
+    the GPU over the weights the DiT keeps resident, by the fit of `attention` (DIT_ATTENTION;
+    ValueError for another name) in the format of `dit_model` (one of DITS; ValueError for
+    another): the attention constant, the per-token term, the per-window term and the format's
+    scratch buffers (INT8_BUFFERS, GGUF_BUFFERS: scratch, no weights). Never the DiT's weights,
+    the swapped blocks' slots or the VAE's weights, which dit_peak counts besides (loaded,
+    swapped_saving, VAE_WEIGHTS): so it depends on neither the blocks swapped nor the VAE's
+    place, and dit_peak(...) equals what is resident (loaded(dit_model) less swapped_saving,
+    less VAE_WEIGHTS where the VAE is away) plus this, to a byte (dit_peak rounds the sum, this
+    its own part). The P of the DiT's reserve (reserve; DESIGN.md, Allocator, Small cards).
+    `windows`: the attention windows the per-window term counts, where the caller bounds a set
+    of pictures by the most any takes (still_plan.windows_most); None counts the window's own
+    (attention_windows)."""
+    if attention not in DIT_ATTENTION:
+        raise ValueError(f"attention {attention!r}: the DiT's fit is {FLASH_ATTN_2}'s or {SDPA}'s")
+    constant, factor = DIT_ATTENTION[attention]
+    int8 = _format(dit_model) == INT8
+    per_token = (INT8_PER_TOKEN if int8 else PER_TOKEN) * factor * tokens(padded, latents)
+    buffers = INT8_BUFFERS if int8 else GGUF_BUFFERS if dit_model.layout == weights.GGUF else 0
+    per_window = INT8_PER_WINDOW if int8 else PER_WINDOW
+    counted = attention_windows(padded, latents) if windows is None else windows
+    return round(constant + buffers + per_token + per_window * counted)
+
+
+def vae_working(
+    peak: int, resident: int | None, swapped: int, dit_model: weights.Architecture = FP16
+) -> int:
+    """P of a VAE pass, in bytes: its predicted `peak` (encode_peak, decode_peak) over the
+    models resident in its phase, the VAE's weights and what of the DiT stays on the GPU
+    (dit_on_gpu's `resident`, `swapped` and `dit_model`). The P of the VAE's reserve (reserve);
+    the pass's own terms (ENCODE_EXTRA, the colour correction's) are in it."""
+    return peak - VAE_WEIGHTS - dit_on_gpu(resident, swapped, dit_model)
+
+
 def dit_on_gpu(resident: int | None, swapped: int, dit_model: weights.Architecture = FP16) -> int:
     """What of the DiT is on the GPU in a VAE phase, in bytes, `swapped` of its blocks being
     swapped, by what the phase is entered with (Plan.resident_encode, Plan.resident_decode), as
@@ -641,6 +683,94 @@ def decode_peak(
     corrected = SPLIT_FRAME_4K * frames * output[0] * output[1] / PIXELS_4K if split else 0
     above = fit + corrected if tiles is None else max(fit, corrected)
     return round(above) + VAE_WEIGHTS + dit_on_gpu(resident, swapped, dit_model)
+
+
+# ---- The reserve of a held run, by the step (DESIGN.md, Allocator, "The reserve under the segments
+# is measured by the step", decided 2026-11-06; research/docs/small-cards.md) ---------------------
+
+# What a held run's plan leaves torch beyond a step's predicted peak P (dit_working, vae_working)
+# under torch's own allocator with expandable segments (memory.SEGMENTS): max(floor, share x P).
+# Measured by place-study on an RTX 5090 under WSL2 with a card left exactly its size, at night:
+# the lean windows want 0.18, 0.20 then 0.29 x P beyond their peak to keep their speed (a room
+# short of it costs 2.7 to 3.4 times the window's time), and keep it from there down to no bit
+# changed, so the DiT's 0.3 is the largest of those with a little over; a VAE pass keeps its speed
+# from 0.2 x P. No cap where 0.3 x P passes 4.5 GiB (design's ruling, 2026-11-06). The floors:
+# the planner's MARGIN for a window (0.6 GiB) and VAE_ROOM for a pass (1.25 GiB), the figures a
+# driver that refuses has always left, kept as the rule's lower bound.
+DIT_RESERVE_FLOOR = MARGIN
+DIT_RESERVE_SHARE = 0.3
+VAE_RESERVE_FLOOR = VAE_ROOM
+VAE_RESERVE_SHARE = 0.2
+# The same under cudaMallocAsync (memory.POOL), on a driver that lends: torch's limit binds the
+# allocated bytes alone, and the pool held more of the card beside them, slowing nothing and moving
+# no bit: that pool is the reserve there, counted on the card. The DiT's: max(0.85, 0.24 x P).
+# Measured by hold_probe.py's scan (RTX 5090, 2026-11-06, the lean attention, 36 blocks swapped,
+# the VAE away, torch's limit lowered from 3.0 to 0 GiB over the peak by 0.25: the bits equal and
+# no step slower at any rung); the pool held beyond the allocated peak, at the most over the
+# rungs, 0.35 GiB at 1 latent of 1080p (P 0.59), 0.74 at 3 (P 1.55), 0.71 at 5 (2.51), 0.81 at 7
+# (3.51), 1.22 at 11 (5.47), 1.70 at 19 (9.34), and 0.80 at one latent of 4K (2.03): the rule
+# covers every one by 0.03 GiB at the least (7 latents: 0.842 for 0.811). A VAE pass: 0.35 x P
+# (DESIGN.md, Allocator, Small cards), under the same floor as the segments' (1.25 GiB), a floor
+# design has not measured below: PROVISIONAL, a question for design.
+POOL_DIT_FLOOR = round(0.85 * GIB)
+POOL_DIT = 0.24
+POOL_VAE = 0.35
+# The phases a reserve is asked for: a DiT window, a VAE encode, a VAE decode.
+DIT_PHASE, ENCODE_PHASE, DECODE_PHASE = "dit", "encode", "decode"
+PHASES = (DIT_PHASE, ENCODE_PHASE, DECODE_PHASE)
+
+
+def reserve(phase: str, working: int, allocator: str, margin: float | None = None) -> int:
+    """What a held run's plan leaves torch beyond a step's predicted peak, in bytes, for the
+    step `phase` (DIT_PHASE, ENCODE_PHASE or DECODE_PHASE; ValueError for another) whose peak
+    over the models resident in it is `working` bytes (P: dit_working, vae_working), under
+    `allocator` (memory.SEGMENTS, PLAIN or POOL; ValueError for another):
+    - SEGMENTS: a DiT step max(DIT_RESERVE_FLOOR, DIT_RESERVE_SHARE x P), a VAE pass
+      max(VAE_RESERVE_FLOOR, VAE_RESERVE_SHARE x P);
+    - POOL: a DiT step max(POOL_DIT_FLOOR, POOL_DIT x P), a VAE pass max(VAE_RESERVE_FLOOR,
+      POOL_VAE x P);
+    - PLAIN (torch's own allocator without the segments, and a driver that refuses): what the
+      plan leaves beyond the peak besides the flat memory.RESERVE it takes off the counted figure
+      (memory.counted), which is not in this one: 0 for a DiT step, its margin being inside that
+      figure, and VAE_ROOM for a VAE pass, the room it is judged by besides, as before.
+    `margin`: the allocator's margin the environment probe measured, a share of P (memory.Reading.
+    margin, probe.Probed.allocator_margin), None where none is: where it is larger than the
+    rule's share (SEGMENTS and POOL), it is the share, the plan counting the larger of the two.
+    PLAIN's flat reserve takes none.
+    The step needs its peak plus this under the figure the plan counts on."""
+    floor, share = reserve_terms(phase, allocator, margin)
+    return max(floor, round(share * working))
+
+
+def reserve_terms(phase: str, allocator: str, margin: float | None = None) -> tuple[int, float]:
+    """The floor, in bytes, and the share of P of reserve's rule max(floor, share x P) for the
+    step `phase` under `allocator` (ValueError for a name that isn't one): reserve's own table,
+    for whoever solves the rule for P (still_plan._largest_input). `margin`: the probe's measured
+    share of P (reserve), which replaces the rule's share where larger, under SEGMENTS and POOL;
+    PLAIN's takes none. Nothing builds the measurement yet (probe.py): this is the reading
+    side."""
+    floor, share = _terms(phase, allocator)
+    if margin is not None and allocator != PLAIN:
+        share = max(share, margin)
+    return floor, share
+
+
+def _terms(phase: str, allocator: str) -> tuple[int, float]:
+    """The rule's own floor and share (reserve_terms without the probe's margin)."""
+    if phase not in PHASES:
+        raise ValueError(f"phase {phase!r}: one of {', '.join(PHASES)}")
+    dit = phase == DIT_PHASE
+    if allocator == SEGMENTS:
+        return (
+            (DIT_RESERVE_FLOOR, DIT_RESERVE_SHARE)
+            if dit
+            else (VAE_RESERVE_FLOOR, VAE_RESERVE_SHARE)
+        )
+    if allocator == POOL:
+        return (POOL_DIT_FLOOR, POOL_DIT) if dit else (VAE_RESERVE_FLOOR, POOL_VAE)
+    if allocator == PLAIN:
+        return (0 if dit else VAE_ROOM), 0.0
+    raise ValueError(f"allocator {allocator!r}: one of {SEGMENTS}, {PLAIN}, {POOL}")
 
 
 # ---- One still picture: one frame (DESIGN.md, Still images, "The plan for one picture") -------

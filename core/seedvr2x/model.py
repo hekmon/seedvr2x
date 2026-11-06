@@ -177,8 +177,8 @@ class Models:
         (research/scripts/placement_bench.py)."""
         # Where seedvr2x holds itself to the card (a driver that gives system memory in its
         # place), other programs filling the card stop the run here, before the unit passes it
-        # (seedvr2x/memory.py).
-        memory.check(self.device)
+        # (seedvr2x/memory.py), a re-hold bounded by the reserve of the step about to run, `phase`.
+        memory.check(self.device, step=phase)
         if self.parts is not None and self.model_plan is None:
             raise RuntimeError("the models are released: Models.place puts them for a run")
         if self.model_plan is None or phase == self.phase:

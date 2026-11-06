@@ -10,7 +10,7 @@ import http.client
 import io
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from fractions import Fraction
 from importlib import metadata
@@ -53,7 +53,13 @@ class StandIn:
     attention_name: str = peaks.FLASH_ATTN_2
     # The format of the DiT file the server is started on (the stand-in's file is empty).
     dit_format: Architecture = peaks.FP16
+    # The allocator of a held run (memory.SEGMENTS, PLAIN or POOL); None: a driver that refuses.
+    allocator: str | None = None
     reserves: list[int] = field(default_factory=list[int])
+    # The reserve each load was given (memory.hold's `reserve`: the plan's, by step).
+    holds: list[Mapping[str, int] | int | None] = field(
+        default_factory=list[Mapping[str, int] | int | None]
+    )
     # Bytes of the last reservation torch has given back to the card: reserved() is that less,
     # until reserve() is called again.
     lost: int = 0
@@ -74,7 +80,14 @@ class StandIn:
         return self.free_bytes
 
     def reading(self, free: int) -> Reading:
-        return memory.reading(free)
+        if self.allocator is None:
+            return memory.reading(free)
+        # A run held to the card (a driver that lends) under the allocator named, counted as
+        # memory.counted counts it: the card's figure less HELD_BACK, less RESERVE under PLAIN.
+        shell = Reading(free, free, 0, True, memory.HELD_BACK, self.allocator)
+        return Reading(
+            free, free, memory.counted(free, shell), True, memory.HELD_BACK, self.allocator
+        )
 
     def host(self) -> int | None:
         return self.host_bytes
@@ -85,8 +98,11 @@ class StandIn:
     def dit_model(self, path: Path) -> Architecture:
         return self.dit_format
 
-    def load(self, files: ModelFiles, plan: ModelPlan, reserve: int) -> model.Models:
+    def load(
+        self, files: ModelFiles, plan: ModelPlan, reserve: Mapping[str, int] | int | None
+    ) -> model.Models:
         self.plans.append(plan)
+        self.holds.append(reserve)
         # As the library's load: each file hashed as it is read, its SHA-256 proved or given at
         # its end (pull.Hashes.proved; DESIGN.md, Weights, decided on 2026-11-03).
         for each in (files.dit.path, files.vae.path):
@@ -138,7 +154,9 @@ class HeldStart(StandIn):
     reached: threading.Event = field(default_factory=threading.Event)
     go: threading.Event = field(default_factory=threading.Event)
 
-    def load(self, files: ModelFiles, plan: ModelPlan, reserve: int) -> model.Models:
+    def load(
+        self, files: ModelFiles, plan: ModelPlan, reserve: Mapping[str, int] | int | None
+    ) -> model.Models:
         self.reached.set()
         assert self.go.wait(120), "the start was never let go"
         return super().load(files, plan, reserve)

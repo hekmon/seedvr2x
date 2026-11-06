@@ -8,11 +8,11 @@ classes (nodes.py) and the run (models.py) build on it, and the tests hold it al
 words never name an option of the command line: a setting is named by the label the user sees
 on the node that has it (LABELS, words.say)."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 
-from seedvr2x import peaks, pull, shotcuts, shotruns, shots
+from seedvr2x import memory, peaks, pull, shotcuts, shotruns, shots, still_plan
 from seedvr2x.memory import GIB, Reading
 from seedvr2x.passes import Plan, Tiles
 from seedvr2x.shot_plan import Peaks
@@ -391,10 +391,37 @@ def gib(count: float) -> str:
     return f"{count / GIB:.2f} GiB"
 
 
-def _room(room: Room, reading: Reading) -> list[str]:
+def _spare(reading: Reading, reserves: Mapping[str, int] | None) -> list[str]:
+    """The line saying the memory a held run leaves free beyond each step's need, in ComfyUI
+    users' words: by the step (the model working, an image encoded, an image decoded) under
+    PyTorch's default allocator and ComfyUI's cudaMallocAsync, one figure under PyTorch's
+    allocator without expandable segments (memory.PLAIN, where the plan takes a flat reserve off
+    the card). None says no reserve (the driver refuses memory the card does not have): no line."""
+    if reserves is None:
+        return []
+    if reading.allocator == memory.PLAIN:
+        return [
+            f"spare memory: {gib(memory.RESERVE)} of the card is kept free beyond what any step"
+            " needs, for PyTorch's own use"
+        ]
+    way = (
+        "ComfyUI's cudaMallocAsync setting"
+        if reading.allocator == memory.POOL
+        else "PyTorch's default memory handling"
+    )
+    return [
+        "spare memory: each step is left some of the card beyond what it needs at its peak, more"
+        f" for a larger step ({way}): {gib(reserves['dit'])} while the model works,"
+        f" {gib(reserves['encode'])} while an image is encoded, {gib(reserves['decode'])} while"
+        " it is decoded"
+    ]
+
+
+def _room(room: Room, reading: Reading, reserves: Mapping[str, int] | None = None) -> list[str]:
     lines = [
         f"graphics card: {room.card}, {gib(room.free)} free; ComfyUI's own models use"
-        f" {gib(room.comfy)} of it, and seedvr2x counts on {gib(reading.counted)}"
+        f" {gib(room.comfy)} of it, and seedvr2x counts on {gib(reading.counted)}",
+        *_spare(reading, reserves),
     ]
     if room.plan_only:
         lines.append(
@@ -511,7 +538,7 @@ def picture_text(
         f"seedvr2x plan{' (plan only)' if room.plan_only else ''}: {what} {source[0]}x{source[1]}"
         f" to {output[0]}x{output[1]} (resolution {resolution})",
         *notes,
-        *_room(room, plan.reading),
+        *_room(room, plan.reading, still_plan.reserve_taken(plan)),
         *_common(dit, attention, plan.models.swapped, settings),
         _tiles("encode_tile", settings.encode_tile is not None, tiles.encode, tiles.encode_peak),
         _tiles("decode_tile", settings.decode_tile is not None, tiles.decode, tiles.decode_peak),
@@ -613,7 +640,7 @@ def clip_text(
         first,
         *per_shot,
         *notes,
-        *_room(room, expected.reading),
+        *_room(room, expected.reading, expected.reserve_taken()),
         *_common(dit, attention, plan.swapped, settings),
         _became(
             "window",

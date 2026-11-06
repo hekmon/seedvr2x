@@ -47,6 +47,8 @@ class StandIn:
     allocator_name: str = "cudaMallocAsync"
     # Whether torch's own allocator, where that is the stand-in's, has its segments expandable.
     expandable: bool = True
+    # The allocator's margin the probe's cache holds for the environment (a share of a step's P).
+    allocator_margin: float | None = None
     # What the driver's reading is for the plan: the stand-in's default is a driver that refuses,
     # where the reported figure is the plan's; a test sets a held one.
     held_card: int | None = None
@@ -76,9 +78,24 @@ class StandIn:
     def reading(self, free: int) -> Reading:
         if self.held_card is None:
             return memory.reading(free)
-        counted = max(min(free, self.held_card) - memory.HELD_BACK - memory.RESERVE, 0)
+        # The allocator the stand-in runs, as memory.startup names it: cudaMallocAsync the pool,
+        # torch's own with its segments expandable SEGMENTS, without them PLAIN.
+        allocator = (
+            memory.POOL
+            if self.allocator_name == "cudaMallocAsync"
+            else memory.SEGMENTS
+            if self.expandable
+            else memory.PLAIN
+        )
+        taken = min(free, self.held_card)
+        shell = Reading(free, self.held_card, 0, True, memory.HELD_BACK, allocator)
         return Reading(
-            free, self.held_card, counted, True, memory.HELD_BACK, expandable=self.expandable
+            free,
+            self.held_card,
+            memory.counted(taken, shell),
+            True,
+            memory.HELD_BACK,
+            allocator,
         )
 
     def host(self) -> int | None:
@@ -91,8 +108,9 @@ class StandIn:
         self.headers.append(path)
         return self.dit_format
 
-    def probe(self, architecture: Architecture, attention: str) -> None:
+    def probe(self, architecture: Architecture, attention: str) -> float | None:
         self.probes.append((architecture.name, attention))
+        return self.allocator_margin
 
     def load(
         self,

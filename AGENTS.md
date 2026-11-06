@@ -791,11 +791,14 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   The card line leaves the driver's figure where NVML's is the smaller to a debug record beside
   it (`tests/test_planner.py`; `tests/test_cli_run.py`'s
   `test_the_drivers_figure_is_said_under_verbose`).
-  The spilling driver's two warnings are written out whole in `tests/test_memory.py`
-  (`LENDS_LINE`, `HOLDS_LINE`), not built from `memory`'s constants, so that a change of wording
-  fails the tests that compare them. `HOLDS_LINE` carries the autouse `round_figures` fixture's
-  figures, so `SHIPPED_HOLDS_LINE` is the line with the shipped ones, held by
-  `test_the_shipped_holds_line_says_the_shipped_figures`.
+  The spilling driver's warnings are written out whole in `tests/test_memory.py`
+  (`LENDS_LINE`, `HOLDS_LINE`, and `PLAIN_HOLDS_LINE` for torch's own allocator without the
+  segments, which keeps the flat 4.5 GiB), not built from `memory`'s constants, so that a change
+  of wording fails the tests that compare them. `HOLDS_LINE` carries the autouse `round_figures`
+  fixture's figures, so `SHIPPED_HOLDS_LINE` is the line with the shipped ones (each step planned
+  with a reserve by its own peak), held by `test_the_shipped_holds_line_says_the_shipped_figures`,
+  and `SHIPPED_PLAIN_HOLDS_LINE` the plain allocator's, held by
+  `test_the_plain_allocators_holds_line_keeps_its_4_5_gib`.
 - The calibration's measured lengths (`calibration.py`): `tests/test_timing.py`'s
   stand-ins `Steady`, `Heavy` (slow windows, and the first calls costing what the calibration's
   constants say) and `SlowEncode` (slow encodes) give the times, and the tests hold the longer
@@ -836,7 +839,12 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   check and an out-of-memory error uncached; importing the module imports no torch. The
   matrix product's and the attention's tolerances are PROVISIONAL (probe.py); `pytest -m gpu`
   prints every error against its tolerance on CUDA for each layout. The allocator's margin is not
-  built: the cache has the field, null.
+  measured: the cache has the field, null; its reading side is built (`Probed.allocator_margin`,
+  carried by an app into `memory.Reading.margin`, which `peaks.reserve` counts where it is
+  larger than the rule's share, under the segments and the pool; the nodes do it,
+  `apps/comfyui/models.py`), held by `test_a_cached_margin_counts_in_the_plan_where_it_is_over_the_rules_share`
+  (under, equal to and over the 0.3 share) and, through the plans, by `test_peaks.py`,
+  `test_shot_plan.py`, `test_still_plan.py` and the nodes' `test_machine.py`.
 - A still picture (DESIGN.md, Still images), on the CPU, in `core/tests/`: `tests/test_picture.py`
   holds `seedvr2x/picture.py` to files it makes, bytes in: every format and mode read (PNG in
   RGB, palette, grey at 1 to 16 bits, 16-bit RGB by TorchCodec's decoder, alpha; JPEG, WebP,
@@ -897,7 +905,7 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   8K and 6000x4000 bounds on cards of 16 to 48 GB given tiles that fit, by `peaks.py` alone; the
   attention windows counted as the DiT's window functions count them, and their most within a
   bound; the floor proved, and what of the DiT a pinned VAE phase keeps lowered for it; the DiT's order, int8, SDPA (the fit of FlashAttention 2's),
-  pins, the host's trades and refusal, held readings and the tight reserve; the picture's own
+  pins, the host's trades and refusal, held readings and each phase's reserve (below); the picture's own
   copies and resize on the GPU (`input_pixels`, a 100 MP input's 1.2 GB in float32 and 0.6 in
   bfloat16, the transform's tensors counted from their sizes, unmeasured): the residents lowered
   where a moment needs it, the refusal naming the largest input that fits, a small input changing
@@ -1138,6 +1146,40 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   boundaries of their scenarios re-picked, the direction of each move checked (a refused case
   planned, a window longer, never the reverse), and nothing loosened. The ledger of the moves
   is in the commit's message, not here.
+- The reserve by the step (DESIGN.md, Allocator, Small cards; `seedvr2x/peaks.py`'s `reserve`,
+  `dit_working`, `vae_working`, `memory.counted`): a held run no longer takes a flat 4.5 GiB
+  off the card's free memory; each step (a DiT window, an encode, a decode) needs its peak over
+  the models resident in it (P) plus a reserve of its own, a floor or a share of P with no cap,
+  by the run's allocator (`memory.SEGMENTS`, torch's own with expandable segments, the default;
+  `PLAIN`, without them, and a driver that refuses; `POOL`, cudaMallocAsync), which
+  `Reading.allocator` names. `PLAIN` is today's behaviour byte for byte (the flat reserve in
+  `memory.counted`, the VAE's room), by construction, and the tests that held it keep their
+  literals under it. `core/tests/test_peaks.py` holds the working sets (`dit_working` equal to
+  the DiT's peak less what is resident, over 72 parameter sets, `vae_working`), the table of
+  floors and shares by phase and allocator, no cap where the share passes 4.5 GiB, the pool
+  scan's coverage, `PLAIN`'s zero and refusals, and a probe's margin counted where larger;
+  `tests/test_memory.py` `counted` without the flat reserve, the reading naming its allocator
+  and a refusing driver `PLAIN`, `hold` taking the plan's reserves by step (a mapping, or the
+  flat figure under `PLAIN`) and `check` judging the step about to run (stop and re-hold at each
+  side of its reserve; no step, the smallest; one figure, all steps), and the pool's check
+  (stopped where the card no longer holds the step, the pool's bytes counted with the card's,
+  the driver's figure where the card's was not read: PROVISIONAL, no re-hold); `tests/
+  test_shot_plan.py` and `test_still_plan.py` the plans by step (the reserve each `Peaks`
+  carries, need equal to peak plus reserve within the budget, the floors on both sides, the
+  record's per-phase reserve, a picture's phase room and the copies judged by theirs, the
+  reserve a picture's plan hands the limit, `_largest_input` exact to the pixel) and the
+  direction of the change: where no reserve passes 4.5 GiB the segments need no more than the
+  flat reserve (a window no shorter, blocks swapped no more), and cards `PLAIN` refuses that the
+  segments run. The 2.5 GiB reserve and its `tightened` and `instead` fields are retired with
+  its advice (`test_a_check_judges_the_step_about_to_run` replaces it). The server's start holds
+  torch to each step's reserve and says it (`apps/imgserver/tests/test_service.py`; the
+  reservation per phase and `Peak.over` by allocator in `test_reservation.py`, its
+  `RESERVED_OVER` slack under `PLAIN` alone) and the nodes' plan text says the spare memory of
+  each step (`apps/comfyui/tests/test_machine.py`; ComfyUI's models gone counted by the
+  allocator's rule, a refusing driver none). The CLI's budget line is per step
+  (`apps/seedvr2x/tests/test_planner.py`). A plan refused under `PLAIN` says where the segments
+  would run it (`test_a_plan_refused_under_torch_s_own_allocator_says_where_the_segments_would_run_it`).
+  The pool's VAE floor (1.25 GiB) is design's open question, not a measure.
 - The plan matrix, in two tools ([Checks](#checks)). Core's `tools/plan_matrix.py`, the
   library's alone: `shot_plan.plan` over a fixed matrix, 4,760 cases today (cards, targets, shots,
   system memory, pins, kernels, readings, plans recorded on a larger card planned again on smaller
@@ -1157,10 +1199,14 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   (the CLI's) the CLI's: the same, core's text in it unchanged but for the lines that hold a
   refusal, which this half words as the CLI does (a plan's refusal under `PlanError`, its
   message in the CLI's options, its parts `instead` as the option string, `phase` and
-  `shortfall`, and the Peaks printed as before): the proof that the CLI's words did not move when
-  the refusals got kinds, core's text printing the kind, the library's words and the kind's
+  `shortfall`, and the Peaks printed as before, `tightened=None, instead=''` kept where the
+  retired fields stood, `Matrix.peaks_text`, so that two runs differ in the plans alone): the
+  proof that the CLI's words did not move when the refusals got kinds, core's text printing the
+  kind, the library's words and the kind's
   facts; the smaller files' line alone left out by `--without-smaller`, and a check of a record
   compared by what it is.
+  The matrix's held readings are `memory.SEGMENTS` (kind 2) and `memory.PLAIN` (kind 3,
+  `counted` from `memory.counted`); its cases and their counts did not move.
 - Met running the suite from a worktree: `git read-tree -u --reset` empties the `upstream/`
   submodule directories (link them again); `--compile`'s cache on a Windows drive under WSL2
   costs minutes, so compile times are measured with the job on Linux's disk; `--until` takes

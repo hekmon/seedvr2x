@@ -24,7 +24,7 @@ import math
 import secrets
 import threading
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -128,7 +128,9 @@ class Machine(Protocol):
     def host(self) -> int | None: ...
     def attention(self) -> str: ...
     def dit_model(self, path: Path) -> Architecture: ...
-    def load(self, files: ModelFiles, plan: ModelPlan, reserve: int) -> "Models": ...
+    def load(
+        self, files: ModelFiles, plan: ModelPlan, reserve: Mapping[str, int] | int | None
+    ) -> "Models": ...
     def reserve(self, size: int) -> None: ...
     def reserved(self) -> int: ...
     def reserved_peak(self) -> int: ...
@@ -189,7 +191,9 @@ class Card:
 
         return weights.check(path, "dit")
 
-    def load(self, files: ModelFiles, plan: ModelPlan, reserve: int) -> "Models":
+    def load(
+        self, files: ModelFiles, plan: ModelPlan, reserve: Mapping[str, int] | int | None
+    ) -> "Models":
         from seedvr2x import model
 
         memory.hold(self.device, reserve=reserve)
@@ -353,7 +357,7 @@ class Service:
         started = time.monotonic()
         made = self.made
         files = self.files
-        self.models = self.card.load(files, made.plan.models, made.plan.reading.reserve)
+        self.models = self.card.load(files, made.plan.models, still_plan.reserve_taken(made.plan))
         # The record's SHA-256, those of the very bytes the load read (pull.Hashes.proved).
         self.record_models = (
             records.Model(self.options.dit, files.hashes.sha256(files.dit.path)),
@@ -422,6 +426,19 @@ class Service:
             reservation.gib(memory.CONTEXT),
         )
         logger.info("%s", fits)
+        if made.plan.reading.allocator != memory.PLAIN:
+            # The reservation is each phase's peak and the reserve the plan leaves beyond it, no
+            # share added for torch's slack (still_plan.reserved_share); the reserve torch is
+            # held to between pictures' steps is the same (memory.hold).
+            each_step = still_plan.reserve_taken(made.plan)
+            assert each_step is not None
+            logger.info(
+                "reservation: each phase's peak and the reserve beyond it, %s GiB for the DiT,"
+                " %s for the encode, %s for the decode, as torch's limit leaves them",
+                reservation.gib(each_step["dit"]),
+                reservation.gib(each_step["encode"]),
+                reservation.gib(each_step["decode"]),
+            )
 
     def warm_up(self) -> None:
         """--max-concurrent pictures at the bound at once, from inputs of --max-input, through the

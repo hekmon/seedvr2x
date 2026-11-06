@@ -15,7 +15,7 @@ import sys
 import time
 import warnings
 from bisect import bisect_right
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -1337,9 +1337,9 @@ def _run(args: argparse.Namespace) -> int:
         # picture is cut, and where the weights are is planned again around it; a plan, which
         # has made none, is planned again whole (_resume).
         split = args.color_correction == "split"
-        # The reserve the plan leaves torch's allocator on a held run (memory.Reading.reserve),
-        # for the limit set once it is made (memory.hold).
-        reserve = memory.RESERVE
+        # The reserve the plan leaves torch's allocator beyond each step's peak on a held run
+        # (Peaks.reserve_taken), for the limit set once it is made (memory.hold).
+        reserve: Mapping[str, int] | int | None = memory.RESERVE
         kept_plan = None
         # The recorded shape a resume planned again, no longer fitting the memory free, with
         # --accept-env-change (_resume, _reshape); else None.
@@ -1425,7 +1425,7 @@ def _run(args: argparse.Namespace) -> int:
                     kept_plan.decode_tiles,
                 ):
                     reshaped = kept_plan
-            reserve = peaks.reading.reserve
+            reserve = peaks.reserve_taken()
             card = torch.cuda.get_device_name(identity.device)
             # The disk the job takes beside its output, against what its disk has free (DESIGN.md,
             # Memory planner, decided on 2026-10-28): its line among the plan's, its warning after
@@ -2182,7 +2182,7 @@ def _load(
     model_files: "ModelFiles",
     device: "torch.device",
     plan: "ModelPlan",
-    reserve: int | None = None,
+    reserve: Mapping[str, int] | int | None = None,
     kept: str = "",
     compilation: "Compilation | None" = None,
 ) -> "tuple[Models, float] | None":
@@ -2191,7 +2191,7 @@ def _load(
     compilation among them where the plan has one (`compilation`, which the load fills in with
     its seconds); None once a refusal is logged, nothing run, `kept` said after it
     (_first_kept): the memory the driver spills held first, from the memory free now that the
-    first pass and the plan are made, the plan's `reserve` (memory.hold)."""
+    first pass and the plan are made, the plan's `reserve` by step (memory.hold)."""
     import torch  # loaded since the job's identity: named here for the refusals below
 
     import planner

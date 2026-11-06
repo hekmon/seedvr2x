@@ -58,7 +58,7 @@ from typing import Any
 
 import seedvr2x
 from seedvr2x import frames, memory, peaks
-from seedvr2x.errors import JobError, Refusal, plain
+from seedvr2x.errors import JobError, Refusal
 from seedvr2x.passes import Phase, Plan, Tiles
 from seedvr2x.shot_plan import Peaks, Pins, PlanError, host_moments, plan
 from seedvr2x.shots import Shot
@@ -181,17 +181,12 @@ class Matrix:
         return type(error).__name__, str(error), parts
 
     def peaks_text(self, made_peaks: Peaks) -> str:
-        """A plan's Peaks as the text says them, its fields printed as they were before the
-        refusals had kinds: `tightened` as the refusal's message, a string, `instead` as the pin's
-        words ('' for none; a hook, the CLI's half words them as its options)."""
-        tightened = made_peaks.tightened
-        instead = made_peaks.instead
-        return repr(
-            replace(
-                made_peaks,
-                tightened=None if tightened is None else str(tightened),  # type: ignore[arg-type]
-                instead="" if instead is None else plain(instead),  # type: ignore[arg-type]
-            )
+        """A plan's Peaks as the text says them. The two fields the 2.5 GiB reserve had
+        (`tightened`, `instead`) retired from Peaks with it (DESIGN.md, Allocator, Small cards,
+        2026-11-06); the text keeps them, None and '', where they stood, so that two runs of the
+        matrix, before and after, differ in the plans alone."""
+        return repr(made_peaks).replace(
+            ", dit_model=", ", tightened=None, instead='', dit_model=", 1
         )
 
     def attempt(self, call: Callable[[], Any]) -> tuple[bool, Any]:
@@ -220,8 +215,8 @@ class Matrix:
     def free_figure(self, kind: int, card: int, exact: bool) -> tuple[Any, str]:
         """plan's free memory: kind 0 an int (a driver that refuses), 1 memory.reading's of it
         (the module's state as imported: the same), 2 a held Reading (a driver that spills:
-        WSL2), 3 a held one on a card with 1.5 GiB less free than the driver reports, its
-        allocator not expandable."""
+        WSL2: torch's own allocator with expandable segments), 3 a held one on a card with 1.5 GiB
+        less free than the driver reports, its allocator without the segments (memory.PLAIN)."""
         free = gib(card) if exact else our_free(card)
         label = f"{free}"
         if kind == 0:
@@ -229,11 +224,11 @@ class Matrix:
         if kind == 1:
             return memory.reading(free), label + " reading()"
         if kind == 2:
-            counted = max(free - memory.HELD_BACK - memory.RESERVE, 0)
-            return memory.Reading(free, free, counted, True, memory.HELD_BACK), label + " held"
+            held = memory.Reading(free, free, 0, True, memory.HELD_BACK, memory.SEGMENTS)
+            return replace(held, counted=memory.counted(free, held)), label + " held"
         card_free = max(free - gib(1.5), 0)
-        counted = max(card_free - memory.HELD_BACK - memory.RESERVE, 0)
-        reading = memory.Reading(free, card_free, counted, True, memory.HELD_BACK, expandable=False)
+        plain = memory.Reading(free, card_free, 0, True, memory.HELD_BACK, memory.PLAIN)
+        reading = replace(plain, counted=memory.counted(card_free, plain))
         return reading, label + f" held-card={card_free}"
 
     def item(self, text: str, function: Callable[..., Any], *args: Any, **kwargs: Any) -> None:

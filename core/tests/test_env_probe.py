@@ -381,6 +381,32 @@ def test_the_margin_a_future_measure_wrote_is_kept_when_checks_are_added(
     assert stored["allocator_margin"] == 0.5
 
 
+@pytest.mark.parametrize(("margin", "over"), [(0.1, False), (0.3, False), (0.5, True)])
+def test_a_cached_margin_counts_in_the_plan_where_it_is_over_the_rules_share(
+    stand_in_environment: dict[str, str], cache: Path, margin: float, over: bool
+) -> None:
+    # The reading side of the allocator's margin (the measurement is not built): the cache's
+    # value rides on the reading (Reading.margin) and peaks.reserve counts the larger of it and
+    # the rule's share, here the segments' DiT share 0.3. Written into the cache by hand.
+    from dataclasses import replace
+
+    from seedvr2x import peaks
+
+    sdpa(path=cache)
+    document = json.loads(cache.read_text())
+    document["environments"][probe.digest(PARTS)]["allocator_margin"] = margin
+    cache.write_text(json.dumps(document))
+    found = sdpa(path=cache).allocator_margin
+    assert found == margin
+    held = memory.Reading(30 * peaks.GIB, None, 24 * peaks.GIB, True, 3 * peaks.GIB)
+    counted = replace(held, margin=found)
+    working = 10 * peaks.GIB
+    rule = peaks.reserve(peaks.DIT_PHASE, working, held.allocator)
+    taken = peaks.reserve(peaks.DIT_PHASE, working, counted.allocator, counted.margin)
+    assert rule == round(0.3 * working)
+    assert (taken > rule) is over and taken == max(rule, round(margin * working))
+
+
 def damaged_results(document: dict[str, Any]) -> str:
     """One check's result with a field of the wrong type."""
     environment = next(iter(document["environments"].values()))

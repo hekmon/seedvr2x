@@ -41,7 +41,7 @@ import logging
 import math
 import mmap
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import Any, Literal
 
@@ -262,24 +262,40 @@ class Peaks:
     # kept on the GPU in their phases: the tiles the card alone would have given, and why not
     # (_dit_kept); else None.
     shrunk: Shrunk | None = None
-    # Where a held run's plan was made with memory.RESERVE_TIGHT, the plan with memory.RESERVE
-    # refused (plan): that refusal, for the budget's line; else None. And where that refusal was
-    # a pin's, the pin that runs with memory.RESERVE (PlanRefused.instead); else None.
-    tightened: PlanRefused | None = None
-    instead: Setting | None = None
     # The DiT's file's format the peaks were predicted for (peaks.DITS), which the plan's lines
     # say and the record keeps by its name (DIT_FORMATS), for information: the job's record
     # names the file itself (settings.dit_model), which a resume compares.
     dit_model: Architecture = peaks.FP16
+    # What the planner leaves each phase beyond its predicted peak, in bytes (peaks.reserve, by
+    # the step's P and the allocator the reading names): the default is the plan of a driver that
+    # refuses, nothing beyond a window's peak and VAE_ROOM beyond a VAE pass's.
+    # Not in the repr: a plan under torch's own allocator without the segments prints as it did.
+    reserves: dict[Phase, int] = field(
+        default_factory=lambda: {"encode": VAE_ROOM, "dit": 0, "decode": VAE_ROOM}, repr=False
+    )
 
     def peak(self, phase: Phase) -> int:
         """The predicted peak of `phase`."""
         return {"encode": self.encode, "dit": self.dit, "decode": self.decode}[phase]
 
     def need(self, phase: Phase) -> int:
-        """What the planner judges `phase` by against the budget: its predicted peak, and for
-        the encode and the decode the room a VAE pass is held to (VAE_ROOM)."""
-        return self.peak(phase) + (0 if phase == "dit" else VAE_ROOM)
+        """What the planner judges `phase` by against the budget: its predicted peak and its
+        reserve (`reserves`): under torch's own allocator without the segments and on a driver
+        that refuses, nothing for a window and VAE_ROOM for a VAE pass, as before the reserve was
+        measured by the step."""
+        return self.peak(phase) + self.reserves[phase]
+
+    def reserve_taken(self) -> dict[str, int] | None:
+        """The reserve a held run's plan leaves torch beyond each phase's peak, in bytes, as
+        the manifest keeps it and `memory.hold` takes it: the step's own (`reserves`) under the
+        segments and cudaMallocAsync, the flat memory.RESERVE for every phase under torch's own
+        allocator without the segments (the figure counted off the plan's memory); None on a
+        driver that refuses, which leaves none."""
+        if not self.reading.held:
+            return None
+        if self.reading.allocator == memory.PLAIN:
+            return dict.fromkeys(PHASES, memory.RESERVE)
+        return {phase: each for phase, each in self.reserves.items()}
 
     @property
     def bound(self) -> Phase:
@@ -304,9 +320,10 @@ class Peaks:
             "free": self.free,
             "driver_free": self.reading.reported,
             "card_free": self.reading.card,
-            # What a held run's plan leaves torch's allocator beyond a step's peak; null on a
-            # driver that refuses, which leaves none.
-            "reserve": self.reading.reserve if self.reading.held else None,
+            # What a held run's plan leaves torch's allocator beyond each step's peak, by phase
+            # (reserve_taken; until 2026-11-06 one number); null on a driver that refuses, which
+            # leaves none.
+            "reserve": self.reserve_taken(),
             "attention": self.attention,
             "dit_format": _format_name(self.dit_model),
             "budget": self.budget,
@@ -362,9 +379,11 @@ class _Job:
     @property
     def margin(self) -> int:
         """What the plan leaves of the memory it may count on, in bytes: MARGIN on a driver that
-        refuses; nothing on a run held to the card, where memory.RESERVE, taken off already,
-        measures the same need (DESIGN.md, Allocator: "the planner's 0.6 GiB margin is counted
-        inside the 4.5"): the budget is then what the plan counts on."""
+        refuses; nothing on a run held to the card, where the same need is inside the
+        figure counted (memory.RESERVE, taken off already, under torch's own allocator without
+        the segments: DESIGN.md, Allocator, "the planner's 0.6 GiB margin is counted inside the
+        4.5") or inside a window's reserve, whose floor it is (peaks.DIT_RESERVE_FLOOR): the
+        budget is then what the plan counts on."""
         return 0 if self.reading.held else MARGIN
 
     @property
@@ -470,20 +489,13 @@ def plan(
     (planner.check_recorded). Where the weights are is planned for the backend given, a resume's
     too: FlashAttention installed since, or gone, the recorded shape is held to today's fit.
 
-    On a run held to the card, a plan so made that is refused, a new job's or a resume's recorded
-    shape, whatever refuses it, is made again with the reserve of memory.RESERVE_TIGHT in
-    memory.RESERVE's place (memory.tightened), the plan's last resort, slower, as its budget line
-    says (Peaks.tightened; DESIGN.md, Allocator, decided on 2026-10-13, for a resume's plan on
-    2026-10-21); the VAE's room is in the budget either way. Refused with it too, the job is
-    refused with that plan's figures, the closest to running, and the refusal says both reserves
-    were tried. Only under torch's own allocator with expandable segments (Reading.expandable),
-    under which a step short of room slows down and runs (DESIGN.md, Allocator: "With a reserve
-    of 2.5 GiB under those segments"): under a user's allocator without them such a step is
-    refused, in a unit, perhaps hours in, and under cudaMallocAsync nothing checks the card (a
-    review's finding; DESIGN.md, Allocator, decided on 2026-10-21: "only under the segments, where
-    the 2.5 was measured"). Never on a driver that refuses,
-    which leaves no reserve; nor for a pin that is no pin, refused before any memory is counted.
-    The reserves are memory's, read as the plan is made.
+    On a run held to the card each phase is judged by its predicted peak and its own reserve
+    beyond it (peaks.reserve, by the step's P and the allocator the reading names; Peaks.reserves;
+    DESIGN.md, Allocator, Small cards, decided on 2026-11-06): the reserve replaces the flat
+    memory.RESERVE and the 2.5 GiB retry of before it, which retired under the segments. Under
+    torch's own allocator without them (memory.PLAIN) the flat memory.RESERVE stays off the
+    figure, and a job refused there is refused, saying where the segments' default would run it.
+    A driver that refuses leaves MARGIN and VAE_ROOM, as before.
 
     compile_vae: --compile, the VAE compiled (DESIGN.md, Memory planner, "torch.compile: the
     VAE, opt-in, in v0.1.0"): each VAE pass is held to COMPILE_PEAK times its tile's plain peak
@@ -567,57 +579,36 @@ def plan(
             raise _covering(phase, pin, job.padded)
     try:
         return _planned(job, pins, recorded, host_available)
-    except PlanRefused as error:
-        reading = job.reading
-        if not reading.held or reading.tight or memory.RESERVE_TIGHT >= reading.reserve:
+    except PlanRefused as refused:
+        if not job.reading.held or job.reading.allocator != memory.PLAIN:
             raise
-        refused = error
-    tight = memory.tightened(job.reading)
-    refused_words = refused.words
-    if not job.reading.expandable:
-        # Refused with the usual reserve, as before, saying what torch's default setting would
-        # do where it would run the job (design, 2026-10-21).
+        # A user's allocator without the segments refuses a step short of room: said where torch's
+        # default, with them, would run the job, whose reserve is the step's (peaks.reserve). The
+        # reading is turned into that allocator's with what PLAIN took off the figure given back.
+        if job.reading.counted <= 0:
+            raise
+        words = refused.words
+        segments = replace(
+            job.reading,
+            allocator=memory.SEGMENTS,
+            counted=job.reading.counted + memory.RESERVE,
+        )
         try:
             _planned(
-                replace(job, free=tight.counted, reading=tight), pins, recorded, host_available
+                replace(job, free=segments.counted, reading=segments),
+                pins,
+                recorded,
+                host_available,
             )
         except PlanRefused:
             raise refused from None
         raise refused.reworded(
             lambda say: (
-                f"{refused_words(say)}; torch's own allocator with its expandable segments, a"
-                " held run's default, which the allocator's setting in the environment replaces"
-                f" here, would run it with the reserve of {_gib(memory.RESERVE_TIGHT)} GiB,"
-                " slower"
+                f"{words(say)}; torch's own allocator with its expandable segments, a held run's"
+                " default, which the allocator's setting in the environment replaces here, would"
+                " run it"
             )
         ) from None
-    try:
-        made, predicted = _planned(
-            replace(job, free=tight.counted, reading=tight), pins, recorded, host_available
-        )
-    except PlanRefused as error:
-        tight_words = error.words
-        raise error.reworded(lambda say: f"{tight_words(say)}{held_note()}", instead=None) from None
-    instead = refused.instead
-    if instead is not None:
-        # Named only where that pin, in its place, runs with the usual reserve: another pin, or
-        # a pass the blocks it changes move, can still refuse it (the review, 2026-10-21).
-        substituted = _substituted(pins, instead)
-        runs = False
-        if substituted is not None:
-            try:
-                _planned(job, substituted, recorded, host_available)
-                runs = True
-            except PlanRefused:
-                pass
-        if not runs:
-            instead = None
-    # The refusal the budget's second line names: said whole at debug, not in the line (DESIGN.md,
-    # Architecture, What it prints, decided on 2026-10-28).
-    logger.debug(
-        "the plan with the reserve of %s GiB was refused: %s", _gib(memory.RESERVE), refused
-    )
-    return made, replace(predicted, tightened=refused, instead=instead)
 
 
 def _covering(phase: Phase, pin: int, padded: tuple[int, int]) -> PinRefused:
@@ -632,15 +623,6 @@ def _covering(phase: Phase, pin: int, padded: tuple[int, int]) -> PinRefused:
         ),
         pin=asked,
         why="covers",
-    )
-
-
-def held_note() -> str:
-    """What a held run's refusal adds after its figures: both reserves tried (plan)."""
-    return (
-        f"; refused with the reserve of {_gib(memory.RESERVE)} GiB that a held run's plan leaves"
-        f" torch's allocator beyond a step's peak, and with {_gib(memory.RESERVE_TIGHT)}, the one"
-        " it takes where that is refused, whose figures these are"
     )
 
 
@@ -763,16 +745,6 @@ def _within(padded: tuple[int, int], phase: Phase) -> list[int]:
     return [pin for pin in pins if peaks.in_compile_range(padded, phase, _pin_tiles(pin))]
 
 
-def _substituted(pins: Pins, instead: Setting) -> Pins | None:
-    """`pins` with the pin a refusal names in place of the one it refused (PlanRefused.instead,
-    the window 6); None for a setting that is no pin."""
-    if instead.name not in ("window", "swap_blocks", "encode_tile", "decode_tile"):
-        return None
-    if not instead.value.isdecimal():
-        return None
-    return replace(pins, **{instead.name: int(instead.value)})
-
-
 def _planned(
     job: _Job, pins: Pins, recorded: Plan | None, host_available: int | None
 ) -> tuple[Plan, Peaks]:
@@ -828,7 +800,7 @@ def _planned(
             there=int(job.free),
             short=need - int(job.free),
             freeable=_can_free(job, need),
-            reserve=job.reading.reserve if job.reading.held else None,
+            reserve=_reserve_fact(job, taken.reserves[phase]),
             phase=phase,
             instead=window,
             shortfall=shortfall,
@@ -1062,14 +1034,32 @@ def _split(length: int, cap: int) -> int:
     return max(end - start for start, end in window_layout(length, cap))
 
 
-def _dit_need(job: _Job, cap: int | None, swapped: int, vae_in_dit: bool) -> int:
+def _dit_peak(job: _Job, cap: int | None, swapped: int, vae_in_dit: bool) -> int:
     """The predicted peak of the job's DiT phase under a cap, in bytes, `swapped` blocks swapped
     and the VAE's weights there or not: its longest window's (dit_peak), on the attention
     backend the job runs; nothing of a shot is on the GPU beside the window, its noise drawn in
-    system memory (shot_pass.sample_windows). Wherever the phase is judged, and what the plan
-    records (_peaks): real memory, unlike a VAE pass's room."""
+    system memory (shot_pass.sample_windows). What the plan records (_peaks): real memory,
+    unlike the reserve beyond it."""
     latents = _longest(job.lengths, cap)
     return peaks.dit_peak(job.padded, latents, swapped, vae_in_dit, job.attention, job.dit_model)
+
+
+def _dit_reserve(job: _Job, cap: int | None) -> int:
+    """What the plan leaves the job's DiT phase under a cap beyond its peak, in bytes: the
+    reserve of its longest window (peaks.reserve), by the window's P (peaks.dit_working) and the
+    allocator the reading names. Whatever the blocks swapped and the VAE's place: P is what the
+    window takes over the weights."""
+    working = peaks.dit_working(
+        job.padded, _longest(job.lengths, cap), job.attention, job.dit_model
+    )
+    return peaks.reserve(peaks.DIT_PHASE, working, job.reading.allocator, job.reading.margin)
+
+
+def _dit_need(job: _Job, cap: int | None, swapped: int, vae_in_dit: bool) -> int:
+    """What the planner judges the job's DiT phase by against the budget, in bytes: its peak
+    (_dit_peak) and its reserve (_dit_reserve), wherever it decides whether a window fits, as
+    _unfit judges the plan made."""
+    return _dit_peak(job, cap, swapped, vae_in_dit) + _dit_reserve(job, cap)
 
 
 def _holds(job: _Job, cap: int | None, swapped: int) -> bool:
@@ -1201,6 +1191,7 @@ def _window(job: _Job, pins: Pins) -> tuple[int, int, bool]:
     else:
         latents = _longest(job.lengths, pins.window)
         need = _dit_need(job, pins.window, most, vae_in_dit=False) + job.margin
+        room = _reserve_part(job, "dit", _dit_reserve(job, pins.window))
         asked = Setting("window", str(pins.window))
         fits = Setting("window", str(_own_cap(job, longest)))
 
@@ -1212,7 +1203,7 @@ def _window(job: _Job, pins: Pins) -> tuple[int, int, bool]:
             )
             return (
                 f"{say(asked)}: its longest window, {_count(latents, 'latent')}, takes"
-                f" {_over(need)} GiB of free VRAM with {blocks}, and {_there(job)}:"
+                f" {_over(need)} GiB of free VRAM{room} with {blocks}, and {_there(job)}:"
                 f" {_to_free(job, need)}the longest window that fits is {say(fits)}"
             )
 
@@ -1258,13 +1249,14 @@ def _swap_refused(
     longest window it is."""
     latents = _longest(job.lengths, cap)
     need = _dit_need(job, cap, swapped, vae_in_dit=False) + job.margin
+    room = _reserve_part(job, "dit", _dit_reserve(job, cap))
     asked, fits = Setting("swap_blocks", str(swapped)), Setting("swap_blocks", str(fewest))
 
     def message(say: Say) -> str:
         owner = whose if isinstance(whose, str) else f"{say(whose)}'s longest"
         what = f"a window of {_count(latents, 'latent')}, {owner},"
         return (
-            f"{say(asked)}: {what} takes {_over(need)} GiB of free VRAM with"
+            f"{say(asked)}: {what} takes {_over(need)} GiB of free VRAM{room} with"
             f" {_count(swapped, 'block')} swapped, and {_there(job)}: {_to_free(job, need)}the"
             f" fewest blocks that hold it are {say(fits)}"
         )
@@ -1474,14 +1466,24 @@ def _vae_peak(
     )
 
 
+def _vae_reserve(job: _Job, phase: Phase, peak: int, resident: int | None, swapped: int) -> int:
+    """What the plan leaves the job's encode or decode beyond its `peak`, in bytes: the pass's
+    reserve (peaks.reserve), by its P, the peak over the models resident in the phase
+    (peaks.vae_working), and the allocator the reading names; VAE_ROOM under torch's own
+    allocator without the segments and on a driver that refuses, as before."""
+    working = peaks.vae_working(peak, resident, swapped, job.dit_model)
+    return peaks.reserve(phase, working, job.reading.allocator, job.reading.margin)
+
+
 def _vae_need(
     job: _Job, phase: Phase, tiles: Tiles | None, resident: int | None, swapped: int
 ) -> int:
     """What the planner judges the job's encode or decode by against the budget, in bytes: its
-    predicted peak and the room every VAE pass is held to (VAE_ROOM), wherever it decides
-    whether a pass fits and what of the DiT stays there, as _unfit judges the plan made. The
-    plan records the peak alone (_peaks)."""
-    return _vae_peak(job, phase, tiles, resident, swapped) + VAE_ROOM
+    predicted peak and its reserve (_vae_reserve), wherever it decides whether a pass fits and
+    what of the DiT stays there, as _unfit judges the plan made. The plan records the peak alone
+    (_peaks)."""
+    peak = _vae_peak(job, phase, tiles, resident, swapped)
+    return peak + _vae_reserve(job, phase, peak, resident, swapped)
 
 
 def _fitting(job: _Job, phase: Phase, swapped: int) -> list[Tiles | None]:
@@ -1539,7 +1541,9 @@ def _pass(job: _Job, phase: Phase, pin: int | None, swapped: int) -> Tiles | Non
             why="compile",
             phase=phase,
         )
-    need = _vae_need(job, phase, tiles, 0, swapped) + job.margin
+    peak = _vae_peak(job, phase, tiles, 0, swapped)
+    reserve = _vae_reserve(job, phase, peak, 0, swapped)
+    need = peak + reserve + job.margin
     if need <= job.free:
         return tiles
     # The untiled pass alone fits where a frame little larger than the smallest tile takes less
@@ -1548,6 +1552,8 @@ def _pass(job: _Job, phase: Phase, pin: int | None, swapped: int) -> Tiles | Non
     # With the VAE compiled, the untiled pass is named only where it is within the shapes
     # measured (in_compile_range): a refusal never advises a pin the compiled plan refuses.
     fits = Setting(f"{phase}_tile", str(0 if largest is None else largest))
+
+    room = _reserve_part(job, phase, reserve)
 
     def refused(say: Say) -> str:
         if largest is not None:
@@ -1558,7 +1564,7 @@ def _pass(job: _Job, phase: Phase, pin: int | None, swapped: int) -> Tiles | Non
             advice = f"no tile fits, the untiled {phase} does, {say(fits)}"
         return (
             f"{say(asked)}: the {phase} {_tiles_said(tiles)} takes {_over(need)} GiB of free"
-            f" VRAM, the DiT off the GPU{_ROOM_HELD}, and {_there(job)}: {_to_free(job, need)}"
+            f" VRAM, the DiT off the GPU{room}, and {_there(job)}: {_to_free(job, need)}"
             f"{advice}"
         )
 
@@ -1575,6 +1581,26 @@ def _pass(job: _Job, phase: Phase, pin: int | None, swapped: int) -> Tiles | Non
 
 # What a refusal adds after the free VRAM a VAE pass takes, its room in it (VAE_ROOM).
 _ROOM_HELD = f", {VAE_ROOM / peaks.GIB:.2f} of them the room a VAE pass is held to"
+
+
+def _reserve_part(job: _Job, phase: Phase, reserve: int) -> str:
+    """What a refusal adds after the free VRAM a phase takes, in words, `reserve` bytes of it
+    being what the plan leaves beyond the phase's peak: a VAE pass's room under torch's own
+    allocator without the segments and on a driver that refuses (_ROOM_HELD), nothing for a
+    window there (its margin is inside the figure counted), the step's reserve elsewhere
+    (peaks.reserve)."""
+    if job.reading.allocator == memory.PLAIN:
+        return "" if phase == "dit" else _ROOM_HELD
+    return f", {reserve / peaks.GIB:.2f} of them the reserve left beyond its peak"
+
+
+def _reserve_fact(job: _Job, reserve: int) -> int | None:
+    """The reserve a refusal carries (MemoryShort.reserve), in bytes: None on a driver that
+    refuses; the flat memory.RESERVE under torch's own allocator without the segments, which
+    is what the plan took off the figure; the step's own `reserve` (peaks.reserve) elsewhere."""
+    if not job.reading.held:
+        return None
+    return memory.RESERVE if job.reading.allocator == memory.PLAIN else reserve
 
 
 def _resident(job: _Job, phase: Phase, tiles: Tiles | None, swapped: int) -> int | None:
@@ -1646,19 +1672,23 @@ def _too_large(job: _Job, phase: Phase, least: int) -> MemoryShort:
             f"its smallest window, {_count(latents, 'latent')}, with every block of the DiT"
             " swapped and the VAE off the GPU"
         )
-        room = 0
+        room = _dit_reserve(job, job.smallest)
     else:
         tiled = _tiles_said(_least_pass(job, phase))
         if not _tile_sizes(job.padded):
             tiled += ", too small for a tile"
         how = f"its {phase} {tiled}, with the DiT off the GPU"
-        room = VAE_ROOM
+        least_pass = _vae_peak(job, phase, _least_pass(job, phase), 0, peaks.BLOCKS)
+        room = _vae_reserve(job, phase, least_pass, 0, peaks.BLOCKS)
     # The room as what is left of the total once the peak and the margin are said, each rounded
     # as the message has it, so that its figures add up. No margin on a run held to the card
     # (_Job.margin), and none said.
     total, peak = _hundredths(least + job.margin, up=True), _hundredths(least - room, up=True)
     rest = (total - peak - _hundredths(job.margin, up=True)) / 100
-    held = f", {rest:.2f} of room a VAE pass is held to" if room else ""
+    if job.reading.allocator == memory.PLAIN:
+        held = f", {rest:.2f} of room a VAE pass is held to" if room else ""
+    else:
+        held = f", {rest:.2f} of reserve beyond its peak"
     margin = f", and {_gib(job.margin)} of margin" if job.margin else ""
     fitting: tuple[int, tuple[int, int]] | None = None
     target_height, target_width = job.target
@@ -1698,7 +1728,7 @@ def _too_large(job: _Job, phase: Phase, least: int) -> MemoryShort:
         there=int(job.free),
         short=int(need) - int(job.free),
         freeable=_can_free(job, need),
-        reserve=job.reading.reserve if job.reading.held else None,
+        reserve=_reserve_fact(job, room),
         phase=phase,
         instead=None if fitting is None else Setting("resolution", str(fitting[0])),
     )
@@ -1770,12 +1800,19 @@ def _peaks(job: _Job, plan: Plan) -> Peaks:
     cache its mapping works in."""
     latents = _longest(job.lengths, plan.window)
     held_by_shot, moment, holder = _shot_held(job, plan)
+    encode = _vae_peak(job, "encode", plan.encode_tiles, plan.resident_encode, plan.swapped)
+    decode = _vae_peak(job, "decode", plan.decode_tiles, plan.resident_decode, plan.swapped)
+    reserves: dict[Phase, int] = {
+        "encode": _vae_reserve(job, "encode", encode, plan.resident_encode, plan.swapped),
+        "dit": _dit_reserve(job, plan.window),
+        "decode": _vae_reserve(job, "decode", decode, plan.resident_decode, plan.swapped),
+    }
     return Peaks(
         job.free,
         job.budget,
-        _vae_peak(job, "encode", plan.encode_tiles, plan.resident_encode, plan.swapped),
-        _dit_need(job, plan.window, plan.swapped, plan.vae_in_dit),
-        _vae_peak(job, "decode", plan.decode_tiles, plan.resident_decode, plan.swapped),
+        encode,
+        _dit_peak(job, plan.window, plan.swapped, plan.vae_in_dit),
+        decode,
         HOST_RESIDENT
         + _pinned(plan, job.dit_model, job.held)
         + held_by_shot
@@ -1789,6 +1826,7 @@ def _peaks(job: _Job, plan: Plan) -> Peaks:
         moment,
         holder,
         dit_model=job.dit_model,
+        reserves=reserves,
     )
 
 
@@ -1903,7 +1941,8 @@ def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
     for phase in PHASES:
         need = peaks.need(phase) + job.margin
         if need > job.free:
-            room = "" if phase == "dit" else f"{_ROOM_HELD},"
+            room = _reserve_part(job, phase, peaks.reserves[phase])
+            room = f"{room}," if room else ""
             freed = ", which would have to be freed on the card" if _freeable(job, need) else ""
             return (
                 f"{whats[phase]} takes {_over(need)} GiB of free VRAM{room} and {_there(job)},"

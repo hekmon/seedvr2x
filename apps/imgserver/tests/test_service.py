@@ -977,6 +977,42 @@ def test_the_reservations_lines_say_how_many_pictures_the_gpu_runs(
         assert "two on the GPU" not in lines[0] + fits[0]
 
 
+@pytest.mark.parametrize("allocator", [None, memory.SEGMENTS, memory.POOL, memory.PLAIN], ids=str)
+def test_the_start_holds_torch_to_the_plans_reserve_of_each_step_and_says_it(
+    allocator: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cpu_models: model.Models,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # memory.hold gets the plan's reserve by step (still_plan.reserve_taken): each phase's own
+    # beyond its peak under the segments and the pool, the flat memory.RESERVE under torch's own
+    # allocator without the segments, none on a driver that refuses; the start's line says the
+    # per-step figures only where they are the plan's rule, in the server's words.
+    machine = StandIn(cpu_models, allocator=allocator)
+    with caplog.at_level(logging.INFO, logger="imgserver.service"):
+        with live(monkeypatch, tmp_path, cpu_models, machine=machine) as server:
+            made = server.service.made
+    assert made is not None
+    assert machine.holds == [still_plan.reserve_taken(made.plan)]
+    said = [r.getMessage() for r in caplog.records if "the reserve beyond it" in r.getMessage()]
+    if allocator is None:
+        assert machine.holds == [None] and not said
+    elif allocator == memory.PLAIN:
+        assert machine.holds == [dict.fromkeys(peaks.PHASES, memory.RESERVE)] and not said
+    else:
+        held = machine.holds[0]
+        assert isinstance(held, dict) and set(held) == set(peaks.PHASES)
+        assert all(0 < held[phase] < memory.RESERVE for phase in peaks.PHASES)
+        assert len(said) == 1
+        for phase, name in (("dit", "DiT"), ("encode", "encode"), ("decode", "decode")):
+            assert f"{held[phase] / memory.GIB:.2f} GiB for the {name}" in said[0] or (
+                f"{held[phase] / memory.GIB:.2f} for the {name}" in said[0]
+            ), (phase, said[0])
+        # The reservation is each phase's peak and its reserve, no share added over the peak.
+        assert all(each.over == 0.0 for each in still_plan.bound_peaks(made.plan).values())
+
+
 @pytest.mark.parametrize("dit", [peaks.INT8, peaks.FP16])
 def test_the_reservations_line_says_the_tiles_pictures_at_once_take(
     dit: weights.Architecture, tmp_path: Path, caplog: pytest.LogCaptureFixture
