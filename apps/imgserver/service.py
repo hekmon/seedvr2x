@@ -611,7 +611,7 @@ class Service:
             )
         target = frames.target_size(width, height, Fraction(1), settings.resolution)
         try:
-            frames.check_target(target, settings.resolution)
+            frames.check_picture_target(target, settings.resolution)
         except Refusal as error:
             raise Unprocessable(answers.refused(error), error.kind) from None
         out_height, out_width = frames.output_size(target)

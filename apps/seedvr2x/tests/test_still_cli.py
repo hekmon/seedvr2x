@@ -731,6 +731,20 @@ def test_a_resolution_too_small_for_the_padding_is_refused(
     assert status == 1 and "too small for the padding" in caplog.text and not machine.asked
 
 
+def test_a_resolution_whose_even_crop_is_too_small_is_refused_before_anything_is_asked(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # 17 on the 24 x 40 picture is a 28 x 17 target and a 28 x 16 output, which the plan's bound
+    # refuses with a ValueError: the picture's own check refuses it first, in the picture's words.
+    status = run(
+        machine, make_picture(tmp_path / "in.png"), tmp_path / "o.png", "--resolution", "17"
+    )
+    assert status == 1 and not machine.asked and not (tmp_path / "o.png").exists()
+    assert "--resolution 17: the output 28x16, the 28x17 it is resized to cropped" in caplog.text
+    assert "it takes 18 rows and 16 columns at least" in caplog.text
+    assert "ValueError" not in caplog.text and "bound" not in caplog.text
+
+
 # The size line: a default that makes the output smaller than the source ----------------------
 
 

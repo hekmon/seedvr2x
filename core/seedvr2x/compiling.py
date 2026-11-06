@@ -267,7 +267,7 @@ def compile_vae(models: Models, compilation: Compilation) -> None:
         dynamo.accumulated_recompile_limit,
     )
     logger.info(
-        "compiling the VAE (--compile): its encoder and decoder, %d causal convolutions left out"
+        "compiling the VAE: its encoder and decoder, %d causal convolutions left out"
         " of the graph, %s; the cache in %s",
         convolutions,
         _shapes_said(compilation.shapes),

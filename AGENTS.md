@@ -349,7 +349,10 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   tensors, versions, a file cut short), the header read without torch; `tests/test_blockswap.py`
   the blocks of unequal sizes swapped as any others, the file read into its parts and hashed once
   (the one read, below), a file cut short refused in safetensors' words, and, `-m gpu`, a real
-  GGUF file's blocks swapped giving the bits of the DiT loaded whole; `tests/test_peaks.py` and
+  GGUF file's blocks swapped giving the bits of the DiT loaded whole, and `HostCopy`'s two
+  platforms by their calls with the platform faked (Windows: the anonymous `mmap.mmap(-1,
+  length)` with no POSIX flag; Linux: `MAP_PRIVATE | MAP_ANONYMOUS` and `MADV_DONTFORK`);
+  `tests/test_peaks.py` and
   `tests/test_still_plan.py` the GGUF DiT's figures by its own blocks (`peaks.leaving_blocks`)
   and the smaller files' line in a picture's plan; `tests/test_pull.py` the pins and
   `pull.smaller_files` (the facts: files, sizes, `pull.Swaps`); `tests/test_planner.py` and
@@ -806,7 +809,14 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   ORF's and RW2's magic numbers no TIFF; a picture over Pillow's limit and under its refusal said
   in the library's own INFO line, from a header-only PNG, the library touching neither Pillow's
   limit nor the warning filters; every refusal, the commands it gives run. `tests/test_frames.py`
-  holds `frames.short_side` (the `--resolution` that keeps the displayed size) to `target_size`.
+  holds `frames.short_side` (the `--resolution` that keeps the displayed size) to `target_size`,
+  and `frames.check_picture_target`: a picture's output is its target cropped to even sides, and
+  the plan's bound refuses one under the padding's 17 rows (resolution 17 on a 40x24 picture, a
+  28x17 target and a 28x16 output), so the picture is refused first as `TargetTooSmall`, its size
+  the output's and its `least` 18 rows, while `check_target` passes the same target for a video,
+  whose frames are padded at the target's size and cropped after the decode; the CLI's
+  `test_still_cli.py`, the server's `test_web.py` and `test_answers.py` and the nodes'
+  `test_nodes.py` hold each caller's refusal in its words, and a video at 17 rows planned.
   `tests/test_png.py` holds `seedvr2x/png.py`: the chunks'
   order and CRCs, the record's tEXt Software and uncompressed iTXt XMP after the colour chunks
   and the profile and before IDAT (read back by Pillow, the Software text by ffprobe, which reads

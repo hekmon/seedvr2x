@@ -550,6 +550,15 @@ def test_a_resolution_too_small_for_the_padding_is_refused(server: Live) -> None
     assert "larger Seedvr2x-Resolution" in body.decode()
 
 
+def test_a_resolution_whose_even_crop_is_too_small_is_refused(server: Live) -> None:
+    # 17 on a 40x24 picture is 28x17, 28x16 once cropped to even sides, under the padding's 17.
+    status, _, body = server.upscale(png_of(40, 24), 17)
+    assert status == 422
+    text = body.decode()
+    assert "The output 28x16" in text and "it takes 18 rows and 16 columns at least" in text
+    assert "larger Seedvr2x-Resolution" in text and "--" not in text
+
+
 def test_an_empty_body_is_a_422(server: Live) -> None:
     status, headers, body = server.upscale(b"", 48)
     assert status == 422

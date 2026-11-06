@@ -130,3 +130,53 @@ def test_the_refusal_of_a_target_too_small_carries_its_parts() -> None:
         == f"{cli_say(Setting('resolution', '16'))}: the frames resized to 16x16 are too small "
         + (error.reason.split("too small ", 1)[1])
     )
+
+
+def test_a_picture_whose_even_crop_cannot_be_padded_is_refused_as_too_small() -> None:
+    # Resolution 17 on a 40x24 picture: target_size gives 28x17, the output 28x16, under the 17
+    # rows the padding takes. A picture's plan is made for the output (still_plan's bound refuses
+    # it with a ValueError), so check_picture_target refuses it first, in the picture's words; a
+    # video's frames are padded at the target's size and cropped after the decode (shot_pass), so
+    # check_target passes it, as it always did.
+    from library_fixtures import cli_words
+
+    from seedvr2x.errors import Refusal, TargetTooSmall
+    from seedvr2x.frames import check_picture_target, check_target
+
+    target = target_size(40, 24, Fraction(1), 17)
+    assert (target, output_size(target)) == ((17, 28), (16, 28))
+    check_target(target, 17)
+    with pytest.raises(Refusal) as caught:
+        check_picture_target(target, 17)
+    error = caught.value
+    assert isinstance(error, TargetTooSmall)
+    assert (error.kind, error.resolution, error.size, error.least) == (
+        "too-small",
+        17,
+        (16, 28),
+        (18, 16),
+    )
+    assert error.reason == (
+        "the output 28x16, the 28x17 it is resized to cropped to even sides, is too small for the"
+        " padding, at least 8 rows reflected from the picture under it, up to a multiple of 16,"
+        " and columns alike: it takes 18 rows and 16 columns at least"
+    )
+    assert "--" not in error.reason and "resolution" not in error.reason
+    assert cli_words(error).startswith("--resolution 17: the output 28x16, the 28x17 it is")
+    # What check_target refuses stays refused in its own words; 18 rows and 17 columns (16 once
+    # cropped) are padded.
+    with pytest.raises(TargetTooSmall, match="the frames resized to 16x16"):
+        check_picture_target((16, 16), 16)
+    check_picture_target((18, 28), 18)
+    check_picture_target((40, 17), 17)
+    # Exactly the targets whose output the planner's bound takes (still_plan._paddable).
+    from seedvr2x import still_plan
+
+    for height in range(1, 41):
+        for width in range(1, 41):
+            try:
+                check_picture_target((height, width), 7)
+                passed = True
+            except TargetTooSmall:
+                passed = False
+            assert passed == still_plan._paddable(output_size((height, width))), (height, width)

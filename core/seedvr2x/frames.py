@@ -108,6 +108,42 @@ def check_target(target: tuple[int, int], resolution: int) -> None:
         )
 
 
+def check_picture_target(target: tuple[int, int], resolution: int) -> None:
+    """check_target for a still picture, whose plan is made for the output's size, the target
+    cropped to even sides (output_size): a target of 17 rows passes check_target and is 16 rows
+    once cropped, which still_plan's bound refuses with a ValueError. A video's frames are padded
+    at the target's size and cropped after the decode (shot_pass), so the video path keeps
+    check_target alone. The refusal's size is the output's, and it asks for 18 rows, the least
+    whose even crop the padding takes (columns: 16 are the least either way)."""
+    check_target(target, resolution)
+    cropped = output_size(target)
+    rows, columns = padding(cropped)
+    if rows >= cropped[0] or columns >= cropped[1]:
+        height, width = target
+        out_height, out_width = cropped
+        need = (
+            f"for the padding, at least {REFLECTED} rows reflected from the picture under it,"
+            f" up to a multiple of {MULTIPLE}, and columns alike: it takes 18 rows and 16"
+            " columns at least"
+        )
+        said = (
+            f"{out_width}x{out_height}, the {width}x{height} it is resized to cropped to even"
+            " sides,"
+        )
+        asked = Setting("resolution", str(resolution))
+
+        def message(say: Say) -> str:
+            return f"{say(asked)}: the output {said} is too small {need}"
+
+        raise TargetTooSmall(
+            message,
+            reason=f"the output {said} is too small {need}",
+            resolution=resolution,
+            size=cropped,
+            least=(18, 16),
+        )
+
+
 def padded_length(count: int) -> int:
     """The VAE's input length, 4n + 1: the frames of `count` frames once padded to it, the VAE
     packing 4 frames per latent after the first."""

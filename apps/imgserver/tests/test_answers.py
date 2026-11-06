@@ -327,6 +327,16 @@ def test_a_picture_too_small_for_its_resolution_is_worded_too() -> None:
     assert answers.WAYS["too-small"] in words
 
 
+def test_a_picture_whose_even_crop_is_too_small_is_worded_too() -> None:
+    with pytest.raises(Refusal) as error:
+        frames.check_picture_target((17, 28), 17)
+    assert error.value.kind == "too-small"
+    words = answers.refused(error.value)
+    assert words.startswith("The output 28x16, the 28x17 it is resized to cropped to even sides")
+    assert "it takes 18 rows and 16 columns at least" in words
+    assert "--" not in words and words.endswith(f"{answers.WAYS['too-small']}")
+
+
 def test_a_refusal_with_no_reason_is_worded_by_its_message() -> None:
     assert answers.refused(Refusal("something odd")) == "something odd"
 

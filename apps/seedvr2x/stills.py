@@ -151,7 +151,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     from job import DEFAULT_RESOLUTION, default_smaller
     from seedvr2x import memory, picture, png, pull, still_plan, webp
     from seedvr2x.errors import JobError, Refusal
-    from seedvr2x.frames import check_target, output_size, target_size
+    from seedvr2x.frames import check_picture_target, output_size, target_size
     from seedvr2x.weights import check_models
 
     # Refused first, before the file is read and before anything else is asked of the machine:
@@ -185,7 +185,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     sample_aspect = args.input_sar or Fraction(1)
     resolution = DEFAULT_RESOLUTION if args.resolution is None else args.resolution
     target = target_size(width, height, sample_aspect, resolution)
-    check_target(target, resolution)
+    check_picture_target(target, resolution)
     out_height, out_width = output_size(target)
     _check_tile_pins(args, target)
     # The file's size is the model's, its sides swapped by the turn for orientations 5 to 8.

@@ -2093,6 +2093,60 @@ def test_a_host_copy_is_a_private_mapping() -> None:
         pytest.fail("the copy's address is in no mapping")
 
 
+def test_a_host_copy_on_windows_is_an_anonymous_mmap_with_no_posix_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Python's mmap has MAP_PRIVATE, MAP_ANONYMOUS and madvise on POSIX only; on Windows
+    # mmap.mmap(-1, length) is the anonymous mapping. The platform is faked and mmap's call
+    # recorded; the stand-in is a bytearray, which has no madvise, so that a call to it fails.
+    calls: list[tuple[Any, ...]] = []
+
+    def anonymous(*args: Any, **kwargs: Any) -> bytearray:
+        calls.append((args, kwargs))
+        return bytearray(args[1])
+
+    fake = SimpleNamespace(mmap=anonymous, PAGESIZE=4096)
+    monkeypatch.setattr(blockswap, "mmap", fake)
+    monkeypatch.setattr(blockswap, "sys", SimpleNamespace(platform="win32"))
+    copy = blockswap.HostCopy(4096 + 1, pin=False)
+    assert calls == [((-1, 2 * 4096), {})]
+    assert copy.bytes.numel() == 2 * 4096 and not copy.pinned
+
+
+def test_a_host_copy_on_linux_is_a_private_anonymous_mmap_kept_from_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The other branch, by its calls: the flags and the madvise (the mapping itself is read in
+    # /proc by test_a_host_copy_is_a_private_mapping).
+    import mmap
+
+    calls: list[tuple[Any, ...]] = []
+
+    class Area(bytearray):
+        def madvise(self, option: int) -> None:
+            calls.append(("madvise", option))
+
+    def anonymous(*args: Any, **kwargs: Any) -> Area:
+        calls.append(("mmap", args, kwargs))
+        return Area(args[1])
+
+    fake = SimpleNamespace(
+        mmap=anonymous,
+        PAGESIZE=mmap.PAGESIZE,
+        MAP_PRIVATE=mmap.MAP_PRIVATE,
+        MAP_ANONYMOUS=mmap.MAP_ANONYMOUS,
+        MADV_DONTFORK=mmap.MADV_DONTFORK,
+    )
+    monkeypatch.setattr(blockswap, "mmap", fake)
+    monkeypatch.setattr(blockswap, "sys", SimpleNamespace(platform="linux"))
+    blockswap.HostCopy(1, pin=False)
+    flags = mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS
+    assert calls == [
+        ("mmap", (-1, mmap.PAGESIZE), {"flags": flags}),
+        ("madvise", mmap.MADV_DONTFORK),
+    ]
+
+
 @pytest.mark.parametrize("missing", ["the binding", "the call", "CUDA"])
 def test_pinning_without_torch_s_binding_is_a_refusal(
     monkeypatch: pytest.MonkeyPatch, missing: str

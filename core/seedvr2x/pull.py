@@ -410,7 +410,9 @@ def resolve(
     GB for an assembly alone left). A file in the cache is checked as any job's, by its header
     and its pin."""
     if model_dir is not None:
-        logger.info("model files from %s (--model-dir), nothing downloaded", model_dir)
+        logger.info(
+            "model files from %s, a directory given by the user, nothing downloaded", model_dir
+        )
         return ModelFiles(
             ModelFile(dit, model_dir / dit),
             ModelFile(vae, model_dir / vae),

@@ -521,7 +521,8 @@ class TargetTooSmall(Refusal):
     resolution is the way out, as a Setting (`resolution`) the message words as an option.
 
     - resolution: the short side asked, in pixels;
-    - size: (height, width) of the resized frames, in pixels;
+    - size: (height, width) of the resized frames, in pixels; of a picture's output, cropped to
+      even sides, where that is what the padding refuses (frames.check_picture_target);
     - least: (rows, columns) the padding takes at least, in pixels."""
 
     def __init__(

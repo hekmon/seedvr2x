@@ -31,6 +31,7 @@ import logging
 import mmap
 import os
 import re
+import sys
 import weakref
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -83,10 +84,27 @@ _DTYPES: dict[str, torch.dtype] = {
 }
 
 
+def _anonymous(length: int) -> mmap.mmap:
+    """An anonymous mapping of `length` bytes (a multiple of the page size), zeros, of the
+    platform's own kind: Python's mmap takes flags and madvise on POSIX only, and on Windows
+    mmap.mmap(-1, length) is the anonymous mapping, which no child process inherits unless it is
+    made to (seedvr2x starts none that takes it)."""
+    if sys.platform == "win32":
+        return mmap.mmap(-1, length)
+    area = mmap.mmap(-1, length, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+    # Not a forked child's: the kernel would copy every pinned page for it at the fork,
+    # the 15.81 GiB pinned for a plan that keeps the two models apart (the whole DiT and
+    # the VAE, measured, milestone 3, 2026-10-11). seedvr2x forks nothing (its
+    # ffmpeg processes are spawned); a child that did would have no weights to read.
+    area.madvise(mmap.MADV_DONTFORK)
+    return area
+
+
 class HostCopy:
     """`size` bytes of host memory, page-locked for CUDA when `pin`: a private anonymous mapping
-    of its own, registered with cudaHostRegister, so that it takes its size and no more. torch's
-    own pinned allocator rounds each allocation up to a power of two: a 7B block's 0.4220 GiB
+    of its own (_anonymous: POSIX's, or Windows' anonymous mmap), registered with
+    cudaHostRegister, so that it takes its size and no more. torch's own pinned allocator rounds
+    each allocation up to a power of two: a 7B block's 0.4220 GiB
     took 0.5 GiB there, 18.0 GiB for the 36 blocks where their bytes are 15.19 (torch 2.14.1).
     Copies from it to the device are as fast as from torch's (54.6 against 53.4 GB/s on a desktop
     PCIe 5.0 link, 18.2 from pageable memory) and return at once (0.12 ms): measured by
@@ -97,17 +115,15 @@ class HostCopy:
     bytes is the buffer, (size rounded up to a page,) uint8, zeros at first. Raises
     HostMemoryError when the host refuses the mapping or its page-locking, or when this torch
     doesn't bind CUDA's call for it (torch.cuda.cudart(), which torch binds without documenting
-    it): a refusal before the run, never a pageable copy in the pinned one's place."""
+    it): a refusal before the run, never a pageable copy in the pinned one's place. The pinning
+    is torch's binding of the runtime's cudaHostRegister on every platform (no POSIX call in it);
+    the Windows mapping is checked by its call alone, on the CPU (tests/test_blockswap.py), never
+    pinned on a Windows card by seedvr2x's tests."""
 
     def __init__(self, size: int, pin: bool) -> None:
         length = -(-max(size, 1) // mmap.PAGESIZE) * mmap.PAGESIZE
         try:
-            area = mmap.mmap(-1, length, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
-            # Not a forked child's: the kernel would copy every pinned page for it at the fork,
-            # the 15.81 GiB pinned for a plan that keeps the two models apart (the whole DiT and
-            # the VAE, measured, milestone 3, 2026-10-11). seedvr2x forks nothing (its
-            # ffmpeg processes are spawned); a child that did would have no weights to read.
-            area.madvise(mmap.MADV_DONTFORK)
+            area = _anonymous(length)
         except OSError as error:
             raise HostMemoryError(
                 f"the host refuses {_gib(length)} of memory: {error}", need=length

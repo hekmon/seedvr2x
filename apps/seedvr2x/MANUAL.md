@@ -1894,7 +1894,7 @@ mid-job, at every new window length. Off by default.
 
   ```
   03:55:15 plan: compile: the VAE compiled (--compile), each pass held to 1.1 times its plain peak, in the shapes measured only; compiling its 6 shapes takes about 6 min 30 s for this new job, about 2 min on a resume, its cache warm (measured on an RTX 5090's host, on a Windows drive), paid before the DiT loads, at every start and resume, its cache kept in the job's directory
-  03:55:17 compiling the VAE (--compile): its encoder and decoder, 62 causal convolutions left out of the graph, warmed at the encode's 1664x1104, 320x1104 and the decode's 1024x1024, 960x1024, 1024x144, 960x144, shots of 2, 3 latents or more; the cache in film.segments/compile-cache
+  03:55:17 compiling the VAE: its encoder and decoder, 62 causal convolutions left out of the graph, warmed at the encode's 1664x1104, 320x1104 and the decode's 1024x1024, 960x1024, 1024x144, 960x144, shots of 2, 3 latents or more; the cache in film.segments/compile-cache
   04:01:44 the VAE compiled in 6 min 27 s
   04:04:10 time: estimated from a calibration of 49 s, the models loaded in 8 min 7 s, 6 min 28 s of it compiling the VAE
   ```
