@@ -312,7 +312,7 @@ seedvr2x/                the repository
       at a time, so nothing of ComfyUI's touches the card meanwhile (read in v0.44.0's
       executor, its `async` nodes included, before it is relied on); its Cancel is honoured
       between steps and its progress bar moves.
-  - **Four nodes** (the user, 2026-11-05):
+  - **Four nodes, and three that give the plan's settings** (the user, 2026-11-05):
     - seedvr2x Models: the DiT file by a name a user reads ("Sharp 7B, int8"), with its size
       and the model card's typical error (0.86% for int8), from Hugging Face's cache or a
       directory; the RAM choice above.
@@ -328,17 +328,27 @@ seedvr2x/                the repository
     - seedvr2x Upscale Image, a batch of pictures each upscaled on its own, and seedvr2x
       Upscale Video, a clip's frames shot by shot, each in sliding windows, its cut list a
       required input.
-    - Each upscale node carries the settings the plan makes as its own widgets: each pass's
-      tiles, the blocks swapped, a clip's window cap, the attention kernel, the colour
-      correction, the seed (the user, 2026-11-05: a Tuning node first specified would only
-      have forwarded them). A number is an INT input, so that any node giving an INT drives
-      it, as ComfyUI's flow has it; "auto" is a value no pin takes (0 for a tile side or the
-      window cap, -1 for the blocks swapped, where 0 swaps none), and a tile side one step past
-      the planner's largest (2112 px) is untiled, each said in its label and its tooltip, as
-      ComfyUI's frontend (1.57) shows no word for a value; min, max and step are the
-      planner's own candidates, so that a pin is always a
-      value the plan could take. One pinned, the plan makes the others around it, as the CLI's
-      pins do: that tuning is seedvr2x's first value, and every workflow shows it.
+    - Each upscale node shows as widgets the choices a user keeps at their default: the
+      output's resolution, the attention kernel, the colour correction (a toggle, on `split`,
+      off `none`), the seed (ComfyUI's own, fixed) and "plan only" (a Tuning node first
+      specified would only have forwarded them). The plan's numbers are optional inputs of
+      seedvr2x's own types, with no widget: each pass's tile, the blocks swapped, a clip's
+      window length. Unconnected, the plan chooses, and its text says what it chose;
+      connected, the value is pinned (the user's review of the nodes in ComfyUI Desktop,
+      2026-11-05: an INT widget with a value standing for "auto" offered tiles of 64 px). A
+      value node gives each, in the node library's `seedvr2x/plan settings`, with its range,
+      its step and a description: seedvr2x Tile (512 to 2048 px by 64, or the whole image at
+      once), seedvr2x Blocks Swapped (0 to 36), seedvr2x Window Length (in frames, 17 to 509
+      by 4, the model's own steps), which ComfyUI offers first on a link released from the
+      socket; an Int node still drives one through its widget's socket. A value off the grid
+      is refused when it is queued, or, brought by a link, when the node runs. One pinned,
+      the plan makes the others around it, as the CLI's pins do: that tuning is seedvr2x's
+      first value, and every plan says it.
+    - Every label, tooltip and line a node shows is in a ComfyUI user's words, with no word of
+      the library's (pinned, latent, phase): the upscale nodes take `images`, then `models`,
+      and give `images` and `plan`, named in lowercase as ComfyUI's V3 nodes name theirs; the
+      model file's tooltip says what its error per weight measures, and that it measures the
+      file, not the picture.
     - The plan is made in the upscale node, at run time, where the input's size, the shots and
       the card are known. "Plan only", off by default, has the node make it and say it, loading
       nothing and reading no weight, and stops what follows it, as the CLI's `--plan` does: a
@@ -366,7 +376,7 @@ seedvr2x/                the repository
     the plan matrix holding them byte for byte.
   - **The code:** `core/seedvr2x/clip.py`, one shot from frames in memory through models already
     loaded, the video's counterpart of `still.py`; the refusal classes in `errors.py`;
-    `apps/comfyui/`: `nodes.py` (the four nodes and ComfyUI's calls), `models.py` (loading,
+    `apps/comfyui/`: `nodes.py` (the nodes and ComfyUI's calls), `models.py` (loading,
     the RAM kept, the placement per run), `words.py` (the nodes' words for each refusal), the
     example workflows and a README; its tests against a stand-in for ComfyUI's few calls, in
     the CLI's environment. Not a uv project of its own, unlike the other apps: the nodes run
