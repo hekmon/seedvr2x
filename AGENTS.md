@@ -38,6 +38,8 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
                          against the CPU, cached on disk by a fingerprint of the environment
     frames.py passes.py peaks.py files.py clock.py errors.py     what the bricks share (errors.py:
                          a refusal's message worded by each app, and the plan's refusals by kind)
+    waiting.py           a wait on the GPU, polled and timed: said once past 4 times its unit's
+                         estimate, the unit and its estimate named by each app
     vendor/              model layer, vendored from numz (below)
     transnetv2/          the shot detector's model, vendored from TransNetV2 (below)
   tests/                 the library's, with library_fixtures.py, stand_ins.py and conftest.py
@@ -628,6 +630,24 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   stay, the reader's and the writer's real ffmpeg (skipped without a build seedvr2x accepts), and
   the segment command's shell, left running by a kill, as DESIGN.md has it. `/proc` tells the
   processes left, so Linux only.
+- A wait on the GPU (`seedvr2x/waiting.py`; DESIGN.md, Allocator, the hang of 2026-11-06), the
+  poll `model.synchronize` and `blockswap.Cuda.wait` go through: `core/tests/test_waiting.py`
+  holds it on a fake clock whose sleep advances it, nothing sleeping: the line once past 4 times
+  its unit's estimate and never under it, the floor of 60 s, nothing said without a unit or an
+  estimate, NVML's reading or its absence in the line, the stacks with the process's first such
+  line only (and the real `faulthandler` dump to a file), the end of a wait said once it was, a
+  stop raised inside the poll (an exception, a real signal's handler) propagating with the wait
+  recorded (`ended`, `ended_by`: by the exception's identity, the exception itself not kept, its
+  frames with it), a line that fails (a replaced NVML reading that raises, as a research
+  script's did on the GPU) said at debug and the wait going on, the waits running seen from
+  another thread
+  (`longest`, `stalled`), units per thread, `cuda_used` and `cuda_failed`, and its import making
+  no torch; `tests/test_memory.py` NVML's activity (`memory.activity`) on its stand-in. The CLI
+  names each unit in `run._begin` with the calibration's estimate; the image server each step of
+  a picture inside its model's lock, the warm-up's longest time of that step its estimate:
+  `tests/test_service.py` the estimates and the units named, `tests/test_web.py` /health's
+  `stalled` (503, a ready server only, ready again after) and the gauge of the longest wait,
+  `tests/test_metrics.py` its family.
 - The one clock (`seedvr2x/clock.py`): `tests/test_clock.py` holds it on fake monotonic and wall
   readers, nothing sleeping (`Readers`, `Pace`): the ratio of the wall to the run's clock before and
   after its minimum span, steps of the wall told from drift (a few seconds either way, an hour set,

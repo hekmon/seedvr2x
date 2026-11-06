@@ -202,6 +202,9 @@ class Nvml:
         self.times: int | None = None
         self.calls: list[str] = []
         self.open = 0
+        # What the card is doing, for memory.activity: the percent of time a kernel ran, and the
+        # performance state (8 is P8; NVML's 32 is "unknown").
+        self.busy, self.state = 6, 8
 
     def call(self, name: str) -> int | None:
         self.calls.append(name)
@@ -235,6 +238,18 @@ class Nvml:
         found._obj.total, found._obj.reserved = TOTAL, GIB // 2
         found._obj.free, found._obj.used = free, TOTAL - GIB // 2 - free
         return SUCCESS
+
+    def nvmlDeviceGetUtilizationRates(self, handle: ctypes.c_void_p, found: Any) -> int:
+        failed = self.call("nvmlDeviceGetUtilizationRates")
+        if not failed:
+            found._obj.gpu, found._obj.memory = self.busy, 3
+        return failed or SUCCESS
+
+    def nvmlDeviceGetPerformanceState(self, handle: ctypes.c_void_p, found: Any) -> int:
+        failed = self.call("nvmlDeviceGetPerformanceState")
+        if not failed:
+            found._obj.value = self.state
+        return failed or SUCCESS
 
     def nvmlShutdown(self) -> int:
         self.open -= 1
@@ -403,6 +418,7 @@ def test_a_card_nvml_does_not_list_gives_no_figure(
 
 CUDA_S = ["cuInit", "cuDeviceGet", "cuDeviceGetUuid"]
 NVML_S = ["nvmlInit", "nvmlDeviceGetHandleByUUID", "nvmlDeviceGetMemoryInfo", "nvmlShutdown"]
+ACTIVITY_S = ["nvmlDeviceGetUtilizationRates", "nvmlDeviceGetPerformanceState"]
 
 
 @pytest.mark.parametrize("failing", [*CUDA_S, *NVML_S])
@@ -427,6 +443,45 @@ def test_a_call_that_fails_gives_no_figure(
     initialised = failing in NVML_S[1:]
     assert nvml.calls.count("nvmlShutdown") == initialised and nvml.open == 0
     assert ("nvmlInit" in nvml.calls) == (failing in NVML_S)
+
+
+def test_the_card_s_activity(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # What the card is doing, for a wait that has lasted: the percent busy, the performance state
+    # and the bytes programs hold (not what the driver keeps), read through the same naming of
+    # the card as card_free's, NVML shut down after.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    nvml = Nvml({NAMED: 28 * GIB})
+    nvml.busy, nvml.state = 6, 8
+    libraries(monkeypatch, Card(30 * GIB, spills=True), nvml)
+    assert memory.activity() == memory.Activity(busy=6, state=8, used=int(3.5 * GIB))
+    assert nvml.calls == [*NVML_S[:3], *ACTIVITY_S, "nvmlShutdown"] and nvml.open == 0
+    nvml.busy, nvml.state = 100, 32
+    assert memory.activity(0) == memory.Activity(busy=100, state=32, used=int(3.5 * GIB))
+    assert not caplog.messages
+
+
+@pytest.mark.parametrize("failing", [*CUDA_S, *NVML_S, *ACTIVITY_S])
+def test_an_activity_that_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failing: str
+) -> None:
+    # Whichever call fails: None, never raised, the call named at debug level, and NVML shut down
+    # exactly when it was initialised.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    card = Card(30 * GIB, spills=True, failing=failing if failing in CUDA_S else None)
+    nvml = Nvml({NAMED: 28 * GIB}, failing=failing if failing not in CUDA_S else None)
+    libraries(monkeypatch, card, nvml)
+    found = memory.activity()
+    if failing == "nvmlShutdown":
+        assert found is not None and not caplog.messages
+        return
+    assert found is None
+    assert [record.levelname for record in caplog.records] == ["DEBUG"]
+    assert f"the card's activity can't be read through NVML ({failing}" in caplog.text
+    assert caplog.text.endswith(": 999)\n")
+    assert nvml.calls.count("nvmlShutdown") == (failing in NVML_S[1:] or failing in ACTIVITY_S)
+    assert nvml.open == 0
 
 
 def test_nvml_s_structure_is_its_second_version_s() -> None:

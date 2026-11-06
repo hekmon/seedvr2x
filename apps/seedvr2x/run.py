@@ -30,7 +30,7 @@ from media.reader import Reader, listed
 from media.source import Source
 from media.writer import FFV1Writer, Tags, Writer, quantise
 from scratch import Scratch, ScratchError
-from seedvr2x import compiling, memory
+from seedvr2x import compiling, memory, waiting
 from seedvr2x.clock import spent
 from seedvr2x.frames import output_size
 from seedvr2x.model import Models, synchronize
@@ -137,7 +137,7 @@ def run_job(
         raise ValueError("the segments don't hold whole shots")
     if list(units.manifest.shots) != list(shots):
         raise ValueError("the units' manifest is of other shots")
-    with Inputs(source) as inputs:
+    with Inputs(source) as inputs, _units_named():
         for segment, group in enumerate(groups):
             if units.finished(segment):
                 continue
@@ -183,14 +183,30 @@ def job_units(
     )
 
 
+@contextmanager
+def _units_named() -> Generator[None]:
+    """The job's units named for the waits on the GPU while it runs (_begin), none after: a
+    later wait of the process (another job's calibration, in a test's process) is no unit's."""
+    try:
+        yield
+    finally:
+        waiting.clear()
+
+
 def _begin(stop: Stop | None, unit: str, cost: float | None) -> None:
     """Before a unit: stop there if asked, or if it wouldn't finish by --until's time (Stop.check;
     DESIGN.md, Pause and resume, Stopping), else name it for a Ctrl-C's notice. cost is the time
     the unit is expected to take, in seconds (timing.py), None when nothing estimates
-    it."""
+    it. Named for the waits on the GPU too, which say when one lasts past its bound (waiting.py):
+    nothing where nothing estimates the unit."""
     if stop is not None:
         stop.check(cost, unit)
         stop.unit = unit
+    waiting.unit(unit, cost, WAY)
+
+
+# The way out a wait on the GPU that lasts says (waiting.py), in the command's words.
+WAY = "Ctrl-C twice or SIGTERM stops it at once, every unit done kept, and the same command resumes"
 
 
 def _made(

@@ -1767,6 +1767,13 @@ flag, as any resume; another GPU alone is no change to it, its assembly being ff
   to end before SIGKILL; Ctrl-C again kills it at once`. Its file is discarded. A single Ctrl-C
   lets it finish its segment.
 - Either way the GPU is freed entirely, no ffmpeg is left running, and the same command resumes.
+- **A wait on the GPU that lasts** more than four times its unit's estimate, and at least a
+  minute, is said once, the run going on: `WARNING segment 2/5's decode and write: a wait on the
+  GPU has lasted 4 min 10 s, the whole unit estimated at 17.9 s; CUDA has reported no error;
+  NVML reads the card 6% busy at P8, ...`, then every thread's stack, the first time. A slow card
+  and a stalled one look the same from here, so seedvr2x waits; a stop at once keeps every unit
+  done, and `the wait on the GPU ended after ...` says it if it ends. Units with no estimate yet
+  (the calibration's) say nothing.
 - **A value that isn't a number** (NaN, infinity) coming out of the model stops the run, with
   a message naming the stage, the shot and the window or frames. Such a unit is never saved,
   and never written to a master.

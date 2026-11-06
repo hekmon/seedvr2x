@@ -182,12 +182,13 @@ def install(keep_gib: float) -> None:
     keep = round(keep_gib * GIB)
     original = memory._read_all
 
-    def capped(index: int) -> tuple[int, int] | str:
-        found = original(index)
+    def capped(index: int, **more: Any) -> tuple[int, ...] | str:
+        # The reading's other figures (memory.activity's, `busy`) come after the two capped.
+        found = original(index, **more)
         if isinstance(found, str):
             return found
-        free, used = found
-        return max(free - keep, 0), used + keep
+        free, used, *rest = found
+        return max(free - keep, 0), used + keep, *rest
 
     memory._read_all = capped
 

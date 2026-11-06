@@ -24,7 +24,8 @@ import math
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from fractions import Fraction
@@ -39,7 +40,18 @@ import admission
 import answers
 import reservation
 from metrics import Gauges, Metrics
-from seedvr2x import blockswap, frames, memory, peaks, picture, png, pull, still_plan, webp
+from seedvr2x import (
+    blockswap,
+    frames,
+    memory,
+    peaks,
+    picture,
+    png,
+    pull,
+    still_plan,
+    waiting,
+    webp,
+)
 from seedvr2x import record as records
 from seedvr2x.errors import Refusal
 from seedvr2x.memory import Reading
@@ -56,6 +68,16 @@ logger = logging.getLogger("imgserver.service")
 APP = "seedvr2x-imgserver"
 GIB = peaks.GIB
 
+# The steps of a picture's run, as the waiting-on-the-GPU line names them (waiting.named).
+ENCODE = "a picture's encode"
+SAMPLING = "a picture's sampling"
+DECODE = "a picture's decode"
+
+# The way out the line of a long wait gives, in the server's words: the server never ends a
+# stalled wait itself (a stall is no CUDA error, and it can't be told from a slow card), the
+# probe or the operator decides.
+WAY = "/health answers 503 stalled until it ends; a second SIGTERM ends the server at once"
+
 
 class State(Enum):
     """The server's state, as /health says it."""
@@ -64,6 +86,8 @@ class State(Enum):
     READY = "ready"
     STOPPING = "stopping"
     FAILED = "failed"
+    # Not kept in Service.state: a wait on the GPU past its bound (Service.health).
+    STALLED = "stalled"
 
 
 class Unprocessable(Exception):
@@ -189,22 +213,11 @@ class Card:
         return (self.torch.OutOfMemoryError,)
 
     def fatal(self, error: BaseException) -> bool:
-        """A CUDA error other than out of memory: torch's AcceleratorError, or a RuntimeError
-        CUDA, cuBLAS or cuDNN reported, after which the card's state is untrusted."""
-        if isinstance(error, self.torch.OutOfMemoryError):
-            return False
-        accelerator = getattr(self.torch, "AcceleratorError", None)
-        if accelerator is not None and isinstance(error, accelerator):
-            return True
-        text = str(error)
-        # cuBLAS's and cuDNN's refused allocations are out of memory, not a broken card
-        # (CUBLAS_STATUS_ALLOC_FAILED, CUDNN_STATUS_ALLOC_FAILED): the picture is answered 500 and
-        # the server goes on (_upscaled).
-        if "_ALLOC_FAILED" in text:
-            return False
-        return isinstance(error, RuntimeError) and any(
-            word in text for word in ("CUDA error", "CUBLAS_STATUS", "cuDNN error")
-        )
+        """A CUDA error other than out of memory, after which the card's state is untrusted
+        (waiting.cuda_failed: torch's AcceleratorError, or a RuntimeError CUDA, cuBLAS or cuDNN
+        reported; their refused allocations are out of memory: the picture is answered 500 and
+        the server goes on, _upscaled)."""
+        return waiting.cuda_failed(error)
 
     def watched(self, models: "Models") -> Any:
         return memory.watched(models.device, "the picture's passes", "pixels")
@@ -276,6 +289,11 @@ class Service:
     failed: threading.Event = field(default_factory=threading.Event)
     # The error that set it, for main's last line.
     failure: str = ""
+    # The longest time of each step of a picture in the warm-up, in the run's own seconds
+    # (waiting.monotonic): the step's estimate for every later picture, which is within the bound
+    # the warm-up's pictures are at.
+    estimates: dict[str, float] = field(default_factory=dict[str, float])
+    _estimated: threading.Lock = field(default_factory=threading.Lock)
 
     # ---- The start ------------------------------------------------------------------------
 
@@ -486,6 +504,34 @@ class Service:
         if self.admitted is not None:
             self.admitted.stop()
 
+    def health(self) -> State:
+        """What /health says: the state, except that a ready server whose GPU wait has passed its
+        bound (waiting.stalled) says stalled and ready again once the wait ends. Starting,
+        stopping and failed win: a stop or a CUDA error is the more useful thing for a probe to
+        know, and the pictures running are answered or ended either way."""
+        state = self.state
+        if state is State.READY and waiting.stalled():
+            return State.STALLED
+        return state
+
+    @contextmanager
+    def _step(self, name: str, warm: bool) -> Generator[None]:
+        """One step of a picture, inside its model's lock, its waits on the GPU part of it. The
+        warm-up's steps say nothing of a long wait and keep their longest time; the later ones
+        take that time as their estimate."""
+        if not warm:
+            with self._estimated:
+                estimate = self.estimates.get(name)
+            with waiting.named(name, estimate, WAY):
+                yield
+            return
+        began = waiting.monotonic()
+        with waiting.named(name, None, WAY):
+            yield
+        seconds = waiting.monotonic() - began
+        with self._estimated:
+            self.estimates[name] = max(seconds, self.estimates.get(name, 0.0))
+
     def _reservation(self) -> int:
         return 0 if self.made is None else self.made.reservation
 
@@ -499,6 +545,7 @@ class Service:
             reserved_peak=self.card.reserved_peak() if loaded else 0,
             reservation=self._reservation(),
             ready=self.state is State.READY,
+            gpu_wait=waiting.longest() or 0.0,
         )
 
     # ---- A picture --------------------------------------------------------------------------
@@ -627,7 +674,7 @@ class Service:
             raise Unavailable("the server is stopping") from None
         started = time.monotonic()
         try:
-            out = self._upscaled(prepared)
+            out = self._upscaled(prepared, warm)
         finally:
             self.admitted.leave(ticket)
             self._held()
@@ -639,7 +686,7 @@ class Service:
             self.metrics.upscaled(ticket.waited, seconds, made.output[0] * made.output[1])
         return made
 
-    def _upscaled(self, prepared: Prepared) -> npt.NDArray[np.float32]:
+    def _upscaled(self, prepared: Prepared, warm: bool = False) -> npt.NDArray[np.float32]:
         from seedvr2x import still
 
         models = self.models
@@ -647,14 +694,14 @@ class Service:
         pixels, target, seed = prepared.picture.pixels, prepared.target, prepared.seed
         try:
             with self.card.watched(models):
-                with self._vae:
+                with self._vae, self._step(ENCODE, warm):
                     latent = still.encoded(
                         models, pixels, target, seed, tiles=prepared.tiles.encode
                     )
-                with self._dit:
+                with self._dit, self._step(SAMPLING, warm):
                     sampled = still.sampled(models, latent, seed)
                 del latent
-                with self._vae:
+                with self._vae, self._step(DECODE, warm):
                     return still.decoded(
                         models, sampled, pixels, target, tiles=prepared.tiles.decode, correct=True
                     )

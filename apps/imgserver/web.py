@@ -215,7 +215,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         service = self.server.service
         if path == "/health":
-            state = service.state
+            state = service.health()
             status = HTTPStatus.OK if state is State.READY else HTTPStatus.SERVICE_UNAVAILABLE
             self._text(status, state.value)
         elif path == "/metrics":

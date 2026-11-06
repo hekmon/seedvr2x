@@ -547,6 +547,37 @@ class _Memory(ctypes.Structure):
     )
 
 
+class _Utilization(ctypes.Structure):
+    """NVML's nvmlUtilization_t (nvml.h): the percent of the last sample period in which a kernel
+    ran on the card (gpu), and in which its memory was read or written (memory)."""
+
+    _fields_ = (("gpu", ctypes.c_uint), ("memory", ctypes.c_uint))
+
+
+@dataclass(frozen=True)
+class Activity:
+    """What NVML says the card behind a CUDA device is doing: `busy`, the percent of its last
+    sample period in which a kernel ran (nvidia-smi's GPU-Util), whatever program's; `state`,
+    its performance state, 0 (P0, the most) to 15 (P15, the least), 32 unknown; `used`, the bytes
+    programs hold. For a wait on the GPU that lasts (waiting.py): the place-study night's hang
+    (2026-11-06) read 6% busy at P8 with seedvr2x's work queued, the desktop's alone."""
+
+    busy: int
+    state: int
+    used: int
+
+
+def activity(index: int = 0) -> Activity | None:
+    """NVML's reading of what the card behind CUDA's device `index` is doing (Activity), or None
+    when NVML doesn't say, the reason at debug level. Never raises; one reading, nothing
+    remembered, no CUDA context made or needed (card_free)."""
+    found = _read_all(index, busy=True)
+    if isinstance(found, tuple):
+        return Activity(busy=found[2], state=found[3], used=found[1])
+    logger.debug("the card's activity can't be read through NVML (%s)", found)
+    return None
+
+
 def startup() -> str:
     """Ask the driver whether it refuses, once a run, before torch is imported, and set the
     allocator the run takes by default (VARIABLES, which the user's own setting overrides):
@@ -1307,7 +1338,7 @@ def card_state(index: int = 0) -> tuple[int, int] | None:
     say, the reason at debug level. Never raises; one reading, nothing remembered."""
     found = _read_all(index)
     if isinstance(found, tuple):
-        return found
+        return found[0], found[1]
     logger.debug("the whole card's free memory can't be read through NVML (%s)", found)
     return None
 
@@ -1319,10 +1350,11 @@ def _read(index: int) -> int | str:
     return found if isinstance(found, str) else found[0]
 
 
-def _read_all(index: int) -> tuple[int, int] | str:
+def _read_all(index: int, busy: bool = False) -> tuple[int, ...] | str:
     """NVML's reading of the card behind CUDA's device `index`: the bytes free and the bytes
-    programs hold (nvmlMemory_v2_t's `used`, without what the driver keeps: `reserved`), or why
-    NVML gave none, in words. NVML is loaded first, so that a machine without it asks CUDA
+    programs hold (nvmlMemory_v2_t's `used`, without what the driver keeps: `reserved`), and with
+    `busy` the percent of time a kernel ran and the performance state after them (Activity), or
+    why NVML gave none, in words. NVML is loaded first, so that a machine without it asks CUDA
     nothing; initialised only once CUDA has named the card, and shut down whatever follows."""
     try:
         nvml, cuda = ctypes.CDLL(NVML), ctypes.CDLL(CUDA)
@@ -1347,7 +1379,16 @@ def _read_all(index: int) -> tuple[int, int] | str:
             status = nvml.nvmlDeviceGetMemoryInfo_v2(handle, ctypes.byref(memory))
             if status != SUCCESS:
                 return f"nvmlDeviceGetMemoryInfo: {status}"
-            return int(memory.free), int(memory.used)
+            if not busy:
+                return int(memory.free), int(memory.used)
+            rates, state = _Utilization(), ctypes.c_int()
+            status = nvml.nvmlDeviceGetUtilizationRates(handle, ctypes.byref(rates))
+            if status != SUCCESS:
+                return f"nvmlDeviceGetUtilizationRates: {status}"
+            status = nvml.nvmlDeviceGetPerformanceState(handle, ctypes.byref(state))
+            if status != SUCCESS:
+                return f"nvmlDeviceGetPerformanceState: {status}"
+            return int(memory.free), int(memory.used), int(rates.gpu), int(state.value)
         finally:
             nvml.nvmlShutdown()
     except (OSError, AttributeError) as error:

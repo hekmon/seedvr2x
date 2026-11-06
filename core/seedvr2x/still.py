@@ -137,7 +137,9 @@ def decoded(
         if isinstance(slices, Generator):
             slices.close()
     # As shot_pass.finite checks it, before the correction and the post-processing; the picture's
-    # frame is the one part.
+    # frame is the one part. Polled first, as finite is: the check's copy to the CPU would wait in
+    # C for the whole decode, out of a stop's reach (waiting.py).
+    model.synchronize(chunk.device)
     if not bool(torch.isfinite(chunk).all()):
         bad = int((~torch.isfinite(chunk)).sum())
         raise NonFinite(f"the picture's decode holds NaN or inf: {bad} of {chunk.numel()} values")

@@ -48,6 +48,7 @@ from seedvr2x import (
     pull,
     still,
     still_plan,
+    waiting,
     weights,
 )
 from seedvr2x.errors import Refusal
@@ -335,6 +336,114 @@ def test_the_warm_up_runs_count_pictures_in_landscape_and_in_portrait_through_ad
         assert (
             server.service.metrics.text(server.service.gauges).count("upscale_seconds_count 0") == 1
         )
+
+
+class Steps:
+    """The three steps of a picture (still.encoded, still.sampled, still.decoded) taking the time
+    each call is given from `seconds` on a clock waiting.monotonic reads, and waiting.named
+    recording what it is given: (name, estimate, way). Nothing sleeps."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, seconds: dict[str, list[float]]) -> None:
+        self.now = 1000.0
+        self.named: list[tuple[str, float | None, str]] = []
+        self._seconds = {name: list(each) for name, each in seconds.items()}
+        named = waiting.named
+        monkeypatch.setattr(waiting, "monotonic", lambda: self.now)
+
+        def recording(name: str, estimate: float | None, way: str = waiting.WAY) -> Any:
+            self.named.append((name, estimate, way))
+            return named(name, estimate, way)
+
+        monkeypatch.setattr(waiting, "named", recording)
+        for name in ("encoded", "sampled", "decoded"):
+            monkeypatch.setattr(still, name, self._step(name, getattr(still, name)))
+
+    def _step(self, name: str, original: Callable[..., Any]) -> Callable[..., Any]:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            out = original(*args, **kwargs)
+            # The step's time is the clock's move while it runs; the last value repeats.
+            each = self._seconds[name]
+            self.now += each.pop(0) if len(each) > 1 else each[0]
+            return out
+
+        return wrapper
+
+
+def test_the_warm_ups_longest_time_of_each_step_is_the_estimate_of_every_later_picture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cpu_models: model.Models
+) -> None:
+    """The warm-up runs the landscape and the portrait picture (count 1, so in turn): each step
+    keeps the longer of its two times, and a request's step is named with it. The warm-up's own
+    steps are named with no estimate, so that no wait in it says anything."""
+    steps = Steps(
+        monkeypatch,
+        {"encoded": [2.0, 5.0], "sampled": [10.0, 7.0], "decoded": [3.0]},
+    )
+    with live(monkeypatch, tmp_path, cpu_models) as server:
+        assert server.service.estimates == {
+            services.ENCODE: 5.0,
+            services.SAMPLING: 10.0,
+            services.DECODE: 3.0,
+        }
+        warm = list(steps.named)
+        assert [(name, estimate) for name, estimate, _ in warm] == [
+            (services.ENCODE, None),
+            (services.SAMPLING, None),
+            (services.DECODE, None),
+        ] * 2
+        steps.named.clear()
+        assert server.upscale(png_of(40, 24))[0] == 200
+        assert [(name, estimate) for name, estimate, _ in steps.named] == [
+            (services.ENCODE, 5.0),
+            (services.SAMPLING, 10.0),
+            (services.DECODE, 3.0),
+        ]
+        # A request's own times change nothing: the estimate is the warm-up's.
+        assert server.service.estimates[services.ENCODE] == 5.0
+        assert {way for _, _, way in steps.named + warm} == {services.WAY}
+
+
+def test_a_step_is_named_in_the_thread_that_runs_it_and_the_name_goes_after_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cpu_models: model.Models
+) -> None:
+    """The unit named for a thread's waits is the step's inside it and what it was before after
+    it (waiting.named), so that a wait in the models' placement between pictures says nothing."""
+    seen: list[str | None] = []
+
+    def seeing(original: Callable[..., Any]) -> Callable[..., Any]:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            current = getattr(waiting._named, "unit", None)  # pyright: ignore[reportPrivateUsage]
+            seen.append(None if current is None else current.name)
+            return original(*args, **kwargs)
+
+        return wrapper
+
+    for name in ("encoded", "sampled", "decoded"):
+        monkeypatch.setattr(still, name, seeing(getattr(still, name)))
+    with live(monkeypatch, tmp_path, cpu_models) as server:
+        assert seen == [services.ENCODE, services.SAMPLING, services.DECODE] * 2
+        assert getattr(waiting._named, "unit", None) is None  # pyright: ignore[reportPrivateUsage]
+        assert server.service.estimates.keys() == {
+            services.ENCODE,
+            services.SAMPLING,
+            services.DECODE,
+        }
+
+
+def test_stopping_and_failed_win_over_stalled_in_health(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cpu_models: model.Models
+) -> None:
+    monkeypatch.setattr(waiting, "stalled", lambda: True)
+    with live(monkeypatch, tmp_path, cpu_models, ready=False) as server:
+        service = server.service
+        # Starting: a probe waits for the warm-up, a stall of the warm-up's steps is not said.
+        assert service.health() is services.State.STARTING
+        service.state = services.State.READY
+        assert service.health() is services.State.STALLED
+        service.state = services.State.STOPPING
+        assert service.health() is services.State.STOPPING
+        service.state = services.State.FAILED
+        assert service.health() is services.State.FAILED
 
 
 # ---- A start refused --------------------------------------------------------------------------

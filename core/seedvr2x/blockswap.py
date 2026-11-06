@@ -31,7 +31,6 @@ import logging
 import mmap
 import os
 import re
-import time
 import weakref
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -45,7 +44,7 @@ from typing import Any, NoReturn, cast
 import torch
 from torch import Tensor
 
-from seedvr2x import gguf_file, memory
+from seedvr2x import gguf_file, memory, waiting
 from seedvr2x.errors import HostMemoryError, ModelChanged, ModelDamaged
 from seedvr2x.gguf_file import GgufError
 from seedvr2x.passes import Phase
@@ -193,12 +192,13 @@ class Cuda:
 
     def wait(self, *streams: Any) -> None:
         """Wait for the work queued on streams, polling as model.synchronize does, so that a
-        signal's handler runs meanwhile (stop.py)."""
+        signal's handler runs meanwhile (stop.py), timed (waiting.wait)."""
+        named: Any = self.device.index  # None for a bare "cuda", whatever the stubs say
+        index = torch.cuda.current_device() if named is None else named
         for stream in streams:
             done = torch.cuda.Event()
             done.record(stream)
-            while not done.query():
-                time.sleep(0.001)
+            waiting.wait(done.query, 0.001, index)
 
 
 @dataclass

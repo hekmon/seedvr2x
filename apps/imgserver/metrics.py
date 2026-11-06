@@ -1,7 +1,8 @@
 """The server's /metrics (DESIGN.md, The image server): Prometheus' text exposition format, version
 0.0.4, written here with no dependency, its tests reading it back with prometheus_client's parser:
 requests by status, the upscale's and the wait's times, the pictures running and waiting, the
-output's pixels, the VRAM reserved and its peak, ready, and the version and model files."""
+output's pixels, the VRAM reserved and its peak, ready, the longest wait on the GPU running, and
+the version and model files."""
 
 import threading
 from collections.abc import Callable, Sequence
@@ -51,6 +52,7 @@ class Gauges:
     reserved_peak: int
     reservation: int
     ready: bool
+    gpu_wait: float = 0.0
 
 
 class Metrics:
@@ -109,6 +111,14 @@ class Metrics:
         ):
             _family(lines, name, "gauge", help_)
             lines.append(_sample(name, {}, int(value)))
+        _family(
+            lines,
+            "gpu_wait_seconds",
+            "gauge",
+            "The longest wait on the GPU running now, 0 with none; past a bound /health says"
+            " stalled.",
+        )
+        lines.append(_sample("gpu_wait_seconds", {}, read.gpu_wait))
         _family(lines, "info", "gauge", "The server's version and model files.")
         lines.append(_sample("info", info, 1))
         return "\n".join(lines) + "\n"

@@ -34,7 +34,7 @@ import answers
 import reservation
 import service as services
 import web
-from seedvr2x import model, picture, png, still
+from seedvr2x import model, picture, png, still, waiting
 from seedvr2x import record as records
 from seedvr2x.peaks import GIB
 
@@ -604,6 +604,36 @@ def test_a_server_starting_says_so(
         status, _, body = server.request("GET", "/health")
         assert (status, body.strip()) == (200, b"ready")
         assert metric(server, "ready") == 1
+
+
+def test_a_wait_past_its_bound_says_stalled_and_ready_again_once_it_ends(
+    server: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/health is 503 stalled while a wait on the GPU is past its bound (waiting.stalled, set by
+    the library's wait), 200 ready again after it, with no wait made: the flag is the library's,
+    tested in core/tests/test_waiting.py."""
+    status, _, body = server.request("GET", "/health")
+    assert (status, body.strip()) == (200, b"ready")
+    monkeypatch.setattr(waiting, "stalled", lambda: True)
+    status, headers, body = server.request("GET", "/health")
+    assert (status, body.strip()) == (503, b"stalled")
+    assert headers["content-type"].startswith("text/plain")
+    # The server takes pictures still, and says ready in /metrics: it is waiting, not stopped.
+    assert server.upscale(png_of(40, 24))[0] == 200
+    assert metric(server, "ready") == 1
+    monkeypatch.setattr(waiting, "stalled", lambda: False)
+    status, _, body = server.request("GET", "/health")
+    assert (status, body.strip()) == (200, b"ready")
+
+
+@pytest.mark.parametrize(
+    ("longest", "expected"), [(12.5, 12.5), (None, 0.0), (0.0, 0.0)], ids=["12.5 s", "none", "zero"]
+)
+def test_the_metrics_carry_the_longest_wait_on_the_gpu(
+    server: Live, monkeypatch: pytest.MonkeyPatch, longest: float | None, expected: float
+) -> None:
+    monkeypatch.setattr(waiting, "longest", lambda: longest)
+    assert metric(server, "gpu_wait_seconds") == expected
 
 
 def test_a_full_queue_is_a_503_with_retry_after(

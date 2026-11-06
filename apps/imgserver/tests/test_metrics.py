@@ -69,6 +69,7 @@ def test_every_family_the_design_lists_is_there_with_its_type() -> None:
         "vram_reserved_peak_bytes": "gauge",
         "vram_reservation_bytes": "gauge",
         "ready": "gauge",
+        "gpu_wait_seconds": "gauge",
         "info": "gauge",
     }
     assert all(name.startswith(PREFIX) for name in families)
@@ -106,6 +107,12 @@ def test_the_gauges_read_back_exactly() -> None:
     assert value(families[named("vram_reserved_peak_bytes")]) == 6 * 1024**3
     assert value(families[named("vram_reservation_bytes")]) == 7 * 1024**3
     assert value(families[named("ready")]) == 1
+
+
+def test_the_longest_wait_on_the_gpu_reads_back_in_seconds_and_is_zero_by_default() -> None:
+    families = read(Metrics(INFO), Gauges(0, 0, 0, 0, 0, True, gpu_wait=12.5))
+    assert value(families[named("gpu_wait_seconds")]) == 12.5
+    assert value(read(Metrics(INFO))[named("gpu_wait_seconds")]) == 0
 
 
 def test_ready_is_zero_when_not_ready() -> None:

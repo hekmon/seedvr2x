@@ -29,7 +29,7 @@ from torchvision.transforms import Compose, InterpolationMode, Lambda, Normalize
 from torchvision.transforms import functional as TVF
 from tqdm import tqdm
 
-from seedvr2x import blockswap, int8, kquant, memory, weights
+from seedvr2x import blockswap, int8, kquant, memory, waiting, weights
 from seedvr2x.blockswap import Part, Placement
 from seedvr2x.frames import BLACK, padding
 from seedvr2x.passes import HELD, Compilation, ModelPlan, Phase
@@ -577,13 +577,19 @@ def pad(frames: Tensor) -> Tensor:
 def synchronize(device: torch.device) -> None:
     """Wait for the work queued on device, polling every 10 ms rather than blocking: Python runs
     a signal's handler between two polls, where a blocking wait holds it until the GPU is done,
-    so that Ctrl-C is answered at once, not after a decode slice or a window (stop.py)."""
+    so that Ctrl-C is answered at once, not after a decode slice or a window (stop.py). Through
+    waiting.wait, which keeps when it began and says once when it lasts past its unit's bound."""
     if device.type != "cuda":
         return
     done = torch.cuda.Event()
     done.record()
-    while not done.query():
-        time.sleep(0.01)
+    # Timed, and said where it lasts past its unit's bound (waiting.py).
+    waiting.wait(done.query, 0.01, _index(device))
+
+
+def _index(device: torch.device) -> int:
+    """CUDA's index of device, the current one where it names none."""
+    return torch.cuda.current_device() if device.index is None else device.index
 
 
 def set_seed(seed: int) -> None:

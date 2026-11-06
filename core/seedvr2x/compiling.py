@@ -32,7 +32,7 @@ from typing import Any
 
 import torch
 
-from seedvr2x import blockswap, model
+from seedvr2x import blockswap, model, waiting
 from seedvr2x.clock import spent, spoken
 from seedvr2x.errors import Refusal
 from seedvr2x.model import COMPUTE_DTYPE, Models
@@ -298,6 +298,8 @@ def compile_vae(models: Models, compilation: Compilation) -> None:
             " --compile runs the plain VAE"
         ) from error
     except (RuntimeError, OSError, ImportError) as error:
+        if waiting.cuda_failed(error):
+            raise  # the card's, not the compiler's: the app's own exit (apps/seedvr2x/main.py)
         # Inductor's and Triton's failures are RuntimeErrors of several kinds (a compiler
         # missing, a kernel that doesn't build); torch's own words first, one line of them. Never
         # a plain VAE in its place: the job's frames would not be those it asked for.

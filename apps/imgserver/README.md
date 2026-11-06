@@ -318,6 +318,7 @@ Plain text, no key needed.
 |---|---|---|
 | `starting` | 503 | The models are loading, or the warm-up has not passed. |
 | `ready` | 200 | The server takes pictures. |
+| `stalled` | 503 | A wait on the GPU has lasted more than 4 times its step's time in the warm-up (at least 60 s), with no CUDA error: the card may be slow, or its driver stopped without a word. The server goes on waiting and takes pictures, the log says which step and where the threads are; `ready` again once the wait ends. A probe or an operator decides whether to restart it. `starting`, `stopping` and `failed` come first. |
 | `stopping` | 503 | It was asked to stop: no new picture. |
 | `failed` | 503 | A CUDA error other than out of memory left the card's state untrusted; the server takes no picture, answers the pictures running, then exits with code 3 ([exit codes](#exit-codes)). |
 
@@ -337,6 +338,7 @@ Prometheus' text format, no key needed. The names:
 | `seedvr2x_imgserver_vram_reserved_peak_bytes` | gauge | The same, at its peak. |
 | `seedvr2x_imgserver_vram_reservation_bytes` | gauge | The reservation torch is held to. |
 | `seedvr2x_imgserver_ready` | gauge | 1 once the warm-up has passed, until the server stops or fails. |
+| `seedvr2x_imgserver_gpu_wait_seconds` | gauge | How long the longest wait on the GPU running has lasted, 0 with none: a value far past a picture's upscale time is what `/health` calls `stalled`. |
 | `seedvr2x_imgserver_info{...}` | gauge | The version, the model files, the attention kernel. |
 
 ### Examples

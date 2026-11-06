@@ -93,5 +93,8 @@ def window(models: Models, noise: Tensor, latent: Tensor) -> Tensor:
     """The DiT's output for one window, (t, h, w, 16) on the device, from the window's slices of
     its shot's noise and latent, on the CPU: sent to the device for the pass, where nothing of
     them is left when this returns but the output."""
+    # Polled first: a copy from pageable memory waits in C for the work queued before it (the
+    # weights sent as the DiT's phase began), out of a stop's reach (waiting.py).
+    model.synchronize(models.device)
     noise, latent = noise.to(models.device), latent.to(models.device)
     return model.sample(models, noise, model.condition(models, noise, latent))
