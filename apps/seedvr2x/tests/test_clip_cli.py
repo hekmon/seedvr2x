@@ -2,6 +2,11 @@
 uses the library's tests' helpers (core/tests): test_still.py's stand-in models and DiT,
 test_clip.py's clips, stand_ins.py's VAE; the library's half is tests/test_clip.py there.
 
+At `quality` enhanced and maximum the clip is the shot of 2 or 4 runs as the command line makes
+it (run.py: each run the shot fed from its first frame, shot.Correction's `first`, the shot's seed,
+the layout of its own frames; each frame taken from the run job.run_of names), held to the same
+passes run one run at a time.
+
 A clip through clip.upscale gives, bit for bit, what the shot's pass (seedvr2x/shot_pass.py), as
 the command line runs it, gives for the same frames as one shot at frame 0: encode_shot, the DiT's
 windows over shots.shot_layout (sample_windows), merge_windows, decode_shot with shot.py's
@@ -22,13 +27,14 @@ from stand_ins import cpu_models  # noqa: F401
 from test_clip import LONG, MIDDLE, SHORT, clip_of
 from test_still import SEED, TARGET, TILES, pipeline_models, stand_in_dit
 
+import job
 import shot
-from seedvr2x import clip, model
+from seedvr2x import clip, model, shotruns
 from seedvr2x.frames import output_size
 from seedvr2x.passes import Tiles
 from seedvr2x.peaks import GIB
 from seedvr2x.shot_pass import decode_shot, encode_shot, merge_windows, sample_windows
-from seedvr2x.shots import shot_layout
+from seedvr2x.shots import Shot, shot_layout
 from shot import Correction
 
 
@@ -93,8 +99,45 @@ def from_memory(monkeypatch: pytest.MonkeyPatch, frames: npt.NDArray[np.float32]
     monkeypatch.setattr(shot, "_copy_reader", copy_reader)
 
 
-def correction_of(frames: npt.NDArray[np.float32]) -> Correction:
-    return Correction(Path("input.mkv"), Path("input.crc32"), frames.shape[2], frames.shape[1])
+def correction_of(frames: npt.NDArray[np.float32], first: int = 0) -> Correction:
+    return Correction(
+        Path("input.mkv"), Path("input.crc32"), frames.shape[2], frames.shape[1], first
+    )
+
+
+def runs_pipeline(
+    models: model.Models,
+    frames: npt.NDArray[np.float32],
+    seed: int,
+    window: int | None,
+    encode_tiles: Tiles | None,
+    decode_tiles: Tiles | None,
+    corrected: bool,
+    level: str,
+    target: tuple[int, int] = TARGET,
+) -> npt.NDArray[np.float32]:
+    """The clip as the command line runs it at `level`, one shot at frame 0 of job.QUALITY[level]
+    runs: each run the shot from its first frame (job.shot_runs) with the shot's seed, its own
+    windows and its correction against the shot's frames from there (Correction.first), the shot
+    pass of shots_pipeline; the output's frames those job.run_of takes from each run. The reader
+    of the input copy (from_memory) is the caller's, over the whole clip."""
+    count = frames.shape[0]
+    runs = job.QUALITY[level]
+    made = {
+        each.offset: shots_pipeline(
+            models,
+            frames[each.offset :],
+            each.seed(seed),
+            window,
+            encode_tiles,
+            decode_tiles,
+            correction_of(frames, each.offset) if corrected else None,
+            target,
+        )
+        for each in job.shot_runs(Shot(0, count), runs)
+    }
+    taken = [job.run_of(runs, frame) for frame in range(count)]
+    return np.stack([made[run][frame - run] for frame, run in enumerate(taken)])
 
 
 # (frames, the plan's window cap, encode tiles, decode tiles, corrected): one, two and three
@@ -163,6 +206,90 @@ def test_a_clip_is_a_shot_at_frame_0(
     assert other.tobytes() != expected.tobytes()
 
 
+# One, two and three windows, each tiled pass alone and both, with the correction and without,
+# at each level above standard.
+LEVEL_CASES = [
+    (SHORT, None, None, None, False),
+    (MIDDLE, 5, None, None, False),
+    (LONG, 5, None, None, False),
+    (LONG, 5, TILES, TILES, False),
+    (SHORT, None, None, None, True),
+    (MIDDLE, 5, None, None, True),
+    (LONG, 5, None, None, True),
+    (MIDDLE, 5, TILES, TILES, True),
+]
+
+
+@pytest.mark.parametrize("level", ["enhanced", "maximum"])
+@pytest.mark.parametrize(
+    ("count", "window", "encode_tiles", "decode_tiles", "correct"),
+    LEVEL_CASES,
+    ids=[
+        f"{count}f-{len(shot_layout(count, window))}w-{'e' if enc else ''}{'d' if dec else ''}"
+        f"{'-corrected' if correct else ''}"
+        for count, window, enc, dec, correct in LEVEL_CASES
+    ],
+)
+def test_a_clip_at_a_level_is_the_shots_runs_as_the_command_line_makes_them(
+    monkeypatch: pytest.MonkeyPatch,
+    level: str,
+    count: int,
+    window: int | None,
+    encode_tiles: Tiles | None,
+    decode_tiles: Tiles | None,
+    correct: bool,
+    cpu_models: model.Models,  # noqa: F811
+) -> None:
+    frames = clip_of(count, 7)
+    from_memory(monkeypatch, frames)
+    stand_in_dit(monkeypatch)
+    models = pipeline_models(cpu_models)
+    expected = runs_pipeline(
+        models, frames, SEED, window, encode_tiles, decode_tiles, correct, level
+    )
+    ours = clip.upscale(
+        models,
+        frames,
+        TARGET,
+        SEED,
+        window=window,
+        encode_tiles=encode_tiles,
+        decode_tiles=decode_tiles,
+        correct=correct,
+        quality=level,
+    )
+    assert ours.shape == expected.shape == (count, 48, 80, 3) and ours.dtype == expected.dtype
+    assert ours.tobytes() == expected.tobytes()
+    # The runs matter: not the standard run's frames.
+    standard = shots_pipeline(
+        models,
+        frames,
+        SEED,
+        window,
+        encode_tiles,
+        decode_tiles,
+        correction_of(frames) if correct else None,
+    )
+    assert ours.tobytes() != standard.tobytes()
+
+
+def test_the_library_chooses_the_runs_the_command_line_does() -> None:
+    # job.py imports the choice from seedvr2x.shotruns, the one clip.py runs by: the very objects.
+    for name in (
+        "QUALITY",
+        "RUN_OFFSETS",
+        "PLACES_BEST_FIRST",
+        "KEPT_SAMPLE_BYTES",
+        "Run",
+        "place",
+        "run_of",
+        "shot_runs",
+        "kept_frames",
+        "kept_bytes",
+    ):
+        assert getattr(job, name) is getattr(shotruns, name), name
+
+
 def test_the_windows_cut_the_output_where_the_layout_does(
     monkeypatch: pytest.MonkeyPatch,
     cpu_models: model.Models,  # noqa: F811
@@ -212,10 +339,14 @@ GPU_HELD_BACK = 3 * GIB
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not GPU_MODELS, reason="needs SEEDVR2X_MODEL_DIR")
-def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("level", ["standard", "maximum"])
+def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(
+    monkeypatch: pytest.MonkeyPatch, level: str
+) -> None:
     """clip.upscale with the real models on CUDA, with the colour correction, in two windows,
-    equals the shot of the command line bit for bit (float32 output), under the plan clip.plan
-    gives in the card's free memory less GPU_SPARE, the models loaded once for both."""
+    equals the shot of the command line bit for bit (float32 output), at standard's one run and at
+    maximum's four (runs_pipeline), under the plan clip.plan gives in the card's free memory less
+    GPU_SPARE, the models loaded once for both."""
     import gc
     from fractions import Fraction
 
@@ -275,15 +406,17 @@ def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(monkeypatch: pytest.MonkeyPatch)
             decode_tiles=made.decode_tiles,
             correct=True,
             step=lambda stage, done, total: told.append((stage, done, total)),
+            quality=level,
         )
-        expected = shots_pipeline(
+        expected = runs_pipeline(
             models,
             frames,
             SEED,
             made.window,
             made.encode_tiles,
             made.decode_tiles,
-            correction_of(frames),
+            True,
+            level,
             target,
         )
         print(f"peak allocated {torch.cuda.max_memory_allocated(device) / GIB:.2f} GiB")
@@ -292,8 +425,14 @@ def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(monkeypatch: pytest.MonkeyPatch)
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.set_per_process_memory_fraction(1.0, device)
-    assert [each for each in told if each[0] == "window"] == [("window", 1, 2), ("window", 2, 2)]
-    assert told[-1] == ("decode", GPU_FRAMES, GPU_FRAMES)
+    # Each run in two windows (a run from frame 3 has 22 frames: 7 latents still), the last run
+    # the shortest.
+    runs = job.QUALITY[level]
+    assert [each for each in told if each[0] == "window"] == [
+        ("window", 1, 2),
+        ("window", 2, 2),
+    ] * runs
+    assert told[-1] == ("decode", GPU_FRAMES - runs + 1, GPU_FRAMES - runs + 1)
     assert ours.shape == expected.shape and ours.dtype == expected.dtype == np.float32
     assert ours.std() > 0.05
     if not np.array_equal(ours, expected):

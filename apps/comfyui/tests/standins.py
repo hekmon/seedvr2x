@@ -266,9 +266,11 @@ def upscale_video(
     *,
     plan_only: bool = False,
     cuts: tuple[Shot, ...] | None = None,
+    quality: str = "standard",
 ) -> tuple[Any, str]:
     """seedvr2x Upscale Video run as ComfyUI runs it: (the frames, the plan's text). `cuts`: the
-    cut list seedvr2x Cuts gives, one shot of the whole clip by default."""
+    cut list seedvr2x Cuts gives, one shot of the whole clip by default; `quality`: the widget's
+    value (ComfyUI gives every widget's, the default standard)."""
     from comfyui import nodes
 
     out = execute(
@@ -279,6 +281,7 @@ def upscale_video(
         models=handle,
         resolution=resolution,
         plan_only=plan_only,
+        quality=quality,
         **inputs(settings, video=True),
     )
     return out[0], out[1]

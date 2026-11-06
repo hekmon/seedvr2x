@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 
-from seedvr2x import peaks, pull, shotcuts, shots
+from seedvr2x import peaks, pull, shotcuts, shotruns, shots
 from seedvr2x.memory import GIB, Reading
 from seedvr2x.passes import Plan, Tiles
 from seedvr2x.shot_plan import Peaks
@@ -84,6 +84,9 @@ WINDOW_FRAMES_MIN = window_frames(WINDOW_MIN)
 WINDOW_FRAMES_MAX = window_frames(WINDOW_MAX)
 WINDOW_FRAMES_STEP = 4
 ATTENTIONS = (AUTO, peaks.SDPA, peaks.FLASH_ATTN_2)
+# Upscale Video's quality, the library's levels (shotruns.QUALITY): standard, the default, runs each
+# shot once, as the command line's --quality does.
+QUALITY_DEFAULT = "standard"
 # The colour correction, a BOOLEAN: on is split, off none (the user, 2026-11-05).
 CORRECTIONS = ("split", "none")
 # The command line's default seed, and the highest seed it takes for a shot at frame 0, which a
@@ -110,6 +113,7 @@ LABELS = {
     "decode_tile": "decode tile",
     "resolution": "resolution",
     "attention": "attention",
+    "quality": "quality",
     "color_correction": "colour correction",
     "seed": "seed",
     "plan_only": "plan only",
@@ -525,6 +529,23 @@ def _shot_line(number: int, shot: shots.Shot, window: int | None) -> str:
     return f"shot {number}: frames {shot.start} to {shot.end - 1} ({shot.frames} frames): {how}"
 
 
+def _quality(cuts: Sequence[shots.Shot], quality: str) -> str:
+    """The quality level's line in a clip's plan: the level, the runs of each shot and in all (a
+    shot too short for a run's first frame has no such run, shotruns.shot_runs), and what they
+    cost, which is time alone (the runs are made one after the other, the plan the same:
+    clip.plan)."""
+    label = LABELS["quality"]
+    per_shot = shotruns.QUALITY[quality]
+    if per_shot == 1:
+        return f"{label}: {quality}, the model runs once over each shot"
+    runs = sum(len(shotruns.shot_runs(each, per_shot)) for each in cuts)
+    return (
+        f"{label}: {quality}, the model runs {per_shot} times over each shot, {runs} runs in all,"
+        " each frame kept from the run that rebuilds it best: about"
+        f" {per_shot} times standard's time, and no more memory"
+    )
+
+
 def clip_text(
     *,
     cuts: Sequence[shots.Shot],
@@ -540,10 +561,12 @@ def clip_text(
     keeping: Keeping,
     notes: tuple[str, ...] = (),
     held: int = 0,
+    quality: str = QUALITY_DEFAULT,
 ) -> str:
     """The plan of a clip, the frames of its shots each in sliding windows, in the same words: a
     clip of one shot says its windows in its first line, a clip of several a line for each shot.
-    `cuts` are the shots, frames [start, end) covering the clip."""
+    `cuts` are the shots, frames [start, end) covering the clip; `quality` the level
+    (shotruns.QUALITY), said with the runs it makes."""
     frames = sum(each.frames for each in cuts)
     inputs = frames * source[0] * source[1] * 3 * 4
     outputs = frames * output[0] * output[1] * 3 * 4
@@ -584,6 +607,7 @@ def clip_text(
             if plan.window is None
             else f"at most {_frames(plan.window)}",
         ),
+        _quality(cuts, quality),
         _tiles("encode_tile", settings.encode_tile is not None, plan.encode_tiles, expected.encode),
         _tiles("decode_tile", settings.decode_tile is not None, plan.decode_tiles, expected.decode),
         keeping.line,

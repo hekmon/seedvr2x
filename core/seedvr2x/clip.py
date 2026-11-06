@@ -7,14 +7,18 @@ does (Models.enter), so that a node can call it in a loop on the models it keeps
 A clip is a shot, Shot(0, T), seeded as such (shots.Shot.seed), and the pass is the shot's own
 (seedvr2x/shot_pass.py): encode_shot, sample_windows over the layout of shots.shot_layout,
 merge_windows, decode_shot with the colour correction read from the frames in memory. So the
-output is bit for bit what the command line gives the same frames as a shot of one run
-(apps/seedvr2x/tests/test_clip_cli.py holds it). A clip cut into shots is one call a shot, `start`
-giving the shot's place in the clip (its seed, as the command line seeds it) and `output` the
-clip's array to write into. What differs is where things wait, all in system memory: each window's
-output goes to the CPU as soon as it is made, as the command line writes it to a file
-(units.Units.save_window), and is merged there; a tiled pass keeps its scratch in tiling.InMemory,
-whole, at 12.7 MB a 1080p frame; the output is one array, allocated once. The plan counts them
-(plan)."""
+output is bit for bit what the command line gives the same frames as a shot of one run, and, at
+`quality` enhanced or maximum, as a shot of 2 or 4 runs (shotruns; apps/seedvr2x/tests/
+test_clip_cli.py holds both): the runs are made one after the other, each fed the shot from its
+first frame, whole, and each writes into the one output array only the frames shotruns.run_of
+takes from it. A clip cut into shots is one call a shot, `start` giving the shot's place in the
+clip (its seed, as the command line seeds it) and `output` the clip's array to write into. What
+differs is where things wait, all in system memory: each window's output goes to the CPU as soon
+as it is made, as the command line writes it to a file (units.Units.save_window), and is merged
+there; a tiled pass keeps its scratch in tiling.InMemory, whole, at 12.7 MB a 1080p frame; the
+output is one array, allocated once, nothing kept between a shot's runs but that array, and the
+host holds one run's latent and windows at a time, the first run's, the longest. The plan counts
+them (plan), at every level."""
 
 import traceback
 from collections.abc import Callable, Generator, Iterator, Sequence
@@ -41,18 +45,22 @@ from seedvr2x.shot_pass import (
 )
 from seedvr2x.shot_plan import Peaks, Pins, PlanError
 from seedvr2x.shot_plan import plan as shot_plan
+from seedvr2x.shotruns import QUALITY, shot_runs, taken_from
 from seedvr2x.shots import Shot, shot_layout
 from seedvr2x.weights import Architecture
 
 __all__ = ["NonFinite", "Stage", "Step", "output_bytes", "plan", "upscale"]
 
 # The steps a clip is made of, as `step` is told them: the one encode, each DiT window, and the
-# decode's frames.
-Stage = Literal["encode", "window", "decode"]
+# decode's frames, of each run; and, with several runs, the start of each ("run").
+Stage = Literal["run", "encode", "window", "decode"]
 
 # step(stage, done, total), called between the steps of upscale: ("encode", 1, 1) after the encode;
 # ("window", n, windows) after the n-th window; ("decode", frames, T) after each slice of the
-# decode is written to the output, frames being those written so far.
+# decode is written to the output, frames being those of the run decoded so far, T the run's.
+# With several runs (`quality` enhanced or maximum), ("run", n, runs) is told first, before the
+# n-th run's encode, and the steps after it are that run's, counted from its own first frame;
+# with one run, standard's, none is told, and the steps are as they were before runs existed.
 Step = Callable[[Stage, int, int], None]
 
 
@@ -89,7 +97,10 @@ def plan(
     host_available before the plan, and a refusal for the host says so; the windows of the shot
     that holds the most are kept in system memory together until its decode, and a tiled pass's
     scratch is the whole of it, never a file, so that a host that can't hold it shortens the
-    window or refuses the clip, as for any host short of memory. ValueError for no frame."""
+    window or refuses the clip, as for any host short of memory. The plan is the same at every
+    `quality` level (upscale): the runs are made one after the other, the first run is the whole
+    shot and the longest, and a later one is shorter, so that no run holds more than it, in
+    system memory or on the card. ValueError for no frame."""
     cut = [Shot(0, shots)] if isinstance(shots, int) else list(shots)
     if not cut or any(each.frames < 1 for each in cut):
         raise ValueError("a clip of no frame")
@@ -138,11 +149,11 @@ def plan(
 
 class _Frames:
     """split's reference for a clip (shot_pass.Reference): the frames themselves, in memory, as
-    the encode reads them, from the clip's first frame."""
+    the encode reads them. `first` is the run's first frame in the clip, which the correction
+    skips to (a later run is corrected against the same frames from there)."""
 
-    first = 0
-
-    def __init__(self, frames: npt.NDArray[np.float32]) -> None:
+    def __init__(self, frames: npt.NDArray[np.float32], first: int = 0) -> None:
+        self.first = first
         self.frames = frames
         self.height, self.width = frames.shape[1], frames.shape[2]
 
@@ -178,6 +189,7 @@ def upscale(
     step: Step | None = None,
     start: int = 0,
     output: npt.NDArray[np.float32] | None = None,
+    quality: str = "standard",
 ) -> npt.NDArray[np.float32]:
     """The clip upscaled: (T, H', W', 3) float32 in [0, 1] on the CPU, (H', W') =
     frames.output_size(target), one array allocated once, or `output`.
@@ -192,22 +204,31 @@ def upscale(
     of several shots is then one array, never a copy of each. window, encode_tiles and
     decode_tiles are the plan's (plan): the cap on the DiT windows in latents (None: one window)
     and the VAE passes' tiles (None: one pass). correct runs the colour correction
-    (colour.split) against the clip's own frames.
+    (colour.split) against the clip's own frames. quality is a level of shotruns.QUALITY
+    (ValueError for another): the clip is run 1, 2 or 4 times, a run from the clip's frame 0, 0
+    and 2, or 0 to 3 (shotruns.shot_runs; a clip too short to have a run's first frame has no
+    such run), each a whole run of its own with its windows and its correction against the same
+    input frames from its first frame; the output's frames are those each run gives
+    (shotruns.run_of), written into the one array as each run decodes them.
 
     The steps one after the other, a phase entered before each (Models.enter): the encode, each
     window with its output sent to system memory as it is made, the windows merged, and the decode
-    written into the output slice by slice. step, when given, is told after each (Step); it may
-    raise anything, BaseException included, to stop the clip: nothing is then left on the
-    device by this call, the decode closed and the frames of the failing call released, but what
-    the models hold. ValueError for frames that aren't (T, H, W, 3) float32 with T >= 1;
-    NonFinite when the encode, a window or the decode holds NaN or inf (shot_pass.finite)."""
+    written into the output slice by slice; a run after the other. step, when given, is told
+    after each (Step; and before each run, with several); it may raise anything, BaseException
+    included, to stop the clip: nothing is then left on the device by this call, the decode closed
+    and the frames of the failing call released, but what the models hold, and the output holds
+    the frames the runs made (a stopped call's output is the caller's to drop). ValueError for
+    frames that aren't (T, H, W, 3) float32 with T >= 1; NonFinite when the encode, a window or
+    the decode holds NaN or inf (shot_pass.finite)."""
     if frames.ndim != 4 or frames.shape[3] != 3 or frames.dtype != np.float32:
         raise ValueError(f"frames {frames.shape} {frames.dtype}, not (T, H, W, 3) float32")
     count = frames.shape[0]
     if count < 1:
         raise ValueError("frames of no frame")
-    layout = shot_layout(count, window)
-    clip_seed = Shot(start, start + count).seed(seed)
+    if quality not in QUALITY:
+        raise ValueError(f"quality {quality!r}, not one of {', '.join(QUALITY)}")
+    shot = Shot(start, start + count)
+    clip_seed = shot.seed(seed)
     height, width = output_size(target)
     if output is None:
         output = np.empty((count, height, width, 3), dtype=np.float32)
@@ -215,47 +236,18 @@ def upscale(
         raise ValueError(
             f"output {output.shape} {output.dtype}, not ({count}, {height}, {width}, 3) float32"
         )
-    reference = _Frames(frames) if correct else None
+    level = QUALITY[quality]
+    runs = shot_runs(Shot(0, count), level)
+    # The run each frame is taken from, as the run's first frame in the clip.
+    taken = np.asarray(taken_from(count, level))
     try:
-        models.enter("encode")
-        latent = encode_shot(
-            models,
-            _reader(frames),
-            count,
-            target,
-            clip_seed,
-            tiles=encode_tiles,
-            store=tiling.InMemory(),
-        )
-        finite(latent, "the clip's encode")
-        if step is not None:
-            step("encode", 1, 1)
-        # The latent is alive through the merge (the caller's and _merged's names hold it): the
-        # plan counts it (shot_plan.host_moments, in_memory), L latents beside the merged one.
-        merged = _merged(models, latent, layout, clip_seed, step, (start, start + count - 1))
-        del latent
-        models.enter("decode")
-        written = 0
-
-        def write(part: npt.NDArray[np.float32]) -> None:
-            nonlocal written
-            output[written : written + part.shape[0]] = part
-            written += part.shape[0]
-            if step is not None:
-                step("decode", written, count)
-
-        decode_shot(
-            models,
-            merged,
-            count,
-            target,
-            write,
-            "the clip",
-            start,
-            reference,
-            tiles=decode_tiles,
-            store=tiling.InMemory(),
-        )
+        for number, each in enumerate(runs, 1):
+            if step is not None and len(runs) > 1:
+                step("run", number, len(runs))
+            _run(
+                *(models, frames, each.offset, target, clip_seed, output),
+                *(window, encode_tiles, decode_tiles, correct, step, start, taken == each.offset),
+            )
     except BaseException as error:
         # Whatever stopped the clip, a step's cancel included: the frames of the calls it passed
         # through hold the slice being corrected on the device, and would keep it for as long as
@@ -263,6 +255,79 @@ def upscale(
         traceback.clear_frames(error.__traceback__)
         raise
     return output
+
+
+def _run(
+    models: Models,
+    frames: npt.NDArray[np.float32],
+    offset: int,
+    target: tuple[int, int],
+    seed: int,
+    output: npt.NDArray[np.float32],
+    window: int | None,
+    encode_tiles: Tiles | None,
+    decode_tiles: Tiles | None,
+    correct: bool,
+    step: Step | None,
+    start: int,
+    mine: npt.NDArray[np.bool_],
+) -> None:
+    """The run of the clip from its frame `offset`: frames [offset, T) of the clip through the
+    shot's pass, with the shot's `seed` (the runs of a shot share it, shotruns.Run) and its own
+    windows (shots.shot_layout of its frames), the colour correction against the same frames from
+    `offset`. Of the frames the decode gives, those whose entry in `mine` (one a frame of the
+    clip, True for those taken from this run) is True are written into their place in `output`,
+    the others dropped: the one array is all the run keeps. `start` is the clip's first frame in
+    its source, which a refusal for NaN names the frames by."""
+    count = frames.shape[0] - offset
+    layout = shot_layout(count, window)
+    reference = _Frames(frames, offset) if correct else None
+    models.enter("encode")
+    latent = encode_shot(
+        models,
+        _reader(frames[offset:]),
+        count,
+        target,
+        seed,
+        tiles=encode_tiles,
+        store=tiling.InMemory(),
+    )
+    finite(latent, "the clip's encode")
+    if step is not None:
+        step("encode", 1, 1)
+    # The latent is alive through the merge (the caller's and _merged's names hold it): the
+    # plan counts it (shot_plan.host_moments, in_memory), L latents beside the merged one.
+    first, last = start + offset, start + frames.shape[0] - 1
+    merged = _merged(models, latent, layout, seed, step, (first, last))
+    del latent
+    models.enter("decode")
+    written = 0
+
+    def write(part: npt.NDArray[np.float32]) -> None:
+        nonlocal written
+        # The run's frame i is the clip's frame offset + i.
+        place = offset + written
+        kept = mine[place : place + part.shape[0]]
+        if kept.all():
+            output[place : place + part.shape[0]] = part
+        elif kept.any():
+            output[place : place + part.shape[0]][kept] = part[kept]
+        written += part.shape[0]
+        if step is not None:
+            step("decode", written, count)
+
+    decode_shot(
+        models,
+        merged,
+        count,
+        target,
+        write,
+        "the clip",
+        first,
+        reference,
+        tiles=decode_tiles,
+        store=tiling.InMemory(),
+    )
 
 
 def _merged(

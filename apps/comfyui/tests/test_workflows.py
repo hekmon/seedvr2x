@@ -198,7 +198,10 @@ def test_seedvr2x_widgets_are_those_of_the_schema_at_their_defaults(name: str) -
                 "color_correction",
                 "seed",
                 "plan_only",
+                *(["quality"] if node["type"] == "seedvr2xUpscaleVideo" else []),
             }
+            if node["type"] == "seedvr2xUpscaleVideo":
+                assert by_id_["quality"] == "standard"
             assert by_id_["attention"] == "auto" and by_id_["color_correction"] is True
             assert by_id_["plan_only"] is False and by_id_["resolution"] == 1080
         else:

@@ -351,7 +351,12 @@ def run_shots(
 
 
 def libraries_clip(
-    machine: StandIn, frames: torch.Tensor, cuts: tuple[Shot, ...], seed: int, **plan
+    machine: StandIn,
+    frames: torch.Tensor,
+    cuts: tuple[Shot, ...],
+    seed: int,
+    quality: str = "standard",
+    **plan,
 ):  # type: ignore[no-untyped-def]
     """What the library gives each shot alone (clip.upscale, its seed the shot's by shots.Shot),
     the shots' frames one after the other."""
@@ -368,6 +373,7 @@ def libraries_clip(
             encode_tiles=made.encode_tiles,
             decode_tiles=made.decode_tiles,
             correct=True,
+            quality=quality,
         )
         for each in cuts
     ]
@@ -391,6 +397,90 @@ def test_a_clip_of_shots_is_the_libraries_shots_one_after_the_other(
     expected = libraries_clip(machine, frames, cuts, 4, window=5)
     assert out.shape == (21, 48, 80, 3) and out.dtype == torch.float32
     assert out.numpy().tobytes() == expected.tobytes()
+
+
+@pytest.mark.parametrize("quality", ["enhanced", "maximum"])
+@pytest.mark.parametrize(
+    "cuts",
+    [(Shot(0, 21),), (Shot(0, 9), Shot(9, 21)), (Shot(0, 2), Shot(2, 21))],
+    ids=["1 shot", "2 shots", "a shot of 2 frames"],
+)
+def test_a_clip_at_a_quality_is_the_librarys_clip_at_it_shot_by_shot(
+    machine: StandIn, tmp_path, cuts: tuple[Shot, ...], quality: str
+) -> None:
+    frames = pictures(21)
+    out, text = upscale_video(
+        handle(tmp_path),
+        plans.Settings(seed=4, window=5),
+        frames,
+        RESOLUTION,
+        "1",
+        cuts=cuts,
+        quality=quality,
+    )
+    expected = libraries_clip(machine, frames, cuts, 4, quality, window=5)
+    assert out.numpy().tobytes() == expected.tobytes()
+    # Not the standard run's: the level reached the pass.
+    standard, _ = run_shots(machine, tmp_path, frames, cuts, seed=4, window=5)
+    assert out.numpy().tobytes() != standard.numpy().tobytes()
+    assert f"quality: {quality}, the model runs " in text
+
+
+def test_a_level_the_node_does_not_have_is_refused_before_anything_loads(
+    machine: StandIn, tmp_path
+) -> None:
+    frames = pictures(9)
+    _, text = upscale_video(handle(tmp_path), plans.Settings(window=5), frames, RESOLUTION)
+    assert "quality: standard, the model runs once over each shot" in text
+    loads = len(machine.loads)
+    # A combo is held to its options when the prompt is queued; a link may carry anything.
+    with pytest.raises(words.Refused, match="quality 'ultra': must be one of standard"):
+        upscale_video(
+            handle(tmp_path), plans.Settings(window=5), frames, RESOLUTION, quality="ultra"
+        )
+    assert len(machine.loads) == loads
+
+
+def test_the_runs_of_a_shot_write_into_the_one_output_array_the_node_allocates(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    given: list[tuple[int, ...]] = []
+    real = clip.upscale
+
+    def spy(models, shot_frames, target, seed, **kwargs):  # type: ignore[no-untyped-def]
+        given.append(kwargs["output"].shape)
+        assert kwargs["quality"] == "maximum"
+        return real(models, shot_frames, target, seed, **kwargs)
+
+    monkeypatch.setattr(clip, "upscale", spy)
+    out, _ = upscale_video(
+        handle(tmp_path),
+        plans.Settings(window=5),
+        pictures(21),
+        RESOLUTION,
+        cuts=(Shot(0, 9), Shot(9, 21)),
+        quality="maximum",
+    )
+    assert given == [(9, 48, 80, 3), (12, 48, 80, 3)] and out.shape == (21, 48, 80, 3)
+
+
+def test_a_bar_with_several_runs_moves_forward_over_them_and_ends_full(
+    machine: StandIn, tmp_path
+) -> None:
+    cuts = (Shot(0, 9), Shot(9, 21))
+    upscale_video(
+        handle(tmp_path), plans.Settings(window=5), pictures(21), RESOLUTION, cuts=cuts,
+        quality="maximum",
+    )  # fmt: skip
+    (bar,) = ProgressBar.created
+    assert bar.updates == sorted(bar.updates) and bar.updates[-1] == bar.total == nodes.BAR
+    first_end = [each for each in bar.updates if each <= nodes.BAR * 9 // 21]
+    assert first_end and max(first_end) == nodes.BAR * 9 // 21
+    # Each run takes a quarter of its shot's share: the first shot's bar passes a quarter of it
+    # (the first run's end) and halves of it before it is full.
+    share = nodes.BAR * 9 // 21
+    assert any(abs(each - share // 4) <= share // 40 for each in bar.updates)
+    assert any(abs(each - share // 2) <= share // 40 for each in bar.updates)
 
 
 def test_the_shots_are_seeded_as_the_command_line_seeds_them(machine: StandIn, tmp_path) -> None:

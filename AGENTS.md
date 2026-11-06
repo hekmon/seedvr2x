@@ -33,6 +33,10 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
                          frame, the clip's one output array written into), upscaled on models
                          already loaded, its plan for the clip's shots (shot_plan's, the output
                          and the windows and scratch kept in system memory counted)
+    shotruns.py          the runs of a shot (the levels of `--quality` and the nodes' quality,
+                         each run's first frame, the run each frame is taken from, the frames
+                         kept between runs), plain Python; the CLI's job.py imports it, clip.py
+                         runs a clip by it
     shotcuts.py          the cuts drawn from the shot detector's probabilities (Cut, detections,
                          detected, possible, the default and the possible cuts' thresholds), plain
                          Python and NumPy; the CLI's cuts.py keeps their timecodes, the cut list
@@ -80,8 +84,8 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
   __init__.py nodes.py   V3 registration (`comfy_entrypoint`, a ComfyExtension; `io.ComfyNode`,
                          `io.Schema`); the nodes (Models, Cuts, Upscale Image, Upscale Video, and
                          the value nodes Tile, Blocks Swapped and Window Length: Upscale Video
-                         takes the Cuts node's cut list, a required input of its own type; the
-                         settings are the
+                         takes the Cuts node's cut list, a required input of its own type, and
+                         a quality widget: the model's runs over each shot; the settings are the
                          upscale nodes' widgets, the plan's numbers their optional sockets of
                          seedvr2x's own types, no Tuning node) and ComfyUI's
                          calls (progress, Cancel, the plan said on the node, plan only); the one
@@ -443,7 +447,24 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   `clip.upscale` bit for bit to the shot's pass as the command line runs it (`encode_shot`,
   `sample_windows`, `merge_windows`, `decode_shot` with `shot.py`'s `Correction` reading the same
   frames), in 1 to 3 windows, each tiled pass alone and both, corrected and not, and under
-  `-m gpu` on CUDA with the sharp 7B in two windows.
+  `-m gpu` on CUDA with the sharp 7B in two windows. The runs of a shot (`seedvr2x/shotruns.py`;
+  `quality` of `clip.upscale`, the nodes' `quality`): `core/tests/test_shotruns.py` holds the levels
+  (standard 1 run, enhanced 2 from frames 0 and 2, maximum 4 from 0 to 3), the run each frame is
+  taken from against the closed forms written out apart, a short shot having fewer runs, the
+  frames kept between runs and their bytes, and the module importing no torch (the rule held to
+  measurement's composer stays the CLI's `tests/test_runs.py`, through `job`'s re-exports, which
+  `test_clip_cli.py` holds to be the library's own objects); `test_clip.py` a level's output
+  equal to the standard clips of the runs' frames composed by `run_of`, in 1 to 3 windows,
+  corrected and not, a clip too short for a run's first frame having no such run, the steps told
+  run by run ("run" first, with several runs only: standard's are as before), the output allocated
+  once and given back when given, the seed shared by the runs and the correction reading the
+  same frames from each run's first, a Cancel between runs leaving nothing alive, an unknown level
+  refused; `test_clip_cli.py` each level bit for bit to the shot's pass run run by run as
+  `run.py` does (`runs_pipeline`: the shot from the run's first frame, `Correction`'s `first`,
+  the shot's seed), 1 to 3 windows, tiled and not, corrected and not, and under `-m gpu` the
+  sharp 7B at standard and at maximum. The plan is the same at
+  every level (the runs one after the other, the first the longest): the plan matrix's both halves
+  unmoved by the move of the choice to the library.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
   `test_pull_cli.py` holds what the command line does over it.
@@ -984,7 +1005,10 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   before a model loads, a picture at resolution 17 refused and a clip at 17 planned, four channels
   with an opaque alpha a view of the same memory and not a copy, the input said in the
   plan's RAM line and out of the comparison, and the INFO line naming the command line said once
-  at import and never by a run; `tests/test_cuts_node.py` seedvr2x Cuts over the untrained
+  at import and never by a run; a clip at enhanced and maximum equal to `clip.upscale` at the level shot by shot (the shot of 2
+  frames with one run of its two), a level that is no option refused at the node's start, the
+  runs writing into the one output array, the bar moving forward over the runs and ending full, a
+  Cancel between runs (`test_release.py`) freeing the card with no later run made; `tests/test_cuts_node.py` seedvr2x Cuts over the untrained
   detector's weights and scripted probabilities (the cut list and the text of the cuts and the
   possible cuts, one shot mode running no detector, the threshold, the file found in a folder or
   fetched by its pin, the detector closed after, the alpha left out, its refusals, its list into
@@ -997,7 +1021,8 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   model's grid and given in latents, a number off the grid refused queued or linked, a value no
   value node gives refused at the upscale node's start; every input and output with a
   label and a tooltip, none in the library's terms; the colour correction a BOOLEAN, split or
-  none, the seed's fixed control; the Models node's model, folder and RAM tooltips; a value the
+  none, `quality` a combo (standard, enhanced, maximum) on Upscale Video alone, its tooltip's points
+  and the plan's quality line (the level and its runs, a short shot's missing runs not counted), the seed's fixed control; the Models node's model, folder and RAM tooltips; a value the
   prompt holds or a link gives refused in the nodes' words at queue time and at the node's
   start, an unwired one not given), the settings' pins
   reaching the plan exactly, the text's lines, the V3 registration (the entrypoint, the seven

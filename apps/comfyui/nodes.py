@@ -59,6 +59,7 @@ from seedvr2x.errors import Refusal
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Plan
 from seedvr2x.shot_plan import HOST_RESIDENT, PHASES, Peaks
+from seedvr2x.shotruns import QUALITY
 from seedvr2x.shots import Shot
 from seedvr2x.weights import Architecture
 
@@ -338,6 +339,22 @@ def _correction_inputs() -> list[Any]:
             " again gives the same result.",
         ),
     ]
+
+
+def _quality_input() -> Any:
+    return io.Combo.Input(
+        "quality",
+        options=list(QUALITY),
+        default=plans.QUALITY_DEFAULT,
+        display_name=plans.LABELS["quality"],
+        # MANUAL.md, Several runs of a shot: 2 or 4 times the time, no more memory; sharper lines
+        # and less flicker where there is motion, little change on a still shot.
+        tooltip="How many times the model runs over each shot. standard: once. enhanced: twice,"
+        " and maximum: four times, each run starting a frame or two further into the shot, and"
+        " each frame is kept from the run that rebuilds it best. The result has sharper lines and"
+        " less flicker where there is motion, and changes little on a still shot. It takes 2"
+        " (enhanced) or 4 (maximum) times as long as standard, and no more memory.",
+    )
 
 
 def _plan_only_input() -> Any:
@@ -686,6 +703,7 @@ class UpscaleVideo(io.ComfyNode):
                 ),
                 _models_input(),
                 _resolution_input(),
+                _quality_input(),
                 _attention_input(),
                 *_correction_inputs(),
                 _plan_only_input(),
@@ -716,12 +734,18 @@ class UpscaleVideo(io.ComfyNode):
         color_correction: bool,
         seed: int,
         plan_only: bool,
+        quality: str = plans.QUALITY_DEFAULT,
         window: int | None = None,
         encode_tile: int | None = None,
         decode_tile: int | None = None,
         swap_blocks: int | None = None,
     ) -> io.NodeOutput:
         _checked(models)
+        if quality not in QUALITY:
+            # A combo is held to its options at queue time; a link may carry anything.
+            raise words.Refused(
+                f"{plans.LABELS['quality']} {quality!r}: must be one of {', '.join(QUALITY)}."
+            )
         settings = _settings(
             window=window,
             encode_tile=encode_tile,
@@ -760,6 +784,7 @@ class UpscaleVideo(io.ComfyNode):
                 keeping=run.keeping,
                 notes=run.notes,
                 held=run.held,
+                quality=quality,
             )
             _say(text, _node_id(cls))
             if plan_only:
@@ -778,7 +803,10 @@ class UpscaleVideo(io.ComfyNode):
                         each.start,
                         each.end - 1,
                     )
-                cls._shot(run.models, clip_frames, each, count, target, settings, made, bar, out)
+                cls._shot(
+                    *(run.models, clip_frames, each, count, target, settings, made, bar, out),
+                    quality,
+                )
         logger.info("seedvr2x: %d frame(s) upscaled in %.1f s", count, time.monotonic() - started)
         return io.NodeOutput(_output(out), text)
 
@@ -793,15 +821,21 @@ class UpscaleVideo(io.ComfyNode):
         made: Plan,
         bar: ProgressBar,
         out: npt.NDArray[np.float32],
+        quality: str = plans.QUALITY_DEFAULT,
     ) -> None:
         """One shot of the clip, `clip_frames` [start, end) of the (T, H, W, 3) float32 in [0, 1]
-        clip, through the library's clip pass in the plan's windows and tiles, written into the
-        same frames of `out`, the bar moved over the clip's `total` frames (a shot's share is its
-        frames') and ComfyUI's Cancel honoured between its steps."""
+        clip, through the library's clip pass at `quality` in the plan's windows and tiles,
+        written into the same frames of `out`, the bar moved over the clip's `total` frames (a
+        shot's share is its frames', a run's of it one in as many as the shot has runs) and
+        ComfyUI's Cancel honoured between its steps, and before each run."""
+        run, runs = 1, 1
 
         def step(stage: clip.Stage, done: int, count: int) -> None:
             """The shot's steps on the bar, and ComfyUI's Cancel between them."""
-            if stage == "encode":
+            nonlocal run, runs
+            if stage == "run":
+                run, runs, position = done, count, 0
+            elif stage == "encode":
                 position = ENCODE_SHARE
             elif stage == "window":
                 position = ENCODE_SHARE + WINDOW_SHARE * done // count
@@ -811,7 +845,10 @@ class UpscaleVideo(io.ComfyNode):
                     + WINDOW_SHARE
                     + (BAR - ENCODE_SHARE - WINDOW_SHARE) * done // count
                 )
-            bar.update_absolute((BAR * shot.start + position * shot.frames) // total, BAR)
+            # The run's place in the shot's share of the bar: each run is a whole pass of the
+            # shot (the shorter later ones counted as long as the first: an approximation).
+            inside = (BAR * (run - 1) + position) // runs
+            bar.update_absolute((BAR * shot.start + inside * shot.frames) // total, BAR)
             management.throw_exception_if_processing_interrupted()
 
         try:
@@ -827,6 +864,7 @@ class UpscaleVideo(io.ComfyNode):
                 step=step,
                 start=shot.start,
                 output=out[shot.start : shot.end],
+                quality=quality,
             )
         except clip.NonFinite as error:
             raise words.non_finite(str(error)) from error

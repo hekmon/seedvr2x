@@ -147,10 +147,15 @@ def test_the_pictures_come_first_then_the_models_then_the_widgets_then_the_plans
         "swap_blocks",
     ]
     # A clip's cut list is the clip's fact: a required socket, right after its frames.
+    # and the clip's quality, the video's alone (a picture is one frame in a latent of its own),
+    # right after the resolution.
+    assert "quality" in video and "quality" not in image
     assert list(video) == [
         "images",
         "cuts",
-        *list(image)[1:7],
+        *list(image)[1:3],
+        "quality",
+        *list(image)[3:7],
         "window",
         *list(image)[7:],
     ]
@@ -341,6 +346,30 @@ def test_attention_is_a_combo_and_the_colour_correction_a_boolean_split_or_none(
     assert plans.Settings.of(color_correction=False).color_correction == "none"
 
 
+def test_quality_is_a_combo_of_the_levels_on_upscale_video_alone_in_a_users_words() -> None:
+    from seedvr2x.shotruns import QUALITY
+
+    assert "quality" not in schema_inputs(nodes.UpscaleImage)
+    quality = schema_inputs(nodes.UpscaleVideo)["quality"]
+    assert quality.io_type == "COMBO" and quality.display_name == "quality"
+    assert quality.options == list(QUALITY) == ["standard", "enhanced", "maximum"]
+    assert quality.default == "standard" and not quality.optional
+    # MANUAL.md's section, in a ComfyUI user's words: the runs, each frame from the run that
+    # rebuilds it best, the gain where there is motion, none on a still shot, the cost in time.
+    said = quality.tooltip
+    for point in (
+        "standard: once",
+        "enhanced: twice",
+        "maximum: four times",
+        "each frame is kept from the run that rebuilds it best",
+        "sharper lines and less flicker where there is motion",
+        "changes little on a still shot",
+        "2 (enhanced) or 4 (maximum) times as long as standard, and no more memory",
+    ):
+        assert point in said, point
+    assert plain(said) and "--" not in said
+
+
 def test_plan_only_is_a_boolean_off_by_default_on_each_upscale_node() -> None:
     for node in (nodes.UpscaleImage, nodes.UpscaleVideo):
         plan_only = schema_inputs(node)["plan_only"]
@@ -432,6 +461,7 @@ def test_the_value_nodes_outputs_reach_the_plan_as_set(machine: StandIn, tmp_pat
         cuts=(Shot(0, 33),),
         models=handle(tmp_path),
         resolution=48,
+        quality="standard",
         attention="auto",
         color_correction=True,
         seed=42,
@@ -678,6 +708,43 @@ def test_the_text_says_what_each_auto_became_and_what_a_value_wired_in_was_taken
     assert "encode tile: the whole image at once, no tiles (needs up to " in clipped
     assert "window length: auto -> " in clip_text(plans.Settings())
     for said in (text, pinned, clipped, clip_text(plans.Settings())):
+        assert plain(said), said
+
+
+def test_a_clips_plan_says_the_quality_level_and_its_runs() -> None:
+    assert (
+        "quality: standard, the model runs once over each shot"
+        in clip_text(plans.Settings()).splitlines()
+    )
+    enhanced = clip_text(plans.Settings(), quality="enhanced").splitlines()
+    assert (
+        "quality: enhanced, the model runs 2 times over each shot, 2 runs in all, each frame kept"
+        " from the run that rebuilds it best: about 2 times standard's time, and no more memory"
+    ) in enhanced
+    maximum = clip_text(plans.Settings(), quality="maximum").splitlines()
+    assert any(
+        each.startswith("quality: maximum, the model runs 4 times over each shot, 4 runs in all,")
+        for each in maximum
+    )
+    # A shot too short for a run's first frame has no such run: in all counts the runs made.
+    made, expected = clip_plan(plans.Settings(), 100)
+    cuts = [Shot(0, 100), Shot(100, 102), Shot(102, 103)]
+    text = plans.clip_text(
+        cuts=cuts,
+        source=(1920, 1080),
+        output=(1920, 1080),
+        resolution=1080,
+        dit="seedvr2x_ema_7b_sharp_fp16.safetensors",
+        attention=peaks.SDPA,
+        plan=made,
+        expected=expected,
+        room=ROOM,
+        settings=plans.Settings(),
+        keeping=KEPT,
+        quality="maximum",
+    )
+    assert "4 times over each shot, 7 runs in all," in text  # 4 + 2 + 1
+    for said in (*enhanced, *maximum, text):
         assert plain(said), said
 
 

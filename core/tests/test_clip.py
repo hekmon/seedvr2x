@@ -19,7 +19,7 @@ from test_held import strays
 from test_still import PICTURE, SEED, TARGET, TILES, pipeline_models, stand_in_dit
 from torch import Tensor
 
-from seedvr2x import clip, model, sampling, shot_plan, tiling
+from seedvr2x import clip, model, sampling, shot_plan, shotruns, tiling
 from seedvr2x.frames import output_size
 from seedvr2x.peaks import FP16, GIB
 from seedvr2x.shot_plan import Pins, PlanError
@@ -62,6 +62,7 @@ def upscale(
     decode_tiles: Any = None,
     correct: bool = False,
     step: clip.Step | None = None,
+    quality: str = "standard",
 ) -> npt.NDArray[np.float32]:
     return clip.upscale(
         models,
@@ -73,6 +74,7 @@ def upscale(
         decode_tiles=decode_tiles,
         correct=correct,
         step=step,
+        quality=quality,
     )
 
 
@@ -528,6 +530,214 @@ def test_tiled_passes_keep_their_scratch_in_memory(
     assert len(stores) == 4
     assert list(tmp_path.iterdir()) == []
     assert both.shape == plain.shape and both.tobytes() != plain.tobytes()
+
+
+# The quality levels: a shot run 2 or 4 times --------------------------------------------------
+
+
+def run_in_pieces(
+    models: model.Models, frames: npt.NDArray[np.float32], level: str, **options: Any
+) -> npt.NDArray[np.float32]:
+    """The composite of a level made from standard clips: frame i of the output is frame
+    i - offset of a standard clip of the clip's frames from `offset`, offset being the first frame
+    of the run shotruns.run_of takes frame i from (a run is a clip of its own, seeded as the
+    clip, its correction against its own frames: clip.upscale's runs made by hand)."""
+    count = frames.shape[0]
+    levels = shotruns.QUALITY[level]
+    made = {
+        offset: upscale(models, frames[offset:], **options)
+        for offset in {shotruns.run_of(levels, i) for i in range(count)}
+    }
+    out = np.empty((count, *made[0].shape[1:]), np.float32)
+    for i in range(count):
+        offset = shotruns.run_of(levels, i)
+        out[i] = made[offset][i - offset]
+    return out
+
+
+@pytest.mark.parametrize("level", ["enhanced", "maximum"])
+@pytest.mark.parametrize(("count", "window"), [(SHORT, None), (MIDDLE, 5), (LONG, 5)])
+@pytest.mark.parametrize("correct", [False, True])
+def test_a_level_takes_each_frame_from_its_run_and_each_run_is_a_clip_from_its_first_frame(
+    models: model.Models,
+    monkeypatch: pytest.MonkeyPatch,
+    level: str,
+    count: int,
+    window: int,
+    correct: bool,
+) -> None:
+    stand_in_dit(monkeypatch)
+    frames = clip_of(count, 5)
+    before = frames.copy()
+    out = upscale(models, frames, window=window, correct=correct, quality=level)
+    expected = run_in_pieces(models, frames, level, window=window, correct=correct)
+    assert out.shape == (count, 48, 80, 3) and out.tobytes() == expected.tobytes()
+    assert frames.tobytes() == before.tobytes()
+    # Not the standard run's frames: the runs differ, as the levels do.
+    assert out.tobytes() != upscale(models, frames, window=window, correct=correct).tobytes()
+    # Standard is the default, and the same as asked.
+    plain = upscale(models, frames, window=window, correct=correct)
+    assert (
+        plain.tobytes()
+        == upscale(models, frames, window=window, correct=correct, quality="standard").tobytes()
+    )
+
+
+def test_a_clip_too_short_for_a_runs_first_frame_has_no_such_run(
+    models: model.Models, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stand_in_dit(monkeypatch)
+    told: list[tuple[str, int, int]] = []
+
+    def record(stage: str, done: int, total: int) -> None:
+        told.append((stage, done, total))
+
+    one = clip_of(1)
+    assert upscale(models, one, quality="maximum").tobytes() == upscale(models, one).tobytes()
+    two = clip_of(2)
+    out = upscale(models, two, quality="maximum", step=record)
+    # Runs from frames 0 and 1: frame 1 is its run's own first frame.
+    assert [each for each in told if each[0] == "run"] == [("run", 1, 2), ("run", 2, 2)]
+    assert out.tobytes() == run_in_pieces(models, two, "maximum").tobytes()
+    # Enhanced's second run starts at frame 2: a clip of two has one run, and told none.
+    told.clear()
+    upscale(models, two, quality="enhanced", step=record)
+    assert "run" not in {stage for stage, _, _ in told}
+
+
+def test_the_steps_of_the_runs_are_told_run_by_run_and_standards_are_as_they_were(
+    models: model.Models, monkeypatch: pytest.MonkeyPatch, events: Events
+) -> None:
+    stand_in_dit(monkeypatch, events)
+    told: list[tuple[str, int, int]] = []
+
+    def record(stage: str, done: int, total: int) -> None:
+        told.append((stage, done, total))
+
+    upscale(models, clip_of(MIDDLE), window=5, step=record)
+    assert "run" not in {stage for stage, _, _ in told} and told[0] == ("encode", 1, 1)
+    for level, offsets in (("enhanced", (0, 2)), ("maximum", (0, 1, 2, 3))):
+        told.clear()
+        events.clear()
+        upscale(models, clip_of(MIDDLE), window=5, quality=level, step=record)
+        runs = len(offsets)
+        # Each run: told its place, then its encode, its windows (25 frames: 7 latents, 2 windows
+        # of at most 5; the shorter runs of 23 to 25 frames: 6 or 7 latents) and its decode, the
+        # frames counted from the run's own first.
+        starts = [i for i, each in enumerate(told) if each[0] == "run"]
+        assert [told[i] for i in starts] == [("run", n + 1, runs) for n in range(runs)]
+        for n, offset in enumerate(offsets):
+            part = told[starts[n] + 1 : starts[n + 1] if n + 1 < runs else None]
+            assert part[0] == ("encode", 1, 1)
+            # The run's windows, counted from its own first, and its decode's frames from its own.
+            windows = [(done, total) for stage, done, total in part if stage == "window"]
+            assert windows == [(i + 1, len(windows)) for i in range(len(windows))]
+            assert len(windows) == len(shot_layout(MIDDLE - offset, 5))
+            decoding = [each for each in part if each[0] == "decode"]
+            assert decoding and {total for _, _, total in decoding} == {MIDDLE - offset}
+            assert decoding[-1][1] == MIDDLE - offset
+        # The phases entered in order, run after run: 25 frames and shorter, 2 windows of at most 5
+        # latents each time (7 latents, 6 or 7 for the shorter runs).
+        phases = [each for each in events if each != "sample"]
+        assert (
+            phases
+            == [("enter", "encode"), ("enter", "dit"), ("enter", "dit"), ("enter", "decode")] * runs
+        )
+
+
+def test_the_output_is_allocated_once_and_the_runs_write_into_it(
+    models: model.Models, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stand_in_dit(monkeypatch)
+    frames = clip_of(MIDDLE)
+    made: list[tuple[int, ...]] = []
+    empty = np.empty
+
+    def counting(shape: Any, *args: Any, **kwargs: Any) -> Any:
+        made.append(tuple(shape) if isinstance(shape, tuple) else (shape,))
+        return empty(shape, *args, **kwargs)
+
+    monkeypatch.setattr(np, "empty", counting)
+    out = upscale(models, frames, window=5, quality="maximum")
+    # One array of the output's shape, not one a run: the frames of the runs go into it.
+    assert made.count((MIDDLE, *output_size(TARGET), 3)) == 1
+    # A given array is the one written and returned, outside the shot's frames untouched.
+    big = np.full((MIDDLE + 6, *output_size(TARGET), 3), -1.0, np.float32)
+    returned = clip.upscale(
+        models, frames, TARGET, SEED, window=5, encode_tiles=None, decode_tiles=None,
+        correct=False, output=big[3 : 3 + MIDDLE], quality="maximum",
+    )  # fmt: skip
+    assert np.shares_memory(returned, big) and returned.tobytes() == out.tobytes()
+    assert (big[:3] == -1).all() and (big[3 + MIDDLE :] == -1).all()
+
+
+def test_the_runs_share_the_clips_seed_and_the_correction_reads_the_same_frames_from_each_first(
+    models: model.Models, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from seedvr2x import colour
+
+    stand_in_dit(monkeypatch)
+    seeded: list[int] = []
+    set_seed = model.set_seed
+
+    def spy_seed(seed: int) -> None:
+        seeded.append(seed)
+        set_seed(seed)
+
+    monkeypatch.setattr(model, "set_seed", spy_seed)
+    run = 0
+    seen: list[list[Tensor]] = [[], []]
+    split = colour.split
+
+    def spy(content: Tensor, reference: Tensor, stages: int) -> Tensor:
+        seen[run - 1].append(reference)
+        return split(content, reference, stages)
+
+    def step(stage: str, done: int, total: int) -> None:
+        nonlocal run
+        if stage == "run":
+            run = done
+
+    monkeypatch.setattr(colour, "split", spy)
+    frames = clip_of(SHORT, 3)
+    clip.upscale(
+        models, frames, TARGET, SEED, window=None, encode_tiles=None, decode_tiles=None,
+        correct=True, start=11, quality="enhanced", step=step,
+    )  # fmt: skip
+    # Each run: the encode seeded with the offset seed, the noise with the clip's (the shot's
+    # seed, 11 more than the job's), the same for the two runs.
+    assert seeded == [SEED + 11 + sampling.ENCODE_SEED_OFFSET, SEED + 11] * 2
+    height, width = output_size(TARGET)
+    transform = model.input_transform(TARGET)
+    for offset, got in zip((0, 2), seen, strict=True):
+        sources = torch.as_tensor(frames[offset:]).permute(0, 3, 1, 2).to(torch.float32)
+        expected = transform(sources).permute(1, 0, 2, 3)[:, :, :height, :width]
+        assert torch.equal(torch.cat(got), expected)
+
+
+def test_a_cancel_between_runs_stops_the_clip_with_nothing_alive(
+    models: model.Models, monkeypatch: pytest.MonkeyPatch, events: Events
+) -> None:
+    stand_in_dit(monkeypatch, events)
+    watched = Watched(monkeypatch)
+
+    def step(stage: str, done: int, total: int) -> None:
+        if stage == "run" and done == 2:
+            raise Stop()
+
+    with pytest.raises(Stop):
+        upscale(models, clip_of(LONG), window=5, quality="maximum", step=step, correct=True)
+    # The first run was made whole, the second begun: told, not encoded.
+    assert events.count(("enter", "encode")) == 1 and events.count(("enter", "decode")) == 1
+    assert watched.closed()
+    assert strays(models) == []
+    clean = upscale(models, clip_of(LONG), window=5, quality="maximum")
+    assert clean.shape == (LONG, 48, 80, 3)
+
+
+def test_a_level_that_is_not_one_is_refused(models: model.Models) -> None:
+    with pytest.raises(ValueError, match="quality 'ultra', not one of standard, enhanced, maximum"):
+        upscale(models, clip_of(2), quality="ultra")
 
 
 # The plan -------------------------------------------------------------------------------------

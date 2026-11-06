@@ -37,6 +37,7 @@ Each upscale node takes `images` first (Upscale Video then takes `cuts`), then `
 | Widget | Default | Notes |
 | --- | --- | --- |
 | resolution | `1080` | The output's short side, in pixels. |
+| quality (Upscale Video only) | `standard` | How many times the model runs over each shot: `standard` once, `enhanced` twice, `maximum` four times, each run starting a frame or two further into the shot, each frame kept from the run that rebuilds it best. Sharper lines and less flicker where there is motion, little change on a still shot; 2 or 4 times as long as `standard`, and no more memory. A picture is one frame, so Upscale Image has no quality. |
 | attention | `auto` | FlashAttention 2 where ComfyUI's environment has it, else PyTorch's SDPA. |
 | colour correction | on (`split`) | On, `split`, keeps the input's overall colours and brightness with the model's fine detail; off, `none`, leaves the model's own colours, which can drift. |
 | seed | `42` | ComfyUI's seed with its control after generate, `fixed`. |

@@ -91,6 +91,41 @@ def test_cancel_between_a_clips_steps_frees_the_card(
     assert len(bar.updates) == update
 
 
+def test_cancel_between_a_clips_runs_frees_the_card_and_makes_no_run_after(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = handle(tmp_path)
+    windows: list[int] = []
+    sample = model.sample
+
+    def counting(*args, **kwargs):  # type: ignore[no-untyped-def]
+        windows.append(1)
+        return sample(*args, **kwargs)
+
+    monkeypatch.setattr(model, "sample", counting)
+    # The bar's value as a second run is told: a quarter of the shot's share, which the first run's
+    # last slice of the decode has put there already; Cancel on its second sight.
+    seen: list[float] = []
+
+    def hook(value: float) -> None:
+        seen.append(value)
+        if seen.count(250) == 2:
+            management.interrupt_current_processing()
+
+    ProgressBar.on_update = hook
+    with pytest.raises(management.InterruptProcessingException):
+        upscale_video(
+            h, plans.Settings(window=5), clip_frames(33), RESOLUTION, "1", quality="maximum"
+        )
+    freed(machine, h)
+    # The first run's 3 windows (33 frames, windows of at most 17): none of the second's.
+    assert len(windows) == 3 and seen.count(250) == 2
+    # The flag was cleared as it raised: the next run goes through, at any level.
+    ProgressBar.on_update = None
+    out, _ = upscale_video(h, plans.Settings(), clip_frames(5), RESOLUTION, "1", quality="enhanced")
+    assert out.shape == (5, 48, 80, 3)
+
+
 def test_an_error_in_the_pass_frees_the_card_and_is_not_swallowed(
     machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
