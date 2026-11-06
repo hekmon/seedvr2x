@@ -2875,16 +2875,18 @@ library's four modules.
     batching is measured there too with ByteDance's `repeat_concat_idx` restored, and its
     figures decide whether v0.1.0 has it.
 - **`/health`**, for a container's probes: 503 `starting` until the warm-up has passed; 200
-  `ready`; 503 `stopping`; 503 `failed` after a CUDA error other than out-of-memory, which
-  leaves the card's state untrusted: the pictures running are answered 500, the waiting ones
-  503, then the process exits with code 3 (0 stopped, 1 a start refused, 2 a wrong option,
-  128+N a second signal), so that Docker's `--restart` and Kubernetes restart it (the user,
-  2026-11-03: plain Docker acts on an exit, never on a health check).
+  `ready`; on a ready server, 503 `stalled` while a wait on the GPU is past its bound
+  (Allocator, the hang), `ready` again once it ends; 503 `stopping`; 503 `failed` after a
+  CUDA error other than out-of-memory, which leaves the card's state untrusted: the pictures
+  running are answered 500, the waiting ones 503, then the process exits with code 3 (0
+  stopped, 1 a start refused, 2 a wrong option, 128+N a second signal), so that Docker's
+  `--restart` and Kubernetes restart it (the user, 2026-11-03: plain Docker acts on an exit,
+  never on a health check).
 - **`/metrics`:** Prometheus' text format, written by the server with no dependency, its tests
   reading it with `prometheus_client`'s parser, a dependency of the tests alone: requests by
   status, the upscale's and the wait's times, the pictures running and waiting, the output's
-  pixels, the VRAM reserved and its peak, ready, and the version and model files. `/health`
-  and `/metrics` take no key.
+  pixels, the VRAM reserved and its peak, ready, the longest wait on the GPU in progress, and
+  the version and model files. `/health` and `/metrics` take no key.
 - **The API key** (the user, 2026-11-03, as vLLM's): optional, `--api-key` or
   `SEEDVR2X_API_KEY`, the option winning, the log saying the key's source and never the key.
   `/upscale` then takes `Authorization: Bearer KEY`, compared in constant time, else 401 with
@@ -3819,8 +3821,12 @@ The GPU's memory refused stops a run in one line, before the models load as afte
       and the GGUF's windows keep their bits, and the planner's per-token term is measured
       again (about 0.46 of today's), not scaled.
     - The reserve under the segments is measured by the step (decided 2026-11-06, after the
-      night below): max(0.6, 0.3 × P) GiB beyond a DiT step's peak P, P by the lean
-      attention, and max(1.25, 0.2 × P) beyond a VAE pass's. The 4.5 and the 2.5 retire there;
+      night below): max(0.6, 0.3 × P) GiB beyond a DiT step's peak P, P its peak over the
+      weights it keeps resident, by the lean attention, and max(1.25, 0.2 × P) beyond a VAE
+      pass's, over the models resident in its phase. No cap where 0.3 × P passes 4.5 GiB: the
+      room the lean windows want grew faster than P (0.18, 0.20, then 0.29 × P), a room short
+      of it costs 2.7 to 3.4 times the window's time, a larger one only some window length
+      (decided 2026-11-06, impl-place's question). The 4.5 and the 2.5 retire there;
       under torch's own allocator without the segments the 4.5 stays, and under
       `cudaMallocAsync` the reserve is its pool's (below). On a card left exactly its size,
       really full, at night (place-study, 2026-11-05 to 06), twelve whole jobs on emulated 16,
@@ -3886,8 +3892,7 @@ The GPU's memory refused stops a run in one line, before the models load as afte
   the process was still there 20 s after, when it was killed. Its first run, three minutes
   before, took 69.4 s; nothing else hung that night. The cause, most likely (design's
   investigation the same morning, read only): a GPU fault below seedvr2x. Windows' System log
-  holds
-  an NVIDIA driver error (nvlddmkm, event 153) 3.5 s into that decode, the only one in
+  holds an NVIDIA driver error (nvlddmkm, event 153) 3.5 s into that decode, the only one in
   place-study's 307 runs, on a machine whose stability was in question since 2026-11-04; the
   work it stopped neither completed nor failed, so the decode's wait on the GPU, inferred to
   be `model.synchronize`'s poll (the only sleep on that path, with no bound), waited, while
@@ -3903,6 +3908,47 @@ The GPU's memory refused stops a run in one line, before the models load as afte
     one.
   - Every thread's stack on SIGUSR1 (`faulthandler`), in the CLI and the image server, the run
     going on.
+- **Built the same day** (impl-stop): the hang came back on demand on main's code, a wait
+  queued on the GPU that nothing ends (`research/scripts/stall_hook.py`), and the stopped
+  process stayed in the pinned memory's finalizer (cudaHostUnregister), run once main's except
+  block let the traceback go. Now:
+  - The command (`main:command`, in both apps) ends a stop at once from inside that block: its
+    work directories removed, its locks released, logging and the console flushed, then
+    `os._exit` (143 or 130), Ctrl-C and SIGTERM ignored from its line on: "stopped at once
+    (SIGTERM), 1 min 1 s into a wait on the GPU; the process ends without waiting for it".
+    `main(argv)` returns its status as before, for every other caller. A CUDA error other than
+    out of memory ends the CLI the same way, its traceback in its line, and the image server
+    ends so once `serve` has returned, whatever its code. A process that never used CUDA exits
+    as before.
+  - A wait on the GPU (`waiting.py`, the poll of `model.synchronize` and `Cuda.wait`) says
+    once that it has lasted past max(60 s, 4 × its whole unit's estimate): four times leaves
+    2.7 times over the slowest unit measured, 1.5 times its estimate, and the floor keeps short
+    units clear of a desktop's pauses. Without an estimate nothing is said (the calibration, a
+    picture in the CLI, the server's warm-up, the nodes). The line names the unit, the wait,
+    the estimate, NVML's reading of the card (busy, its performance state, the memory its
+    programs hold) and the way out; every thread's stack follows the process's first such
+    line. The image server names each step with its longest warm-up time; `/health` answers
+    503 `stalled` while a wait is past its bound, and it doesn't exit: a stall is no CUDA
+    error, and the orchestrator decides.
+  - The night's stall in a decode, reproduced on the RTX 5090: the line at 1 min 1 s against
+    an estimate of 15.2 s, the card 6% busy at P8; SIGTERM ended the process 3.4 s later, no
+    ffmpeg left. Copies to the CPU that waited outside the poll went behind it where that cost
+    nothing (a picture's finite check, a window's copy from pageable memory).
+- **Out of the stop's reach** (the same day): a stall inside a DiT window. The vendored DiT
+  waits on the host in every block, in C (`repeat_interleave` with lengths on the GPU, shapes
+  and lengths copied to the CPU), where no signal's handler runs: reproduced, SIGTERM went
+  unanswered and SIGUSR1's stacks came. Decided by design, to be built once the lean attention
+  has landed, by cause and never by a timer:
+  - The DiT's waits in each block removed (vendored, marked): the shapes and lengths kept on
+    the CPU or made once a window, then an event polled every few blocks, so that the DiT
+    waits only in the poll; taken where the regression keeps its bits, its speed measured.
+  - A thread that needs no main thread reads the signals as they come (`signal.set_wakeup_fd`)
+    and samples the main thread's frame: a main thread held in one call past its unit's bound
+    gets the stall's line, naming the frame, and a stop at once asked again before the main
+    thread has answered it ends the process from that thread, with what of the stop's work
+    needs no main thread, saying so. The user's repeated signal decides, not a grace period.
+  - Any error once CUDA was used ends through the command's exit, its traceback first, in both
+    apps; the first copy after a phase change is waited for in the poll at the phase's entry.
 
 ## Pause and resume
 
