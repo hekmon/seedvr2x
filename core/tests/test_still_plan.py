@@ -407,17 +407,18 @@ def test_the_whole_card_gets_the_untiled_pass_where_it_fits() -> None:
     found = still_plan.tiles(plan, (1080, 1920))
     assert found.encode is None and found.decode is None
     assert plan.models == ModelPlan(0, None, None, True)
-    # Nothing pinned. The host holds the scratch of a tiled pass all the same: a bound's pictures
-    # one pixel over an even side pad to 1120x1952, past the 1104x1920 one frame's untiled decode
-    # was measured on (peaks.ONE_FRAME_UNTILED_MEASURED), so the proof counts them in tiles.
+    # Nothing pinned, and no scratch: a bound's pictures one pixel over an even side pad to
+    # 1120x1952, within the 4K frame both untiled passes were measured on since the night of
+    # 2026-11-05 to 06 (peaks.ONE_FRAME_UNTILED_MEASURED), so the proof counts them untiled (they
+    # were tiled, with scratch, while the decode's frame was 1080p's).
     scratch = max(peaks.scratch(frame, 1) for frame in still_plan._frames((1920, 1080)))
-    assert plan.pinned == 0 and plan.host == PROCESS + scratch and scratch > 0
-    assert still_plan.tiles(plan, (1081, 1921)).decode is not None
-    # 4K: the untiled encode, measured up to 4K's padded frame (38.1 GiB); the decode is in tiles
-    # of 2048 px, 4K being past the 1080p frame its untiled pass was measured on. 8K: both in
-    # tiles of 2048 px.
+    assert plan.pinned == 0 and plan.host == PROCESS and scratch > 0
+    assert still_plan.tiles(plan, (1081, 1921)).decode is None
+    # 4K: both passes untiled, measured up to 4K's padded frame (the encode 14.7 GiB, the decode
+    # 23.7 over the models); the decode was in tiles of 2048 px while 4K was past its 1080p frame.
+    # 8K: both in tiles of 2048 px.
     four_k = still_plan.tiles(made(FOUR_K, card(96)), (2160, 3840))
-    assert four_k.encode is None and four_k.decode == Tiles(2048)
+    assert four_k.encode is None and four_k.decode is None
     eight_k = still_plan.tiles(made(EIGHT_K, card(96)), (4320, 7680))
     assert eight_k.encode == Tiles(2048) and eight_k.decode == Tiles(2048)
 
@@ -852,14 +853,14 @@ def test_a_tile_pin_of_0_is_the_untiled_pass_for_every_picture() -> None:
         found = still_plan.tiles(plan, target)
         assert found.encode is None and found.decode is None
     # The pin is taken for every picture, the bound's pictures one pixel over an even side too,
-    # whose padded frame (1120x1952) is past the 1104x1920 one frame's untiled decode was measured
-    # on: the pin takes the video slice's figure there (peaks.one_frame_ratio 1.0), 38.38 GiB of
-    # free VRAM with the DiT off the GPU, far more than an 11 GB card reports free (9.51).
+    # whose padded frame (1120x1952) is within the 4K frame the untiled decode was measured on:
+    # 9.94 GiB of free VRAM with the DiT off the GPU (38.38, the video slice's figure, while the
+    # decode's frame was 1080p's), still more than an 11 GB card reports free (9.51).
     with pytest.raises(PlanRefusal) as refused:
         made((1920, 1080), card(11), pins=Pins(decode_tile=0))
     assert refused.value.phase == "pin"
     assert cli_words(refused.value).startswith("--decode-tile 0: the decode untiled")
-    assert "takes 38.38 GiB of free VRAM, the DiT off the GPU" in cli_words(refused.value)
+    assert "takes 9.94 GiB of free VRAM, the DiT off the GPU" in cli_words(refused.value)
     assert "the largest tile that fits is --decode-tile " in cli_words(refused.value)
 
 
@@ -914,8 +915,8 @@ def test_the_host_figure_is_the_process_the_pinned_copies_and_the_scratch() -> N
     parts = [peaks.BLOCK] * still_plan._leaving(plan.models) + [peaks.VAE_WEIGHTS]
     assert plan.pinned == sum(-(-part // mmap.PAGESIZE) * mmap.PAGESIZE for part in parts)
     # Untiled passes everywhere: no scratch. A 1600x900 bound, whose padded frames (928x1632) are
-    # within the frame one frame's untiled passes were measured on (1080p's 1920x1104 is not: its
-    # pictures one pixel over an even side pad past it and are tiled, with scratch).
+    # within the frame one frame's untiled passes were measured on (4K's), as a 1080p bound's are
+    # since the decode's was extended to it (2026-11-06).
     assert made((1600, 900), card(96), 64 * GIB).host == PROCESS
 
 
@@ -1289,11 +1290,13 @@ def test_the_residents_are_lowered_where_the_copies_need_it() -> None:
     # blocks of the DiT that the passes keep for a small picture, nor beside 1, and fits beside
     # none: lowered to the most that holds, as the floor proof lowers them. The decode's moment,
     # in float32 at 24 bytes a pixel, is lowered too, to 6 of its 8 (10 before the untiled passes
-    # were offered only within the frames they were measured on).
+    # were offered only within the frames they were measured on; the small picture's decode keeps
+    # 10 since the untiled decode of the 1080p bound is counted by 1080p's measured ratio per
+    # frame, patch 04).
     big = 460_000_000
     plan = made(HD, card(16), input_pixels=big)
     small = made(HD, card(16), input_pixels=INPUT)
-    assert small.models.resident_encode == 15 and small.models.resident_decode == 8
+    assert small.models.resident_encode == 15 and small.models.resident_decode == 10
     assert plan.models.resident_encode == 0 and plan.models.resident_decode == 6
     job, swapped = still_plan._job_of(plan), plan.models.swapped
     assert still_plan._copies_need(job, "encode", 0, swapped) <= plan.budget
@@ -1304,11 +1307,11 @@ def test_the_residents_are_lowered_where_the_copies_need_it() -> None:
     assert still_plan._copies_need(job, "decode", 6, swapped) <= plan.budget
     assert still_plan._copies_need(job, "decode", 7, swapped) > plan.budget
     # A little less input: 1 block, the least lowering at 0 (450 MP); and 390 MP lowers the encode
-    # to 5 alone, the decode's moment still holding at the small picture's 8.
+    # to 5 alone, the decode's moment still holding at the small picture's 10.
     middle = made(HD, card(16), input_pixels=450_000_000)
     assert middle.models.resident_encode == 1
     some = made(HD, card(16), input_pixels=390_000_000)
-    assert some.models.resident_encode == 5 and some.models.resident_decode == 8
+    assert some.models.resident_encode == 5 and some.models.resident_decode == 10
     # The planned tiles are the small picture's: the copies are gone before the encode.
     tiles, tiles_small = (still_plan.tiles(each, (1080, 1920)) for each in (plan, small))
     assert (tiles.encode, tiles.decode) == (tiles_small.encode, tiles_small.decode)
@@ -1719,39 +1722,51 @@ def test_a_landscape_1080p_picture_pinned_untiled_is_taken_where_its_own_plan_is
     text = "\n".join(still_plan.said(pinned, LANDSCAPE_HD))
     assert "encode: untiled, pinned by --encode-tile" in text
     assert "decode: untiled, pinned by --decode-tile" in text
-    # The image server's bound, either orientation, refuses the same pin as before: its portrait
-    # frame is past the one frame's untiled decode was measured on, at the slice's figure.
+    # The image server's bound, either orientation, takes the pin too since the decode's untiled
+    # frame is 4K's (peaks.ONE_FRAME_UNTILED_MEASURED): its portrait pictures' padded frames are
+    # within it (it refused on this card while they were past 1080p's, at the slice's 38 GiB).
+    both = made(HD, TONIGHT, pins=Pins(0, 0))
+    for picture in (LANDSCAPE_HD, PORTRAIT_HD):
+        found = still_plan.tiles(both, picture)
+        assert found.encode is None and found.decode is None
+    # Past 4K's frame it still takes the slice's figure: the 4K bound's pin of 0 is refused on a
+    # 96 GiB card (139.83 GiB of free VRAM).
     with pytest.raises(PlanRefusal) as refused:
-        made(HD, TONIGHT, pins=Pins(0, 0))
+        made(FOUR_K, card(96), pins=Pins(0, 0))
     assert refused.value.phase == "pin"
     assert cli_words(refused.value).startswith(
-        "--decode-tile 0: the decode untiled, for the pictures within 1920x1080, takes 38."
+        "--decode-tile 0: the decode untiled, for the pictures within 3840x2160, takes 139.83"
     )
 
 
 def test_one_orientation_of_the_bound_would_not_have_taken_the_pin() -> None:
-    # Why the CLI's plan is its picture alone and not its orientation of the bound: a smaller
-    # landscape picture within 1920x1080 pads past the picture's frame, and past the frame one
-    # frame's untiled decode was measured on, so its pin of 0 takes the slice's figure.
-    assert padded_size(LANDSCAPE_HD) == (1104, 1920)
-    assert measured_untiled("decode", padded_size(LANDSCAPE_HD))
-    smaller = (1079, 1919)
-    assert output_size(smaller) == (1078, 1918) and padded_size(smaller) == (1104, 1952)
-    assert not measured_untiled("decode", padded_size(smaller))
-    untiled = peaks.picture_decode_peak(padded_size(smaller), output_size(smaller), None, 0, 0)
-    assert untiled + VAE_ROOM > TONIGHT
+    # Why the CLI's plan is its picture alone and not its orientation of the bound: a 4K bound's
+    # portrait pictures pad to 3872x2160, past the 4K frame one frame's untiled decode was
+    # measured on, so a pin of 0 for the bound takes the slice's figure there, where the landscape
+    # picture alone (2192x3840, within it) takes the measured ratio.
+    landscape, portrait = (2160, 3840), (3840, 2160)
+    assert padded_size(landscape) == (2192, 3840)
+    assert measured_untiled("decode", padded_size(landscape))
+    assert padded_size(portrait) == (3872, 2160)
+    assert not measured_untiled("decode", padded_size(portrait))
+    untiled = peaks.picture_decode_peak(padded_size(portrait), output_size(portrait), None, 0, 0)
+    assert untiled + VAE_ROOM > card(96).counted
+    alone = peaks.picture_decode_peak(padded_size(landscape), output_size(landscape), None, 0, 0)
+    assert alone + VAE_ROOM < card(48).counted
 
 
 def test_a_portrait_picture_is_judged_by_its_own_frame() -> None:
-    # 1080x1920 as stored pads to 1104x1952, past the decode measured untiled: its own plan tiles
-    # the decode, and a pin of 0 is refused for it, in the picture's words.
-    assert padded_size(PORTRAIT_HD) == (1952, 1104)
-    own = made(HD, TONIGHT, picture=PORTRAIT_HD)
-    assert still_plan.tiles(own, PORTRAIT_HD).decode is not None
+    # A 4K portrait picture, 2160x3840 as stored, pads to 3872x2160, past the decode measured
+    # untiled: its own plan tiles the decode, and a pin of 0 is refused for it, in the picture's
+    # words (the 1080p portrait, 1104x1952, was past it until the decode's frame was 4K's).
+    portrait = (3840, 2160)
+    assert padded_size(portrait) == (3872, 2160)
+    own = made(FOUR_K, card(96), picture=portrait)
+    assert still_plan.tiles(own, portrait).decode == Tiles(2048)
     with pytest.raises(PlanRefusal) as refused:
-        made(HD, TONIGHT, pins=Pins(decode_tile=0), picture=PORTRAIT_HD)
+        made(FOUR_K, card(96), pins=Pins(decode_tile=0), picture=portrait)
     assert cli_words(refused.value).startswith(
-        "--decode-tile 0: the decode untiled, for the picture, 1080x1920, takes"
+        "--decode-tile 0: the decode untiled, for the picture, 2160x3840, takes 137.83"
     )
     # A portrait picture whose frame is within the one measured, 1072x1920 padded, takes it.
     measured = (1888, 1072)
@@ -1971,8 +1986,8 @@ def test_a_picture_s_refusal_in_the_library_s_words_names_no_option() -> None:
     assert str(error).startswith("swapped blocks 37: the DiT has 36 blocks")
     error = refused_by((1920, 1080), card(11), pins=Pins(decode_tile=0))
     assert str(error).startswith("decode tile 0: the decode untiled")
-    assert str(error).endswith("the largest tile that fits is decode tile 1088")
-    assert cli_words(error).endswith("the largest tile that fits is --decode-tile 1088")
+    assert str(error).endswith("the largest tile that fits is decode tile 1536")
+    assert cli_words(error).endswith("the largest tile that fits is --decode-tile 1536")
     error = refused_by(HD, held(16.0), input_pixels=2_000_000_000)
     assert "a smaller resolution" in str(error) and "a smaller --resolution" in cli_words(error)
     for each in (

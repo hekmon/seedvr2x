@@ -862,18 +862,27 @@ ONE_FRAME_TILED: dict[int, tuple[float, float]] = {
     1536: (0.29, 0.24),
     2048: (0.24, 0.20),
 }
-# An untiled pass: 1080p's encode 0.255 and decode 0.207 of their figures, 4K's encode 0.194 (its
-# decode, untiled, past the 20 GiB the card's figures were taken under, at 0.146 or more). One
-# ratio up to the largest frame measured untiled, so that the untiled pass grows with the frame's
-# area as its fit does (still_plan._worst's proof takes the largest frame for the worst).
-ONE_FRAME_UNTILED = (0.26, 0.21)
+# An untiled pass, by the frame it was measured on. At 1080p (1104x1920): the encode 0.255 and the
+# decode 0.207 of their figures (2026-11-03). At 4K (2192x3840), on the RTX 5090 (place-study's
+# night, 2026-11-05 to 06, picture_phases.py --then, 36 blocks swapped, a fresh process, the same
+# bits twice): the encode 14.621 GiB above the weights and the picture's frame (16.193 allocated
+# over 1.571 before it), 0.194 of its figure (75.27 GiB), and the decode 23.654 GiB above the
+# weights (25.178 over 1.524), 0.1735 of its figure (136.32 GiB): the ratio falls with the frame,
+# the figure growing with the area faster than the pass does, so one ratio would count the 4K
+# decode at 28.6 GiB (0.21) or the 1080p one at 6.1 (0.1735, under its 7.22 measured). Each
+# measured frame has its own, rounded up to the thousandth for the 4K pair (14.68 and 23.72 GiB
+# predicted) and to the hundredth for the 1080p pair (as before: 5.16 and 7.34).
+ONE_FRAME_UNTILED_1080P = (0.26, 0.21)
+ONE_FRAME_UNTILED_4K = (0.195, 0.174)
+# Kept for the 1080p frame: the ratios of a frame within it, and of `padded` None.
+ONE_FRAME_UNTILED = ONE_FRAME_UNTILED_1080P
 # The largest padded frames one frame's untiled pass was measured on, (rows, columns), the
-# encode's (4K's) and the decode's (1080p's), in either orientation: past them, and for tiles past
-# TILE_MAX, which only a pin gives, a picture's pass takes the video slice's figure, 3 to 5.6
-# times what one frame took where it was measured, until the card's batch measures them
-# (DESIGN.md, Still images, Measured before it ships: "the planner keeping no blind spot"; the
-# review of 2026-11-03).
-ONE_FRAME_UNTILED_MEASURED = ((2192, 3840), (1104, 1920))
+# encode's and the decode's, in either orientation (4K's, both, since 2026-11-06): past them, and
+# for tiles past TILE_MAX, which only a pin gives, a picture's pass takes the video slice's
+# figure, 3 to 5.6 times what one frame took where it was measured, until the card's batch
+# measures them (DESIGN.md, Still images, Measured before it ships: "the planner keeping no blind
+# spot"; the review of 2026-11-03).
+ONE_FRAME_UNTILED_MEASURED = ((2192, 3840), (2192, 3840))
 # The bytes the picture's own frame takes on the GPU beside the encode, per pixel of the padded
 # frame: 3 channels in bfloat16 (model.COMPUTE_DTYPE), alive through the pass (still.upscale's
 # `frame`), and allocated before it, so outside the measures above (6 B a pixel: 0.047 GiB at 4K,
@@ -910,15 +919,25 @@ def one_frame_ratio(
     """One frame's VAE pass against the video slice's figure (_fit), the encode's (column 0) or
     the decode's (1), for the pass in `tiles` (None: untiled) over frames padded to `padded`:
     ONE_FRAME_TILED at a measured side, the larger of its two neighbours' between them, the
-    smallest's below; ONE_FRAME_UNTILED untiled within the frame measured
-    (ONE_FRAME_UNTILED_MEASURED, either orientation; `padded` None: within). 1.0, the slice's own
-    figure, past what was measured: an untiled pass over a larger frame, a tile past the largest
-    side measured."""
+    smallest's below; ONE_FRAME_UNTILED_1080P / _4K untiled within the frame measured
+    (ONE_FRAME_UNTILED_MEASURED, either orientation; `padded` None: within, the 1080p's). 1.0,
+    the slice's own figure, past what was measured: an untiled pass over a larger frame, a tile
+    past the largest side measured."""
     if tiles is None:
         measured = ONE_FRAME_UNTILED_MEASURED[column]
         if padded is not None and (max(padded) > max(measured) or min(padded) > min(measured)):
             return 1.0
-        return ONE_FRAME_UNTILED[column]
+        # The 4K ratio at a frame as large as 4K's in area. A frame between 1080p's and 4K's takes
+        # the 1080p ratio, but never more than the 4K frame's whole prediction (a pass takes no
+        # more on a smaller frame than on the larger one it was measured on), so that the
+        # prediction grows with the frame, the proof of still_plan._worst resting on that.
+        fitted = ONE_FRAME_UNTILED_MEASURED[column]
+        if padded is None:
+            return ONE_FRAME_UNTILED_1080P[column]
+        if padded[0] * padded[1] >= fitted[0] * fitted[1]:
+            return ONE_FRAME_UNTILED_4K[column]
+        cap = ONE_FRAME_UNTILED_4K[column] * _fit(fitted, None, column) / _fit(padded, None, column)
+        return min(ONE_FRAME_UNTILED_1080P[column], cap)
     sides = sorted(ONE_FRAME_TILED)
     if tiles.size in ONE_FRAME_TILED:
         return ONE_FRAME_TILED[tiles.size][column]

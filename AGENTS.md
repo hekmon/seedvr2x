@@ -966,12 +966,20 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   `tests/test_still_measured.py` (`core/tests/`) holds every one-frame VAE pass, colour correction
   and copies measured on that card that day under `peaks.picture_encode_peak`,
   `peaks.picture_decode_peak`, `peaks.colour_one_frame` and `still_plan.copies_peak`, each
-  prediction at or over its measure and near it; `tests/test_peaks.py` the one-frame ratios by
-  tile side, the video slice's own figure past what one frame was measured on (an untiled pass
-  over a larger frame, a tile past 2048 px), and a video's figures unmoved; `tests/test_still_plan.py`
-  the plan choosing no untiled pass past the frame measured (`still_plan._untiled_measured`), a
-  pin taking one there at the slice's figure; `tests/test_still_plan.py` the copies' measured rule
-  (`still_plan.RESIZE`, cuBLAS's workspace held) and what a phase takes for a reservation
+  prediction at or over its measure and near it, the untiled 4K encode and decode among them
+  (`test_the_4k_untiled_passes_are_within_a_tenth_of_a_gib_over_their_measure`); `tests/
+  test_peaks.py` the one-frame ratios by tile side, the untiled ratios by the frame they were
+  measured on (`ONE_FRAME_UNTILED_1080P` and `_4K`, a frame between the two taking the smaller
+  of the 1080p ratio and a capped 4K one, never falling as the frame grows:
+  `test_one_frame_untiled_between_the_two_measured_frames_never_falls_as_the_frame_grows`), the
+  video slice's own figure past what one frame was measured on (an untiled pass over a larger
+  frame than `ONE_FRAME_UNTILED_MEASURED`, a tile past 2048 px), and a video's figures unmoved;
+  `tests/test_still_plan.py`
+  the plan choosing no untiled pass past the frame measured (`still_plan._untiled_measured`, 4K
+  for both passes now), a pin taking one there at the slice's figure, and a landscape 1080p
+  picture pinned untiled taken where its own plan is untiled (the padded 1080p and 1440p
+  frames within 4K), the refusal shown on a 4K bound; `tests/test_still_plan.py` the copies'
+  measured rule (`still_plan.RESIZE`, cuBLAS's workspace held) and what a phase takes for a reservation
   (`still_plan.Peak`, `bound_peaks`, `picture_peaks`, a picture's passes within a `budget`). That
   patch moved no video plan: the plan matrix's 5,480 cases were main's byte for byte (5,120
   since the tests' numz modes retired, 2026-11-04; since 2026-11-05 in the repository, core's

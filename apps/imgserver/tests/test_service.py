@@ -1018,7 +1018,7 @@ def test_the_reservations_line_says_the_tiles_pictures_at_once_take(
     dit: weights.Architecture, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     # Two pictures within 1920x1080 on the RTX 5090 under WSL2 (2026-11-04: 18.45 GiB counted of
-    # 23.45 free on the whole card), the int8 DiT kept whole by the VAE's passes in tiles of 1088
+    # 23.45 free on the whole card), the int8 DiT kept whole by the VAE's passes in tiles of 1536
     # px (reservation._made): the line says so. One picture at a time takes the plan's own
     # tiles, and its line says none.
     held = memory.Reading(
@@ -1039,7 +1039,7 @@ def test_the_reservations_line_says_the_tiles_pictures_at_once_take(
             server._say_reservation()  # pyright: ignore[reportPrivateUsage]
         line = caplog.messages[0]
         tiles = (
-            ", the VAE's passes in tiles of 1088 px (untiled where a picture's frame is no"
+            ", the VAE's passes in tiles of 1536 px (untiled where a picture's frame is no"
             " larger), so that the DiT stays whole beside them; the CUDA context"
         )
         assert (tiles in line) == (count == 2), line
@@ -1163,7 +1163,7 @@ def test_the_start_logs_the_smaller_files_that_swap_fewer_blocks(
     lines, service = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 12)
     blocks = next(at for at, each in enumerate(lines) if each.startswith("plan: blocks swapped"))
     assert lines[blocks + 1] == (
-        "plan: smaller DiT files plan this bound better: this plan swaps 17 blocks; for the sharp"
+        "plan: smaller DiT files plan this bound better: this plan swaps 16 blocks; for the sharp"
         " 7B (int8 0 blocks; the dynamic GGUF 0 blocks); for the 7B (int8 0 blocks; the dynamic"
         " GGUF 0 blocks); --dit-model names them"
     )

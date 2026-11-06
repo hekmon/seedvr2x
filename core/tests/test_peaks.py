@@ -934,55 +934,71 @@ def test_one_frame_ratio_below_the_smallest_tile_is_the_smallest_ones() -> None:
     )
 
 
-def test_one_frame_ratio_untiled_is_one_ratio_within_the_frame_it_was_measured_on() -> None:
-    assert peaks.ONE_FRAME_UNTILED == (0.26, 0.21)
-    # `padded` not given: within the measured frame.
+def test_one_frame_ratio_untiled_is_the_ratio_of_the_frame_it_was_measured_on() -> None:
+    assert peaks.ONE_FRAME_UNTILED_1080P == (0.26, 0.21)
+    assert peaks.ONE_FRAME_UNTILED_4K == (0.195, 0.174)
+    assert peaks.ONE_FRAME_UNTILED == peaks.ONE_FRAME_UNTILED_1080P
+    # `padded` not given: within the measured frame, the 1080p ratio.
     assert peaks.one_frame_ratio(None, 0) == 0.26 and peaks.one_frame_ratio(None, 1) == 0.21
-    # The encode was measured up to 4K's padded frame, the decode up to 1080p's, either
-    # orientation, and at any smaller frame the same ratio.
-    assert peaks.ONE_FRAME_UNTILED_MEASURED == ((2192, 3840), (1104, 1920))
-    for padded, ratio in (
-        ((2192, 3840), 0.26),
-        ((3840, 2192), 0.26),
-        ((1104, 1920), 0.26),
-        ((576, 960), 0.26),
-    ):
-        assert peaks.one_frame_ratio(None, 0, padded) == ratio
-    for padded, ratio in (
-        ((1104, 1920), 0.21),
-        ((1920, 1104), 0.21),
-        ((1088, 1920), 0.21),
-        ((576, 960), 0.21),
-    ):
-        assert peaks.one_frame_ratio(None, 1, padded) == ratio
+    # Both passes were measured untiled up to 4K's padded frame (the decode too since the night of
+    # 2026-11-05 to 06), either orientation: 4K's ratio at a frame as large as 4K's, 1080p's at
+    # 1080p and under.
+    assert peaks.ONE_FRAME_UNTILED_MEASURED == ((2192, 3840), (2192, 3840))
+    for column in (0, 1):
+        for padded, ratio in (
+            ((2192, 3840), peaks.ONE_FRAME_UNTILED_4K[column]),
+            ((3840, 2192), peaks.ONE_FRAME_UNTILED_4K[column]),
+            ((1104, 1920), peaks.ONE_FRAME_UNTILED_1080P[column]),
+            ((1920, 1104), peaks.ONE_FRAME_UNTILED_1080P[column]),
+            ((1088, 1920), peaks.ONE_FRAME_UNTILED_1080P[column]),
+            ((576, 960), peaks.ONE_FRAME_UNTILED_1080P[column]),
+        ):
+            assert peaks.one_frame_ratio(None, column, padded) == ratio, (column, padded)
+
+
+def test_one_frame_untiled_between_the_two_measured_frames_never_falls_as_the_frame_grows() -> None:
+    # A frame between 1080p's and 4K's takes the 1080p ratio, capped at the 4K frame's whole
+    # prediction (the pass takes no more on a smaller frame than on the larger one measured):
+    # the prediction grows with the area, which still_plan._worst's proof rests on.
+    for column in (0, 1):
+        at_4k = peaks.one_frame_ratio(None, column, OURS_4K) * peaks._fit(OURS_4K, None, column)  # pyright: ignore
+        previous = 0.0
+        for rows in range(1104, 2193, 16):
+            padded = (rows, 1920 * rows // 1104 // 16 * 16)
+            figure = peaks.one_frame_ratio(None, column, padded) * peaks._fit(padded, None, column)  # pyright: ignore
+            # A byte of slack: the capped figures are one product divided and multiplied back,
+            # equal to 1.5e10 B to float rounding (2e-6 B apart at 3808 columns).
+            assert figure >= previous - 1, (column, padded)
+            assert figure <= at_4k + 1, (column, padded)
+            previous = figure
 
 
 def test_one_frame_ratio_untiled_past_the_measured_frame_is_the_slices_figure() -> None:
-    # One row or column past the frame, in either orientation, and 8K (nothing measured there).
-    for padded in ((2208, 3840), (2192, 3856), (3856, 2192), (4352, 7712), (4352, 2192)):
-        assert peaks.one_frame_ratio(None, 0, padded) == 1.0, padded
-    for padded in ((1120, 1920), (1104, 1936), (1936, 1104), (2192, 3840), (4352, 7712)):
-        assert peaks.one_frame_ratio(None, 1, padded) == 1.0, padded
-    # 4K's encode is within its measured frame, its decode is not: the plan offers the encode
-    # untiled there and the decode in tiles.
-    assert peaks.one_frame_ratio(None, 0, OURS_4K) == 0.26
-    assert peaks.one_frame_ratio(None, 1, OURS_4K) == 1.0
+    # One row or column past the frame, in either orientation, and 8K (nothing measured there):
+    # the same for both passes, 4K's padded frame being the measured one of each.
+    for column in (0, 1):
+        for padded in ((2208, 3840), (2192, 3856), (3856, 2192), (4352, 7712), (4352, 2192)):
+            assert peaks.one_frame_ratio(None, column, padded) == 1.0, (column, padded)
+    assert peaks.one_frame_ratio(None, 0, OURS_4K) == 0.195
+    assert peaks.one_frame_ratio(None, 1, OURS_4K) == 0.174
 
 
 def test_a_pinned_untiled_pass_past_the_measured_frame_takes_the_slices_figure() -> None:
     # A pin of 0 (untiled) is still taken for any picture, at the video slice's figure past the
-    # frame measured: the encode of 8K's padded frame and the decode of 4K's.
+    # frame measured: 8K's padded frame, for the encode and the decode.
     models = peaks.VAE_WEIGHTS + peaks.dit_on_gpu(0, 0)
     eight_k = (4352, 7712)
     encode = peaks.picture_encode_peak(eight_k, None, 0, 0)
     assert encode == (
         round(peaks._fit(eight_k, None, 0)) + 6 * eight_k[0] * eight_k[1] + models  # pyright: ignore
     )
-    decode = peaks.picture_decode_peak(OURS_4K, (2160, 3840), None, 0, 0, False)
-    assert decode == round(peaks._fit(OURS_4K, None, 1)) + models  # pyright: ignore
-    # Within the frame it is the measured ratio of the same fit.
+    decode = peaks.picture_decode_peak(eight_k, (4320, 7680), None, 0, 0, False)
+    assert decode == round(peaks._fit(eight_k, None, 1)) + models  # pyright: ignore
+    # Within the frame it is the measured ratio of the same fit, 4K's decode now among them.
     within = peaks.picture_decode_peak(OURS_1080, (1080, 1920), None, 0, 0, False)
     assert within == round(0.21 * peaks._fit(OURS_1080, None, 1)) + models  # pyright: ignore
+    at_4k = peaks.picture_decode_peak(OURS_4K, (2160, 3840), None, 0, 0, False)
+    assert at_4k == round(0.174 * peaks._fit(OURS_4K, None, 1)) + models  # pyright: ignore
 
 
 def test_a_pictures_encode_is_one_frames_ratio_of_the_fit_and_its_frame_without_the_extra() -> None:

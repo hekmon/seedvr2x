@@ -12,13 +12,13 @@ the picture budget, or the DiT's peak at one picture when it binds), counted at 
 2.0 to 100 GiB free in steps of 0.3 GiB, both attention kernels, at 1, 2 and 4 pictures:
 - one picture: 1 plan where the first fits (48 GiB and up) or the plan itself refuses at once,
   2 to 5 where the first comes out short and is lowered (2 at 8 and 12 GiB with FlashAttention 2,
-  3 at 16, 4 at 24 and 32); of the 654 cases, 436 take 1, 68 take 2, 62 take 3, 82 take 4 and 6
+  3 at 16, 4 at 24 and 32); of the 654 cases, 414 take 1, 88 take 2, 64 take 3, 82 take 4 and 6
   take 5;
 - two or four pictures: the same figures at both, the reservation not growing with the count
   (the server runs one picture in each model at a time), each pin tried (reservation._several:
   the plan's own tiles, then both VAE passes pinned to each of the 25 sides from 2048 to 512 px)
-  taking 3 plans at the most: 1 plan where the first fits (386 cases), 2 where it is lowered and
-  fits (44); 17 to 33 where the plan's own tiles move the models or reserve too much and smaller
+  taking 3 plans at the most: 1 plan where the first fits (366 cases), 2 where it is lowered and
+  fits (64); 14 to 33 where the plan's own tiles move the models or reserve too much and smaller
   tiles are tried, 86 of them fitting so and 138 refused once every side was tried.
 No case takes more than 5 at one picture, nor more than 3 for each pin at two or more: the tests
 hold them.
@@ -26,7 +26,7 @@ hold them.
 The night's case on the RTX 5090 under WSL2 (2026-11-04, server_int8_n2.log and
 server_fp16_n2.log): two pictures within 1920x1080 from inputs of 0.6 MP, the run held to the
 card, 18.45 GiB counted of the 23.45 free on the whole card, SDPA: the int8 DiT whole with both
-passes in tiles of 1088 px, the fp16 refused, naming what fits."""
+passes in tiles of 1216 px, the fp16 refused, naming what fits."""
 
 import math
 from dataclasses import replace
@@ -312,9 +312,10 @@ def test_every_picture_within_the_bound_gets_passes_within_the_picture_budget(fr
 def test_a_4k_bound_from_50_mp_on_96_gib_reserves_a_part_of_the_card() -> None:
     made = reservation.make(asked(96))
     # Not the whole card: the models (15.87 GiB) and the room and share of the pictures the
-    # bound's own take, about 40.7 GiB, where the plan's budget is the card's 95.4.
+    # bound's own take, about 45.6 GiB (40.7 before the decode's untiled frame was 4K's), where
+    # the plan's budget is the card's 95.4.
     assert made.reservation < 0.5 * 96 * GIB
-    assert reservation.gib(made.reservation) == "40.66"
+    assert reservation.gib(made.reservation) == "45.59"
     assert made.budget < made.plan.budget
     assert made.budget == reservation.picture_budget(made.plan, INPUT)
     assert made.reservation == reservation.reserved(reservation.ceilings(made.plan, made.budget), 1)
@@ -569,10 +570,10 @@ def test_the_tries_stay_under_the_limit_on_cards_between(
             outcomes[outcome] = outcomes.get(outcome, 0) + 1
     assert sum(seen.values()) == 654
     if count == 1:
-        assert seen == {1: 436, 2: 68, 3: 62, 4: 82, 5: 6}
+        assert seen == {1: 414, 2: 88, 3: 64, 4: 82, 5: 6}
     else:
-        assert seen[1] == 386 and seen[2] == 44
-        assert min(plans for plans in seen if plans > 2) == 17 and max(seen) == 33
+        assert seen[1] == 366 and seen[2] == 64
+        assert min(plans for plans in seen if plans > 2) == 14 and max(seen) == 33
         assert outcomes == {"fits": 430, "fits pinned": 86, "reservation refused": 138}
 
 
@@ -595,7 +596,9 @@ def test_several_pictures_take_as_many_tries_as_two_and_never_more_than_three(
 ) -> None:
     counter = Counted(monkeypatch)
     tried = Tried(monkeypatch, counter)
-    for free in (48, 96):
+    # 52 GiB and up take the first plan: the 4K bound's decode untiled (patch 04) is a larger
+    # share of the budget, so that 44 and 48 GiB, which took it before, lower the plan once.
+    for free in (52, 96):
         assert counter.tries(asked(free, count), FOUR_K, count) == (1, "fits")
     # Below, no tile keeps the DiT whole with a reservation that fits: every pin tried, 3 plans
     # at the most each, refused for the whole DiT.
@@ -670,7 +673,7 @@ def test_the_tiles_tried_are_the_plans_own_sizes(bound: Bound) -> None:
     assert reservation._several((128, 96)) == [Pins(swap_blocks=0)]
 
 
-def test_two_pictures_on_the_int8_dit_keep_it_whole_in_tiles_of_1088() -> None:
+def test_two_pictures_on_the_int8_dit_keep_it_whole_in_tiles_of_1216() -> None:
     # Refused that night: the plan's own tiles kept the DiT whole at the memory counted, but
     # reserved more than it, and lowered the DiT beside the decode on the memory lowered.
     wanted = night(peaks.INT8, 2)
@@ -682,16 +685,16 @@ def test_two_pictures_on_the_int8_dit_keep_it_whole_in_tiles_of_1088() -> None:
         reservation._tried(wanted, FULL_HD, 2, Pins(swap_blocks=0))
     made = reservation.make(wanted)
     assert reservation.whole(made.plan)
-    assert made.plan.pins == Pins(1088, 1088, swap_blocks=0)
+    assert made.plan.pins == Pins(1216, 1216, swap_blocks=0)
     assert made.reservation <= wanted.reading.counted - made.plan.margin
-    assert reservation.gib(made.reservation) == "17.36"
+    assert reservation.gib(made.reservation) == "18.43"
     assert (
         reservation.gib(made.models) == "8.29"
     )  # the int8 DiT and the VAE, as the plan counts them
     assert made.reservation == reservation.reserved(reservation.ceilings(made.plan, made.budget), 2)
     # The first side that does: every larger one moves the models or reserves too much.
     for side in reservation.tile_sides(FULL_HD):
-        if side == 1088:
+        if side == 1216:
             break
         with pytest.raises(ReservationRefused):
             reservation._tried(wanted, FULL_HD, 2, Pins(side, side, swap_blocks=0))
@@ -700,7 +703,7 @@ def test_two_pictures_on_the_int8_dit_keep_it_whole_in_tiles_of_1088() -> None:
     for target in ((1080, 1920), (1920, 1080), (720, 1280), (360, 640)):
         tiles = still_plan.tiles(made.plan, target, made.budget)
         for phase, chosen in (("encode", tiles.encode), ("decode", tiles.decode)):
-            assert chosen is None or chosen.size == 1088, (target, phase)
+            assert chosen is None or chosen.size == 1216, (target, phase)
     small = still_plan.tiles(made.plan, (360, 640), made.budget)
     assert small.encode is None and small.decode is None
     # Four at once reserve the same: one picture in each model at a time.
@@ -729,8 +732,9 @@ def test_two_pictures_on_the_fp16_dit_are_refused_naming_what_fits() -> None:
 @pytest.mark.parametrize("dit", [peaks.INT8, peaks.FP16])
 def test_one_picture_takes_the_plans_own_tiles(dit: Architecture) -> None:
     # One picture at a time: the asked pins alone, none here, the plan's own tiles and placement
-    # (the night's: the int8 DiT lowered to 30 blocks beside the decode, the fp16 to 22 and 15
-    # beside the encode and the decode, the VAE now in the DiT's phase for both), as before.
+    # (the night's: the int8 DiT lowered to 35 blocks beside the decode, the fp16 to 23 and 17
+    # beside the encode and the decode, the VAE now in the DiT's phase for both; 30, and 22 and 15,
+    # before the decode's untiled frame was 4K's, 2026-11-06), as before.
     wanted = night(dit, 1)
     made = reservation.make(wanted)
     assert made.plan.pins == still_plan.NO_PINS
@@ -739,17 +743,17 @@ def test_one_picture_takes_the_plans_own_tiles(dit: Architecture) -> None:
     if dit == peaks.INT8:
         assert (models.resident_encode, models.resident_decode, models.vae_in_dit) == (
             None,
-            30,
+            35,
             True,
         )
-        assert reservation.gib(made.reservation) == "18.43"
+        assert reservation.gib(made.reservation) == "18.27"
     else:
         assert (models.resident_encode, models.resident_decode, models.vae_in_dit) == (
-            22,
-            15,
+            23,
+            17,
             True,
         )
-        assert reservation.gib(made.reservation) == "18.42"
+        assert reservation.gib(made.reservation) == "18.45"
 
 
 def test_the_wsl2_card_under_the_segments_keeps_more_of_the_dit_than_under_the_flat_reserve() -> (
@@ -762,10 +766,10 @@ def test_the_wsl2_card_under_the_segments_keeps_more_of_the_dit_than_under_the_f
     # a smaller tile, a pair refused under the flat reserve served.
     plain_int8 = reservation.make(night(peaks.INT8, 1))
     for allocator, count, dit, expected in (
-        (memory.SEGMENTS, 1, peaks.INT8, ((None, None), "18.44")),
-        (memory.SEGMENTS, 1, peaks.FP16, ((None, 28), "22.65")),
-        (memory.POOL, 1, peaks.INT8, ((None, None), "19.71")),
-        (memory.POOL, 1, peaks.FP16, ((35, 25), "22.66")),
+        (memory.SEGMENTS, 1, peaks.INT8, ((None, None), "17.23")),
+        (memory.SEGMENTS, 1, peaks.FP16, ((None, 31), "22.71")),
+        (memory.POOL, 1, peaks.INT8, ((None, None), "18.35")),
+        (memory.POOL, 1, peaks.FP16, ((35, 28), "22.56")),
     ):
         found = reservation.make(night(dit, count, allocator, 22.95))
         models = found.plan.models
@@ -780,16 +784,16 @@ def test_the_wsl2_card_under_the_segments_keeps_more_of_the_dit_than_under_the_f
         assert found.reservation <= found.plan.reading.counted - found.plan.margin
         assert all(each.over == 0.0 for each in still_plan.bound_peaks(found.plan).values())
     assert (
-        plain_int8.plan.models.resident_decode == 30
+        plain_int8.plan.models.resident_decode == 35
     )  # the flat reserve's, lowered beside the decode
-    # Two pictures keep the DiT whole in the plan's own tiles on the int8 file (20.03 GiB) where
-    # the flat reserve needed 1088-px tiles (17.36), and the fp16 pair, refused under the flat
+    # Two pictures keep the DiT whole in the plan's own tiles on the int8 file (18.82 GiB) where
+    # the flat reserve needed 1216-px tiles (18.43), and the fp16 pair, refused under the flat
     # reserve, is served in 832-px tiles.
     two = reservation.make(night(peaks.INT8, 2, memory.SEGMENTS, 22.95))
-    assert two.plan.pins == Pins(swap_blocks=0) and reservation.gib(two.reservation) == "20.03"
+    assert two.plan.pins == Pins(swap_blocks=0) and reservation.gib(two.reservation) == "18.82"
     pooled = reservation.make(night(peaks.INT8, 2, memory.POOL, 22.95))
     assert (
-        pooled.plan.pins == Pins(swap_blocks=0) and reservation.gib(pooled.reservation) == "21.55"
+        pooled.plan.pins == Pins(swap_blocks=0) and reservation.gib(pooled.reservation) == "20.19"
     )
     pair = reservation.make(night(peaks.FP16, 2, memory.SEGMENTS, 22.95))
     assert pair.plan.pins == Pins(832, 832, swap_blocks=0)
@@ -803,9 +807,10 @@ def test_the_mechanism_of_the_tiles_tried_holds_under_the_segments_on_a_card_tha
     None
 ):
     # The int8 pair of the night, on the segments with 19.5 GiB counted (another program holds
-    # about 3.5 GiB of the card): the plan's own tiles keep the DiT whole but reserve more than
-    # the budget, so 1088-px tiles are the first that fit, as under the flat reserve at 18.45.
-    wanted = night(peaks.INT8, 2, memory.SEGMENTS, 19.5)
+    # about 5.5 GiB of the card; 19.5, the figure before the decode's untiled frame was 4K's,
+    # now keeps the plan's own tiles): the plan's own tiles keep the DiT whole but reserve more
+    # than the budget, so 1152-px tiles are the first that fit, as under the flat reserve at 18.45.
+    wanted = night(peaks.INT8, 2, memory.SEGMENTS, 17.5)
     first = reservation._plan(wanted, FULL_HD, 2, wanted.reading, Pins(swap_blocks=0))
     assert reservation.whole(first)
     ceiling = reservation.ceilings(first, reservation.picture_budget(first, NIGHT_INPUT))
@@ -813,8 +818,8 @@ def test_the_mechanism_of_the_tiles_tried_holds_under_the_segments_on_a_card_tha
     with pytest.raises(reservation._Moves, match="the plan moves the models"):
         reservation._tried(wanted, FULL_HD, 2, Pins(swap_blocks=0))
     made = reservation.make(wanted)
-    assert made.plan.pins == Pins(1088, 1088, swap_blocks=0)
-    assert reservation.gib(made.reservation) == "16.65"
+    assert made.plan.pins == Pins(1152, 1152, swap_blocks=0)
+    assert reservation.gib(made.reservation) == "17.22"
     assert made.reservation <= wanted.reading.counted - made.plan.margin
     # The fp16 pair does not fit there at all (22.46 GiB on 22.95): one picture, or 768x432.
     with pytest.raises(ReservationRefused) as error:
@@ -937,7 +942,7 @@ def test_the_start_says_the_smaller_files_that_swap_fewer_blocks() -> None:
         " the dynamic GGUF 0 blocks; --dit-model names them"
     )
     assert line(one_in_full_hd(12, peaks.FP16, sharp)) == (
-        "smaller DiT files plan this bound better: this plan swaps 17 blocks; int8 0 blocks;"
+        "smaller DiT files plan this bound better: this plan swaps 16 blocks; int8 0 blocks;"
         " the dynamic GGUF 0 blocks; --dit-model names them"
     )
     # An int8 DiT is offered the GGUF alone.
@@ -951,7 +956,7 @@ def test_the_start_says_the_smaller_files_that_swap_fewer_blocks() -> None:
     regular = line(one_in_full_hd(12, peaks.FP16, "seedvr2x_ema_7b_fp16.safetensors"))
     assert regular is not None and "seedvr2x_ema_7b_sharp" not in regular
     assert regular.startswith(
-        "smaller DiT files plan this bound better: this plan swaps 17 blocks;"
+        "smaller DiT files plan this bound better: this plan swaps 16 blocks;"
     )
 
 
@@ -972,7 +977,7 @@ def test_an_unpinned_dit_name_gives_both_7bs_files_in_the_start_line() -> None:
     # A file that is not a pinned one does not say which 7B it holds (pull.smaller_files): each
     # 7B's files, in brackets, the sharp 7B's first.
     assert line(one_in_full_hd(12, peaks.FP16, "w.safetensors")) == (
-        "smaller DiT files plan this bound better: this plan swaps 17 blocks; for the sharp 7B"
+        "smaller DiT files plan this bound better: this plan swaps 16 blocks; for the sharp 7B"
         " (int8 0 blocks; the dynamic GGUF 0 blocks); for the 7B (int8 0 blocks; the dynamic GGUF"
         " 0 blocks); --dit-model names them"
     )

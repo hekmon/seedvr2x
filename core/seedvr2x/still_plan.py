@@ -782,9 +782,10 @@ def _worst(
     The untiled passes: the pictures too small for the tiles are the padded frames whose sides
     are both within the tile. The untiled pass takes more of the GPU the larger the frame: both
     of its fits (peaks.ENCODE_UNTILED, peaks.DECODE_UNTILED and the small tiles' fit it is the
-    larger of) have positive slopes in the area, taken at one ratio whatever the size
-    (peaks.ONE_FRAME_UNTILED), and so do the frame's and the correction's terms, so the largest
-    frame, in area, is the worst. The
+    larger of) have positive slopes in the area, taken at the ratio of the frame measured
+    (peaks.one_frame_ratio: 1080p's, 4K's, a frame between capped at the 4K frame's prediction,
+    so that the prediction never falls as the frame grows), and so do the frame's and the
+    correction's terms, so the largest frame, in area, is the worst. The
     same holds in a pair of sets of a cut picture: its members all take the same tile, and the
     untiled pass of the largest of them (the key's last row and column) is the most of theirs, so
     the worst member needs the less of the two.

@@ -34,9 +34,11 @@ ENCODE: dict[str, dict[int, float]] = {
     "6000x4000": {2048: 8.4987, 1536: 5.6827, 1024: 3.5465, 768: 2.2903, 512: 1.0367},
     "8K": {2048: 8.3791, 1536: 5.6827, 1024: 3.5465, 768: 2.2903, 512: 1.0367},
 }
+# (The two 4K untiled entries, tile 0, are place-study's of 2026-11-05 to 06: the encode's the
+# 2026-11-03 figure it already was, the decode's new; see the test of the 4K untiled passes.)
 DECODE: dict[str, dict[int, float]] = {
     "1080p": {0: 7.2197, 1536: 6.512, 1024: 4.7844, 768: 3.6354, 512: 1.8858},
-    "4K": {2048: 12.1039, 1536: 8.0072, 1024: 4.7844, 768: 3.6354, 512: 1.8858},
+    "4K": {0: 23.6538, 2048: 12.1039, 1536: 8.0072, 1024: 4.7844, 768: 3.6354, 512: 1.8858},
     "6000x4000": {2048: 12.1273, 1536: 8.0072, 1024: 4.4296, 768: 3.6354, 512: 1.8858},
     "8K": {2048: 12.1273, 1536: 8.0072, 1024: 4.7844, 768: 3.6354, 512: 1.8858},
 }
@@ -67,9 +69,10 @@ COPIES = [
 # two slots (no block resident, none swapped: peaks.dit_on_gpu(0, 0)), as the cases ran.
 MODELS = peaks.VAE_WEIGHTS + peaks.dit_on_gpu(0, 0)
 
-# How far over a measure the prediction may be, tiled or not: the most the table below has is
-# 1.34 (the 4K untiled encode, the slice's fit at 14.6 GiB measured at 1080p's 5.07), and 1.14 for
-# a tile (the 6000x4000 encode at 512 px, where 1080p's cut-off tiles took 0.283 over the rest).
+# How far over a measure the prediction may be, tiled or not: the most the table has is 1.14
+# (the 6000x4000 encode at 512 px, where 1080p's cut-off tiles took 0.283 over the rest), the
+# untiled passes 1.02 at the most since the 4K frame has its own ratio (it was 1.34, the 4K untiled
+# encode at the 1080p ratio). The slack stays 1.45, which a change opening a gap would cross.
 SLACK = 1.45
 
 ENCODES = [
@@ -132,9 +135,24 @@ def test_the_most_a_vae_pass_is_over_counted_is_computed_here_and_under_the_slac
     }
     most = max(over, key=lambda each: over[each])
     assert over[most] < SLACK
-    assert most == ("encode", "4K", 0)
+    assert most == ("encode", "6000x4000", 512)
+    untiled = max((each for each in over if not each[2]), key=lambda each: over[each])
+    assert over[untiled] < 1.03
     tiled = max((each for each in over if each[2]), key=lambda each: over[each])
     assert over[tiled] < 1.2
+
+
+def test_the_4k_untiled_passes_are_within_a_tenth_of_a_gib_over_their_measure() -> None:
+    # The 4K picture's untiled passes, place-study's night (2026-11-05 to 06, picture_phases.py
+    # --then, 36 blocks swapped, a fresh process, the same bits twice): the encode 14.6214 GiB
+    # and the decode 23.6538 (25.178 allocated over the 1.524 held before it) above the models
+    # (3.5 s warm, 1.85 s the encode). Their own ratios (peaks.ONE_FRAME_UNTILED_4K) put the
+    # prediction at or over each, 0.06 GiB at the most: the plan counted the decode at 28.6.
+    for predicted, measured in (
+        (encoded(PADDED["4K"], 0), 14.6214),
+        (decoded(PADDED["4K"], 0), 23.6538),
+    ):
+        assert measured <= predicted <= measured + 0.1
 
 
 def test_a_tile_of_the_grids_shape_takes_the_same_at_every_picture_size() -> None:
