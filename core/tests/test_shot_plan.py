@@ -2557,7 +2557,7 @@ def test_a_plan_s_refusal_in_the_library_s_words_names_no_option() -> None:
         assert "--" not in str(error) and cli_words(error) == str(error)
 
 
-def test_the_reserve_is_the_step_s_beyond_its_peak() -> None:
+def test_the_reserve_is_the_step_s_beyond_its_peak(monkeypatch: pytest.MonkeyPatch) -> None:
     # A held run is judged phase by phase: a phase needs its peak and its reserve (peaks.reserve)
     # under the budget, which is the figure counted whole (no margin on top, the reserve's floor
     # standing for it). DESIGN.md, Allocator, Small cards, decided on 2026-11-06.
@@ -2592,14 +2592,28 @@ def test_the_reserve_is_the_step_s_beyond_its_peak() -> None:
             assert predicted.reserve_taken() == predicted.reserves
             assert predicted.record()["reserve"] == predicted.reserves
     # Both sides of the floors: a small window at 1080p is under the DiT's 0.3 x P = 0.6 GiB, and
-    # its reserve is the floor (MARGIN); a long one at 4K is over it; no cap where 0.3 x P is over
-    # 4.5 GiB (a window of 40 latents at 4K, P of 20 GiB, is left 6 GiB).
+    # its reserve is the floor (MARGIN); a long one at 4K is over it, capped where 0.3 x P
+    # is over 4.5 GiB (a window of 40 latents at 4K is left 4.5 GiB, hold_probe.py's scan).
     small = shot_plan.plan(reading(memory.SEGMENTS), HD, shots(1), Pins(), None)[1]
     assert small.reserves["dit"] == MARGIN
     large = shot_plan.plan(reading(memory.SEGMENTS, 96.0), UHD, shots(40), Pins(), None)[1]
     working = peaks.dit_working(padded_size(UHD), large.window)
-    assert MARGIN < large.reserves["dit"] == round(0.3 * working)
-    assert 0.3 * working > memory.RESERVE and large.reserves["dit"] > memory.RESERVE
+    assert working * 0.3 > peaks.DIT_RESERVE_CAP
+    assert MARGIN < large.reserves["dit"] == peaks.DIT_RESERVE_CAP == round(4.5 * GIB)
+    assert large.reserves["dit"] == memory.RESERVE
+    # The plan of such a case is the one made with a reserve of 4.5 GiB for the window, whatever
+    # its peak: the cap holds in the search as well as in the figure.
+    real = peaks.reserve
+
+    def flat(phase: str, working: int, *args: object, **kwargs: object) -> int:
+        if phase == peaks.DIT_PHASE:
+            return round(4.5 * GIB)
+        return real(phase, working, *args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(peaks, "reserve", flat)
+    flatly = shot_plan.plan(reading(memory.SEGMENTS, 96.0), UHD, shots(40), Pins(), None)[1]
+    monkeypatch.undo()
+    assert flatly == large
     # Torch's own allocator without the segments, and a driver that refuses: as before the reserve
     # was measured by the step. A window has none beyond its peak, a VAE pass VAE_ROOM, and the
     # record keeps the flat figure for every phase, or nothing.

@@ -1186,20 +1186,34 @@ def test_under_the_segments_a_step_is_left_the_larger_of_its_floor_and_its_share
     edge = floor / share
     for working in (0, GIB // 4, round(edge) - 1000):
         assert peaks.reserve(phase, working, memory.SEGMENTS) == floor
-    for working in (round(edge) + 1000, 8 * GIB, 20 * GIB, 60 * GIB):
-        assert peaks.reserve(phase, working, memory.SEGMENTS) == round(share * working) > floor
+    # (the DiT's share is capped at 4.5 GiB, from P of 15: its own test)
+    for working in (round(edge) + 1000, 8 * GIB, 14 * GIB, 20 * GIB, 60 * GIB):
+        want = round(share * working)
+        if phase == peaks.DIT_PHASE:
+            want = min(want, peaks.DIT_RESERVE_CAP)
+        assert peaks.reserve(phase, working, memory.SEGMENTS) == want > floor
     # Continuous at the edge, to a byte or two.
     assert abs(peaks.reserve(phase, round(edge), memory.SEGMENTS) - floor) <= 1
 
 
-@pytest.mark.parametrize("phase", peaks.PHASES)
-def test_the_reserve_has_no_cap_where_the_share_passes_4_5_gib(phase: str) -> None:
-    # Design's ruling of 2026-11-06: no cap; 0.3 x P is over 4.5 GiB from P of 15 GiB, 0.2 x P
-    # from 22.5.
-    _, share = SEGMENT_RULES[phase]
-    working = round(4.5 * GIB / share) + GIB
-    assert peaks.reserve(phase, working, memory.SEGMENTS) > round(4.5 * GIB)
-    assert peaks.reserve(phase, 100 * GIB, memory.SEGMENTS) == round(share * 100 * GIB)
+def test_the_dit_reserve_is_capped_at_4_5_gib_and_the_vae_passes_are_not() -> None:
+    # hold_probe.py's scan, 2026-11-06: the DiT's want stops growing past 27 latents (P 13.21
+    # GiB), so max(0.6, min(0.3 x P, 4.5)); 0.3 x P is 4.5 GiB from P of 15 GiB.
+    cap = round(4.5 * GIB)
+    assert peaks.DIT_RESERVE_CAP == cap
+    dit = peaks.DIT_PHASE
+    under = round(14 * GIB)
+    assert peaks.reserve(dit, under, memory.SEGMENTS) == round(0.3 * under) < cap
+    for working in (15 * GIB + GIB // 100, 20 * GIB, 100 * GIB):
+        assert peaks.reserve(dit, working, memory.SEGMENTS) == cap
+    assert peaks.reserve(dit, 0, memory.SEGMENTS) == round(0.6 * GIB)
+    # The pool's DiT rule and the VAE passes' are not capped (0.2 x P is over 4.5 from P of 22.5).
+    assert peaks.reserve(dit, 100 * GIB, memory.POOL) == round(0.24 * 100 * GIB)
+    for phase in (peaks.ENCODE_PHASE, peaks.DECODE_PHASE):
+        _, share = SEGMENT_RULES[phase]
+        working = round(4.5 * GIB / share) + GIB
+        assert peaks.reserve(phase, working, memory.SEGMENTS) > cap
+        assert peaks.reserve(phase, 100 * GIB, memory.SEGMENTS) == round(share * 100 * GIB)
 
 
 def test_under_the_pool_a_step_is_left_its_pools_share() -> None:

@@ -1172,14 +1172,15 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
 - The reserve by the step (DESIGN.md, Allocator, Small cards; `seedvr2x/peaks.py`'s `reserve`,
   `dit_working`, `vae_working`, `memory.counted`): a held run no longer takes a flat 4.5 GiB
   off the card's free memory; each step (a DiT window, an encode, a decode) needs its peak over
-  the models resident in it (P) plus a reserve of its own, a floor or a share of P with no cap,
-  by the run's allocator (`memory.SEGMENTS`, torch's own with expandable segments, the default;
+  the models resident in it (P) plus a reserve of its own, a floor or a share of P (the DiT's
+  capped at 4.5 GiB under expandable segments, where its want stops growing), by the run's
+  allocator (`memory.SEGMENTS`, torch's own with expandable segments, the default;
   `PLAIN`, without them, and a driver that refuses; `POOL`, cudaMallocAsync), which
   `Reading.allocator` names. `PLAIN` is today's behaviour byte for byte (the flat reserve in
   `memory.counted`, the VAE's room), by construction, and the tests that held it keep their
   literals under it. `core/tests/test_peaks.py` holds the working sets (`dit_working` equal to
   the DiT's peak less what is resident, over 72 parameter sets, `vae_working`), the table of
-  floors and shares by phase and allocator, no cap where the share passes 4.5 GiB, the pool
+  floors and shares by phase and allocator, the DiT's cap at 4.5 GiB, the pool
   scan's coverage, `PLAIN`'s zero and refusals, and a probe's margin counted where larger;
   `tests/test_memory.py` `counted` without the flat reserve, the reading naming its allocator
   and a refusing driver `PLAIN`, `hold` taking the plan's reserves by step (a mapping, or the

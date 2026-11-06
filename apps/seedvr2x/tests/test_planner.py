@@ -1856,7 +1856,8 @@ def test_a_held_plan_says_the_reserve_of_each_step() -> None:
             phase: reserves[phase] for phase in ("encode", "dit", "decode")
         }
     # A long window of a tall shot is over the DiT's floor: 0.3 x P (0.24 under the pool), P the
-    # window's peak over the weights it keeps (peaks.dit_working), no cap past 4.5 GiB.
+    # window's peak over the weights it keeps (peaks.dit_working); the segments' is capped at
+    # 4.5 GiB, from P of 15 GiB.
     long = Pins(window=17, swap_blocks=0)
     for allocator, share in ((memory.SEGMENTS, 0.3), (memory.POOL, 0.24)):
         reading = _segments_card(60, allocator)

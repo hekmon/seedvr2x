@@ -750,11 +750,20 @@ def decode_peak(
 # the lean windows want 0.18, 0.20 then 0.29 x P beyond their peak to keep their speed (a room
 # short of it costs 2.7 to 3.4 times the window's time), and keep it from there down to no bit
 # changed, so the DiT's 0.3 is the largest of those with a little over; a VAE pass keeps its speed
-# from 0.2 x P. No cap where 0.3 x P passes 4.5 GiB (design's ruling, 2026-11-06). The floors:
+# from 0.2 x P. The DiT's rule is capped (DIT_RESERVE_CAP, below); a VAE pass's is not. The floors:
 # the planner's MARGIN for a window (0.6 GiB) and VAE_ROOM for a pass (1.25 GiB), the figures a
 # driver that refuses has always left, kept as the rule's lower bound.
 DIT_RESERVE_FLOOR = MARGIN
 DIT_RESERVE_SHARE = 0.3
+# The cap on a DiT step's reserve under the segments: max(0.6, min(0.3 x P, 4.5)) GiB. Measured by
+# hold_probe.py's scan (RTX 5090, 2026-11-06, the sharp 7B in int8, every block swapped, the VAE
+# away, expandable segments, torch held 4.5 GiB under the card's free memory, each window's room
+# scanned down by 0.25 GiB): at 1080p, windows of 19, 27 and 31 latents (P 9.34, 13.21, 15.14 GiB)
+# kept their usual speed (13.3, 19.1, 25.4 s) down to 3.0, 4.0 and 3.25 GiB of room (0.32, 0.30,
+# 0.21 x P), slower below: the want stops growing past 27 latents, so the rule stops at 4.5 GiB,
+# half a GiB over the largest want measured. PROVISIONAL beyond P = 15 GiB, unmeasured (design's
+# ruling of 2026-11-06 asked for this scan). The VAE passes' rule has no cap.
+DIT_RESERVE_CAP = round(4.5 * GIB)
 VAE_RESERVE_FLOOR = VAE_ROOM
 VAE_RESERVE_SHARE = 0.2
 # The same under cudaMallocAsync (memory.POOL), on a driver that lends: torch's limit binds the
@@ -787,8 +796,8 @@ def reserve(
     step `phase` (DIT_PHASE, ENCODE_PHASE or DECODE_PHASE; ValueError for another) whose peak
     over the models resident in it is `working` bytes (P: dit_working, vae_working), under
     `allocator` (memory.SEGMENTS, PLAIN or POOL; ValueError for another):
-    - SEGMENTS: a DiT step max(DIT_RESERVE_FLOOR, DIT_RESERVE_SHARE x P), a VAE pass
-      max(VAE_RESERVE_FLOOR, VAE_RESERVE_SHARE x P);
+    - SEGMENTS: a DiT step max(DIT_RESERVE_FLOOR, min(DIT_RESERVE_SHARE x P, DIT_RESERVE_CAP)),
+      a VAE pass max(VAE_RESERVE_FLOOR, VAE_RESERVE_SHARE x P);
     - POOL: a DiT step max(POOL_DIT_FLOOR, POOL_DIT x P), a VAE pass max(VAE_RESERVE_FLOOR,
       POOL_VAE x P);
     - PLAIN (torch's own allocator without the segments, and a driver that refuses): what the
@@ -804,7 +813,12 @@ def reserve(
     is unchanged; None, the rule's own.
     The step needs its peak plus this under the figure the plan counts on."""
     floor, share = reserve_terms(phase, allocator, margin, vae_floor)
-    return max(floor, round(share * working))
+    wanted = round(share * working)
+    # A probe's margin over the rule's share is a measure of this environment's allocator: it
+    # is counted whole, the cap being the rule's own.
+    if phase == DIT_PHASE and allocator == SEGMENTS and share == DIT_RESERVE_SHARE:
+        wanted = min(wanted, DIT_RESERVE_CAP)
+    return max(floor, wanted)
 
 
 def reserve_terms(
@@ -812,6 +826,7 @@ def reserve_terms(
 ) -> tuple[int, float]:
     """The floor, in bytes, and the share of P of reserve's rule max(floor, share x P) for the
     step `phase` under `allocator` (ValueError for a name that isn't one): reserve's own table,
+    less the DiT step's cap under SEGMENTS (DIT_RESERVE_CAP, which reserve applies),
     for whoever solves the rule for P (still_plan._largest_input). `margin`: the probe's measured
     share of P (reserve), which replaces the rule's share where larger, under SEGMENTS and POOL;
     PLAIN's takes none. `vae_floor`: reserve's. Nothing builds the measurement yet (probe.py):
