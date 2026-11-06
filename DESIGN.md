@@ -3804,7 +3804,8 @@ The GPU's memory refused stops a run in one line, before the models load as afte
     times as long, not 1.4 to 1.5: by how tightly the plan packs (decided on 2026-10-22, built
     on 2026-10-23). The calibration, run under the job's plan and reserve, measures the job's
     own decode: on that card a pinned 1080p job's decode estimate missed by 1.8% with 2.5 and
-    by 0.4% with 4.5.
+    by 0.4% with 4.5. Superseded under the segments on 2026-11-06 (Small cards, below): the
+    reserve there is measured by the step, and the 2.5 and its line retire.
   - **Small cards** (place-study, 2026-11-05, [small-cards.md](research/docs/small-cards.md):
     the RTX 5090 under WSL2, smaller cards emulated, 4 GiB of the card always left to the
     desktop), decided that day with the user, built by one baton:
@@ -3817,36 +3818,59 @@ The GPU's memory refused stops a run in one line, before the models load as afte
       attention kernels stay as they are. The milestone-1 regression proves it whole, int8's
       and the GGUF's windows keep their bits, and the planner's per-token term is measured
       again (about 0.46 of today's), not scaled.
-    - A third reserve, under the segments, where the 2.5 refuses a job too: max(0.6, 0.1 × P)
-      GiB beyond a DiT step's peak P, max(1.25, 0.2 × P) beyond a VAE pass's, where every step
-      measured kept its speed and its bits. A third rung only: in October the 2.5 ran jobs up
-      to 1.5 times as long beside a nearly full card, which the emulation, its 4 GiB left
-      free, never reached. A night on the whole card, really full (2026-11-05), says whether
-      it keeps its speed there: if it does, it becomes the reserve; else it stays the last,
-      said slow. With it, a desktop that grows during a run stops the run at its next unit,
-      resumable.
+    - The reserve under the segments is measured by the step (decided 2026-11-06, after the
+      night below): max(0.6, 0.3 × P) GiB beyond a DiT step's peak P, P by the lean
+      attention, and max(1.25, 0.2 × P) beyond a VAE pass's. The 4.5 and the 2.5 retire there;
+      under torch's own allocator without the segments the 4.5 stays, and under
+      `cudaMallocAsync` the reserve is its pool's (below). On a card left exactly its size,
+      really full, at night (place-study, 2026-11-05 to 06), twelve whole jobs on emulated 16,
+      12 and 8 GB cards, at 4.5, 2.5, the earlier max(0.6, 0.1 × P) and the floor, gave the
+      frames of the same plan run on the whole card, 1 to 3% slower for a clip and 6 to 9% for
+      a picture, mostly the moves between phases: a picture's passes within 0.2 s, and one
+      clip window at 0.1 × P 15% slower, near the lean windows' want (it had about 3.4 GiB
+      beyond its measured peak, the scan's 3.0 being its edge): they need more room beside
+      them than the plain ones' tenth. Windows of 7, 11 and 19 latents (P 4.56, 6.53 and
+      10.40 GiB) ran 2.7 to 3.4 times as long with 0.1 × P, and keep their speed from
+      0.18 to 0.29 × P, their bits all the way down. October's 1.4 to 1.5 times as long did
+      not come back: the same jobs on the full card ran 69.4 s at both reserves pinned to one
+      shape, and 121 against 132 s unpinned, all of it the decode, in the 2.5 plan's 1280-px
+      tiles where the 4.5 took 1152, which no run tells from the smaller room beside them; at
+      equal tiles the reserve slowed nothing, and October's remainder is not explained. A
+      desktop that grows past the reserve during a run stops it at its next unit, resumable.
     - The floor, last rungs for a clip that fits no other way: the decoder's blocks after its
       last temporal upsampling run a frame at a time, its causal memory carried (20 to 27%
       less at every tile, a decode 3 to 11% longer; the frames the same at 640 px and up,
       other at 512 and 576, the same in every run, recorded in the plan); then the VAE's room
       down to 0.5 GiB, where its frames still hold (its decode about 1.2 times as long). With
-      the lean attention and the third reserve, a 1080p clip ran on an emulated 8 GB card in
-      101 s (93 on 16 GB), and the 4K picture in 11.9 s.
+      the lean attention and the measured reserve, a 1080p clip ran on an emulated 8 GB card
+      in 101 s (93 on 16 GB), and the 4K picture in 11.9 s; on the card really full, at night,
+      the clip in 89.5 s and the 4K picture's upscale in 7.4 s warm, each with the frames of
+      the same plan on the whole card.
     - Under `cudaMallocAsync` on a driver that lends (ComfyUI's default there, or a user's
       setting), torch's limit binds the allocated bytes alone: the pool held 0.14 to 0.30
-      × P more of the card, slowing nothing and moving no bit. Every rung counts it on the
-      card, at least max(0.6, 0.2 × P) beyond a DiT step and 0.35 × P beyond a VAE pass, the
-      check between units on the card's figure its only bound. ComfyUI's environment probe
-      measures the pool's share where the nodes run, and the larger figure counts.
+      × P more of the card, slowing nothing and moving no bit. That pool is the reserve there,
+      counted on the card: max(0.6, 0.2 × P) beyond a DiT step and 0.35 × P beyond a VAE pass,
+      the check between units on the card's figure its only bound; the DiT's figure is
+      measured again on the lean attention, whose windows want the same room beside a smaller
+      P. ComfyUI's environment probe measures the pool's share where the nodes run, and the
+      larger figure counts.
     - The tiles stay the largest that fit, untiled where the frame was measured so (the user:
       a large card runs as close to ByteDance's untiled code as it holds; quality is not
-      traded on speed alone). 1024-px tiles decode a 4K picture in 2.7 s against 3.6 at
-      2048 px, but each tile is decoded alone and their colours drift apart (the colour study
-      measured it; `split` halves it): a rule by speed waits for the tiles' cost measured
-      against the untiled output (the same night), where the untiled 4K passes' peaks are
-      measured for the planner too. ComfyUI's one-frame convolution for a picture (its kernel
-      summed over time, a third of the picture's VAE work) gives other bits: after v0.1.0,
-      measured first.
+      traded on speed alone), and no rule by speed. Measured against the untiled output (the
+      same night, after `split`), tiles move the picture's colour by a fraction of a level but
+      leave its luma 37 to 54 dB of PSNR-Y from the untiled output, the differences spread
+      over the whole picture (the overlap bands hold about their share of them, twice for the
+      4K picture's 2048-px tiles), and the encode's tiles cost 7 to 9 dB more than the
+      decode's on the 4K picture, 3 to 7 on a clip. So where memory is short the plan tiles
+      the decode first and keeps the encode's tiles the larger. The 4K picture's untiled
+      passes, measured that night, are the planner's: the decode 23.7 GiB over the models in
+      3.5 s (the plan's ratio said 29.0), the encode 14.7 in 1.85 s, which a 32 GB card holds
+      whole; a 1080p clip's untiled decode, past 27 GiB, is the 96 GB card's to measure. A
+      1080p clip's decode took 34 s at night from 960 to 1152 px, 38.7 at 1280, and 45 to 63
+      from 1344 with torch's reserve at its limit, which that scan can't tell from the tile's
+      side; a 4K picture's 2.9 to 3.1 s from 640 to 1472 px, 3.5 at 2048. ComfyUI's one-frame
+      convolution for a picture (its kernel summed over time, a third of the picture's VAE
+      work) gives other bits: after v0.1.0, measured first.
 - **The vendored RoPE's tables** (`vendor/models/dit_7b/rope.py:44`, an `lru_cache` of 128,
   one table on the card per window shape), live since numz's wrapper went
   ([bug 24](research/bugs/24-rope-wrapper-late-binding.md)): about 2 MB a latent at 1080p,
@@ -3855,6 +3879,30 @@ The GPU's memory refused stops a run in one line, before the models load as afte
   day, `model.forget`) and, decided that day, at each shot's start in every app, to be built
   with the placement: a shot's windows share their shapes, and a table is made again from the
   same numbers.
+- **A hang** (place-study, 2026-11-06 02:32, on the card really full at the 4.5 reserve): a
+  66-frame job's second run stopped in its second shot's decode and never moved, the card
+  4.25 GiB free and 6% busy, the main thread in a timed sleep, CUDA's threads polling, both
+  ffmpegs waiting on their pipes; SIGTERM was logged as stopped at once 34 minutes later, and
+  the process was still there 20 s after, when it was killed. Its first run, three minutes
+  before, took 69.4 s; nothing else hung that night. The cause, most likely (design's
+  investigation the same morning, read only): a GPU fault below seedvr2x. Windows' System log
+  holds
+  an NVIDIA driver error (nvlddmkm, event 153) 3.5 s into that decode, the only one in
+  place-study's 307 runs, on a machine whose stability was in question since 2026-11-04; the
+  work it stopped neither completed nor failed, so the decode's wait on the GPU, inferred to
+  be `model.synchronize`'s poll (the only sleep on that path, with no bound), waited, while
+  seedvr2x's threads and pipes were in their usual state. The stop was handled at once, and
+  the process then stayed, most likely in CUDA's teardown waiting on the same work. Decided
+  that day, before v0.1.0, by their cause, not by a timeout:
+  - A stop ends the process once its own work is done (the writers aborted, the readers
+    killed, the scratch gone, the lock released), without Python's and CUDA's teardown, which
+    can wait on the GPU, saying so.
+  - A wait on the GPU longer than several times its unit's estimate says so once, with NVML's
+    reading and the way out (a stop keeps every unit done; the same command resumes), and
+    goes on waiting: the run can't tell a GPU its driver stopped without a word from a slow
+    one.
+  - Every thread's stack on SIGUSR1 (`faulthandler`), in the CLI and the image server, the run
+    going on.
 
 ## Pause and resume
 
