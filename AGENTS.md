@@ -650,6 +650,11 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   card's, not a CompileError (`seedvr2x/compiling.py`). The image
   server's `command` ends the process the same way once `serve` has returned
   (`apps/imgserver/main.py`'s `_end`), its first SIGTERM still waiting for the pictures running.
+- Every thread's stack on SIGUSR1: `command` registers `faulthandler` (all threads, to stderr,
+  not chained) in the CLI and the image server; `tests/test_stop.py` sends it inside a slow step,
+  the main thread in Python's sleep and in C calls (libc's `usleep`, mode `c-call`): the main
+  thread's stack with the step's frame and the other threads', the run ending 0 with every
+  segment. SIGUSR1 goes to seedvr2x alone there, never its process group: ffmpeg ends on it.
 - A wait on the GPU (`seedvr2x/waiting.py`; DESIGN.md, Allocator, the hang of 2026-11-06), the
   poll `model.synchronize` and `blockswap.Cuda.wait` go through: `core/tests/test_waiting.py`
   holds it on a fake clock whose sleep advances it, nothing sleeping: the line once past 4 times

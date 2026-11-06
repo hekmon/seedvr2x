@@ -5,6 +5,7 @@ serves until SIGTERM or Ctrl-C, or until a CUDA error (other than out of memory)
 ends the process with FAILED_EXIT."""
 
 import argparse
+import faulthandler
 import logging
 import os
 import re
@@ -99,7 +100,8 @@ def parser() -> argparse.ArgumentParser:
         description=(
             "seedvr2x's image server: POST /upscale takes a picture's bytes and answers it"
             " upscaled, the models loaded once and kept on the GPU. GET /health and GET /metrics"
-            " for a container's probes and Prometheus."
+            " for a container's probes and Prometheus. SIGUSR1 prints every thread's stack to"
+            " stderr, the server going on."
         ),
     )
     found.add_argument(
@@ -305,6 +307,11 @@ def main(argv: Sequence[str] | None = None, *, owns_process: bool = False) -> in
     """Serve with argv (sys.argv[1:] when None) and return the exit status. With owns_process
     (command alone sets it), the process ends once the server has stopped where it has used
     CUDA (_end), and main never returns then."""
+    if owns_process:
+        # Every thread's Python stack on SIGUSR1, to stderr, the server going on (DESIGN.md,
+        # Allocator, the hang of 2026-11-06): faulthandler's handler is C's, so it answers with
+        # a thread inside a CUDA call too.
+        faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
     args = parser().parse_args(argv)
     _logging(args.verbose)
     _environment(args.verbose)

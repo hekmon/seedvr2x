@@ -52,7 +52,8 @@ TESTS = Path(__file__).resolve().parent
 # - finalizer: stall, and a finalizer that blocks in C for ever on an object held by the step's
 #   own frame, so that it runs when the stop's traceback is released, as
 #   blockswap.HostCopy's does (cudaHostUnregister of pinned memory);
-# - cuda-error: the step raises the error CUDA gives after a fault, with the same finalizer.
+# - cuda-error: the step raises the error CUDA gives after a fault, with the same finalizer;
+# - c-call: the step's 2 s spent in C calls (libc's usleep), not in Python's sleep.
 DRIVER = r"""
 import atexit, ctypes, os, sys, time, weakref
 sys.path.insert(0, sys.argv[1])
@@ -64,7 +65,8 @@ slow = sys.argv[2]
 mode = os.environ.get("STOP_MODE", "")
 libc = ctypes.CDLL(None)
 
-if mode:
+HANGS = ("stall", "atexit", "finalizer", "cuda-error")
+if mode in HANGS:
     from seedvr2x import waiting
     waiting.cuda_used = lambda: True
 
@@ -77,7 +79,13 @@ def inside(name):
         # the wait would find no wait to name.
         if mode not in ("stall", "atexit", "finalizer"):
             print(f"IN {name}", file=sys.stderr, flush=True)
-        if mode:
+        if mode == "c-call":
+            # 2 s in C calls (usleep), where a signal finds the main thread.
+            end = time.monotonic() + 2
+            while time.monotonic() < end:
+                libc.usleep(100000)
+            return
+        if mode in HANGS:
             if mode == "atexit":
                 atexit.register(libc.pause)
             return
@@ -112,7 +120,7 @@ class Slow(t.Steps):
                 inside(name)
                 if name == slow and mode == "cuda-error":
                     raise RuntimeError("CUDA error: an illegal memory access was encountered")
-                if name == slow and mode:
+                if name == slow and mode in HANGS:
                     hang()
         super().decode(models, merged, count, target, first_then_inside, *names, **tiled)
 
@@ -265,7 +273,11 @@ def upscale(
             lines.append(line)
             if line.startswith(f"IN {slow}"):
                 for number in signals:
-                    os.killpg(process.pid, number)
+                    # SIGUSR1 to seedvr2x alone: ffmpeg's default for it is to end.
+                    if number == signal.SIGUSR1:
+                        os.kill(process.pid, number)
+                    else:
+                        os.killpg(process.pid, number)
                     time.sleep(0.3)
                 if within is not None:
                     watchdog = threading.Timer(within, kill)
@@ -554,3 +566,25 @@ def test_deadline_from_another_zone() -> None:
 
 def test_now_is_aware_and_local() -> None:
     assert stop_module.now().utcoffset() is not None
+
+
+@pytest.mark.parametrize("mode", ["", "c-call"])
+def test_sigusr1_prints_every_threads_stack(job: Path, mode: str) -> None:
+    # SIGUSR1 (faulthandler, registered by main.command) inside a slow step, the main thread in
+    # Python's sleep or in a C call: every thread's stack on stderr, the step's frame in the
+    # main thread's, and the run going on to its end (DESIGN.md, Allocator, the hang of
+    # 2026-11-06).
+    status, calls, text = upscale(job, "out", "decode 0", (signal.SIGUSR1,), mode)
+    assert status == 0, text
+    assert calls == UNINTERRUPTED
+    assert re.search(r"^Current thread 0x[0-9a-f]+ \(most recent call first\):$", text, re.M)
+    # The writer's stderr drain and the reader's threads run beside the main one.
+    assert re.search(r"^Thread 0x[0-9a-f]+ \(most recent call first\):$", text, re.M)
+    assert re.search(r"line \d+ in inside$", text, re.M)
+    assert sorted(p.name for p in (job / "out").iterdir()) == [
+        "checksums",
+        "frame_index.bin",
+        "manifest.json",
+        "seg_000000.mkv",
+        "seg_000001.mkv",
+    ]

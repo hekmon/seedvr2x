@@ -1779,6 +1779,7 @@ flag, as any resume; another GPU alone is no change to it, its assembly being ff
   and a stalled one look the same from here, so seedvr2x waits; a stop at once keeps every unit
   done, and `the wait on the GPU ended after ...` says it if it ends. Units with no estimate yet
   (the calibration's) say nothing.
+- **SIGUSR1** (`kill -USR1 PID`) prints every thread's stack to stderr; the run goes on.
 - **A value that isn't a number** (NaN, infinity) coming out of the model stops the run, with
   a message naming the stage, the shot and the window or frames. Such a unit is never saved,
   and never written to a master.

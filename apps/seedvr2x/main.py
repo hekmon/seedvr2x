@@ -2,6 +2,7 @@
 
 import argparse
 import datetime
+import faulthandler
 import fcntl
 import logging
 import math
@@ -251,6 +252,11 @@ def main(argv: list[str] | None = None, *, owns_process: bool = False) -> int:
     # HF_HOME/.agent_harnesses.json (utils/_headers.py:183-189, utils/_detect_agent.py:143-163,
     # 180-203).
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    if owns_process:
+        # Every thread's Python stack on SIGUSR1, to stderr, the run going on (DESIGN.md,
+        # Allocator, the hang of 2026-11-06, which had none to show): faulthandler's handler is
+        # C's, so it answers with the main thread inside a CUDA call too.
+        faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["verify"]:
         return verify(argv[1:])
@@ -344,7 +350,8 @@ def _parser() -> argparse.ArgumentParser:
         prog="seedvr2x",
         description="SeedVR2 video upscaler for long runs.",
         epilog="seedvr2x verify OUTPUT checks every frame of a job's output against the checksums"
-        " written with it (seedvr2x verify --help)",
+        " written with it (seedvr2x verify --help). SIGUSR1 prints every thread's stack to"
+        " stderr, the run going on",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {version('seedvr2x')}")
     parser.add_argument(

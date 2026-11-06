@@ -400,6 +400,8 @@ SIGTERM or Ctrl-C: no new picture is taken, the pictures waiting are answered 50
 running finish and are answered, then the server exits with code 0, without waiting for the
 GPU's teardown. A second signal ends it at once.
 
+SIGUSR1 prints every thread's stack to stderr; the server goes on.
+
 ### Exit codes
 
 | Code | Meaning |
