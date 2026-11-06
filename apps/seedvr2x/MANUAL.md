@@ -1761,7 +1761,12 @@ flag, as any resume; another GPU alone is no change to it, its assembly being ff
 
 - **Ctrl-C twice, or SIGTERM,** stops at once (`ERROR stopped at once (Ctrl-C)`, exit 130, or
   `(SIGTERM)`, 143). Only the unit in progress is lost. Before the first unit (the first pass,
-  the model load, the calibration), a single Ctrl-C stops at once.
+  the model load, the calibration), a single Ctrl-C stops at once. Once the GPU has been used,
+  the process then ends without waiting for its work, which a stalled card might never finish:
+  `stopped at once (SIGTERM); the process ends without waiting for the GPU`, or `..., 34 min 12 s
+  into a wait on the GPU; ...` where the stop came inside one.
+- **A CUDA error** other than out of memory ends the run the same way, exit 1, its line saying so:
+  every unit done is kept, and the same command resumes.
 - **With `--segment-cmd`,** a stop at once ends your command too: its process group gets SIGTERM,
   then SIGKILL after 5 s, with a line meanwhile, `the segment command was sent SIGTERM: it has 5 s
   to end before SIGKILL; Ctrl-C again kills it at once`. Its file is discarded. A single Ctrl-C

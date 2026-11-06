@@ -13,10 +13,11 @@ import sys
 import threading
 import warnings
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 if TYPE_CHECKING:
     import web
@@ -293,7 +294,17 @@ class Stop:
             raise KeyboardInterrupt
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def command() -> int:
+    """The seedvr2x-imgserver script (the pyproject's `seedvr2x-imgserver = "main:command"`):
+    main, which owns its process and ends it once the server has stopped (main's
+    owns_process)."""
+    return main(owns_process=True)
+
+
+def main(argv: Sequence[str] | None = None, *, owns_process: bool = False) -> int:
+    """Serve with argv (sys.argv[1:] when None) and return the exit status. With owns_process
+    (command alone sets it), the process ends once the server has stopped where it has used
+    CUDA (_end), and main never returns then."""
     args = parser().parse_args(argv)
     _logging(args.verbose)
     _environment(args.verbose)
@@ -335,7 +346,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.vae_model,
         pins,
     )
-    return serve(options, key, listen, services.Card, Metrics())
+    from seedvr2x import waiting
+
+    code = serve(options, key, listen, services.Card, Metrics())
+    if owns_process and waiting.cuda_used():
+        _end(code)
+    return code
+
+
+def _end(code: int) -> NoReturn:
+    """End the process with `code` once the server has stopped, its pictures answered and its
+    socket closed: Python's teardown and CUDA's are skipped (os._exit), which can wait on the
+    GPU's work, most of all after a CUDA error (FAILED_EXIT). The CLI's stop ends so too (the
+    place-study night's hang, 2026-11-06: a stopped run stayed 20 s with its card's memory held
+    until it was killed; apps/seedvr2x/main.py, _end). The kernel gives back what the teardown
+    would have: the pinned models' memory, the card's."""
+    logger.info("the process ends without waiting for the GPU")
+    logging.shutdown()
+    for stream in (sys.stdout, sys.stderr):
+        with suppress(Exception):
+            stream.flush()
+    os._exit(code)
 
 
 @dataclass

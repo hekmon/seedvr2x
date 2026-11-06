@@ -48,7 +48,8 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
   tools/plan_matrix.py   the memory planner's plans over a fixed matrix, two runs' compared
 apps/seedvr2x/          the seedvr2x command: distribution seedvr2x (setuptools), flat: its
                          modules at the app's root, no package folder
-  main.py                options, logging (the script `seedvr2x = "main:main"`)
+  main.py                options, logging (the script `seedvr2x = "main:command"`, which owns
+                         its process: `main(owns_process=True)`)
   shot run cuts planner job manifest resume units scratch environment calibration timing
   stop disk .py          a job: its shots through the library's pass, unit by unit (shot.py: the
                          input copy a decode is corrected against), stitching, the plan's lines
@@ -61,7 +62,7 @@ apps/seedvr2x/          the seedvr2x command: distribution seedvr2x (setuptools)
   pyproject.toml uv.lock .python-version LICENSE NOTICE
   README.md MANUAL.md images/
 apps/imgserver/          the image server: distribution seedvr2x-imgserver (setuptools), flat
-  main.py                options, environment, the server's life (`seedvr2x-imgserver = "main:main"`)
+  main.py                options, environment, the server's life (`seedvr2x-imgserver = "main:command"`)
   service.py reservation.py admission.py     the start (files, plan, reservation, warm-up), a
                          picture's run under a lock per model, the queue
   web.py answers.py metrics.py     HTTP (ThreadingHTTPServer), a request's headers and the
@@ -630,6 +631,25 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   stay, the reader's and the writer's real ffmpeg (skipped without a build seedvr2x accepts), and
   the segment command's shell, left running by a kill, as DESIGN.md has it. `/proc` tells the
   processes left, so Linux only.
+- A stop at once ends the process (DESIGN.md, Allocator, the hang of 2026-11-06): the scripts
+  are `main:command`, which call `main(owns_process=True)`; `main(argv)` returns its status in
+  every other call, as the in-process tests take it. Where the process has used CUDA, a second
+  Ctrl-C or SIGTERM, and a CUDA error other than out of memory, end it with `os._exit` inside
+  main's except block, once the work directories made are removed, the locks released and the
+  lines flushed: the traceback still holds the run's frames there, so no finalizer of the models
+  (`blockswap.HostCopy`'s cudaHostUnregister) runs. `apps/seedvr2x/tests/test_stop.py`'s DRIVER
+  runs `main.command()`, each step said as it is called (`CALL`), in modes (`STOP_MODE`): a
+  decode whose stand-in event never completes (`waiting.wait(lambda: False, ...)`, the process
+  taken for one that used CUDA), with an atexit and with a finalizer on an object of the decode's
+  own frame each calling libc's `pause()` (a teardown blocked in C: both fail on the code before,
+  the process still there 30 s after the signal), and a decode raising a CUDA error: exit 143 or
+  130 within 30 s, the line with the wait's length, the job's files as `test_stopped_at_once`
+  checks them and the resume as if uninterrupted; exit 1 and the CUDA error's line; a run that
+  never used CUDA keeping the line before (`stopped at once (SIGTERM)`) and its exit. Ctrl-C and
+  SIGTERM are ignored from the line to the exit; a CUDA error in `--compile`'s warm-up is the
+  card's, not a CompileError (`seedvr2x/compiling.py`). The image
+  server's `command` ends the process the same way once `serve` has returned
+  (`apps/imgserver/main.py`'s `_end`), its first SIGTERM still waiting for the pictures running.
 - A wait on the GPU (`seedvr2x/waiting.py`; DESIGN.md, Allocator, the hang of 2026-11-06), the
   poll `model.synchronize` and `blockswap.Cuda.wait` go through: `core/tests/test_waiting.py`
   holds it on a fake clock whose sleep advances it, nothing sleeping: the line once past 4 times

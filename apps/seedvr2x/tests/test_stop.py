@@ -5,12 +5,14 @@ The runs are processes of their own, the model replaced by test_cli_run.py's sta
 signals go to their whole process group, as a terminal sends Ctrl-C: ffmpeg's processes must be
 out of its reach, else the segment being written would end early."""
 
+import contextlib
 import json
 import os
 import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
@@ -37,41 +39,88 @@ TESTS = Path(__file__).resolve().parent
 
 # A run of test_cli_run.py's stand-in, announcing on stderr the step named by argv[2] from inside,
 # then taking 2 s in it; a decode, once its first frame is written, so that its segment's ffmpeg
-# runs. The steps called are said last.
+# runs. It runs the command as the script does (cli.command(): the process is its own, and a stop
+# at once ends it by os._exit inside main, so nothing printed after main is read): each step
+# called is said on stderr as it is called ("CALL name").
+#
+# The environment variable STOP_MODE (given by upscale's `mode`) makes the step named a hang the
+# way the place-study night's decode hung (DESIGN.md, Allocator, the hang of 2026-11-06), on a
+# process that "has used CUDA" (waiting.cuda_used replaced):
+# - stall: a wait on the GPU that never ends (waiting.wait on an event that never completes);
+# - atexit: stall, and an atexit function that blocks in C for ever (pause(2)), as a teardown
+#   waiting on the GPU does;
+# - finalizer: stall, and a finalizer that blocks in C for ever on an object held by the step's
+#   own frame, so that it runs when the stop's traceback is released, as
+#   blockswap.HostCopy's does (cudaHostUnregister of pinned memory);
+# - cuda-error: the step raises the error CUDA gives after a fault, with the same finalizer.
 DRIVER = r"""
-import sys, time
+import atexit, ctypes, os, sys, time, weakref
 sys.path.insert(0, sys.argv[1])
 import test_cli_run as t
 import main as cli
 import run
 
 slow = sys.argv[2]
+mode = os.environ.get("STOP_MODE", "")
+libc = ctypes.CDLL(None)
+
+if mode:
+    from seedvr2x import waiting
+    waiting.cuda_used = lambda: True
+
+class Holder:
+    pass
 
 def inside(name):
     if name == slow:
-        print(f"IN {name}", file=sys.stderr, flush=True)
+        # A wait's modes say IN from inside the wait (hang): a signal sent between this line and
+        # the wait would find no wait to name.
+        if mode not in ("stall", "atexit", "finalizer"):
+            print(f"IN {name}", file=sys.stderr, flush=True)
+        if mode:
+            if mode == "atexit":
+                atexit.register(libc.pause)
+            return
         time.sleep(2)
+
+def hang():
+    said = []
+    def never():
+        if not said:
+            said.append(True)
+            print(f"IN {slow}", file=sys.stderr, flush=True)
+        return False
+    waiting.wait(never, 0.01)
 
 class Slow(t.Steps):
     def _call(self, name):
         super()._call(name)
+        print(f"CALL {name}", file=sys.stderr, flush=True)
         inside(name)
 
     def decode(self, models, merged, count, target, write, *names, **tiled):
         name = f"decode {int(merged[0, 0, 0, 0])}"
+        print(f"CALL {name}", file=sys.stderr, flush=True)
         written = []
         def first_then_inside(frames):
             write(frames)
             written.append(len(frames))
             if len(written) == 1:
+                if mode in ("finalizer", "cuda-error"):
+                    held = Holder()
+                    weakref.finalize(held, libc.pause)
                 inside(name)
+                if name == slow and mode == "cuda-error":
+                    raise RuntimeError("CUDA error: an illegal memory access was encountered")
+                if name == slow and mode:
+                    hang()
         super().decode(models, merged, count, target, first_then_inside, *names, **tiled)
 
 t.stand_in_model(setattr)
 steps = Slow()
 run.encode_shot, run.sample_windows, run.decode_shot = steps.encode, steps.windows, steps.decode
-status = cli.main(sys.argv[3:])
-print("CALLS " + ",".join(steps.calls), file=sys.stderr, flush=True)
+sys.argv = ["seedvr2x", *sys.argv[3:]]
+status = cli.command()
 sys.exit(status)
 """
 
@@ -166,11 +215,25 @@ def job(tmp_path: Path) -> Path:
     return tmp_path
 
 
+# The time a process has to end after the signal that stops it at once. A normal exit of a job
+# takes 1.4 s at most (DESIGN.md, Allocator, the hang of 2026-11-06), the teardown that hung
+# stayed 20 s.
+ENDS_WITHIN = 30.0
+
+
 def upscale(
-    directory: Path, output: str, slow: str = "-", signals: tuple[int, ...] = ()
+    directory: Path,
+    output: str,
+    slow: str = "-",
+    signals: tuple[int, ...] = (),
+    mode: str = "",
+    *,
+    within: float | None = None,
 ) -> tuple[int, list[str], str]:
     """Run the job into output, the signals sent to its process group from inside the step slow
-    (DRIVER), 0.3 s apart; its status, the steps it called, its stderr."""
+    (DRIVER, hanging as `mode` says), 0.3 s apart; its status, the steps it called, its stderr.
+    With `within`, the process is killed that many seconds after the last signal (the step
+    itself, with none) if it has not ended, and the test fails saying so."""
     process = subprocess.Popen(
         [
             *(sys.executable, "-c", DRIVER, str(TESTS), slow),
@@ -185,18 +248,39 @@ def upscale(
         text=True,
         cwd=directory,
         start_new_session=True,
+        env={**os.environ, "STOP_MODE": mode},
     )
     assert process.stderr is not None
     lines: list[str] = []
-    for line in process.stderr:
-        lines.append(line)
-        if line.startswith(f"IN {slow}"):
-            for number in signals:
-                os.killpg(process.pid, number)
-                time.sleep(0.3)
-    status = process.wait(timeout=120)
-    calls = next(line for line in lines if line.startswith("CALLS "))
-    return status, calls.split(" ", 1)[1].strip().split(","), "".join(lines)
+    killed = threading.Event()
+
+    def kill() -> None:
+        killed.set()
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+
+    watchdog: threading.Timer | None = None
+    try:
+        for line in process.stderr:
+            lines.append(line)
+            if line.startswith(f"IN {slow}"):
+                for number in signals:
+                    os.killpg(process.pid, number)
+                    time.sleep(0.3)
+                if within is not None:
+                    watchdog = threading.Timer(within, kill)
+                    watchdog.start()
+        status = process.wait(timeout=120)
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    text = "".join(lines)
+    if killed.is_set():
+        pytest.fail(f"the process was still running {within} s after the signal:\n{text}")
+    calls = [line.split(" ", 1)[1].strip() for line in lines if line.startswith("CALL ")]
+    return status, calls, text
 
 
 def indexes(path: Path) -> list[int]:
@@ -270,6 +354,9 @@ def test_stopped_at_once(job: Path, signals: tuple[int, ...], status: int, said:
     found, calls, text = upscale(job, "out", "decode 0", signals)
     assert found == status, text
     assert said in text
+    # A run that has not used CUDA says what it said before the process was ended at once: the
+    # line ends there.
+    assert re.search(rf"^\d\d:\d\d:\d\d .*{re.escape(said)}$", text, re.MULTILINE), text
     assert time.monotonic() - started < 30
     assert calls == UNINTERRUPTED[:5]  # stopped inside the decode of shot 0
     # The segment being written is gone, partial file and all; the windows are kept.
@@ -279,6 +366,68 @@ def test_stopped_at_once(job: Path, signals: tuple[int, ...], status: int, said:
         "manifest.json",
         "resume",
     ]
+    resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])
+
+
+# A stop at once in a run stalled in a wait on the GPU that never ends, or hung in a teardown
+# (DESIGN.md, Allocator, the hang of 2026-11-06): the process ends by os._exit inside main
+# (command), once the job's own work is done, so that neither the atexit functions nor the
+# finalizers of the objects the stop's traceback holds can wait on the GPU.
+SPOKEN = r"\d+ (?:s|min \d+ s|h \d+ min)"
+
+
+@pytest.mark.parametrize(
+    ("signals", "status", "how"),
+    [
+        ((signal.SIGTERM,), 143, "SIGTERM"),
+        ((signal.SIGINT, signal.SIGINT), 130, "Ctrl-C"),
+    ],
+)
+def test_stopped_at_once_in_a_wait_on_the_gpu(
+    job: Path, signals: tuple[int, ...], status: int, how: str
+) -> None:
+    found, calls, text = upscale(
+        *(job, "out", "decode 0", signals), mode="stall", within=ENDS_WITHIN
+    )
+    assert found == status, text
+    assert re.search(
+        rf"stopped at once \({re.escape(how)}\), {SPOKEN} into a wait on the GPU; the process"
+        r" ends without waiting for it$",
+        text,
+        re.MULTILINE,
+    ), text
+    assert calls == UNINTERRUPTED[:5]
+    assert progress(job) == ([False, False], [1, 1, 0])
+    assert sorted(p.name for p in (job / "out").iterdir()) == [
+        "frame_index.bin",
+        "manifest.json",
+        "resume",
+    ]
+    resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])
+
+
+@pytest.mark.parametrize("mode", ["atexit", "finalizer"])
+def test_a_teardown_that_never_ends_is_skipped(job: Path, mode: str) -> None:
+    # atexit: a function blocked in C, as CUDA's teardown is when the GPU's work never ends.
+    # finalizer: one blocked on an object the stop's traceback holds, which runs when main
+    # releases the traceback (blockswap.HostCopy's cudaHostUnregister). Without os._exit inside
+    # main's except block, the process stays until it is killed.
+    found, _, text = upscale(
+        *(job, "out", "decode 0", (signal.SIGTERM,)), mode=mode, within=ENDS_WITHIN
+    )
+    assert found == 143, text
+    assert "stopped at once (SIGTERM)" in text
+
+
+def test_a_cuda_error_ends_the_process_without_waiting_for_the_gpu(job: Path) -> None:
+    found, _, text = upscale(*(job, "out", "decode 0"), mode="cuda-error", within=ENDS_WITHIN)
+    assert found == 1, text
+    assert "the run failed on a CUDA error" in text
+    assert "the process ends without waiting for the GPU" in text
+    assert "an illegal memory access was encountered" in text
+    assert "Traceback (most recent call last)" in text
+    # What was done is kept: the same command resumes.
+    assert progress(job) == ([False, False], [1, 1, 0])
     resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])
 
 

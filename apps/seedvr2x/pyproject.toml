@@ -30,7 +30,7 @@ dependencies = [
 ]
 
 [project.scripts]
-seedvr2x = "main:main"
+seedvr2x = "main:command"
 
 [dependency-groups]
 dev = ["gguf==0.19.0", "pyright[nodejs]", "pytest", "ruff"]

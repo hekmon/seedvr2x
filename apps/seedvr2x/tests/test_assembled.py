@@ -1548,7 +1548,7 @@ def test_missing_frames_filled_into_the_finished_file(
 # ffmpeg reads the source at the source's own pace (-re before its first input: 4 s for the
 # film), and says when it starts, so that a signal finds it at work.
 STOPPING = test_stop.DRIVER.replace(
-    "status = cli.main(sys.argv[3:])",
+    "status = cli.command()",
     """
 import subprocess
 popen = subprocess.Popen
@@ -1564,8 +1564,10 @@ def slow_join(command, *arguments, **options):
     return process
 
 subprocess.Popen = slow_join
-status = cli.main(sys.argv[3:])""",
+status = cli.command()""",
 )
+# A replacement that finds nothing would leave the join at full speed, and the signals unsent.
+assert STOPPING != test_stop.DRIVER
 
 
 def stopping(directory: Path, slow: str = "-", signals: tuple[int, ...] = ()) -> tuple[int, str]:
@@ -1707,7 +1709,8 @@ def test_ctrl_c_once_stops_before_the_assembly_or_lets_it_finish(film_directory:
     )
     # Its segments all made, the file not yet in place: not "finished already" (DESIGN.md, Pause
     # and resume: "A finished file's job is finished once the file is in place").
-    assert "every segment made, its 4 segments: assembling" in text and "CALLS \n" in text
+    assert "every segment made, its 4 segments: assembling" in text
+    assert not re.search(r"^CALL ", text, re.M)  # no step called
     assert "finished already" not in text
     assert not work.exists()
     held_to_the_source(final, film_directory / "film.mkv", film_directory)

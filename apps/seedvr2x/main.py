@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import sys
 import time
 import warnings
@@ -20,7 +21,7 @@ from fractions import Fraction
 from importlib.metadata import version
 from itertools import accumulate
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import stills
 import stop as stopping
@@ -37,6 +38,7 @@ from job import (
 from media.conversion import MATRICES
 from media.ffmpeg import MediaError
 from media.writer import FORMATS
+from seedvr2x import waiting
 from seedvr2x.clock import sample, spent, spoken, taking, wall
 from seedvr2x.pull import DETECTOR, REPO
 from stills import BARE_PLAN, PNG8
@@ -229,8 +231,17 @@ def _pillow_size_warning_off() -> None:
 EX_TEMPFAIL = 75
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run seedvr2x with argv (sys.argv[1:] when None) and return the exit status."""
+def command() -> int:
+    """The seedvr2x script (the pyproject's `seedvr2x = "main:command"`): main, which owns its
+    process and ends it at once on a stop at once or a CUDA error (main's owns_process)."""
+    return main(owns_process=True)
+
+
+def main(argv: list[str] | None = None, *, owns_process: bool = False) -> int:
+    """Run seedvr2x with argv (sys.argv[1:] when None) and return the exit status. With
+    owns_process (command alone sets it), a stop at once (a second Ctrl-C, SIGTERM) and a CUDA
+    error other than out of memory end the process once their own work is done (_end), and
+    main never returns from them."""
     # Hugging Face's telemetry off unless the user set it (DESIGN.md, Weights). huggingface_hub
     # reads the variable once, when imported (constants.py:244-248 in 1.33.0), by seedvr2x/pull.py's
     # lookup in the cache or by diffusers, which the vendored model imports: both after this line,
@@ -251,18 +262,79 @@ def main(argv: list[str] | None = None) -> int:
     # A stop at once, a second Ctrl-C or SIGTERM during the run (stop.py), SIGTERM during
     # the model files' fetch (stop.terminable), or Ctrl-C before the run: what is kept is what the
     # manifest says, and the same command resumes.
+    # Each ends the process (_end) inside its except block, while the exception's traceback still
+    # holds the run's frames: released, they free the models, whose pinned memory's finalizer
+    # (blockswap.HostCopy) calls cudaHostUnregister, which waits on the GPU's work.
     with _warnings_in_lines():
         try:
             return _run(args)
-        except KeyboardInterrupt:
-            logger.error("stopped at once (Ctrl-C)")
-            return 130
-        except Terminated:
-            logger.error("stopped at once (SIGTERM)")
-            return 143
+        except KeyboardInterrupt as error:
+            return _stopped_at_once("Ctrl-C", 130, error, owns_process)
+        except Terminated as error:
+            return _stopped_at_once("SIGTERM", 143, error, owns_process)
+        except Exception as error:
+            if not (owns_process and waiting.cuda_failed(error)):
+                raise
+            _ignore_stops()
+            # What is kept is the job's to say (a picture's run keeps nothing): MANUAL.md says
+            # a video job's units are.
+            logger.error(
+                "the run failed on a CUDA error, after which the GPU's work may never end: %s;"
+                " the process ends without waiting for the GPU",
+                error,
+                exc_info=error,
+            )
+            _end(1)
         finally:
             _unmake()
             _unlock()
+
+
+def _stopped_at_once(how: str, status: int, error: BaseException, owns_process: bool) -> int:
+    """A stop at once (stop.py), said: its status, or the process ended (_end) where main owns it
+    and the process has used CUDA, the line saying it ends without waiting for the GPU and, where
+    the stop came inside a wait on it, how long that wait had lasted (waiting.ended)."""
+    if not (owns_process and waiting.cuda_used()):
+        logger.error("stopped at once (%s)", how)
+        return status
+    _ignore_stops()
+    ended = waiting.ended_by(error)
+    if ended is not None:
+        logger.error(
+            "stopped at once (%s), %s into a wait on the GPU; the process ends without waiting"
+            " for it",
+            how,
+            spoken(spent(ended.seconds)),
+        )
+    else:
+        logger.error("stopped at once (%s); the process ends without waiting for the GPU", how)
+    _end(status)
+
+
+def _ignore_stops() -> None:
+    """Ctrl-C and SIGTERM ignored from here to the end: Stop gave Python's handlers back as the
+    run unwound, and another Ctrl-C would raise inside _end, the teardown it skips run after all."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
+def _end(status: int) -> NoReturn:
+    """End the process with status once its own work is done: the work directories this run
+    made and left empty removed, its locks released, the lines logged flushed and print's buffers
+    with them. Python's teardown and CUDA's are skipped (os._exit), which can wait on the GPU's
+    work: the place-study night's hang (2026-11-06) logged its stop at once, then stayed 20 s
+    with its card's memory held until it was killed, a normal exit of that job taking 1.4 s at
+    most. What they would have done the kernel does: the locks' descriptors closed, the memory
+    pinned and the card's given back, ffmpeg's processes killed by their parent's death
+    (media/ffmpeg.py). The writers and readers were stopped by the unwinding (media/writer.py's
+    abort, run.Inputs)."""
+    _unmake()
+    _unlock()
+    logging.shutdown()
+    for stream in (sys.stdout, sys.stderr):
+        with suppress(Exception):
+            stream.flush()
+    os._exit(status)
 
 
 def _parser() -> argparse.ArgumentParser:

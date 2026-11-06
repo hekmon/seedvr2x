@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.scripts]
-seedvr2x-imgserver = "main:main"
+seedvr2x-imgserver = "main:command"
 
 [dependency-groups]
 # prometheus-client reads /metrics back in the tests alone: the server writes Prometheus' text

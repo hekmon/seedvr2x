@@ -397,8 +397,8 @@ record in each output, says what it holds and why.
 ## Stopping
 
 SIGTERM or Ctrl-C: no new picture is taken, the pictures waiting are answered 503, the pictures
-running finish and are answered, then the server exits with code 0. A second signal ends it at
-once.
+running finish and are answered, then the server exits with code 0, without waiting for the
+GPU's teardown. A second signal ends it at once.
 
 ### Exit codes
 
