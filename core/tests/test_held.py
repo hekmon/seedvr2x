@@ -329,6 +329,9 @@ def test_release_drops_what_the_vae_and_the_rope_keep_between_calls(
     # asked: both dropped by a release (model._forget, model._forget_rope).
     from seedvr2x.vendor.models.dit_7b.rope import NaRotaryEmbedding3d
 
+    # The cache is the class's, shared by the process: the tables the passes of other test files
+    # left (the shot entries clear at their start, not at their end) are cleared first.
+    model.forget_rope_tables()
     rope = NaRotaryEmbedding3d(dim=120)
     rope.get_axial_freqs(2, 3, 4)
     rope.get_axial_freqs(3, 3, 4)

@@ -284,9 +284,14 @@ def sample_windows(
     anything is computed, the noise copied into a new (L, 16) tensor (na.flatten,
     vendor/models/dit_3b/na.py:102, called at vendor/core/infer.py:356) and the latent into the
     condition's, new too (vendor/core/infer.py:53 and 72, or 57 for a window of one latent),
-    and draws nothing."""
+    and draws nothing.
+
+    The RoPE tables the DiT cached for the shots before are cleared here, when the first window
+    is asked for (model.forget_rope_tables): a shot's windows share their shapes, and a run of
+    many shot lengths would otherwise hold a table for each."""
     if layout[-1][1] != latent.shape[0]:
         raise ValueError(f"windows {layout} over a latent of {latent.shape[0]}")
+    model.forget_rope_tables()
     noise, latent = sampling.drawn(models, latent, seed)
     for s, e in layout[start:]:
         yield sampling.window(models, noise[s:e], latent[s:e])

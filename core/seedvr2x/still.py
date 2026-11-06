@@ -94,8 +94,11 @@ def sampled(models: Models, latent: Tensor, seed: int) -> Tensor:
     """The DiT's output for the picture's latent (encoded), (1, h, w, 16) moved to system memory,
     its layout kept: the DiT's phase entered, the noise drawn in system memory from seed
     (sampling.drawn, a generator of its own: nothing of the pass draws from torch's global
-    ones), the one window [(0, 1)], which merge_windows returns as it is."""
+    ones), the one window [(0, 1)], which merge_windows returns as it is. The RoPE tables of the
+    pictures before are cleared first (model.forget_rope_tables), as a shot's start clears them
+    (shot_pass.sample_windows)."""
     models.enter("dit")
+    model.forget_rope_tables()
     noise, latent = sampling.drawn(models, latent, seed)
     out = sampling.window(models, noise, latent)
     del noise, latent

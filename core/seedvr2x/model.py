@@ -38,7 +38,9 @@ from seedvr2x.vendor.common.config import create_object, load_config
 from seedvr2x.vendor.common.seed import set_seed as vendor_set_seed
 from seedvr2x.vendor.core.infer import VideoDiffusionInfer
 from seedvr2x.vendor.models.dit_3b import attention as attention_3b
+from seedvr2x.vendor.models.dit_3b import rope as rope_3b
 from seedvr2x.vendor.models.dit_7b import attention as attention_7b
+from seedvr2x.vendor.models.dit_7b import rope as rope_7b
 from seedvr2x.vendor.models.video_vae_v3.modules.attn_video_vae import Decoder3D
 from seedvr2x.vendor.models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
 from seedvr2x.vendor.models.video_vae_v3.modules.types import MemoryState
@@ -828,6 +830,24 @@ def _forget_rope(dit: Any) -> None:
         if clear is not None and method not in cleared:
             clear()
             cleared.add(method)
+
+
+def forget_rope_tables() -> None:
+    """Clear the RoPE frequencies of every DiT in the process, at a shot's start (the library's
+    entries to the DiT call it: shot_pass.sample_windows, still.sampled). The vendored rope.py
+    memoises get_axial_freqs with an lru_cache on the class (rope.py:44, 128 entries), one table
+    of (frames x rows x columns) x 60 float32 values on the device per window shape (1.99 MB a
+    latent at 1080p, 7B), which a film of many shot lengths would fill with shapes it never asks
+    for again (DESIGN.md, Allocator: the vendored RoPE's tables). A shot's windows share their
+    shapes, so one shot's tables are made again once each, from the module's buffer to the same
+    bits, and the planner counts them once (peaks.DIT_BUFFERS).
+
+    The cache belongs to the class, not to a Models, so no models are needed: the 3B's and the
+    7B's classes are cleared both, which is all the cache there is. Called with the DiT's phase
+    entered (the image server's lock on the DiT, a clip's or a job's own thread), never while
+    another thread is inside a forward: that one would only make its table again."""
+    for module in (rope_3b, rope_7b):
+        module.RotaryEmbeddingBase.get_axial_freqs.cache_clear()
 
 
 def condition(models: Models, noise: Tensor, latent: Tensor) -> Tensor:

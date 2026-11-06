@@ -438,7 +438,8 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   the device, idempotent, refusing an `enter` before the next `place`, safe after a forward that
   raised and after a release that failed half-way; a `place` that can't be made changing
   nothing; the VAE's causal memory and the vendored RoPE's `lru_cache` dropped by release and by
-  `model.forget`, for any `Models` (a dropped job's models leave no RoPE module alive); only
+  `model.forget`, for any `Models` (a dropped job's models leave no RoPE module alive), and
+  the same tables cleared at each shot's start (below); only
   `HELD` itself, never a plan equal to it, making models kept; the
   modules' buffers and the text embeddings copied to the CPU by release and back by place, equal
   to the bit, with a stand-in card and a walk of the models (`strays`) finding no tensor left on
@@ -448,6 +449,18 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   hold the plan the card alone gives where the host is short, no pinned copy counted, a job the
   host refused planned, `held=False` changing no plan (the plan matrix's 5,120 cases too), and
   `_vae_kept` and `_dit_kept` returning nothing for weights held.
+- The vendored RoPE's tables at a shot's start (`model.forget_rope_tables`; DESIGN.md,
+  Allocator, "The vendored RoPE's tables"): `NaRotaryEmbedding3d.get_axial_freqs` (rope.py:44)
+  memoises the tables of each window shape for the class, so a long run of many shot lengths
+  grew them without end. `shot_pass.sample_windows` clears them before a shot's first window and
+  `still.sampled` after it enters the DiT, `still.upscale` and `clip.upscale` through those.
+  `core/tests/test_rope_tables.py` runs the real rotary module, asked for each window's tables
+  by a stand-in DiT, through those entries: a long run of many shot lengths holding at most one
+  shot's tables, the same run growing past one without the clearing (the test proving the
+  clearing is what holds it), a picture run step by step holding one table at a time, every
+  entry clearing once per shot before its first window, and no output bit moved by it; its
+  autouse fixture empties the class's cache before and after each test, so that no test sees
+  another's tables. `test_held.py` has one line of isolation for the same reason.
 - A clip of frames in memory (`seedvr2x/clip.py`; DESIGN.md, Repository and apps, the nodes), on
   the CPU: `core/tests/test_clip.py` holds it on `cpu_models`' VAE in bfloat16 and `test_still.py`'s
   stand-in DiT: the output's shape and dtype and the input left as it was, the clip's seeds (a
