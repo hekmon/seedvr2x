@@ -12,14 +12,14 @@ the picture budget, or the DiT's peak at one picture when it binds), counted at 
 2.0 to 100 GiB free in steps of 0.3 GiB, both attention kernels, at 1, 2 and 4 pictures:
 - one picture: 1 plan where the first fits (48 GiB and up) or the plan itself refuses at once,
   2 to 5 where the first comes out short and is lowered (2 at 8 and 12 GiB with FlashAttention 2,
-  3 at 16, 4 at 24 and 32); of the 654 cases, 449 take 1, 64 take 2, 55 take 3, 80 take 4 and 6
+  3 at 16, 4 at 24 and 32); of the 654 cases, 436 take 1, 68 take 2, 62 take 3, 82 take 4 and 6
   take 5;
 - two or four pictures: the same figures at both, the reservation not growing with the count
   (the server runs one picture in each model at a time), each pin tried (reservation._several:
   the plan's own tiles, then both VAE passes pinned to each of the 25 sides from 2048 to 512 px)
-  taking 3 plans at the most: 1 plan where the first fits (355 cases), 2 where it is lowered and
-  fits (56); 17 to 36 where the plan's own tiles move the models or reserve too much and smaller
-  tiles are tried, 86 of them fitting so and 157 refused once every side was tried.
+  taking 3 plans at the most: 1 plan where the first fits (386 cases), 2 where it is lowered and
+  fits (44); 17 to 33 where the plan's own tiles move the models or reserve too much and smaller
+  tiles are tried, 86 of them fitting so and 138 refused once every side was tried.
 No case takes more than 5 at one picture, nor more than 3 for each pin at two or more: the tests
 hold them.
 
@@ -356,10 +356,11 @@ def test_one_4k_picture_from_50_mp_fits_in_24_gib(attention: str) -> None:
 
 
 @pytest.mark.parametrize("attention", ATTENTIONS)
-def test_two_4k_pictures_do_not_fit_in_24_gib(attention: str) -> None:
-    # The 7B whole at 4K and two pictures: more than 24 GiB.
+def test_two_4k_pictures_do_not_fit_in_22_gib(attention: str) -> None:
+    # The 7B whole at 4K and two pictures: more than 22 GiB (a first fit between 22.5 and 22.75
+    # on the lean attention; 24 GiB held two before it).
     with pytest.raises(ReservationRefused) as error:
-        reservation.make(asked(24, 2, attention=attention))
+        reservation.make(asked(22, 2, attention=attention))
     assert error.value.most == 1
     assert isinstance(error.value, Refusal)
     assert "--max-concurrent" in str(error.value)
@@ -400,7 +401,7 @@ def test_the_reservation_of_a_real_bound_does_not_grow_with_the_count_past_two()
 
 def test_several_pictures_on_a_card_that_moves_blocks_are_refused_for_the_whole_dit() -> None:
     with pytest.raises(ReservationRefused, match="whole DiT on the card") as error:
-        reservation._made(asked(24, 2), FOUR_K, 2)
+        reservation._made(asked(22, 2), FOUR_K, 2)
     assert error.value.most == 0 and error.value.largest is None
 
 
@@ -443,7 +444,7 @@ def candidates(bound: Bound) -> list[Bound]:
 
 @pytest.mark.parametrize(
     ("bound", "free"),
-    [(FOUR_K, 4.5), (FOUR_K, 5.0), (FOUR_K, 6.0), (FOUR_K, 6.5), ((1920, 1080), 4.5)],
+    [(FOUR_K, 4.25), (FOUR_K, 4.5), (FOUR_K, 4.4), ((1920, 1080), 4.25), ((1920, 1080), 4.5)],
 )
 def test_the_largest_bound_is_the_first_that_fits_walking_down(bound: Bound, free: float) -> None:
     wanted = asked(free, bound=bound)
@@ -465,7 +466,7 @@ def test_the_largest_bound_is_the_first_that_fits_walking_down(bound: Bound, fre
 
 def test_the_largest_bound_is_found_in_few_plans(monkeypatch: pytest.MonkeyPatch) -> None:
     counter = Counted(monkeypatch)
-    wanted = asked(6.0)
+    wanted = asked(4.5)
     total = len(candidates(FOUR_K))
     reservation.largest(wanted)
     # Bisected: about log2(candidates) probes of 5 plans at the most, not a walk of them all.
@@ -475,13 +476,13 @@ def test_the_largest_bound_is_found_in_few_plans(monkeypatch: pytest.MonkeyPatch
 
 def test_the_refusal_names_what_would_fit() -> None:
     with pytest.raises(ReservationRefused) as error:
-        reservation.make(asked(6.0))
+        reservation.make(asked(4.5))
     assert error.value.most == 0
     found = error.value.largest
     assert found is not None
     assert f"{found[0]}x{found[1]}" in str(error.value)
     assert "(--max-size)" in str(error.value)
-    assert reservation.fits(asked(6.0), found, 1)
+    assert reservation.fits(asked(4.5), found, 1)
 
 
 def test_a_card_too_small_for_any_picture_is_refused_saying_so() -> None:
@@ -495,14 +496,14 @@ def test_a_card_too_small_for_any_picture_is_refused_saying_so() -> None:
 
 
 def test_most_is_the_count_that_fits_up_to_the_asked_one() -> None:
-    assert reservation.most(asked(24, 4)) == 1
+    assert reservation.most(asked(22, 4)) == 1
     assert reservation.most(asked(24, 1)) == 1
     assert reservation.most(asked(96, 1)) == 1
 
 
 def test_fits_says_a_refusal_as_false() -> None:
     assert reservation.fits(asked(24), FOUR_K, 1)
-    assert not reservation.fits(asked(24, 2), FOUR_K, 2)
+    assert not reservation.fits(asked(22, 2), FOUR_K, 2)
     assert not reservation.fits(asked(2), FOUR_K, 1)
 
 
@@ -568,11 +569,11 @@ def test_the_tries_stay_under_the_limit_on_cards_between(
             outcomes[outcome] = outcomes.get(outcome, 0) + 1
     assert sum(seen.values()) == 654
     if count == 1:
-        assert seen == {1: 449, 2: 64, 3: 55, 4: 80, 5: 6}
+        assert seen == {1: 436, 2: 68, 3: 62, 4: 82, 5: 6}
     else:
-        assert seen[1] == 355 and seen[2] == 56
-        assert min(plans for plans in seen if plans > 2) == 17 and max(seen) == 36
-        assert outcomes == {"fits": 411, "fits pinned": 86, "reservation refused": 157}
+        assert seen[1] == 386 and seen[2] == 44
+        assert min(plans for plans in seen if plans > 2) == 17 and max(seen) == 33
+        assert outcomes == {"fits": 430, "fits pinned": 86, "reservation refused": 138}
 
 
 def test_the_tries_of_a_fit_follow_how_far_the_first_plan_is_over(
@@ -599,7 +600,7 @@ def test_several_pictures_take_as_many_tries_as_two_and_never_more_than_three(
     # Below, no tile keeps the DiT whole with a reservation that fits: every pin tried, 3 plans
     # at the most each, refused for the whole DiT.
     tried.each = []
-    plans, outcome = counter.tries(asked(24, count), FOUR_K, count)
+    plans, outcome = counter.tries(asked(22, count), FOUR_K, count)
     assert outcome == "reservation refused" and plans == sum(tried.each)
     assert len(tried.each) == len(reservation._several(FOUR_K)) and max(tried.each) <= 3
     tried.each = []
@@ -672,7 +673,7 @@ def test_two_pictures_on_the_int8_dit_keep_it_whole_in_tiles_of_1088() -> None:
     assert reservation.whole(made.plan)
     assert made.plan.pins == Pins(1088, 1088, swap_blocks=0)
     assert made.reservation <= wanted.reading.counted - made.plan.margin
-    assert reservation.gib(made.reservation) == "18.20"
+    assert reservation.gib(made.reservation) == "17.36"
     assert (
         reservation.gib(made.models) == "8.29"
     )  # the int8 DiT and the VAE, as the plan counts them
@@ -709,16 +710,16 @@ def test_two_pictures_on_the_fp16_dit_are_refused_naming_what_fits() -> None:
         " the VAE beside it, and no plan for pictures within 1920x1080 keeps it there with their"
         " reservation in the memory the plan counts on, the VAE's passes tiled down to 512 px;"
         " what would fit: one picture at once within 1920x1080 (--max-concurrent), or 2 pictures"
-        " at once within 482x272 (--max-size)"
+        " at once within 540x304 (--max-size)"
     )
-    assert error.value.most == 1 and error.value.largest == (482, 272)
+    assert error.value.most == 1 and error.value.largest == (540, 304)
 
 
 @pytest.mark.parametrize("dit", [peaks.INT8, peaks.FP16])
 def test_one_picture_takes_the_plans_own_tiles(dit: Architecture) -> None:
     # One picture at a time: the asked pins alone, none here, the plan's own tiles and placement
     # (the night's: the int8 DiT lowered to 30 blocks beside the decode, the fp16 to 22 and 15
-    # beside the encode and the decode and the VAE away from the DiT's phase), as before.
+    # beside the encode and the decode, the VAE now in the DiT's phase for both), as before.
     wanted = night(dit, 1)
     made = reservation.make(wanted)
     assert made.plan.pins == still_plan.NO_PINS
@@ -735,7 +736,7 @@ def test_one_picture_takes_the_plans_own_tiles(dit: Architecture) -> None:
         assert (models.resident_encode, models.resident_decode, models.vae_in_dit) == (
             22,
             15,
-            False,
+            True,
         )
         assert reservation.gib(made.reservation) == "18.42"
 
@@ -749,7 +750,7 @@ SHARP_GGUF = "the dynamic GGUF (--dit-model seedvr2x_ema_7b_sharp_dyn.gguf, 4.8 
 def two_in_full_hd(free_gib: float, dit: Architecture, name: str) -> Asked:
     """Two pictures within 1920x1080 from 0.6 MP on `free_gib` GiB, the DiT file `name` in the
     format dit (SDPA): they need the whole DiT on the card, which fp16 never gets in 18 GiB or
-    less, int8 from 15 and the GGUF from 11 (measured by the plan, the tests below)."""
+    less, int8 from 14 and the GGUF from 10 (measured by the plan, the tests below)."""
     held = asked(free_gib, 2, bound=FULL_HD, attention=peaks.SDPA)
     return replace(held, dit_model=dit, input_pixels=NIGHT_INPUT, dit_file=name)
 
@@ -798,8 +799,8 @@ def test_a_refused_start_names_the_smaller_files_that_fit() -> None:
         reservation.make(int8)
     assert str(error.value).endswith(f"a smaller DiT file that plans this bound: {SHARP_GGUF}")
     for held in (
-        two_in_full_hd(10, peaks.GGUF_7B_SHARP, "seedvr2x_ema_7b_sharp_dyn.gguf"),
-        two_in_full_hd(10, peaks.FP16, sharp),
+        two_in_full_hd(9, peaks.GGUF_7B_SHARP, "seedvr2x_ema_7b_sharp_dyn.gguf"),
+        two_in_full_hd(9, peaks.FP16, sharp),
     ):
         with pytest.raises(ReservationRefused) as error:
             reservation.make(held)
@@ -814,8 +815,8 @@ def test_a_refused_start_names_the_smaller_files_that_fit() -> None:
 
 def one_in_full_hd(free_gib: float, dit: Architecture, name: str) -> Asked:
     """One picture within 1920x1080 from 0.6 MP on `free_gib` GiB, the DiT file `name` in the
-    format dit (SDPA). The plan swaps blocks of fp16's 7B below about 20 GiB (23 at 10, 19 at 12,
-    5 at 18), of int8's 9 at 10 and none from 12, and none of the GGUF's from 10 (the plan, the
+    format dit (SDPA). The plan swaps blocks of fp16's 7B below about 20 GiB (21 at 10, 17 at 12,
+    3 at 18), of int8's 5 at 10 and none from 11, and none of the GGUF's from 7 (the plan, the
     probe behind these tests)."""
     return replace(two_in_full_hd(free_gib, dit, name), count=1)
 
@@ -829,25 +830,25 @@ def test_the_start_says_the_smaller_files_that_swap_fewer_blocks() -> None:
     # the command line's plan says, a picture being one latent: blocks alone, no window.
     sharp = "seedvr2x_ema_7b_sharp_fp16.safetensors"
     assert line(one_in_full_hd(10, peaks.FP16, sharp)) == (
-        "smaller DiT files plan this bound better: this plan swaps 23 blocks; int8 9 blocks;"
+        "smaller DiT files plan this bound better: this plan swaps 21 blocks; int8 5 blocks;"
         " the dynamic GGUF 0 blocks; --dit-model names them"
     )
     assert line(one_in_full_hd(12, peaks.FP16, sharp)) == (
-        "smaller DiT files plan this bound better: this plan swaps 19 blocks; int8 0 blocks;"
+        "smaller DiT files plan this bound better: this plan swaps 17 blocks; int8 0 blocks;"
         " the dynamic GGUF 0 blocks; --dit-model names them"
     )
     # An int8 DiT is offered the GGUF alone.
     assert line(
         one_in_full_hd(10, peaks.INT8, "seedvr2x_ema_7b_sharp_int8_convrot.safetensors")
     ) == (
-        "smaller DiT files plan this bound better: this plan swaps 9 blocks; the dynamic GGUF 0"
+        "smaller DiT files plan this bound better: this plan swaps 5 blocks; the dynamic GGUF 0"
         " blocks; --dit-model names them"
     )
     # The regular 7B's file gets the regular 7B's files.
     regular = line(one_in_full_hd(12, peaks.FP16, "seedvr2x_ema_7b_fp16.safetensors"))
     assert regular is not None and "seedvr2x_ema_7b_sharp" not in regular
     assert regular.startswith(
-        "smaller DiT files plan this bound better: this plan swaps 19 blocks;"
+        "smaller DiT files plan this bound better: this plan swaps 17 blocks;"
     )
 
 
@@ -868,7 +869,7 @@ def test_an_unpinned_dit_name_gives_both_7bs_files_in_the_start_line() -> None:
     # A file that is not a pinned one does not say which 7B it holds (pull.smaller_files): each
     # 7B's files, in brackets, the sharp 7B's first.
     assert line(one_in_full_hd(12, peaks.FP16, "w.safetensors")) == (
-        "smaller DiT files plan this bound better: this plan swaps 19 blocks; for the sharp 7B"
+        "smaller DiT files plan this bound better: this plan swaps 17 blocks; for the sharp 7B"
         " (int8 0 blocks; the dynamic GGUF 0 blocks); for the 7B (int8 0 blocks; the dynamic GGUF"
         " 0 blocks); --dit-model names them"
     )

@@ -11,11 +11,12 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
-# Modified for seedvr2x: no sequence parallelism.
+# Modified for seedvr2x: no sequence parallelism; the attention keeps less live at its peak.
 
 from typing import Tuple, Union
 import torch
 from einops import rearrange
+from rotary_embedding_torch import apply_rotary_emb
 from torch.nn import functional as F
 
 # from ..cache import Cache
@@ -30,6 +31,14 @@ from ..normalization import norm_layer_type
 from ..rope import NaRotaryEmbedding3d
 from ..window import get_window_op
 from ....common.half_precision_fixes import safe_pad_operation
+
+# seedvr2x: the tokens whose q and k go through the norm, RoPE and the cast to the compute dtype
+# at a time (forward below). 4,096 tokens a chunk lowers a 4K picture's DiT step from 5.53 to 3.08
+# GiB together with the other lean changes, the same bits (DESIGN.md, Allocator, Small cards;
+# research/docs/small-cards.md, the DiT section; research/scripts/dit_lean.py measured it, with
+# the chunk as its parameter).
+LEAN_CHUNK = 4096
+
 
 class NaSwinAttention(MMWindowAttention):
     def __init__(
@@ -95,15 +104,17 @@ class NaSwinAttention(MMWindowAttention):
             lambda: na.window_idx(vid_shape, make_window),
         )
         vid_qkv_win = window_partition(vid_qkv)
+        # seedvr2x: lean attention (DESIGN.md, Allocator, Small cards: a 4K picture's DiT step
+        # 5.53 to 3.08 GiB, a 1080p window of 5 latents 6.58 to 3.57, the same bits under SDPA
+        # and FlashAttention 2): the projection's q, k and v are freed once windowed, where numz
+        # keeps them to the forward's end.
+        del vid_qkv
 
         vid_qkv_win = rearrange(vid_qkv_win, "l (o h d) -> l o h d", o=3, d=self.head_dim)
         txt_qkv = rearrange(txt_qkv, "l (o h d) -> l o h d", o=3, d=self.head_dim)
 
         vid_q, vid_k, vid_v = vid_qkv_win.unbind(1)
         txt_q, txt_k, txt_v = txt_qkv.unbind(1)
-
-        vid_q, txt_q = self.norm_q(vid_q, txt_q)
-        vid_k, txt_k = self.norm_k(vid_k, txt_k)
 
         txt_len = cache("txt_len", lambda: txt_shape.prod(-1))
 
@@ -114,15 +125,68 @@ class NaSwinAttention(MMWindowAttention):
             "mm_pnp", lambda: na.repeat_concat_idx(vid_len_win, txt_len, window_count)
         )
 
-        # window rope
-        if self.rope:
-            vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
+        compute = self.attn.compute_dtype
+        if self.rope and compute is not None:
+            # seedvr2x: the pipeline's path (model.py sets compute_dtype on every attention
+            # module). The norm, the window RoPE and the cast to the compute dtype act on each
+            # token, and on each head, alone: they run LEAN_CHUNK tokens at a time into one tensor
+            # of the compute dtype, where numz keeps the float32 outputs of the norm (its float32
+            # weight promotes q and k) and of RoPE whole and casts them in the attention, after
+            # their concatenation with the text. A cast and a copy commute, so the attention's
+            # own cast is then nothing and the bits are numz's.
+            txt_q, txt_k = self.norm_q.txt_or_all(txt_q), self.norm_k.txt_or_all(txt_k)
+            out_dtype = txt_q.dtype
+            freqs = cache_win("rope_freqs_3d", lambda: self.rope.get_freqs(window_shape))
+            freqs = freqs.to(device=vid_q.device, dtype=out_dtype)
+
+            def norm_and_rope(raw: torch.Tensor, norm: torch.nn.Module) -> torch.Tensor:
+                done = torch.empty(raw.shape, dtype=compute, device=raw.device)
+                for start in range(0, raw.shape[0], LEAN_CHUNK):
+                    end = min(start + LEAN_CHUNK, raw.shape[0])
+                    normed = rearrange(norm(raw[start:end]), "L h d -> h L d")
+                    turned = apply_rotary_emb(freqs[start:end], normed.float()).to(normed.dtype)
+                    done[start:end].copy_(rearrange(turned, "h L d -> L h d"))
+                return done
+
+            # Each part is freed once concatenated.
+            vid_q = norm_and_rope(vid_q, self.norm_q.vid_or_all)
+            q = concat_win(vid_q, txt_q.to(compute))
+            del vid_q
+            vid_k = norm_and_rope(vid_k, self.norm_k.vid_or_all)
+            k = concat_win(vid_k, txt_k.to(compute))
+            del vid_k
+            v = concat_win(vid_v.to(compute), txt_v.to(compute))
+        else:
+            # seedvr2x: numz's order, for a module whose compute dtype is not set or without
+            # RoPE (the 7B's config has RoPE; no pipeline leaves the dtype unset), the casts
+            # before the concatenations as above, each part freed once concatenated.
+            vid_q, txt_q = self.norm_q(vid_q, txt_q)
+            vid_k, txt_k = self.norm_k(vid_k, txt_k)
+
+            # window rope
+            if self.rope:
+                vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
+
+            out_dtype = vid_q.dtype
+            if compute is not None and vid_q.dtype != compute:
+                q = concat_win(vid_q.to(compute), txt_q.to(compute))
+                del vid_q
+                k = concat_win(vid_k.to(compute), txt_k.to(compute))
+                del vid_k
+                v = concat_win(vid_v.to(compute), txt_v.to(compute))
+            else:
+                q = concat_win(vid_q, txt_q)
+                del vid_q
+                k = concat_win(vid_k, txt_k)
+                del vid_k
+                v = concat_win(vid_v, txt_v)
+        del vid_v, vid_qkv_win, txt_q, txt_k, txt_v, txt_qkv
 
         # Attention handles dtype conversion internally using pipeline compute_dtype
         out = self.attn(
-            q=concat_win(vid_q, txt_q),
-            k=concat_win(vid_k, txt_k),
-            v=concat_win(vid_v, txt_v),
+            q=q,
+            k=k,
+            v=v,
             cu_seqlens_q=cache_win(
                 "vid_seqlens_q", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
             ),
@@ -131,7 +195,11 @@ class NaSwinAttention(MMWindowAttention):
             ),
             max_seqlen_q=cache_win("vid_max_seqlen_q", lambda: all_len_win.max()),
             max_seqlen_k=cache_win("vid_max_seqlen_k", lambda: all_len_win.max()),
-        ).type_as(vid_q)
+        )
+        # seedvr2x: q, k and v freed before the output is cast, and the cast to the dtype of q
+        # after the norm and RoPE (numz's `.type_as(vid_q)`, vid_q being gone by then).
+        del q, k, v
+        out = out.to(out_dtype)
 
         # text pooling
         vid_out, txt_out = unconcat_win(out)

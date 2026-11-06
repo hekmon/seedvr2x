@@ -16,11 +16,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from library_fixtures import cli_say, cli_words
+from library_fixtures import cli_say, cli_words, plain_fit  # noqa: F401
 from test_peaks import (
     BEFORE_ONE_OUTPUT,
-    NUMZ_4K,
-    NUMZ_1080,
     OURS_4K,
     OURS_1080,
     gib,
@@ -54,7 +52,7 @@ def test_constants() -> None:
     # 0.155, the VAE 0.4669, DESIGN.md's 0.47, and 0.058 of buffers and tables that never move.
     assert gib(peaks.MARGIN) == pytest.approx(0.6)
     assert gib(peaks.DIT_LOADED) == pytest.approx(15.871)
-    assert peaks.PER_TOKEN == 127.16 * 1024 and peaks.PER_WINDOW == 2.726 * 1024**2
+    assert peaks.PER_TOKEN == 61.243 * 1024 and peaks.PER_WINDOW == 0.996 * 1024**2
     assert (peaks.BLOCKS, peaks.SLOTS) == (36, 2)
     # The blocks, the slots and the DiT's other parameters are the model's own constants
     # (seedvr2x/weights.py), the 7B's, the one DiT seedvr2x runs, in fp16 (peaks.DIT, the
@@ -172,33 +170,37 @@ def test_weights_by_the_models_shapes() -> None:
 
 
 def test_out_of_memory_rows() -> None:
-    # The table's rows that ran out of memory on the 96 GB card, 94.50 GiB free: 1080p at 79 and
-    # 80 latents, 4K at 20, the Fit column 94.93, 95.92 and 95.79: over the budget.
+    # The windows that run out of memory on the 96 GB card, 94.50 GiB free, on the lean attention's
+    # fit: 1080p at 160 and 161 latents, 4K at 41, the fit's 93.94, 94.42 and 95.27 GiB: over the
+    # budget. (numz's table, the plain attention's, ran out at 79 and 80 latents and 20 at 4K:
+    # 94.93, 95.92 and 95.79.)
     budget = 94.50 * GIB - peaks.MARGIN
     rows = [
-        (NUMZ_1080, 79, 644_640, 94.93),
-        (NUMZ_1080, 80, 652_800, 95.92),
-        (NUMZ_4K, 20, 648_000, 95.79),
+        (OURS_1080, 160, 1_324_800, 93.94),
+        (OURS_1080, 161, 1_333_080, 94.42),
+        (OURS_4K, 41, 1_348_080, 95.27),
     ]
     for padded, latents, tokens, fit in rows:
         assert peaks.tokens(padded, latents) == tokens
         assert peaks.dit_peak(padded, latents) > budget
         assert abs(gib(peaks.dit_peak(padded, latents)) - fit) <= 0.01
+    assert peaks.dit_peak(OURS_1080, 159) <= budget and peaks.dit_peak(OURS_4K, 40) <= budget
 
 
 def test_seedvr2x_sizes() -> None:
     # DESIGN.md, Memory planner, "By the fit, in step 0's padding": 1,104 rows at 1080p, 2,192
-    # at 4K; 6 latents at 1080p take 22.22 GiB; on a budget of 93.74 GiB, 76 latents fit (92.98)
-    # and 77 don't (94.07). And on the bare 96 GB card as seedvr2x reads it once a first tensor
-    # is allocated, 94.2746 GiB free (measured 2026-10-10), a budget of 93.67: the same.
+    # at 4K; 6 latents at 1080p take 18.97 GiB (22.22 on the plain attention); on a budget of 93.74
+    # GiB, 159 latents fit (93.46) and 160 don't (93.94) (76 and 77 on the plain one's). And on the
+    # bare 96 GB card as seedvr2x reads it once a first tensor is allocated, 94.2746 GiB free
+    # (measured 2026-10-10), a budget of 93.67: the same.
     assert padded_size((1080, 1920)) == OURS_1080 and padded_size((2160, 3840)) == OURS_4K
     assert peaks.tokens(OURS_1080, 1) == 8_280 and peaks.tokens(OURS_4K, 1) == 32_880
-    assert round(gib(peaks.dit_peak(OURS_1080, 6)), 2) == 22.22
-    assert round(gib(peaks.dit_peak(OURS_1080, 76)), 2) == 92.98
-    assert round(gib(peaks.dit_peak(OURS_1080, 77)), 2) == 94.07
+    assert round(gib(peaks.dit_peak(OURS_1080, 6)), 2) == 18.97
+    assert round(gib(peaks.dit_peak(OURS_1080, 159)), 2) == 93.46
+    assert round(gib(peaks.dit_peak(OURS_1080, 160)), 2) == 93.94
     for free in (94.34, 94.2746):
         budget = free * GIB - peaks.MARGIN
-        assert peaks.dit_peak(OURS_1080, 76) <= budget < peaks.dit_peak(OURS_1080, 77)
+        assert peaks.dit_peak(OURS_1080, 159) <= budget < peaks.dit_peak(OURS_1080, 160)
 
 
 def test_a_pass_takes_the_tile_that_takes_the_most() -> None:
@@ -368,28 +370,29 @@ def in_one_window(free: int, target: tuple[int, int], pins: Pins) -> int:
 @pytest.mark.parametrize(
     ("target", "card", "swapped", "design", "ours", "planned"),
     [
-        # DESIGN.md, Memory planner, "By the fit, in step 0's padding": every block on the GPU,
-        # at 1080p 5 latents on 24 GB, 13 on 32, 29 on 48 and 76 on 96; at 4K 3 on 32 GB, 7 on
-        # 48, 19 on 96.
-        (HD, 24, 0, 5, 5, 6),
-        (HD, 32, 0, 13, 13, 14),
-        (HD, 48, 0, 29, 29, 30),
-        (HD, 96, 0, 76, 76, 77),
-        (UHD, 32, 0, 3, 3, 3),
-        (UHD, 48, 0, 7, 7, 7),
-        (UHD, 96, 0, 19, 19, 19),
-        # All 36 blocks swapped: at 1080p "about" 11 on 16 GB, 19 on 24 and 27 on 32; at 4K 2 on
-        # 16 GB, 4 on 24, 6 on 32, 10 on 48 and 22 on 96. With a block's measured bytes, 12 fit
-        # on 16 GB by seedvr2x's own reading of the free memory, by 0.3 MiB (13.9712 GiB in a
-        # budget of 13.9715), and 11 by numz's, 12 MiB under it.
-        (HD, 16, 36, 11, 12, 12),
-        (HD, 24, 36, 19, 19, 20),
-        (HD, 32, 36, 27, 27, 28),
-        (UHD, 16, 36, 2, 2, 3),
-        (UHD, 24, 36, 4, 4, 5),
-        (UHD, 32, 36, 6, 6, 6),
-        (UHD, 48, 36, 10, 10, 10),
-        (UHD, 96, 36, 22, 22, 22),
+        # DESIGN.md, Memory planner, "By the fit, in step 0's padding", refitted on the lean
+        # attention (61.243 KiB a token, 0.996 MiB a window; research/docs/small-cards.md): every
+        # block on the GPU, at 1080p 12 latents on 24 GB, 28 on 32, 61 on 48 and 159 on 96; at 4K
+        # 7 on 32 GB, 15 on 48, 40 on 96. (The plain attention's: 5, 13, 29 and 76 at 1080p; 3,
+        # 7 and 19 at 4K.) All 36 blocks swapped: at 1080p 25 on 16 GB, 41 on 24 and 58 on 32; at
+        # 4K 6 on 16 GB, 10 on 24, 14 on 32, 22 on 48 and 47 on 96 (plain: 11-12, 19, 27; 2, 4,
+        # 6, 10, 22). numz's reading of the free memory and seedvr2x's now give the same lengths
+        # at every one of the 15 (the plain attention's 16 GB at 1080p differed by one, 11 and 12).
+        (HD, 24, 0, 12, 12, 13),
+        (HD, 32, 0, 28, 28, 29),
+        (HD, 48, 0, 61, 61, 62),
+        (HD, 96, 0, 159, 159, 160),
+        (UHD, 32, 0, 7, 7, 7),
+        (UHD, 48, 0, 15, 15, 15),
+        (UHD, 96, 0, 40, 40, 40),
+        (HD, 16, 36, 25, 25, 26),
+        (HD, 24, 36, 41, 41, 42),
+        (HD, 32, 36, 58, 58, 59),
+        (UHD, 16, 36, 6, 6, 6),
+        (UHD, 24, 36, 10, 10, 10),
+        (UHD, 32, 36, 14, 14, 14),
+        (UHD, 48, 36, 22, 22, 23),
+        (UHD, 96, 36, 47, 47, 47),
     ],
 )
 def test_design_windows(
@@ -397,9 +400,9 @@ def test_design_windows(
 ) -> None:
     # DESIGN.md's figures are the fit's with the VAE's weights in the DiT's phase, each of the 15
     # found again with the memory numz's process found free (design), and with seedvr2x's own
-    # reading (the figure after it) but for one. The planner, its blocks pinned alike, sends the
-    # VAE's 0.47 GiB away when the window wants them (its first choice): at 1080p, where a latent
-    # takes 1.0 GiB, one latent more on every card; at 4K one more on 16 and 24 GB, 3 and 5.
+    # reading (the figure after it). The planner, its blocks pinned alike, sends the VAE's 0.47
+    # GiB away when the window wants them (its first choice): at 1080p, where a latent takes about
+    # 0.5 GiB, one latent more on every card; at 4K one more on 48 GB, 23.
     pins = Pins(swap_blocks=swapped)
     for free, fit in ((numz_free(card), design), (our_free(card), ours)):
         assert by_the_fit(free, target, swapped) == fit
@@ -411,55 +414,59 @@ def test_design_windows(
 
 
 def test_design_first_reading() -> None:
-    # DESIGN.md: 94.34 GiB free on the 96 GB card, a budget of 93.74 GiB, "which 76 latents fit
-    # (92.98) and 77 don't (94.07)": so by the fit; the planner runs 77, the VAE away (93.60).
+    # DESIGN.md: 94.34 GiB free on the 96 GB card, a budget of 93.74 GiB, which 159 latents fit
+    # (93.46) and 160 don't (93.94) on the lean attention (76 and 77 on the plain one's, 92.98 and
+    # 94.07): so by the fit; the planner runs 160, the VAE away (93.47).
     free = round(94.34 * GIB)
-    assert by_the_fit(free, HD, 0) == 76
-    made, peaks = shot_plan.plan(free, HD, shots(77), Pins(swap_blocks=0), None)
-    assert (made.window, made.vae_in_dit, round(peaks.dit / GIB, 2)) == (77, False, 93.60)
-    # Nothing pinned, it swaps blocks rather than send the VAE away alone: 78 is beyond both.
-    assert in_one_window(free, HD, Pins(swap_blocks=0)) == 77
+    assert by_the_fit(free, HD, 0) == 159
+    made, peaks = shot_plan.plan(free, HD, shots(160), Pins(swap_blocks=0), None)
+    assert (made.window, made.vae_in_dit, round(peaks.dit / GIB, 2)) == (160, False, 93.47)
+    # Nothing pinned, it swaps blocks rather than send the VAE away alone: 161 is beyond both.
+    assert in_one_window(free, HD, Pins(swap_blocks=0)) == 160
 
 
 def test_window_is_the_first_choice() -> None:
-    # On a 24 GB card at 1080p, a shot of 12 latents runs in one window: the fewest blocks that
-    # hold it are swapped, 16, the VAE's weights leaving before a 17th is.
+    # On a 24 GB card at 1080p, a shot of 18 latents runs in one window: the fewest blocks that
+    # hold it are swapped, 8, the VAE's weights leaving before a 9th is. (12 latents and 16 blocks
+    # on the plain attention's figures: the lean attention holds 12 whole, the VAE on the GPU; 18
+    # is the first length whose DiT phase, not the encode, bounds the plan.)
     free, padded = our_free(24), OURS_1080
-    made, predicted = shot_plan.plan(free, HD, shots(12), Pins(), None)
-    assert (made.window, made.swapped, made.vae_in_dit) == (12, 16, False)
+    made, predicted = shot_plan.plan(free, HD, shots(18), Pins(), None)
+    assert (made.window, made.swapped, made.vae_in_dit) == (18, 8, False)
     budget = free - MARGIN
-    assert peaks.dit_peak(padded, 12, 15, vae_in_dit=False) > budget
-    assert peaks.dit_peak(padded, 12, 16) > budget >= peaks.dit_peak(padded, 12, 16, False)
-    assert predicted.dit == peaks.dit_peak(padded, 12, 16, False) and predicted.bound == "dit"
+    assert peaks.dit_peak(padded, 18, 7, vae_in_dit=False) > budget
+    assert peaks.dit_peak(padded, 18, 8) > budget >= peaks.dit_peak(padded, 18, 8, False)
+    assert predicted.dit == peaks.dit_peak(padded, 18, 8, False) and predicted.bound == "dit"
     # One and two swapped blocks save nothing, so are never chosen: no block, then three.
     for latents in range(1, 30):
         assert shot_plan.plan(free, HD, shots(latents), Pins(), None)[0].swapped not in (1, 2)
-    # The VAE stays where the window fits with it: 13 latents on a 32 GB card, no block swapped;
-    # it leaves for 14, before a block is swapped.
-    made, _ = shot_plan.plan(our_free(32), HD, shots(13), Pins(), None)
-    assert (made.window, made.swapped, made.vae_in_dit) == (13, 0, True)
-    made, _ = shot_plan.plan(our_free(32), HD, shots(14), Pins(), None)
-    assert (made.window, made.swapped, made.vae_in_dit) == (14, 0, False)
-    made, _ = shot_plan.plan(our_free(32), HD, shots(15), Pins(), None)
-    assert (made.window, made.swapped, made.vae_in_dit) == (15, 5, False)
-    assert peaks.dit_peak(padded, 15, 4, vae_in_dit=False) > our_free(32) - MARGIN
+    # The VAE stays where the window fits with it: 28 latents on a 32 GB card, no block swapped;
+    # it leaves for 29, before a block is swapped (13 and 14 on the plain attention's figures).
+    made, _ = shot_plan.plan(our_free(32), HD, shots(28), Pins(), None)
+    assert (made.window, made.swapped, made.vae_in_dit) == (28, 0, True)
+    made, _ = shot_plan.plan(our_free(32), HD, shots(29), Pins(), None)
+    assert (made.window, made.swapped, made.vae_in_dit) == (29, 0, False)
+    made, _ = shot_plan.plan(our_free(32), HD, shots(31), Pins(), None)
+    assert (made.window, made.swapped, made.vae_in_dit) == (31, 4, False)
+    assert peaks.dit_peak(padded, 31, 3, vae_in_dit=False) > our_free(32) - MARGIN
 
 
 def test_large_card_swaps_before_it_shortens() -> None:
-    # The 96 GB card swaps blocks on a shot longer than its 76 latents before it shortens the
-    # window (DESIGN.md, Memory planner, Choices, in order): 80 latents in one window, 9 blocks
-    # swapped; and nothing caps it, a shot it holds whole staying untiled, every weight there.
+    # The 96 GB card swaps blocks on a shot longer than its 160 latents before it shortens the
+    # window (DESIGN.md, Memory planner, Choices, in order): 164 latents in one window, 7 blocks
+    # swapped (80 and 9 on the plain attention's figures); and nothing caps it, a shot it holds
+    # whole staying untiled, every weight there.
     free = our_free(96)
-    made, predicted = shot_plan.plan(free, HD, shots(80), Pins(), None)
-    assert (made.window, predicted.window, made.swapped, made.vae_in_dit) == (80, 80, 9, False)
-    assert peaks.dit_peak(OURS_1080, 80, 8, vae_in_dit=False) > free - MARGIN
-    made, predicted = shot_plan.plan(free, HD, shots(60), Pins(), None)
-    assert made == Plan(60) and predicted.bound == "dit"
-    # A longer shot than every block swapped holds, 91 latents: two windows of 47, the plan's
-    # cap, with no block swapped.
-    made, predicted = shot_plan.plan(free, HD, shots(92), Pins(), None)
-    assert (made.window, predicted.window, made.swapped) == (47, 47, 0)
-    assert in_one_window(free, HD, Pins()) == 91
+    made, predicted = shot_plan.plan(free, HD, shots(164), Pins(), None)
+    assert (made.window, predicted.window, made.swapped, made.vae_in_dit) == (164, 164, 7, False)
+    assert peaks.dit_peak(OURS_1080, 164, 6, vae_in_dit=False) > free - MARGIN
+    made, predicted = shot_plan.plan(free, HD, shots(159), Pins(), None)
+    assert made == Plan(159) and predicted.bound == "dit"
+    # A longer shot than every block swapped holds, 189 latents: two windows of 96, the plan's
+    # cap, with no block swapped (91 and 47 on the plain attention's figures).
+    made, predicted = shot_plan.plan(free, HD, shots(190), Pins(), None)
+    assert (made.window, predicted.window, made.swapped) == (96, 96, 0)
+    assert in_one_window(free, HD, Pins()) == 189
 
 
 def test_own_cap_lays_the_shots_out_alike() -> None:
@@ -559,8 +566,9 @@ def test_vae_choices() -> None:
     assert more + room > budget >= predicted.encode + room
     # 24 GB at 1080p: the untiled encode fits with the DiT away by its peak, and not with its
     # room: tiled, in the largest tiles under the frame's longer side.
-    made, predicted = shot_plan.plan(our_free(24), HD, shots(12), Pins(), None)
-    assert bare(made) == Plan(12, Tiles(1856), Tiles(1088), 16, 1, 0, vae_in_dit=False)
+    # (Shots of 25 latents, the 16 blocks swapped as the plain attention's 12 latents had them.)
+    made, predicted = shot_plan.plan(our_free(24), HD, shots(25), Pins(), None)
+    assert bare(made) == Plan(25, Tiles(1856), Tiles(1088), 16, 1, 0, vae_in_dit=False)
     untiled_encode = peaks.encode_peak(OURS_1080, None, 0, 16)
     assert untiled_encode <= our_free(24) - MARGIN < untiled_encode + room
     # split's slice is counted with an untiled decode's peak, which leaves fewer of the DiT's
@@ -575,8 +583,11 @@ def test_vae_choices() -> None:
     # where the next tiles up don't fit with it away (with 1.5 GiB of room, tiles of 1408 px, and
     # the DiT's two slots and its other parameters, 1.0 GiB, beside them, by 90 MiB); the DiT
     # leaves the decode, and no tile shrinks for it.
-    made, predicted = shot_plan.plan(our_free(24), UHD, shots(5), Pins(), None)
-    assert bare(made) == Plan(5, Tiles(1472), Tiles(1088), 36, 0, 0, vae_in_dit=False)
+    # (Every block swapped is pinned: the plain attention's plan swapped them all for 5 latents,
+    # the lean one's unpinned plan at 24 GB swaps 29 for 9 and 34 for 10, the encode's and the
+    # decode's tiles being the same.)
+    made, predicted = shot_plan.plan(our_free(24), UHD, shots(5), Pins(swap_blocks=36), None)
+    assert bare(made) == Plan(5, Tiles(1472), Tiles(1088), 36, 0, 0)  # the VAE stays now
     grid = peaks.grid_shapes  # pyright: ignore[reportPrivateUsage]
     assert (grid(OURS_4K, Tiles(1472)), grid(OURS_4K, Tiles(1088))) == ((2, 3), (3, 4))
     assert predicted.scratch == peaks.scratch(OURS_4K, 17) and predicted.tokens == 32_880
@@ -622,18 +633,19 @@ def test_a_latent_is_counted_by_its_tensor() -> None:
 def test_no_shot_is_too_long_for_the_dit_s_phase() -> None:
     # The DiT's phase is judged by its longest window alone, a shot's noise drawn in system
     # memory (shot_pass.sample_windows; DESIGN.md, Pipeline step 2): however long the shot, the
-    # window decides. 1080p on a 24 GB card, --window 5, whose peak, 21.13 GiB with every weight
-    # there, leaves 0.84 under the budget of 21.97: every weight stays there for a shot of 20
-    # latents as for one of 20,000 (79,997 frames). Drawn on the GPU beside the shot's latent,
-    # 2 MiB a latent at 1080p, the noise took the VAE's weights away from a shot of 3,090
-    # latents, and a third block from one of 3,327 (until 2026-10-16).
-    free, pins = our_free(24), Pins(window=5)
+    # window decides. 1080p on a 24 GB card, --window 11, whose peak, 21.42 GiB with every weight
+    # there, leaves 0.55 under the budget of 21.97 (--window 5, 21.13 GiB and 0.84 under, on the
+    # plain attention; the lean one holds 11 latents where it held 5): every weight stays there
+    # for a shot of 20 latents as for one of 20,000 (79,997 frames). Drawn on the GPU beside the
+    # shot's latent, 2 MiB a latent at 1080p, the noise took the VAE's weights away from a shot of
+    # 3,090 latents, and a third block from one of 3,327 (until 2026-10-16).
+    free, pins = our_free(24), Pins(window=11)
     budget = free - MARGIN
-    window = peaks.dit_peak(OURS_1080, 5)
-    assert (round(gib(window), 2), round(gib(budget - window), 2)) == (21.13, 0.84)
+    window = peaks.dit_peak(OURS_1080, 11)
+    assert (round(gib(window), 2), round(gib(budget - window), 2)) == (21.42, 0.55)
     for latents in (20, 3090, 3327, 4000, 20_000):
         made, predicted = shot_plan.plan(free, HD, shots(latents), pins, None)
-        assert (made.window, predicted.window, made.swapped, made.vae_in_dit) == (5, 5, 0, True)
+        assert (made.window, predicted.window, made.swapped, made.vae_in_dit) == (11, 11, 0, True)
         assert predicted.dit == predicted.record()["dit_peak"] == window
         assert fits(made, free, HD, shots(latents), None) is None
     # A plan from elsewhere with no block swapped fits a shot of 4,000 latents, and --swap-blocks
@@ -641,20 +653,21 @@ def test_no_shot_is_too_long_for_the_dit_s_phase() -> None:
     short = Plan(5, Tiles(512), Tiles(512), 0, 0, 0)
     assert fits(short, free, HD, shots(4000), None) is None
     made, _ = shot_plan.plan(free, HD, shots(4000), Pins(swap_blocks=0), None)
-    assert (made.window, made.swapped, made.vae_in_dit) == (6, 0, False)
+    assert (made.window, made.swapped, made.vae_in_dit) == (13, 0, False)
     # A --window refused is refused for its window.
-    assert refused(free, HD, shots(3000), Pins(window=30), None).startswith(
-        "--window 30: its longest window, 30 latents, takes "
+    assert refused(free, HD, shots(3000), Pins(window=60), None).startswith(
+        "--window 60: its longest window, 60 latents, takes "
     )
 
 
 def test_a_long_shot_at_4k_plans_on_a_24_gb_card() -> None:
-    # 4K with 22.51 GiB free, a card emulated at 24 GB: windows of 5 latents, every block
-    # swapped and the VAE away, for shots of any length, the DiT's phase bounding the plan
-    # (test_a_window_is_all_the_phase_holds_of_a_shot). The draw on the GPU refused a shot
+    # 4K with 11.7 GiB free (22.51 GiB, a card emulated at 24 GB, on the plain attention: the
+    # lean one's 4K floor is 11.64 GiB, so the same boundary sits at 11.7): windows of 5 latents,
+    # every block swapped and the VAE away, for shots of any length, the DiT's phase bounding
+    # the plan (test_a_window_is_all_the_phase_holds_of_a_shot). The draw on the GPU refused a shot
     # of 2,661 latents there, 10,641 frames, naming a cut (until 2026-10-16).
-    free = round(22.51 * GIB)
-    expected = Plan(5, Tiles(1408), Tiles(1088), 36, None, 0, vae_in_dit=False)
+    free = round(11.7 * GIB)
+    expected = Plan(5, Tiles(896), Tiles(640), 36, 0, None, vae_in_dit=False)
     for film in (shots(151), shots(2661), shots(3000, 40), shots(40, 10_000, 5)):
         made, predicted = shot_plan.plan(free, UHD, film, Pins(), None)
         assert bare(made) == expected
@@ -686,7 +699,8 @@ def test_a_long_shot_plans_as_a_short_one() -> None:
         (24, HD, Plan(5, Tiles(1856), Tiles(1088), 0, 1, 0)),
         (32, HD, Plan(5, None, Tiles(1536), 0, 18, 1)),
         (48, HD, Plan(5, resident_decode=21)),
-        (24, UHD, Plan(5, Tiles(1472), Tiles(1088), 36, 0, 0, vae_in_dit=False)),
+        # (11 blocks swapped on the lean attention, 36 on the plain one's.)
+        (24, UHD, Plan(5, Tiles(1472), Tiles(1088), 11, 0, 0, vae_in_dit=False)),
         (96, UHD, Plan(5, None, Tiles(2048))),
     ):
         assert planned(card, target, 20) == planned(card, target, 1000) == plan
@@ -705,6 +719,9 @@ RECIPES = [
 ]
 
 
+# Takes the plain attention's fit: these runs measured the plain attention; the lean fit is held to
+# its own measures (LEAN_WINDOWS, tests/test_peaks.py).
+@pytest.mark.usefixtures("plain_fit")
 @pytest.mark.parametrize(("target", "card", "frames", "swapped", "tiles", "measured"), RECIPES)
 def test_recipes(
     target: tuple[int, int],
@@ -844,6 +861,9 @@ WINDOWED = [
 ]
 
 
+# Takes the plain attention's fit: these runs measured the plain attention; the lean fit is held to
+# its own measures (LEAN_WINDOWS, tests/test_peaks.py).
+@pytest.mark.usefixtures("plain_fit")
 @pytest.mark.parametrize(("card", "latents", "measured"), WINDOWED)
 def test_a_shot_s_windows_peak_as_one_window_shots(
     card: int, latents: int, measured: dict[int, float]
@@ -865,6 +885,9 @@ def test_a_shot_s_windows_peak_as_one_window_shots(
     assert forecast.dit == peaks.dit_peak(OURS_1080, max(measured), 36, vae_in_dit=False)
 
 
+# Takes the plain attention's fit: these runs measured the plain attention; the lean fit is held to
+# its own measures (LEAN_WINDOWS, tests/test_peaks.py).
+@pytest.mark.usefixtures("plain_fit")
 @pytest.mark.parametrize(("target", "free", "frames", "ran", "measured", "again"), MATRIX)
 def test_first_matrix(
     target: tuple[int, int],
@@ -1018,19 +1041,21 @@ def test_window_pin() -> None:
     made, peaks = shot_plan.plan(free, HD, shots(76), Pins(window=20), None)
     assert (made.window, peaks.window) == (20, 17)
     made, peaks = shot_plan.plan(free, HD, shots(76), Pins(window=8), None)
-    assert (made.window, peaks.window, made.swapped) == (8, 8, 7)
-    assert refused(free, HD, shots(76), Pins(window=30), None) == (
-        "--window 30: its longest window, 27 latents, takes 29.17 GiB of free VRAM with every"
+    assert (made.window, peaks.window, made.swapped) == (8, 8, 0)  # 7 swapped before the refit
+    # (Lean attention: 30 latents would plan now, the 24 GB card holding 41 with every block
+    # swapped; the refusal takes a pin of the whole shot, 76, over the 39 that fit.)
+    assert refused(free, HD, shots(76), Pins(window=76), None) == (
+        "--window 76: its longest window, 76 latents, takes 38.79 GiB of free VRAM with every"
         " block of the DiT swapped, and the driver reports 22.57 GiB free: the longest window"
-        " that fits is --window 17"
+        " that fits is --window 39"
     )
-    assert refused(free, HD, shots(76), Pins(window=12, swap_blocks=0), None) == (
-        "--window 12: its longest window, 12 latents, takes 28.46 GiB of free VRAM with"
+    assert refused(free, HD, shots(76), Pins(window=20, swap_blocks=0), None) == (
+        "--window 20: its longest window, 17 latents, takes 24.43 GiB of free VRAM with"
         " --swap-blocks 0, and the driver reports 22.57 GiB free: the longest window that fits is"
-        " --window 6"
+        " --window 13"
     )
-    made, _ = shot_plan.plan(free, HD, shots(76), Pins(window=6, swap_blocks=0), None)
-    assert (made.window, made.swapped, made.vae_in_dit) == (6, 0, False)
+    made, _ = shot_plan.plan(free, HD, shots(76), Pins(window=13, swap_blocks=0), None)
+    assert (made.window, made.swapped, made.vae_in_dit) == (13, 0, False)
 
 
 def test_swap_pin() -> None:
@@ -1039,24 +1064,31 @@ def test_swap_pin() -> None:
     # window; and above the DiT's 36.
     free = our_free(24)
     made, peaks = shot_plan.plan(free, HD, shots(76), Pins(swap_blocks=36), None)
-    assert (made.window, peaks.window, made.swapped, made.vae_in_dit) == (17, 17, 36, True)
+    assert (made.window, peaks.window, made.swapped, made.vae_in_dit) == (
+        39,
+        39,
+        36,
+        True,
+    )  # 17 on the plain attention
     made, peaks = shot_plan.plan(free, HD, shots(76), Pins(swap_blocks=0), None)
-    assert (made.window, peaks.window, made.swapped, made.vae_in_dit) == (6, 6, 0, False)
+    assert (made.window, peaks.window, made.swapped, made.vae_in_dit) == (13, 13, 0, False)  # 6
     # One and two swapped blocks save nothing, and are taken as pinned.
     made, _ = shot_plan.plan(free, HD, shots(76), Pins(swap_blocks=2), None)
-    assert (made.window, made.swapped) == (6, 2)
-    free = our_free(32)
+    assert (made.window, made.swapped) == (13, 2)  # 6 on the plain attention
+    # (The 24 GB card at 4K, where the 32 GB one was: on the lean attention 5 latents with no
+    # block swapped take 25.98 GiB, which 32 GB holds; 36.74 GiB and 17 blocks before the refit.)
+    free = our_free(24)
     assert refused(free, UHD, shots(40), Pins(swap_blocks=0), None) == (
-        "--swap-blocks 0: a window of 5 latents, the shortest this job can run, takes 36.74 GiB of"
-        " free VRAM with 0 blocks swapped, and the driver reports 30.57 GiB free: the fewest"
-        " blocks that hold it are --swap-blocks 17"
+        "--swap-blocks 0: a window of 5 latents, the shortest this job can run, takes 25.98 GiB of"
+        " free VRAM with 0 blocks swapped, and the driver reports 22.57 GiB free: the fewest"
+        " blocks that hold it are --swap-blocks 11"
     )
-    made, _ = shot_plan.plan(free, UHD, shots(40), Pins(swap_blocks=17), None)
-    assert (made.window, made.swapped, made.vae_in_dit) == (5, 17, False)
+    made, _ = shot_plan.plan(free, UHD, shots(40), Pins(swap_blocks=11), None)
+    assert (made.window, made.swapped, made.vae_in_dit) == (5, 11, False)
     assert refused(free, UHD, shots(40), Pins(window=6, swap_blocks=0), None) == (
-        "--swap-blocks 0: a window of 6 latents, --window 6's longest, takes 41.00 GiB of free"
-        " VRAM with 0 blocks swapped, and the driver reports 30.57 GiB free: the fewest blocks"
-        " that hold it are --swap-blocks 27"
+        "--swap-blocks 0: a window of 6 latents, --window 6's longest, takes 28.00 GiB of free"
+        " VRAM with 0 blocks swapped, and the driver reports 22.57 GiB free: the fewest blocks"
+        " that hold it are --swap-blocks 15"
     )
     assert refused(free, UHD, shots(40), Pins(swap_blocks=37), None) == (
         "--swap-blocks 37: the DiT has 36 blocks, so from 0 to 36"
@@ -1066,57 +1098,58 @@ def test_swap_pin() -> None:
 def test_floor() -> None:
     # A size that doesn't fit is refused, never degraded, the refusal counting in free VRAM:
     # what the size takes, what the driver reports free, and the largest output that fits there
-    # (DESIGN.md, Memory planner). At 4K the smallest window, 5 latents, takes 22.40 GiB of free
-    # VRAM by the model, every block swapped and the VAE away: a peak of 21.80 GiB and the margin
-    # (DESIGN.md: "At 4K the smallest window takes 22.40 GiB of free VRAM"). Whatever the shot's
-    # length: nothing of a longer shot is on the GPU beside a window, its noise drawn in system
-    # memory.
-    assert refused(numz_free(16), UHD, shots(5), Pins(), None).startswith(
-        "an output of 3840x2160 takes 22.40 GiB of free VRAM (its smallest window, 5 latents, with"
-        " every block of the DiT swapped and the VAE off the GPU: a peak of 21.80 GiB, and 0.60 of"
-        " margin), and the driver reports 14.56 GiB free: the largest output that fits there is"
+    # (DESIGN.md, Memory planner). At 4K the smallest window, 5 latents, takes 11.64 GiB of free
+    # VRAM by the model on the lean attention, every block swapped and the VAE away: a peak of
+    # 11.04 GiB and the margin (11.64 GiB, a peak of 21.80, on the plain attention's fit that
+    # DESIGN.md's "At 4K the smallest window takes 11.64 GiB of free VRAM" gave). Whatever the
+    # shot's length: nothing of a longer shot is on the GPU beside a window, its noise drawn in
+    # system memory. The cards below are the 12 GB that is short of it, and the 14 GB that holds
+    # it (the 16 GB and the 24 GB of the plain fit).
+    assert refused(numz_free(12), UHD, shots(5), Pins(), None).startswith(
+        "an output of 3840x2160 takes 11.64 GiB of free VRAM (its smallest window, 5 latents, with"
+        " every block of the DiT swapped and the VAE off the GPU: a peak of 11.04 GiB, and 0.60 of"
+        " margin), and the driver reports 10.56 GiB free: the largest output that fits there is"
     )
-    assert refused(numz_free(16), UHD, shots(40), Pins(), None) == (
-        "an output of 3840x2160 takes 22.40 GiB of free VRAM (its smallest window, 5 latents, with"
-        " every block of the DiT swapped and the VAE off the GPU: a peak of 21.80 GiB, and 0.60 of"
-        " margin), and the driver reports 14.56 GiB free: the largest output that fits there is"
-        " --resolution 1680, about 2986x1680"
+    assert refused(numz_free(12), UHD, shots(40), Pins(), None) == (
+        "an output of 3840x2160 takes 11.64 GiB of free VRAM (its smallest window, 5 latents, with"
+        " every block of the DiT swapped and the VAE off the GPU: a peak of 11.04 GiB, and 0.60 of"
+        " margin), and the driver reports 10.56 GiB free: the largest output that fits there is"
+        " --resolution 2016, about 3584x2016"
     )
     # The pins change nothing to it.
     pins = Pins(window=5, swap_blocks=36, decode_tile=512)
-    assert refused(numz_free(16), UHD, shots(40), pins, None).startswith("an output of 3840x2160")
-    # The same floor for a shot of 5 latents, of 40 and of 1,000, 3,997 frames: 22.40 GiB of
+    assert refused(numz_free(12), UHD, shots(40), pins, None).startswith("an output of 3840x2160")
+    # The same floor for a shot of 5 latents, of 40 and of 1,000, 3,997 frames: 11.64 GiB of
     # free VRAM plans, in windows of 5 latents, which bound the plan, and 0.01 GiB less is
     # refused, the next size down fitting.
     for latents in (5, 40, 1000):
-        made, predicted = shot_plan.plan(round(22.40 * GIB), UHD, shots(latents), Pins(), None)
+        made, predicted = shot_plan.plan(round(11.64 * GIB), UHD, shots(latents), Pins(), None)
         assert (made.window, made.swapped, made.vae_in_dit) == (5, 36, False)
         assert predicted.dit == peaks.dit_peak(OURS_4K, 5, 36, vae_in_dit=False)
-        assert round(predicted.dit / GIB, 2) == 21.79 and predicted.bound == "dit"
-        assert refused(round(22.39 * GIB), UHD, shots(latents), Pins(), None) == (
-            "an output of 3840x2160 takes 22.40 GiB of free VRAM (its smallest window, 5 latents,"
-            " with every block of the DiT swapped and the VAE off the GPU: a peak of 21.80 GiB,"
-            " and 0.60 of margin), and the driver reports 22.39 GiB free: the largest output that"
+        assert round(predicted.dit / GIB, 2) == 11.03 and predicted.bound == "dit"
+        assert refused(round(11.63 * GIB), UHD, shots(latents), Pins(), None) == (
+            "an output of 3840x2160 takes 11.64 GiB of free VRAM (its smallest window, 5 latents,"
+            " with every block of the DiT swapped and the VAE off the GPU: a peak of 11.04 GiB,"
+            " and 0.60 of margin), and the driver reports 11.63 GiB free: the largest output that"
             " fits there is --resolution 2144, about 3810x2144"
         )
-    made, _ = shot_plan.plan(round(22.39 * GIB), (2144, 3811), shots(1000), Pins(), None)
+    made, _ = shot_plan.plan(round(11.63 * GIB), (2144, 3811), shots(1000), Pins(), None)
     assert made.window == 5
-    # An emulated 24 GB card has that, by 0.16 GiB (22.56 GiB free; 22.57 by seedvr2x's own
+    # An emulated 14 GB card has that, by 0.92 GiB (12.56 GiB free; 12.57 by seedvr2x's own
     # reading): 4K runs there in windows of 5 latents, a shot of 22 latents, 85 frames, as one
-    # of 40 or of 1,000, in tiles of 1472 and 1088 px, the DiT away (1408 px with the DiT's slots
-    # beside the encode's, with 1.5 GiB of room).
-    for free in (numz_free(24), our_free(24)):
+    # of 40 or of 1,000, in tiles of 896 and 704 px, 34 blocks swapped, the DiT away.
+    for free in (numz_free(14), our_free(14)):
         for latents in (22, 40, 1000):
             made, predicted = shot_plan.plan(free, UHD, shots(latents), Pins(), None)
-            assert bare(made) == Plan(5, Tiles(1472), Tiles(1088), 36, 0, 0, vae_in_dit=False)
-            assert predicted.dit == peaks.dit_peak(OURS_4K, 5, 36, vae_in_dit=False)
-    # A job whose shots are all shorter runs its longest shot's length: 3 latents on 16 GB, in
+            assert bare(made) == Plan(5, Tiles(896), Tiles(704), 34, 2, 0, vae_in_dit=False)
+            assert predicted.dit == peaks.dit_peak(OURS_4K, 5, 34, vae_in_dit=False)
+    # A job whose shots are all shorter runs its longest shot's length: 3 latents on 12 GB, in
     # the largest tiles that then fit, the DiT's slots beside the encode's and the decode's.
-    made, _ = shot_plan.plan(numz_free(16), UHD, shots(3, 2), Pins(), None)
-    assert bare(made) == Plan(3, Tiles(1024), Tiles(768), 36, None, None, vae_in_dit=False)
+    made, _ = shot_plan.plan(numz_free(12), UHD, shots(3, 2), Pins(), None)
+    assert bare(made) == Plan(3, Tiles(768), Tiles(640), 30, 1, 0, vae_in_dit=False)
     # A portrait target is scaled by its short side too, the output said width x height.
-    assert refused(numz_free(16), (3840, 2160), shots(40), Pins(), None).endswith(
-        "the largest output that fits there is --resolution 1696, about 1696x3014"
+    assert refused(numz_free(12), (3840, 2160), shots(40), Pins(), None).endswith(
+        "the largest output that fits there is --resolution 2048, about 2048x3640"
     )
     # At 1080p the floor is the VAE's, its decode in 512-px tiles with the DiT away and the room
     # a VAE pass is held to: 8.27 GiB of free VRAM (8.52 with 1.5 GiB of room, which DESIGN.md
@@ -1130,11 +1163,12 @@ def test_floor() -> None:
         " --resolution 288, about 512x288"
     )
     made, _ = shot_plan.plan(round(8.6 * GIB), HD, shots(40), Pins(), None)
-    assert bare(made) == Plan(6, Tiles(640), Tiles(512), 35, 1, 0, vae_in_dit=False)
+    # (Windows of 12 latents now, 6 on the plain attention; blocks swapped 34 for 35 there.)
+    assert bare(made) == Plan(12, Tiles(640), Tiles(512), 34, 1, 0, vae_in_dit=False)
     made, _ = shot_plan.plan(round(8.52 * GIB), HD, shots(40), Pins(), None)
-    assert bare(made) == Plan(6, Tiles(640), Tiles(512), 35, 1, 0, vae_in_dit=False)
+    assert bare(made) == Plan(12, Tiles(640), Tiles(512), 35, 1, 0, vae_in_dit=False)
     made, _ = shot_plan.plan(round(8.27 * GIB), HD, shots(40), Pins(), None)
-    assert bare(made) == Plan(6, Tiles(640), Tiles(512), 36, 0, 0, vae_in_dit=False)
+    assert bare(made) == Plan(12, Tiles(640), Tiles(512), 35, 0, 0, vae_in_dit=False)
     assert refused(round(8.26 * GIB), HD, shots(40), Pins(), None).endswith(
         "and the driver reports 8.26 GiB free: the largest output that fits there is"
         " --resolution 464, about 824x464"
@@ -1145,16 +1179,16 @@ def test_floor() -> None:
     # Neither floor rises with the longest shot, no pass keeping anything of it on the GPU, its
     # noise drawn in system memory; nor the VAE's with the frame, while a tile of 512 px is
     # whole in it: 8.27 GiB at 1080p for a shot of 6 latents as for one of 1,000 or 20,000, and
-    # at 540p. At 4K, where the DiT's smallest window is the floor, 22.40 for a shot of 5
-    # latents as for one of 1,000 or 20,000.
+    # at 540p. At 4K, where the DiT's smallest window is the floor, 11.64 (22.40 plain) for a
+    # shot of 5 latents as for one of 1,000 or 20,000.
     for target, latents, said in (
         (HD, 6, "an output of 1920x1080 takes 8.27 GiB of free VRAM (its decode in tiles"),
         (HD, 1000, "an output of 1920x1080 takes 8.27 GiB of free VRAM (its decode in tiles"),
         ((540, 960), 1000, "an output of 960x540 takes 8.27 GiB of free VRAM (its decode in"),
-        (UHD, 5, "an output of 3840x2160 takes 22.40 GiB of free VRAM (its smallest window"),
-        (UHD, 1000, "an output of 3840x2160 takes 22.40 GiB of free VRAM (its smallest window"),
+        (UHD, 5, "an output of 3840x2160 takes 11.64 GiB of free VRAM (its smallest window"),
+        (UHD, 1000, "an output of 3840x2160 takes 11.64 GiB of free VRAM (its smallest window"),
         (HD, 20_000, "an output of 1920x1080 takes 8.27 GiB of free VRAM (its decode in tiles"),
-        (UHD, 20_000, "an output of 3840x2160 takes 22.40 GiB of free VRAM (its smallest window"),
+        (UHD, 20_000, "an output of 3840x2160 takes 11.64 GiB of free VRAM (its smallest window"),
     ):
         assert refused(4 * GIB, target, shots(latents), Pins(), None).startswith(said)
     # The 8.27 GiB hold to a shot of 20,000 latents, 79,997 frames, where the noise drawn on the
@@ -1162,7 +1196,8 @@ def test_floor() -> None:
     # 2026-10-16).
     for latents in (3476, 3477, 20_000):
         made, _ = shot_plan.plan(round(8.27 * GIB), HD, shots(latents), Pins(), None)
-        assert bare(made) == Plan(6, Tiles(640), Tiles(512), 36, 0, 0, vae_in_dit=False)
+        # (13 latents, every block swapped: the shots of this length split into windows of 13.)
+        assert bare(made) == Plan(13, Tiles(640), Tiles(512), 36, 0, 0, vae_in_dit=False)
     # The same pass bounds a smaller frame: 512x512, padded to 544x512, from 8.52 GiB free. Its
     # untiled decode takes more, 6.47 GiB against the tile's 6.41, and is no floor: pinned, it
     # is refused under 8.32 GiB free, naming the tile.
@@ -1226,7 +1261,8 @@ def test_floor() -> None:
         " margin), and the driver reports 8.15 GiB free: the largest output that fits there is"
         " --resolution 448, about 794x448"
     )
-    assert shot_plan.plan(round(8.15 * GIB), (448, 796), shots(40), Pins(), None)[0].window == 21
+    # (The whole shot of 40 latents in one window on the lean attention; 21 on the plain one's.)
+    assert shot_plan.plan(round(8.15 * GIB), (448, 796), shots(40), Pins(), None)[0].window == 40
     assert refused(round(7.85 * GIB), (448, 796), shots(40), Pins(), None).startswith(
         "an output of 796x448 takes 8.11 GiB of free VRAM (its decode in tiles of 512 px, with"
     )
@@ -1528,31 +1564,31 @@ def test_the_vae_kept_first_costs_no_window() -> None:
         ends = [sum(frames[: index + 1]) for index in range(len(frames))]
         return [Shot(end - count, end) for end, count in zip(ends, frames, strict=True)]
 
-    # 4K, shots of 23, 24, 150 and 600 frames, 63.0 GiB free, 11.22 GiB of system memory:
-    # windows of 12 latents were taken, the VAE kept; 13 run with it away, nothing of the DiT
-    # leaving the GPU in the VAE's phases, its 16 swapped blocks and the VAE pinned.
-    made, peaks = shot_plan.plan(
-        67_645_735_689, UHD, film(23, 24, 150, 600), Pins(), 12_050_198_642
-    )
-    assert (made.window, made.swapped, made.vae_in_dit) == (13, 16, False)
-    assert (made.encode_tiles, made.decode_tiles) == (Tiles(2048), Tiles(1792))
+    # 4K, shots of 23, 24, 150 and 600 frames, 60.0 GiB free, 13.5 GiB of system memory (63.0 GiB
+    # and 11.22 before the lean attention's refit, which gave windows of 12 with the VAE kept and
+    # 13 with it away; the inputs are found again by a sweep of the planner's, where the plan is
+    # of the same kind): windows of 27 latents run with the VAE away, nothing of the DiT
+    # leaving the GPU in the VAE's phases, its 22 swapped blocks and the VAE pinned.
+    made, peaks = shot_plan.plan(60 * GIB, UHD, film(23, 24, 150, 600), Pins(), round(13.5 * GIB))
+    assert (made.window, made.swapped, made.vae_in_dit) == (27, 22, False)
+    assert (made.encode_tiles, made.decode_tiles) == (Tiles(2048), Tiles(1792))  # as before
     assert (made.resident_encode, made.resident_decode) == (None, None)
-    assert peaks.shrunk == shot_plan.Shrunk(Tiles(2048), Tiles(1920), 1473, 1122)
-    # 5K, a shot of 149 frames, split, 14.32 GiB: refused with 43.0 GiB free; windows of 5 run.
+    assert peaks.shrunk == shot_plan.Shrunk(Tiles(2048), Tiles(1920), 1766, 1350)
+    # 5K, a shot of 149 frames, split, 18.375 GiB (14.32 GiB and 43.0 GiB free before the refit,
+    # the lean attention running longer windows there; found again by a sweep): windows of 5 run,
+    # the smallest.
     made, peaks = shot_plan.plan(
-        46_170_899_209, (2880, 5120), film(149), Pins(), 15_379_895_297, split=True
+        20 * GIB, (2880, 5120), film(149), Pins(), round(18.375 * GIB), split=True
     )
-    assert (made.window, made.swapped, made.vae_in_dit) == (5, 25, False)
-    assert (made.encode_tiles, made.decode_tiles) == (Tiles(1984), Tiles(1472))
-    assert peaks.shrunk == shot_plan.Shrunk(Tiles(2048), Tiles(1600), 1836, 1432)
+    assert (made.window, made.swapped, made.vae_in_dit) == (5, 35, False)
+    assert (made.encode_tiles, made.decode_tiles) == (Tiles(1280), Tiles(960))
+    assert peaks.shrunk == shot_plan.Shrunk(Tiles(1344), Tiles(1024), 1893, 1837)
     # A byte under what that plan takes but its scratch, no window's plan fits, 5 latents being
     # the smallest: the refusal says the least any tiles take there, the VAE away, its 25
-    # swapped blocks and the VAE's weights pinned, where the VAE kept pins 27 blocks.
+    # swapped blocks and the VAE's weights pinned, where the VAE kept pins more blocks.
     least = peaks.host - made.scratch_allowance
-    assert refused(
-        46_170_899_209, (2880, 5120), film(149), Pins(), least - 1, split=True
-    ).startswith(
-        "the plan takes 14.14 GiB of system memory (2.40 for the process, 11.02 pinned for 25"
+    assert refused(20 * GIB, (2880, 5120), film(149), Pins(), least - 1, split=True).startswith(
+        "the plan takes 18.36 GiB of system memory (2.40 for the process, 15.24 pinned for 35"
         " blocks and the VAE's weights that leave the GPU, 0.72 for the longest shot"
     )
     # Where neither fits, the figures said are of the plan that takes the least, the VAE kept
@@ -1560,15 +1596,17 @@ def test_the_vae_kept_first_costs_no_window() -> None:
     # card's window, 35 latents, the VAE kept (35 blocks swapped, the one unswapped block kept
     # in the decode, nothing more to keep) takes 17.30 GiB, and the VAE away with the decode's
     # tiles shrunk from 1216 to 1152 px 17.35: the plan's line says the 17.30, windows of 29
-    # taken.
-    made, peaks = shot_plan.plan(19 * GIB, (720, 1280), shots(12, 133), Pins(), round(16.5 * GIB))
-    assert made.window == 29 and peaks.shortened == shot_plan.Shortened(35, 1730, 1650)
+    # taken. (On the lean attention, which runs longer windows: the card's window 68 latents, the
+    # VAE kept taking 16.05 GiB where 12.0 are available, windows of 46 taken; the host is 12.0
+    # GiB, not 16.5.)
+    made, peaks = shot_plan.plan(19 * GIB, (720, 1280), shots(12, 133), Pins(), round(12.0 * GIB))
+    assert made.window == 46 and peaks.shortened == shot_plan.Shortened(68, 1605, 1200)
     # Where the VAE kept and the tiles shrunk fit, that is the plan, as before: the grid's job
     # whose window fell (test_on_a_short_host_the_tiles_shrink_before_the_window).
     made, _ = shot_plan.plan(
         48_855_253_769, (1440, 2560), shots(5, 39), Pins(), 18_616_624_832, split=True
     )
-    assert (made.window, made.swapped, made.vae_in_dit) == (21, 24, True)
+    assert (made.window, made.swapped, made.vae_in_dit) == (39, 14, True)  # 21 and 24 before
 
 
 def test_the_tiles_shrunk_for_the_host_are_the_largest_that_fit_it() -> None:
@@ -1630,29 +1668,32 @@ def test_the_host_s_window_is_searched_from_the_next_one_down_to_the_smallest() 
     # (shot_plan._window_that_runs), each by a job a brute force over the planner found (a
     # review, 2026-10-12): the grid above has none at either end.
     # The first window under the card's own. 4K, shots of 63, 60, 89 and 53 latents, 80 GiB
-    # free, --decode-tile 1280 and 17.33 GiB of system memory: the card alone holds windows of
-    # 19, whose plan pins 35 blocks, 17.93 GiB; windows of 18 plan there and are taken, not
-    # those of 17, which plan too.
-    film, pins, host = shots(63, 60, 89, 53), Pins(decode_tile=1280), round(17.33 * GIB)
-    alone, _ = shot_plan.plan(80 * GIB, UHD, film, pins, None)
-    made, predicted = shot_plan.plan(80 * GIB, UHD, film, pins, host)
+    # free (80 GiB and 17.33 GiB of system memory before the lean attention's refit, which gave
+    # the same windows, 19 and 18, there; the inputs are found again by a sweep), --decode-tile
+    # 1280 and, with 40 GiB free, 17.0 GiB of system memory: the card alone holds windows of 19,
+    # whose plan pins 30 blocks, 17.55 GiB; windows of 18 plan there and are taken, not those of
+    # 17, which plan too.
+    film, pins, host = shots(63, 60, 89, 53), Pins(decode_tile=1280), round(17.0 * GIB)
+    alone, _ = shot_plan.plan(40 * GIB, UHD, film, pins, None)
+    made, predicted = shot_plan.plan(40 * GIB, UHD, film, pins, host)
     assert (alone.window, made.window) == (19, 18)
-    assert predicted.shortened == shot_plan.Shortened(19, 1793, 1733)
-    assert shot_plan.plan(80 * GIB, UHD, film, replace(pins, window=17), host)[0].window == 17
-    assert "of system memory" in refused(80 * GIB, UHD, film, replace(pins, window=19), host)
-    # The smallest window the job can run. 1080p, a shot of 45 latents, a run held to its card
-    # that counts on 8 GiB, under SDPA, 18 GiB of system memory: the card alone holds windows
-    # of 6, every part of the weights pinned, 18.32 GiB; windows of 5, the smallest, plan, with
-    # the VAE's weights kept on the GPU, and are taken, where the job was refused had the
+    assert predicted.shortened == shot_plan.Shortened(19, 1755, 1700)
+    assert shot_plan.plan(40 * GIB, UHD, film, replace(pins, window=17), host)[0].window == 17
+    assert "of system memory" in refused(40 * GIB, UHD, film, replace(pins, window=19), host)
+    # The smallest window the job can run. 4K (1080p before the refit: on the lean attention its
+    # shot of 45 latents never comes down to 5), a shot of 45 latents, a run held to its card
+    # that counts on 13.125 GiB (8), under SDPA, 18 GiB of system memory: the card alone holds
+    # windows of 6, every part of the weights pinned, 18.66 GiB; windows of 5, the smallest, plan,
+    # with the VAE's weights kept on the GPU, and are taken, where the job was refused had the
     # search stopped a window short. The reading is the plan's last resort already (tight), so
     # that what is refused is this plan's, not tried again with the reserve of 2.5 GiB
     # (test_a_held_plan_refused_takes_the_reserve_of_2_5).
-    held = Reading(13 * GIB, None, 8 * GIB, True, round(0.5 * GIB), tight=True)
-    job = (held, HD, shots(45))
+    held = Reading(13 * GIB, None, round(13.125 * GIB), True, round(0.5 * GIB), tight=True)
+    job = (held, UHD, shots(45))
     alone, _ = shot_plan.plan(*job, Pins(), None, attention=peaks.SDPA)
     made, predicted = shot_plan.plan(*job, Pins(), 18 * GIB, attention=peaks.SDPA)
     assert (alone.window, made.window, made.vae_in_dit) == (6, 5, True)
-    assert predicted.shortened == shot_plan.Shortened(6, 1832, 1800)
+    assert predicted.shortened == shot_plan.Shortened(6, 1866, 1800)
     assert "of system memory" in refused(*job, Pins(window=6), 18 * GIB, attention=peaks.SDPA)
 
 
@@ -1716,13 +1757,14 @@ def test_host_moments() -> None:
 
 
 def test_a_long_shot_the_host_cannot_hold() -> None:
-    # A job whose longest shot fits the GPU and not the host: 4K on a 24 GB card, a shot of
+    # A job whose longest shot fits the GPU and not the host: 4K on a card with 11.7 GiB free (the
+    # lean attention's 4K floor is 11.64; the plain one's 24 GB card), a shot of
     # 3,997 frames, 1,000 latents, in windows of 5, the shortest: no shorter window to take.
     # Every part of the weights is pinned, 15.81 GiB, and the shot holds 10.47 GiB as its decode
     # merges its 333 windows: 28.68 GiB with the process, refused on a host with 28 GiB
     # available, naming each part. (14.36 GiB and 32.57 until 2026-10-12, the shot made anew at
     # each join.)
-    free, film = our_free(24), shots(1000)
+    free, film = round(11.7 * GIB), shots(1000)
     pinned = 36 * paged(BLOCK) + paged(peaks.DIT_OTHER) + paged(peaks.VAE_WEIGHTS)
     held = 2670 * 4_208_640
     assert refused(free, UHD, film, Pins(), 28 * GIB) == (
@@ -1737,7 +1779,7 @@ def test_a_long_shot_the_host_cannot_hold() -> None:
     least = shot_plan.HOST_RESIDENT + pinned + held
     made, predicted = shot_plan.plan(free, UHD, film, Pins(), least)
     assert (made.window, made.scratch_allowance, predicted.host) == (5, 0, least)
-    assert (made.encode_tiles, made.decode_tiles) == (Tiles(1472), Tiles(1088))
+    assert (made.encode_tiles, made.decode_tiles) == (Tiles(896), Tiles(640))
     assert refused(free, UHD, film, Pins(), least - 1).startswith("the plan takes 28.68 GiB of")
     # The fit of a plan from elsewhere counts the shot too (fits).
     short = fits(made, free, UHD, film, least - 1)
@@ -1817,28 +1859,31 @@ def test_resumed_around_the_recorded_shape() -> None:
     # A resume takes the recorded shape, cap, tiles and compile flags, as it is, and plans where
     # the weights are again from the memory free that day (DESIGN.md, Memory planner, A plan
     # shapes the output a little): with more, fewer blocks swapped; with less, more.
-    recorded = Plan(17, Tiles(1856), Tiles(1088), 28, 1, 0, vae_in_dit=False)
+    # (Windows of 39 latents, 32 blocks swapped on the lean attention; 17 and 28 on the plain
+    # one's.)
+    recorded = Plan(39, Tiles(1856), Tiles(1088), 32, 1, 0, vae_in_dit=False)
     job = (HD, shots(76), Pins(), None)
-    shape = Plan(17, Tiles(1856), Tiles(1088))
+    shape = Plan(39, Tiles(1856), Tiles(1088))
     assert bare(shot_plan.plan(our_free(24), *job)[0]) == recorded
     assert bare(shot_plan.plan(our_free(24), *job, recorded=shape)[0]) == recorded
     made, peaks = shot_plan.plan(our_free(48), *job, recorded=recorded)
     assert bare(made) == shape
-    assert (peaks.window, peaks.free, peaks.bound) == (17, our_free(48), "decode")
-    # Planned whole, that card has no tiles and two windows of 39 latents: the shape is the
-    # record's.
+    assert (peaks.window, peaks.free, peaks.bound) == (39, our_free(48), "decode")
+    # Planned whole, that card has no tiles and one window of the shot's 76 latents (two windows
+    # of 39 and no tiles on the plain attention's figures): the shape is the record's.
     whole, peaks = shot_plan.plan(our_free(48), *job)
-    assert whole == Plan(39, swapped=24, vae_in_dit=False) and peaks.window == 39
+    assert whole == Plan(76, swapped=18, vae_in_dit=False) and peaks.window == 76
     # A cap recorded above the windows it lays out, as a pinned one is, stays as recorded.
-    made, peaks = shot_plan.plan(our_free(24), *job, recorded=replace(shape, window=20))
-    assert bare(made) == replace(recorded, window=20) and peaks.window == 17
+    made, peaks = shot_plan.plan(our_free(24), *job, recorded=replace(shape, window=42))
+    assert bare(made) == replace(recorded, window=42) and peaks.window == 39
     # A shape recorded with smaller tiles, which leave room, nothing then moving for the encode:
-    # with 0.58 GiB less, two more blocks swapped, and one fewer left in the decode.
-    smaller = Plan(17, Tiles(1088), Tiles(1024))
+    # with 0.58 GiB less, two more blocks swapped (nothing left in either pass: 28 and 30 swapped
+    # with 6 and 4 blocks left in the decode on the plain attention's figures).
+    smaller = Plan(39, Tiles(1088), Tiles(1024))
     made, _ = shot_plan.plan(our_free(24), *job, recorded=smaller)
-    assert bare(made) == Plan(17, Tiles(1088), Tiles(1024), 28, None, 6, vae_in_dit=False)
+    assert bare(made) == Plan(39, Tiles(1088), Tiles(1024), 32, None, None, vae_in_dit=False)
     made, _ = shot_plan.plan(round(21.99 * GIB), *job, recorded=smaller)
-    assert bare(made) == Plan(17, Tiles(1088), Tiles(1024), 30, None, 4, vae_in_dit=False)
+    assert bare(made) == Plan(39, Tiles(1088), Tiles(1024), 34, None, None, vae_in_dit=False)
     # The recorded tiles themselves take 22.03 GiB of free VRAM with the DiT away, their room
     # counted (the decode's; the encode's take 21.83, where 1.5 GiB of room made them the
     # larger, 22.08), whatever the shot's length: with less, the shape no longer fits.
@@ -1860,35 +1905,36 @@ def test_resumed_around_the_recorded_shape() -> None:
     )
     # A pass recorded is held to its room as one planned is: on 24 GB at 1080p an untiled
     # encode's peak fits with the DiT away, and the shape doesn't.
-    assert refused(our_free(24), *job, recorded=Plan(17, None, Tiles(1088))) == (
+    assert refused(our_free(24), *job, recorded=Plan(39, None, Tiles(1088))) == (
         "the recorded plan no longer fits the memory free now: the encode, untiled, with the"
         " DiT off the GPU, takes 22.63 GiB of free VRAM, 1.25 of them the room a VAE pass is held"
         " to, and the driver reports 22.57 GiB free, 0.06 GiB short"
     )
-    tiled = Plan(20, Tiles(768), Tiles(640))
+    # (A recorded window of 40, laid out as 39: 20 latents fit 16 GB now, where 17 did not.)
+    tiled = Plan(40, Tiles(768), Tiles(640))
     assert refused(our_free(16), *job, recorded=tiled) == (
-        "the recorded plan no longer fits the memory free now: the DiT's phase, a window of 17"
-        " latents with 36 blocks swapped and the VAE off the GPU, takes 19.05 GiB of free VRAM and"
-        " the driver reports 14.57 GiB free, 4.48 GiB short"
+        "the recorded plan no longer fits the memory free now: the DiT's phase, a window of 39"
+        " latents with 36 blocks swapped and the VAE off the GPU, takes 20.78 GiB of free VRAM and"
+        " the driver reports 14.57 GiB free, 6.21 GiB short"
     )
     assert refused(our_free(24), HD, shots(76), Pins(), 8 * GIB, recorded=recorded) == (
-        "the recorded plan no longer fits the memory free now: the plan takes 17.92 GiB of system"
+        "the recorded plan no longer fits the memory free now: the plan takes 17.94 GiB of system"
         " memory (2.40 for the process, 15.35 pinned for 36 blocks and the DiT's other parameters"
-        " that leave the GPU, 0.17 for the longest shot, 301 frames (76 latents), at its longest"
+        " that leave the GPU, 0.19 for the longest shot, 301 frames (76 latents), at its longest"
         " window, its latent and its noise beside the window's output) and 8.00 GiB are"
-        " available, 9.92 GiB short"
+        " available, 9.94 GiB short"
     )
     # --swap-blocks still applies, taken exactly; where it alone doesn't hold the recorded
     # windows, it is the pin that is refused.
     made, _ = shot_plan.plan(
         our_free(24), HD, shots(76), Pins(swap_blocks=36), None, recorded=tiled
     )
-    assert bare(made) == Plan(20, Tiles(768), Tiles(640), 36)
+    assert bare(made) == Plan(40, Tiles(768), Tiles(640), 36)
     pins = Pins(swap_blocks=3)
     assert refused(our_free(24), HD, shots(76), pins, None, recorded=recorded) == (
-        "--swap-blocks 3: a window of 17 latents, the recorded plan's, takes 32.98 GiB of free"
+        "--swap-blocks 3: a window of 39 latents, the recorded plan's, takes 34.70 GiB of free"
         " VRAM with 3 blocks swapped, and the driver reports 22.57 GiB free: the fewest blocks"
-        " that hold it are --swap-blocks 28"
+        " that hold it are --swap-blocks 32"
     )
     # The other pins were the record's when it was made: the shape is taken from it alone.
     pins = Pins(window=5, encode_tile=512, decode_tile=512)
@@ -1924,9 +1970,12 @@ def test_fits() -> None:
         " them the room a VAE pass is held to, and the driver reports 22.57 GiB free, 14.74 GiB"
         " short"
     )
-    assert fits(replace(away, swapped=3), free, *job) == (
-        "the DiT's phase, a window of 12 latents with 3 blocks swapped and the VAE off the GPU,"
-        " takes 28.04 GiB of free VRAM and the driver reports 22.57 GiB free, 5.47 GiB short"
+    # (The DiT's phase needs a longer window to fall short on the lean attention: 12 latents with
+    # 3 blocks swapped fit, the sentence's 28.04 GiB and 5.47 short being the plain one's; 24
+    # latents take 27.42.)
+    assert fits(replace(away, window=24, swapped=3), free, HD, shots(24), None) == (
+        "the DiT's phase, a window of 24 latents with 3 blocks swapped and the VAE off the GPU,"
+        " takes 27.42 GiB of free VRAM and the driver reports 22.57 GiB free, 4.85 GiB short"
     )
     tiled = replace(away, decode_tiles=Tiles(1088))
     assert fits(tiled, free, *job) is None
@@ -1988,28 +2037,29 @@ def test_a_resume_names_the_pin_s_part_of_its_shortfall() -> None:
     # blocks: the pin can't be refused for another count, as it is where one holds the shape
     # (test_resumed_around_the_recorded_shape), and the DiT's phase is counted with the blocks
     # it pins. The refusal says which part of the shortfall is the pin's, and what the shape is
-    # short of with every block swapped and the VAE away: a window of 21 latents at 1080p with
-    # 22 GiB free, 1.07 GiB short, and 15.41 with --swap-blocks 0.
-    recorded = Plan(21, Tiles(512), Tiles(512))
-    free, job = 22 * GIB, (HD, shots(40))
-    start = "the recorded plan no longer fits the memory free now: the DiT's phase, a window of 21"
+    # short of with every block swapped and the VAE away: a window of 44 latents at 1080p with
+    # 22 GiB free, 1.20 GiB short, and 15.54 with --swap-blocks 0 (21 latents, 1.07 and 15.41 on
+    # the plain attention's figures; the shot is of 44 latents, one window).
+    recorded = Plan(44, Tiles(512), Tiles(512))
+    free, job = 22 * GIB, (HD, shots(44))
+    start = "the recorded plan no longer fits the memory free now: the DiT's phase, a window of 44"
     shape = (
-        f"{start} latents with 36 blocks swapped and the VAE off the GPU, takes 23.07 GiB of free"
-        " VRAM and the driver reports 22.00 GiB free, 1.07 GiB short"
+        f"{start} latents with 36 blocks swapped and the VAE off the GPU, takes 23.20 GiB of free"
+        " VRAM and the driver reports 22.00 GiB free, 1.20 GiB short"
     )
     assert refused(free, *job, Pins(), None, recorded=recorded) == shape
     assert refused(free, *job, Pins(swap_blocks=36), None, recorded=recorded) == shape
     assert refused(free, *job, Pins(swap_blocks=0), None, recorded=recorded) == (
-        f"{start} latents with 0 blocks swapped and the VAE off the GPU, takes 37.41 GiB of free"
-        " VRAM and the driver reports 22.00 GiB free, 15.41 GiB short, 14.34 GiB of them"
+        f"{start} latents with 0 blocks swapped and the VAE off the GPU, takes 37.54 GiB of free"
+        " VRAM and the driver reports 22.00 GiB free, 15.54 GiB short, 14.34 GiB of them"
         " --swap-blocks 0's: with every block of the DiT swapped and the VAE off the GPU, the"
-        " recorded plan is 1.07 GiB short"
+        " recorded plan is 1.20 GiB short"
     )
     assert refused(free, *job, Pins(swap_blocks=20), None, recorded=recorded) == (
-        f"{start} latents with 20 blocks swapped and the VAE off the GPU, takes 29.82 GiB of free"
-        " VRAM and the driver reports 22.00 GiB free, 7.82 GiB short, 6.75 GiB of them"
+        f"{start} latents with 20 blocks swapped and the VAE off the GPU, takes 29.95 GiB of free"
+        " VRAM and the driver reports 22.00 GiB free, 7.95 GiB short, 6.75 GiB of them"
         " --swap-blocks 20's: with every block of the DiT swapped and the VAE off the GPU, the"
-        " recorded plan is 1.07 GiB short"
+        " recorded plan is 1.20 GiB short"
     )
     # On a run held to the card, after what would have to be freed, where memory freed on the
     # card can give it: the whole card's figure the one the plan is held under, 17 GiB under
@@ -2017,23 +2067,23 @@ def test_a_resume_names_the_pin_s_part_of_its_shortfall() -> None:
     # last resort already (tight): its refusal is this plan's.
     kept = Reading(round(45.05 * GIB), round(28.05 * GIB), free - MARGIN, True, 3 * GIB, True)
     assert refused(kept, *job, Pins(swap_blocks=0), None, recorded=recorded).endswith(
-        ", the run held to the card's own memory, 15.41 GiB short, which would have to be freed"
+        ", the run held to the card's own memory, 15.54 GiB short, which would have to be freed"
         " on the card, 14.34 GiB of them --swap-blocks 0's: with every block of the DiT swapped"
-        " and the VAE off the GPU, the recorded plan is 1.07 GiB short"
+        " and the VAE off the GPU, the recorded plan is 1.20 GiB short"
     )
     # Where it can't, the card's figure not read: what it is short of, and no more.
     kept = Reading(round(28.05 * GIB), None, free - MARGIN, True, 3 * GIB, True)
     assert refused(kept, *job, Pins(swap_blocks=0), None, recorded=recorded).endswith(
-        ", the run held to the card's own memory, 15.41 GiB short, 14.34 GiB of them"
+        ", the run held to the card's own memory, 15.54 GiB short, 14.34 GiB of them"
         " --swap-blocks 0's: with every block of the DiT swapped and the VAE off the GPU, the"
-        " recorded plan is 1.07 GiB short"
+        " recorded plan is 1.20 GiB short"
     )
     # Another phase refused first is the shape's own, whatever is pinned: no part of the pin's.
     small = refused(round(6.25 * GIB), *job, Pins(swap_blocks=0), None, recorded=recorded)
     assert small.startswith("the recorded plan no longer fits the memory free now: the encode, in")
     assert "--swap-blocks" not in small
     # Nor has a new job's refusal any: there the pin is refused, naming the fewest blocks.
-    assert "of them" not in refused(free, *job, Pins(swap_blocks=0, window=21), None)
+    assert "of them" not in refused(free, *job, Pins(swap_blocks=0, window=44), None)
 
 
 def test_peaks_record() -> None:
@@ -2051,16 +2101,17 @@ def test_peaks_record() -> None:
         # The DiT's format the peaks were predicted for: the default's, fp16.
         "dit_format": "fp16",
         "budget": our_free(24) - MARGIN,
-        "encode_peak": peaks.encode_peak(OURS_1080, Tiles(1856), 1, 28),
+        "encode_peak": peaks.encode_peak(OURS_1080, Tiles(1856), 1, 32),
         # The longest window's.
-        "dit_peak": peaks.dit_peak(OURS_1080, 17, 28, vae_in_dit=False),
-        "decode_peak": peaks.decode_peak(OURS_1080, HD, Tiles(1088), 0, 28),
+        "dit_peak": peaks.dit_peak(OURS_1080, 39, 32, vae_in_dit=False),
+        "decode_peak": peaks.decode_peak(OURS_1080, HD, Tiles(1088), 0, 32),
         "bound": "dit",
         "host": predicted.host,
-        # Of it, the longest shot's part: its 76 latents and their noise beside a window of 17.
-        "host_shot": (2 * 76 + 17) * 1_059_840,
+        # Of it, the longest shot's part: its 76 latents and their noise beside a window of 39
+        # (17 on the plain attention).
+        "host_shot": (2 * 76 + 39) * 1_059_840,
         "scratch": peaks.scratch(OURS_1080, 301),
-        "longest_window": 17,
+        "longest_window": 39,
     }
     assert [predicted.peak(phase) for phase in shot_plan.PHASES] == [
         predicted.encode,
@@ -2114,7 +2165,7 @@ def test_a_recorded_shape_refused_says_what_it_falls_short_of_apart() -> None:
     # plan shapes the output a little, decided on 2026-10-28): the phase, the GiB, whether
     # programs closed on the card give it back. The message stays the figures' sentence.
     job = (HD, shots(76), Pins(), None)
-    recorded = Plan(17, Tiles(1856), Tiles(1088))
+    recorded = Plan(39, Tiles(1856), Tiles(1088))  # 17 on the plain attention
 
     def refusal(free: int | Reading, **options: Any) -> PlanError:
         with pytest.raises(PlanError) as error:
@@ -2125,8 +2176,8 @@ def test_a_recorded_shape_refused_says_what_it_falls_short_of_apart() -> None:
     error = refusal(our_free(16), recorded=recorded)
     assert error.shortfall == shot_plan.Shortfall("the encode", "7.26", freeable=True)
     assert "7.26 GiB short" in str(error)
-    assert refusal(our_free(16), recorded=Plan(20, Tiles(768), Tiles(640))).shortfall == (
-        shot_plan.Shortfall("the DiT's phase", "4.48")
+    assert refusal(our_free(16), recorded=Plan(40, Tiles(768), Tiles(640))).shortfall == (
+        shot_plan.Shortfall("the DiT's phase", "6.21")
     )
     assert refusal(round(21.99 * GIB), recorded=recorded).shortfall == (
         shot_plan.Shortfall("the decode", "0.04")
@@ -2141,7 +2192,7 @@ def test_a_recorded_shape_refused_says_what_it_falls_short_of_apart() -> None:
     assert untiled.value.shortfall is None
     with pytest.raises(PlanError) as pinned:
         shot_plan.plan(our_free(24), HD, shots(76), Pins(swap_blocks=3), None, recorded=recorded)
-    assert pinned.value.shortfall is None and pinned.value.instead == Setting("swap_blocks", "28")
+    assert pinned.value.shortfall is None and pinned.value.instead == Setting("swap_blocks", "32")
     # A run held to the card: the closest to running, the plan with 2.5, its figures; and whether
     # memory freed on the card gives it back (shot_plan._freeable): the card's figure the smaller,
     # up to the driver's.
@@ -2178,13 +2229,13 @@ def test_a_refusal_names_the_phase_that_does_not_fit() -> None:
             shot_plan.plan(free, HD, shots(76), pins, host, **options)
         return error.value.phase
 
-    shape = Plan(17, Tiles(1856), Tiles(1088))
+    shape = Plan(39, Tiles(1856), Tiles(1088))  # 17 on the plain attention
     assert phase_of(our_free(16), recorded=shape) == "encode"
-    assert phase_of(our_free(16), recorded=Plan(20, Tiles(768), Tiles(640))) == "dit"
+    assert phase_of(our_free(16), recorded=Plan(40, Tiles(768), Tiles(640))) == "dit"
     assert phase_of(round(21.99 * GIB), recorded=shape) == "decode"
     assert phase_of(our_free(24), host=8 * GIB, recorded=shape) == "host"
     assert phase_of(our_free(16), Pins(decode_tile=0)) == "decode"
-    assert phase_of(our_free(16), Pins(window=30)) == "dit"
+    assert phase_of(our_free(16), Pins(window=60)) == "dit"  # 30 on the plain one's
     assert phase_of(our_free(96), Pins(swap_blocks=37)) == ""
 
 
@@ -2199,62 +2250,59 @@ def test_a_held_run_s_choices_for_the_host_take_no_margin_either() -> None:
         return Reading(counted + round(5.0 * GIB), None, counted, True, round(0.5 * GIB))
 
     job = (HD, shots(76), Pins())
-    # 1080p on a 24 GB card, a shot of 301 frames, a host one byte short of the plan: 29 blocks
-    # swapped and the VAE staying for 28 and the VAE away, the windows of 17 kept
-    # (test_the_vae_stays_where_the_host_is_short). The DiT's phase stands under the margin
-    # from the budget there: with a margin on top, the held plan would pass for one the card
-    # doesn't hold, and its window be shortened instead.
+    # 1080p on a 24 GB card, a shot of 301 frames, a host one byte short of the plan: 33 blocks
+    # swapped and the VAE staying for 32 and the VAE away, the windows of 39 kept (17, 29 and 28
+    # on the plain attention's figures; test_the_vae_stays_where_the_host_is_short). The DiT's
+    # phase stands under the margin from the budget there: with a margin on top, the held plan
+    # would pass for one the card doesn't hold, and its window be shortened instead.
     free = our_free(24)
     pinned = 36 * paged(BLOCK) + paged(peaks.DIT_OTHER) + paged(peaks.VAE_WEIGHTS)
-    first = shot_plan.HOST_RESIDENT + pinned + 169 * 1_059_840
+    first = shot_plan.HOST_RESIDENT + pinned + 191 * 1_059_840
     refusing, predicted = shot_plan.plan(free, *job, first - 1)
-    assert (refusing.window, refusing.swapped, refusing.vae_in_dit) == (17, 29, True)
+    assert (refusing.window, refusing.swapped, refusing.vae_in_dit) == (39, 33, True)
     assert 0 < predicted.budget - predicted.dit < MARGIN
     held, on_it = shot_plan.plan(on_card(free - MARGIN), *job, first - 1)
     assert held == refusing and on_it.budget == on_it.free == predicted.budget
     assert on_it.shortened is None and predicted.shortened is None
-    # 80 GiB to count on and 16 GiB of system memory: two windows of 39, the card's own window
-    # of 76 pinning 35 blocks (test_the_planner_takes_the_longest_window_the_host_holds).
-    refusing, predicted = shot_plan.plan(80 * GIB, *job, 16 * GIB, split=True)
-    alone, by_itself = shot_plan.plan(80 * GIB, *job, None, split=True)
+    # 40 GiB to count on and 16 GiB of system memory: two windows of 39, the card's own window
+    # of 76 pinning 34 blocks (80 GiB and 35 on the plain attention's figures, which the lean one
+    # holds whole) (test_the_planner_takes_the_longest_window_the_host_holds).
+    refusing, predicted = shot_plan.plan(40 * GIB, *job, 16 * GIB, split=True)
+    alone, by_itself = shot_plan.plan(40 * GIB, *job, None, split=True)
     assert (refusing.window, alone.window, predicted.shortened is not None) == (39, 76, True)
     assert 0 < by_itself.budget - by_itself.dit < MARGIN
-    held, on_it = shot_plan.plan(on_card(80 * GIB - MARGIN), *job, 16 * GIB, split=True)
+    held, on_it = shot_plan.plan(on_card(40 * GIB - MARGIN), *job, 16 * GIB, split=True)
     assert held == refusing and on_it.shortened == predicted.shortened
-    assert (on_it.free, on_it.budget) == (80 * GIB - MARGIN,) * 2
+    assert (on_it.free, on_it.budget) == (40 * GIB - MARGIN,) * 2
 
 
 def test_resumed_on_another_attention_backend() -> None:
     # Where the weights are is planned again on every resume, from the memory free that day
     # (DESIGN.md, Memory planner, A plan shapes the output a little), and for the attention
     # backend of that day's run: FlashAttention installed since, or gone, the recorded shape is
-    # held to today's fit. A shape recorded with FlashAttention 2, taken up on SDPA: the same
-    # windows and tiles, two more blocks swapped; and the other way round, two fewer.
+    # held to today's fit. On the plain attention a shape recorded with FlashAttention 2 and taken
+    # up on SDPA had the same windows and tiles and two more blocks swapped, and the other way
+    # round two fewer; the lean attention gives both backends one fit (peaks.DIT_ATTENTION), so
+    # the resume is the same plan under either.
     free, job = our_free(24), (HD, shots(76), Pins(), None)
-    shape = Plan(17, Tiles(1856), Tiles(1088))
-    with_flash = Plan(17, Tiles(1856), Tiles(1088), 28, 1, 0, vae_in_dit=False)
+    shape = Plan(39, Tiles(1856), Tiles(1088))
+    with_flash = Plan(39, Tiles(1856), Tiles(1088), 32, 1, 0, vae_in_dit=False)
     assert bare(shot_plan.plan(free, *job, recorded=shape)[0]) == with_flash
     resumed, predicted = shot_plan.plan(free, *job, recorded=with_flash, attention=peaks.SDPA)
-    assert bare(resumed) == replace(with_flash, swapped=30)
+    assert bare(resumed) == with_flash  # swapped 30 for 28 before the refit
     assert predicted.attention == peaks.SDPA
     back, predicted = shot_plan.plan(free, *job, recorded=resumed, attention=peaks.FLASH_ATTN_2)
     assert (bare(back), predicted.attention) == (with_flash, peaks.FLASH_ATTN_2)
-    # A shape whose windows only FlashAttention 2's fit holds on that card no longer fits there
-    # without it, and is refused as any recorded shape that no longer fits: its windows of 20
-    # latents take 23.23 GiB of free VRAM by SDPA's fit, every block swapped.
+    # A shape whose windows only FlashAttention 2's fit held on that card was refused on SDPA
+    # (windows of 20 latents, 23.23 GiB by SDPA's fit, every block swapped); the same shape and
+    # the same windows are one plan, fitting or refused alike, under either backend.
     long = (HD, shots(300), Pins(), None)
-    recorded, _ = shot_plan.plan(free, *long)
-    assert bare(recorded) == Plan(20, Tiles(1856), Tiles(1088), 35, 1, 0, vae_in_dit=False)
+    recorded, flash = shot_plan.plan(free, *long)
+    assert bare(recorded) == Plan(40, Tiles(1856), Tiles(1088), 33, 1, 0, vae_in_dit=False)
     assert fits(recorded, free, HD, shots(300), None) is None
-    assert fits(recorded, free, HD, shots(300), None, attention=peaks.SDPA) == (
-        "the DiT's phase, a window of 20 latents with 35 blocks swapped and the VAE off the GPU,"
-        " takes 23.65 GiB of free VRAM and the driver reports 22.57 GiB free, 1.08 GiB short"
-    )
-    assert refused(free, *long, recorded=recorded, attention=peaks.SDPA) == (
-        "the recorded plan no longer fits the memory free now: the DiT's phase, a window of 20"
-        " latents with 36 blocks swapped and the VAE off the GPU, takes 23.23 GiB of free VRAM"
-        " and the driver reports 22.57 GiB free, 0.66 GiB short"
-    )
+    assert fits(recorded, free, HD, shots(300), None, attention=peaks.SDPA) is None
+    same, sdpa = shot_plan.plan(free, *long, recorded=recorded, attention=peaks.SDPA)
+    assert same == recorded and sdpa.dit == flash.dit
 
 
 # ---- Weights held: the pinned copies exist already (shot_plan.plan's held) -----------------------
@@ -2268,9 +2316,9 @@ def one_film(*frames: int) -> list[Shot]:
 # Three jobs a short host makes the planner shrink tiles, shorten the window or keep the VAE
 # for (test_the_vae_kept_first_costs_no_window's): the free memory, target, shots, host, split.
 SHORT_HOSTS = {
-    "4k": (67_645_735_689, UHD, one_film(23, 24, 150, 600), 12_050_198_642, False),
-    "5k": (46_170_899_209, (2880, 5120), one_film(149), 15_379_895_297, True),
-    "720p": (19 * GIB, (720, 1280), shots(12, 133), round(16.5 * GIB), False),
+    "4k": (60 * GIB, UHD, one_film(23, 24, 150, 600), round(13.5 * GIB), False),
+    "5k": (20 * GIB, (2880, 5120), one_film(149), round(18.375 * GIB), True),
+    "720p": (19 * GIB, (720, 1280), shots(12, 133), round(12.0 * GIB), False),
 }
 
 
@@ -2308,7 +2356,7 @@ def test_a_job_refused_for_the_host_is_planned_with_the_weights_held() -> None:
     assert held_peaks.host <= host
     # The same weights still leave the GPU in the plan's phases, held or not: only the host's
     # count of them is 0.
-    assert made.swapped == 25 and not made.vae_in_dit
+    assert made.swapped == 35 and not made.vae_in_dit  # 25 on the plain attention
     # A host that doesn't hold the process, a shot and no scratch is refused all the same, and
     # its words count no pinned copy.
     words = refused(free, target, film, Pins(), 2 * GIB, split=split, held=True)
@@ -2361,7 +2409,7 @@ def raised(*job: object, **options: object) -> PlanRefused:
 
 
 def test_each_refusal_of_the_planner_is_of_its_kind_with_its_facts() -> None:
-    recorded = Plan(17, Tiles(1856), Tiles(1088))
+    recorded = Plan(39, Tiles(1856), Tiles(1088))  # 17 on the plain attention
     # A swap count above the DiT's blocks, and a tile covering the frame: pins that are no pins,
     # before any memory is counted.
     error = raised(our_free(24), HD, shots(76), Pins(swap_blocks=40), None)
@@ -2372,15 +2420,15 @@ def test_each_refusal_of_the_planner_is_of_its_kind_with_its_facts() -> None:
     assert error.pin == Setting("decode_tile", "2048") and error.instead is None
     assert str(error).endswith("decode tile 0 pins an untiled decode")
     # A pin the memory doesn't hold, with the pin that does: the window, the swapped blocks, a tile.
-    error = raised(our_free(24), HD, shots(3000), Pins(window=30), None)
+    error = raised(our_free(24), HD, shots(3000), Pins(window=60), None)
     assert type(error) is PinRefused and error.why == "memory" and error.phase == "dit"
-    assert error.pin == Setting("window", "30")
+    assert error.pin == Setting("window", "60")
     assert error.instead is not None and error.instead.name == "window"
     assert error.need is not None and error.there is not None and error.need > error.there
     error = raised(our_free(24), HD, shots(76), Pins(swap_blocks=3), None, recorded=recorded)
     assert type(error) is PinRefused and error.why == "memory" and error.phase == ""
     assert error.pin == Setting("swap_blocks", "3")
-    assert error.instead == Setting("swap_blocks", "28")
+    assert error.instead == Setting("swap_blocks", "32")
     error = raised(our_free(16), HD, shots(76), Pins(decode_tile=0), None)
     assert type(error) is PinRefused and error.why == "memory" and error.phase == "decode"
     assert error.pin == Setting("decode_tile", "0")
@@ -2407,8 +2455,9 @@ def test_each_refusal_of_the_planner_is_of_its_kind_with_its_facts() -> None:
     assert type(error) is HostShort and error.kind == "host" and error.phase == "host"
     assert error.available == 8 * GIB and error.need is not None and error.need > 8 * GIB
     assert error.short == error.need - error.available
-    error = raised(our_free(16), HD, shots(76), Pins(window=10), 12 * GIB)
-    assert type(error) is HostShort and error.instead == Setting("window", "6")
+    # (--window 20 and the window 13 that holds, for the plain attention's 10 and 6.)
+    error = raised(our_free(16), HD, shots(76), Pins(window=20), 12 * GIB)
+    assert type(error) is HostShort and error.instead == Setting("window", "13")
     # A held run's refusal says the reserve it was made with, in bytes: the tight retry's, which
     # it names, and the kind and facts are kept through the rewording.
     decode = peaks.decode_peak(padded_size(HD), output_size(HD), None, 0, 36)
@@ -2440,12 +2489,12 @@ def test_each_refusal_of_the_planner_is_of_its_kind_with_its_facts() -> None:
 def test_a_plan_s_refusal_in_the_library_s_words_names_no_option() -> None:
     # str() of every kind of refusal above is the library's own words, which name no option of
     # any application; the command line's say gives back the option each names.
-    recorded = Plan(17, Tiles(1856), Tiles(1088))
+    recorded = Plan(39, Tiles(1856), Tiles(1088))  # 17 on the plain attention
     named = {
         "--swap-blocks 40": raised(our_free(24), HD, shots(76), Pins(swap_blocks=40), None),
         "--decode-tile 2048": raised(our_free(24), HD, shots(76), Pins(decode_tile=2048), None),
-        "--window 30": raised(our_free(24), HD, shots(3000), Pins(window=30), None),
-        "--swap-blocks 28": raised(
+        "--window 60": raised(our_free(24), HD, shots(3000), Pins(window=60), None),
+        "--swap-blocks 32": raised(
             *(our_free(24), HD, shots(76), Pins(swap_blocks=3), None), recorded=recorded
         ),
         "--decode-tile 1856": raised(our_free(16), HD, shots(76), Pins(decode_tile=0), None),

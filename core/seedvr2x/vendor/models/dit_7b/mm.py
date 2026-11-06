@@ -11,6 +11,7 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
+# Modified for seedvr2x: the vid and txt modules of a pair as properties, for the lean attention.
 
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Tuple
@@ -49,6 +50,16 @@ class MMModule(nn.Module):
         else:
             self.vid = module(*get_args("vid", args), **get_kwargs("vid", kwargs))
             self.txt = module(*get_args("txt", args), **get_kwargs("txt", kwargs))
+
+    # seedvr2x: the module a stream goes through, as forward picks it, for the lean attention
+    # (nablocks/mmsr_block.py), which runs the norms of q and k by chunks itself.
+    @property
+    def vid_or_all(self) -> nn.Module:
+        return self.all if self.shared_weights else self.vid
+
+    @property
+    def txt_or_all(self) -> nn.Module:
+        return self.all if self.shared_weights else self.txt
 
     def forward(
         self,

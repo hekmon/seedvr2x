@@ -11,6 +11,7 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
+# Modified for seedvr2x: the MLP's GELU in place.
 
 from typing import Optional
 import torch
@@ -38,7 +39,12 @@ class MLP(nn.Module):
 
     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
         x = self.proj_in(x)
-        x = self.act(x)
+        # seedvr2x: the GELU (tanh) in place on proj_in's output, which nothing else reads: the
+        # same kernel on the same values, one tensor of 4 x dim values a token fewer at the MLP's
+        # peak (DESIGN.md, Allocator, Small cards: a 4K picture's DiT step 5.53 to 3.08 GiB with
+        # the lean attention, the same bits; research/docs/small-cards.md, the DiT section).
+        # self.act is nn.GELU("tanh"), whose forward calls the same torch._C._nn.gelu.
+        torch._C._nn.gelu_(x, approximate="tanh")
         x = self.proj_out(x)
         return x
 

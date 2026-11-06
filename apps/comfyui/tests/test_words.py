@@ -162,8 +162,10 @@ def refusals() -> dict[str, Refusal]:
         "host, video": clip_refusal(24 * GIB, 33, 1 * GIB),
         "host, the output array": clip_refusal(24 * GIB, 100_000, 8 * GIB),
         "input": picture(8 * GIB, input_pixels=10**9),
+        # A window of 9 latents takes 20.56 GiB since the lean attention (2026-11-06), over 24
+        # before.
         "pin: window": clip_refusal(
-            24 * GIB, 33, 64 * GIB, window=9, swap_blocks=0, encode_tile=512
+            19 * GIB, 33, 64 * GIB, window=9, swap_blocks=0, encode_tile=512
         ),
         "compile": compile_,
         "probe": probe,
@@ -595,5 +597,5 @@ def test_a_plan_with_tiny_figures_is_refused_by_the_real_planner_in_the_nodes_wo
         text = str(words.refusal(error))
         assert text and " --" not in text and "command" not in text.lower()
     # A window pin the planner can't take for a clip, and a host too small for its output.
-    clip_error = clip_refusal(24 * GIB, 33, 64 * GIB, window=9, swap_blocks=0, encode_tile=512)
+    clip_error = clip_refusal(19 * GIB, 33, 64 * GIB, window=9, swap_blocks=0, encode_tile=512)
     assert "--" not in str(words.refusal(clip_error))

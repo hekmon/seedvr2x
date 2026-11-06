@@ -7,6 +7,7 @@ measured takes. On the CPU, no weights: the models are built on the meta device 
 shapes are counted."""
 
 import pytest
+from library_fixtures import LEAN_WINDOWS
 
 from seedvr2x import peaks, tilegrid, weights
 from seedvr2x.frames import output_size, padded_size
@@ -59,24 +60,63 @@ def gib(count: float) -> float:
 
 
 @pytest.mark.parametrize(("padded", "latents", "tokens", "windows", "peak"), DIT_POINTS)
-def test_dit_fit(
+def test_dit_tokens_and_windows(
     padded: tuple[int, int], latents: int, tokens: int, windows: int, peak: float
 ) -> None:
-    # The table's tokens and windows exactly. Its peaks are rounded to 0.01 GiB and the fit holds
-    # them to 0.005 (planner-limits.md: "fit all 26 passing points to 0.005 GiB"), so the model
-    # is compared with the column as printed within the two together, 0.01 GiB; the furthest is
-    # 0.0051 (1080p, 78 latents: 93.9349 against 93.94).
+    # The table's tokens and windows exactly. Its peaks are the plain attention's (numz's), which
+    # the lean attention seedvr2x ships replaced: the shipped fit is held to its own measures in
+    # test_dit_fit below.
     assert peaks.tokens(padded, latents) == tokens
     assert peaks.attention_windows(padded, latents) == windows
-    assert abs(gib(peaks.dit_peak(padded, latents)) - peak) <= 0.01
+
+
+# The padded size of LEAN_WINDOWS' rows.
+LEAN_PADDED = {1104: OURS_1080, 2192: OURS_4K}
+
+
+@pytest.mark.parametrize(
+    ("rows", "latents", "swapped", "vae_on_gpu", "peak"),
+    LEAN_WINDOWS,
+    ids=[f"{r}-{n}-{s}" for r, n, s, _, _ in LEAN_WINDOWS],
+)
+@pytest.mark.parametrize("attention", [peaks.FLASH_ATTN_2, peaks.SDPA])
+def test_dit_fit(
+    rows: int, latents: int, swapped: int, vae_on_gpu: bool, peak: int, attention: str
+) -> None:
+    # The lean attention's 19 measured windows (hold_probe.py, 2026-11-06; the fixture's table):
+    # the prediction is at or over each measure, and near it. The margin is the constant of
+    # DIT_ATTENTION that bounds every point, 0.081 GiB, less each point's own distance from the
+    # line: 0.0012 GiB at the 1-latent 1080p window (whose peak is elsewhere in the step) and
+    # 0.0738 to 0.0746 at the others. FlashAttention 2 and SDPA gave the same peaks, and one fit
+    # serves both (the plain attention's SDPA fit was 4.69% higher a token and 0.141 GiB).
+    predicted = peaks.dit_peak(
+        LEAN_PADDED[rows], latents, swapped, vae_in_dit=vae_on_gpu, attention=attention
+    )
+    margin = gib(predicted - peak)
+    assert margin >= 0
+    if (rows, latents) == (1104, 1):
+        assert margin == pytest.approx(0.0012, abs=5e-5)
+    else:
+        assert 0.0738 <= margin <= 0.0746
 
 
 def test_dit_fit_furthest() -> None:
-    furthest = max(
-        abs(gib(peaks.dit_peak(padded, latents)) - peak)
-        for padded, latents, _, _, peak in DIT_POINTS
-    )
-    assert furthest == pytest.approx(0.0051, abs=5e-5)
+    margins = [
+        gib(peaks.dit_peak(LEAN_PADDED[rows], latents, swapped, vae_in_dit=vae) - peak)
+        for rows, latents, swapped, vae, peak in LEAN_WINDOWS
+    ]
+    assert min(margins) == pytest.approx(0.0012, abs=5e-5)
+    assert max(margins) == pytest.approx(0.0745, abs=5e-5)
+
+
+def test_the_two_kernels_share_one_fit() -> None:
+    # Before the lean attention SDPA's DiT peaked higher (4.69% a token and 0.141 GiB); the
+    # measured peaks are equal, and the fit is.
+    assert peaks.DIT_ATTENTION[peaks.SDPA] == peaks.DIT_ATTENTION[peaks.FLASH_ATTN_2]
+    for padded, latents, swapped in ((OURS_1080, 12, 0), (OURS_4K, 4, 36), (OURS_1080, 70, 20)):
+        assert peaks.dit_peak(padded, latents, swapped, attention=peaks.SDPA) == peaks.dit_peak(
+            padded, latents, swapped, attention=peaks.FLASH_ATTN_2
+        )
 
 
 @pytest.mark.parametrize(
@@ -114,27 +154,32 @@ def test_attention_layouts(padded: tuple[int, int], latents: int, layouts: tuple
 
 def test_dit_swapped_and_vae_away() -> None:
     # A swapped block takes its 0.42 GiB off the peak, but for the two in the slots, and the VAE
-    # sent away its 0.47 (DESIGN.md, Memory planner, Per-phase peaks; numz: 28.15 to 27.68 GiB).
-    whole = peaks.dit_peak(NUMZ_1080, 12)
-    assert peaks.dit_peak(NUMZ_1080, 12, 1) == peaks.dit_peak(NUMZ_1080, 12, 2) == whole
-    assert whole - peaks.dit_peak(NUMZ_1080, 12, 3) == peaks.BLOCK
-    assert whole - peaks.dit_peak(NUMZ_1080, 12, 36) == 34 * peaks.BLOCK
-    away = peaks.dit_peak(NUMZ_1080, 12, vae_in_dit=False)
+    # sent away its 0.47 (DESIGN.md, Memory planner, Per-phase peaks).
+    whole = peaks.dit_peak(OURS_1080, 12)
+    assert peaks.dit_peak(OURS_1080, 12, 1) == peaks.dit_peak(OURS_1080, 12, 2) == whole
+    assert whole - peaks.dit_peak(OURS_1080, 12, 3) == peaks.BLOCK
+    assert whole - peaks.dit_peak(OURS_1080, 12, 36) == 34 * peaks.BLOCK
+    away = peaks.dit_peak(OURS_1080, 12, vae_in_dit=False)
     assert whole - away == peaks.VAE_WEIGHTS
-    assert abs(gib(whole) - 28.15) <= 0.01 and abs(gib(away) - 27.68) <= 0.01
     for swapped in (-1, 37):
         with pytest.raises(ValueError, match="blocks swapped of the DiT's 36"):
-            peaks.dit_peak(NUMZ_1080, 12, swapped)
-    # Measured on seedvr2x (milestone 3, 2026-10-11), one window of 1 latent at 1080p: 17.016
-    # GiB with no block swapped, 16.595 with 3, 12.796 with 12 and 2.668 with 36. Each swapped
-    # block beyond the two slots takes its bytes off, to 0.001 GiB, as the model has it; the
-    # peak itself is 0.061 GiB over numz's fit, whose constants the model keeps, at every count.
-    measured = {0: 17.016, 3: 16.595, 12: 12.796, 36: 2.668}
+            peaks.dit_peak(OURS_1080, 12, swapped)
+    # Measured on the lean code (hold_probe.py, 2026-11-06), one window of 1 latent at 1080p:
+    # 17_677_632_986 bytes with no block swapped and 2_271_102_426 with 36
+    # (LEAN_WINDOWS). The 34 blocks beyond the two slots take their bytes off, to 0.001 GiB, as
+    # the model has it, and the prediction is 0.0012 GiB over the measure at both counts. (The
+    # plain code's, milestone 3, 2026-10-11: 17.016 GiB with none swapped, 16.595 with 3, 12.796
+    # with 12 and 2.668 with 36.)
+    measured = {
+        swapped: peak for rows, n, swapped, _, peak in LEAN_WINDOWS if (rows, n) == (1104, 1)
+    }
+    assert set(measured) == {0, 36}
+    saved = 34 * peaks.BLOCK
+    assert abs(gib(measured[0] - measured[36] - saved)) <= 0.0015
+    assert peaks.dit_peak(OURS_1080, 1) - peaks.dit_peak(OURS_1080, 1, 36) == saved
     for swapped, peak in measured.items():
-        saved = max(swapped - peaks.SLOTS, 0) * peaks.BLOCK
-        assert abs(measured[0] - peak - gib(saved)) <= 0.0015  # two figures rounded to 0.001
-        assert peaks.dit_peak(OURS_1080, 1) - peaks.dit_peak(OURS_1080, 1, swapped) == saved
-        assert 0.0605 <= peak - gib(peaks.dit_peak(OURS_1080, 1, swapped)) <= 0.0625
+        over = gib(peaks.dit_peak(OURS_1080, 1, swapped) - peak)
+        assert over == pytest.approx(0.0012, abs=5e-5)
 
 
 def test_dit_on_gpu() -> None:

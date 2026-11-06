@@ -255,7 +255,7 @@ def test_windows_most_at_8k_is_quick() -> None:
 
 def test_a_smaller_picture_can_take_more_windows_than_the_bound() -> None:
     # The windows are not monotone in the picture's size: a 3000x2000 picture takes 72 attention
-    # windows, a 2970x1898 one 81 (a window is 2.726 MiB, peaks.PER_WINDOW).
+    # windows, a 2970x1898 one 81 (a window is 0.996 MiB, peaks.PER_WINDOW).
     bound = (3000, 2000)
     own = max(
         peaks.attention_windows(padded_size((2000, 3000)), 1),
@@ -514,7 +514,7 @@ def test_the_residents_are_lowered_until_every_picture_has_a_pass() -> None:
     # bound's own picture leaves 11 and the plan keeps 11: the lowering is at 6 to 6.5 GiB.)
     bound = (1920, 1080)
     plan = made(bound, held(6.0), pins=Pins(encode_tile=512))
-    assert plan.models.swapped == 27 and plan.models.resident_encode == 6
+    assert plan.models.swapped == 26 and plan.models.resident_encode == 6
     job = still_plan._job_of(plan)
     own = [
         still_plan._resident(job, "encode", frame, (1080, 1920), plan.models.swapped)
@@ -554,12 +554,16 @@ def test_an_unpinned_phase_is_rarely_lowered() -> None:
 
 def test_the_fewest_swapped_blocks_with_the_vae_leaving_first() -> None:
     # peaks.dit_peak's order: no block swapped, the VAE on the GPU then off, then 3 to 36 blocks
-    # (one or two save nothing). At 4K, one latent: 20 GiB with the VAE there.
+    # (one or two save nothing). At 4K, one latent: 17.99 GiB with the VAE there (20 on the plain
+    # attention).
     assert made(FOUR_K, card(96)).models.swapped == 0
     plan = made(FOUR_K, card(24))
     assert (plan.models.swapped, plan.models.vae_in_dit) == (0, True)
-    plan = made(FOUR_K, card(22))
+    # Card 22 on the plain attention's figures, 20 on the lean one's (the VAE leaves between
+    # 20.5 and 20 GiB).
+    plan = made(FOUR_K, card(20))
     assert (plan.models.swapped, plan.models.vae_in_dit) == (0, False)
+    assert made(FOUR_K, card(20.5)).models.vae_in_dit
     plan = made(FOUR_K, card(16))
     assert plan.models.swapped > 2 and not plan.models.vae_in_dit
     for swapped in range(plan.models.swapped):
@@ -602,33 +606,42 @@ def test_the_budget_has_the_margin_on_a_driver_that_refuses_and_none_on_a_held_r
     assert on_card.margin == 0 and on_card.budget == on_card.reading.counted
 
 
-def test_int8_needs_less_and_sdpa_more() -> None:
+def test_int8_needs_less_and_sdpa_the_same() -> None:
+    # SDPA planned more than FlashAttention 2 on the plain attention (swapped >=, dit_peak >);
+    # on the lean attention the two kernels share one fit, and one plan.
     fp16 = made(EIGHT_K, card(24))
     int8 = made(EIGHT_K, card(24), dit_model=peaks.INT8)
     sdpa = made(EIGHT_K, card(24), attention=peaks.SDPA)
     assert int8.models.swapped < fp16.models.swapped
     assert int8.pinned < fp16.pinned
-    assert sdpa.models.swapped >= fp16.models.swapped
+    assert sdpa.models == fp16.models and sdpa.pinned == fp16.pinned
     same = made(EIGHT_K, card(96))
-    assert made(EIGHT_K, card(96), attention=peaks.SDPA).dit_peak > same.dit_peak
+    assert made(EIGHT_K, card(96), attention=peaks.SDPA).dit_peak == same.dit_peak
     assert made(EIGHT_K, card(96), dit_model=peaks.INT8).dit_peak < same.dit_peak
-    # The DiT's floor, every block swapped (the two slots stay): 18.52 GiB of free VRAM at 8K, 18.48
-    # in int8, and 19.40 under SDPA.
-    free = Reading(round(19 * GIB), None, round(19 * GIB), False)
-    made(EIGHT_K, free)
+    # The DiT's floor, every block swapped (the two slots stay): 9.745 GiB of free VRAM at 8K in
+    # fp16 and under SDPA, 9.700 in int8 (18.52, 18.48 and 19.40 on the plain attention, whose
+    # card of 19 GiB is now far above all three).
+    free = Reading(round(9.72 * GIB), None, round(9.72 * GIB), False)
     made(EIGHT_K, free, dit_model=peaks.INT8)
-    with pytest.raises(PlanRefusal) as refused:
-        made(EIGHT_K, free, attention=peaks.SDPA)
-    assert refused.value.phase == "dit"
+    for attention in (peaks.FLASH_ATTN_2, peaks.SDPA):
+        with pytest.raises(PlanRefusal) as refused:
+            made(EIGHT_K, free, attention=attention)
+        assert refused.value.phase == "dit"
+    roomy = Reading(round(9.8 * GIB), None, round(9.8 * GIB), False)
+    made(EIGHT_K, roomy)
+    made(EIGHT_K, roomy, attention=peaks.SDPA)
 
 
 @pytest.mark.parametrize("gguf", [peaks.GGUF_7B, peaks.GGUF_7B_SHARP], ids=["7b", "sharp"])
 def test_the_gguf_dit_is_planned_by_its_own_blocks(gguf: Architecture) -> None:
     # The dynamic GGUF file's DiT, accepted (peaks.DITS): its weights 4.43 GiB where fp16's take
     # 15.35 and int8's 7.76, so fewer blocks swapped and less pinned than either on the same card.
-    fp16 = made(EIGHT_K, card(24))
-    int8 = made(EIGHT_K, card(24), dit_model=peaks.INT8)
-    held = made(EIGHT_K, card(24), dit_model=gguf)
+    # (A card of 24 GiB on the plain attention's figures, where the three still swapped blocks at
+    # 8K; the lean attention swaps none of int8's or the GGUF's there, and the ordering shows at
+    # 14: 30, 23 and 9 blocks.)
+    fp16 = made(EIGHT_K, card(14))
+    int8 = made(EIGHT_K, card(14), dit_model=peaks.INT8)
+    held = made(EIGHT_K, card(14), dit_model=gguf)
     assert held.models.swapped < int8.models.swapped < fp16.models.swapped
     assert held.pinned < int8.pinned < fp16.pinned
     assert made(EIGHT_K, card(96), dit_model=gguf).dit_peak < made(EIGHT_K, card(96)).dit_peak
@@ -646,9 +659,9 @@ def test_the_gguf_dit_is_planned_by_its_own_blocks(gguf: Architecture) -> None:
     assert pinned(some, gguf) == pages(*sizes[-3:]) < 3 * pages(max(sizes))
     assert pinned(everything, gguf) == pages(*sizes, peaks.DIT_OTHER, peaks.VAE_WEIGHTS)
     assert f"{pinned(everything, gguf) / GIB:.2f}" == "4.90"
-    # Every block swapped on a card the DiT could not otherwise fit, 8 GB at 4K: 27 swapped.
+    # A card the DiT could not otherwise fit, 8 GB at 4K: 9 swapped (27 on the plain attention).
     small = made(FOUR_K, card(8), dit_model=gguf)
-    assert small.models.swapped == 27 and small.models.vae_in_dit is False
+    assert small.models.swapped == 9 and small.models.vae_in_dit is False
     # The plan says what the file is and what its buffers are counted as.
     text = "\n".join(still_plan.said(made(FOUR_K, card(24), dit_model=gguf)))
     assert (
@@ -699,12 +712,14 @@ def test_the_colour_correction_term_is_counted_when_the_decode_splits() -> None:
 
 
 def test_the_floor_refusal_names_the_phase_what_it_takes_and_the_largest_bound_that_fits() -> None:
+    # A card of 10 GiB: the 16 GiB card of the plain attention's figures plans 8K now (the DiT's
+    # floor at 8K is 9.75 GiB free where it was 18.52).
     with pytest.raises(PlanRefusal) as refused:
-        made(EIGHT_K, card(16))
+        made(EIGHT_K, card(10))
     words = cli_words(refused.value)
     assert refused.value.phase == "dit"
     assert "pictures within 7680x4320 take" in words and "GiB of free VRAM" in words
-    assert "the driver reports 14.51 GiB free" in words
+    assert "the driver reports 8.51 GiB free" in words
     fits = refused.value.fits
     assert fits is not None and f"the largest bound that fits there is {fits[0]}x{fits[1]}" in words
     # The planner's walk down, linearly: the short side in steps of 16 from the multiple under it,
@@ -713,9 +728,9 @@ def test_the_floor_refusal_names_the_phase_what_it_takes_and_the_largest_bound_t
     for side in range((EIGHT_K[1] - 1) // 16 * 16, 0, -16):
         steps.append((side * EIGHT_K[0] // EIGHT_K[1] // 2 * 2, side))
     index = steps.index(fits)
-    made(fits, card(16))
+    made(fits, card(10))
     with pytest.raises(PlanRefusal):
-        made(steps[index - 1], card(16))
+        made(steps[index - 1], card(10))
 
 
 def test_the_floor_of_a_vae_phase_is_the_proof_at_the_smallest_tiles() -> None:
@@ -761,13 +776,14 @@ def test_swap_blocks_pinned_is_taken_exactly() -> None:
     assert plan.models.swapped == 12 and plan.pins.swap_blocks == 12
     # The VAE stays if it fits with them, leaves if only that fits.
     assert made(FOUR_K, free, pins=Pins(swap_blocks=0)).models.vae_in_dit
-    assert not made(FOUR_K, card(22), pins=Pins(swap_blocks=0)).models.vae_in_dit
+    # (card 22 on the plain attention's figures, 20 on the lean one's)
+    assert not made(FOUR_K, card(20), pins=Pins(swap_blocks=0)).models.vae_in_dit
     assert made(FOUR_K, free, pins=Pins(swap_blocks=36)).models.swapped == 36
 
 
 def test_swap_blocks_pinned_that_does_not_hold_the_dit_is_refused_naming_the_fewest() -> None:
     with pytest.raises(PlanRefusal) as refused:
-        made(FOUR_K, card(20), pins=Pins(swap_blocks=0))
+        made(FOUR_K, card(19), pins=Pins(swap_blocks=0))
     words = cli_words(refused.value)
     assert refused.value.phase == "dit"
     assert (
@@ -775,11 +791,11 @@ def test_swap_blocks_pinned_that_does_not_hold_the_dit_is_refused_naming_the_few
         in words
     )
     assert (
-        "takes 20.30 GiB of free VRAM with 0 blocks swapped, and the driver reports 18.51" in words
+        "takes 18.12 GiB of free VRAM with 0 blocks swapped, and the driver reports 17.51" in words
     )
-    fewest = made(FOUR_K, card(20)).models.swapped
-    assert fewest == 7 and f"the fewest blocks that hold it are --swap-blocks {fewest}" in words
-    assert made(FOUR_K, card(20), pins=Pins(swap_blocks=fewest)).models.swapped == fewest
+    fewest = made(FOUR_K, card(19)).models.swapped
+    assert fewest == 4 and f"the fewest blocks that hold it are --swap-blocks {fewest}" in words
+    assert made(FOUR_K, card(19), pins=Pins(swap_blocks=fewest)).models.swapped == fewest
 
 
 def test_swap_blocks_above_the_dits_blocks_is_refused_before_memory() -> None:
@@ -885,10 +901,11 @@ def test_a_pin_that_no_tile_serves_names_the_untiled_pass(monkeypatch: pytest.Mo
 
 
 def test_the_host_figure_is_the_process_the_pinned_copies_and_the_scratch() -> None:
-    plan = made(EIGHT_K, card(32), 64 * GIB)
+    plan = made(EIGHT_K, card(24), 64 * GIB)
     scratch = max(peaks.scratch(frame, 1) for frame in still_plan._frames(EIGHT_K))
     assert plan.host == PROCESS + plan.pinned + scratch and scratch > 0
-    # Pinned: each part page-rounded; 8 swapped blocks and what the VAE phases send away.
+    # Pinned: each part page-rounded; the swapped blocks (6 at 24 GB, 8K) and what the VAE
+    # phases send away.
     blocks = plan.models.swapped
     assert still_plan._leaving(plan.models) >= blocks
     parts = [peaks.BLOCK] * still_plan._leaving(plan.models) + [peaks.VAE_WEIGHTS]
@@ -902,13 +919,15 @@ def test_the_host_figure_is_the_process_the_pinned_copies_and_the_scratch() -> N
 def test_the_vae_is_kept_with_more_swapped_blocks_when_that_pins_less_and_fits_the_host() -> None:
     free = card(24)
     base = made(EIGHT_K, free, 64 * GIB)
-    assert not base.models.vae_in_dit and base.models.swapped == 27
+    assert (
+        not base.models.vae_in_dit and base.models.swapped == 6
+    )  # 27 on the plain attention's figures
     tight = made(EIGHT_K, free, base.host - 1)
     assert tight.models.vae_in_dit and tight.models.swapped > base.models.swapped
     assert tight.host < base.host and tight.host <= base.host - 1
     # Never under --swap-blocks, taken exactly.
-    pinned = made(EIGHT_K, free, base.host - 1 + 64 * GIB, pins=Pins(swap_blocks=27))
-    assert pinned.models.swapped == 27
+    pinned = made(EIGHT_K, free, base.host - 1 + 64 * GIB, pins=Pins(swap_blocks=6))
+    assert pinned.models.swapped == 6
 
 
 def test_more_of_the_dit_stays_on_the_gpu_in_the_vae_phases_when_the_host_is_short() -> None:
@@ -940,7 +959,7 @@ def test_more_of_the_dit_stays_on_the_gpu_in_the_vae_phases_when_the_host_is_sho
 
 def test_a_host_that_cannot_hold_the_plan_is_refused_with_its_parts_adding_up() -> None:
     with pytest.raises(PlanRefusal) as refused:
-        made(EIGHT_K, card(24), round(12 * GIB))
+        made(EIGHT_K, card(24), round(4 * GIB))
     words = cli_words(refused.value)
     assert refused.value.phase == "host"
     numbers = [
@@ -949,7 +968,7 @@ def test_a_host_that_cannot_hold_the_plan_is_refused_with_its_parts_adding_up() 
     ]
     total = float(found(r"takes (\d+\.\d+) GiB of system memory", words).group(1))
     assert len(numbers) == 3 and total == pytest.approx(sum(numbers), abs=0.001)
-    assert "12.00 GiB are available" in words and "2.41 GiB short" in words
+    assert "4.00 GiB are available" in words and "1.54 GiB short" in words
 
 
 def test_the_host_is_unchecked_when_it_is_unread() -> None:
@@ -1050,11 +1069,21 @@ def test_said_without_a_target_gives_the_plan_in_the_planners_words() -> None:
     assert f"blocks swapped: {plan.models.swapped} of the DiT's 36" in text
     assert "the VAE: off the GPU in the DiT's phase, its 0.47 GiB given to the DiT" in text
     assert f"{plan.dit_peak / GIB:.2f} GiB at the most" in text and f"{plan.windows}" in text
-    # Both VAE passes are small beside one frame's measured figures, so that the 9 unswapped
-    # blocks and the two slots stay in each (27 swapped of 36 at 24 GB, 8K).
+    # The VAE passes keep what fits of the DiT beside them: 26 blocks in the encode and 17 in the
+    # decode at 24 GB, 8K (on the plain attention's figures, 27 blocks swapped there and the 9
+    # unswapped stayed in both).
+    assert (
+        "in the encode, 26 of the DiT's blocks on the GPU; in the decode, 17 of the DiT's blocks"
+        " on the GPU" in text
+    )
+    # Both VAE passes small beside one frame's measured figures, the unswapped blocks and the two
+    # slots stay in each: the plain attention's plan at this card, 27 swapped, here pinned to it.
+    pinned = "\n".join(
+        still_plan.said(made(EIGHT_K, card(24), 64 * GIB, pins=Pins(swap_blocks=27)))
+    )
     assert (
         "in the encode, the DiT's 9 unswapped blocks and its 2 slots on the GPU; in the decode, "
-        "the DiT's 9 unswapped blocks and its 2 slots on the GPU" in text
+        "the DiT's 9 unswapped blocks and its 2 slots on the GPU" in pinned
     )
     # And the residents counted in blocks, one phase with the DiT off the GPU (4K, 16 GB: the
     # untiled passes being offered only within the frames they were measured on, a 24 GB card keeps
@@ -1065,7 +1094,8 @@ def test_said_without_a_target_gives_the_plan_in_the_planners_words() -> None:
         in four_k
     )
     assert (
-        "system memory: " in text and f"pinned for {plan.models.swapped} blocks and the VAE" in text
+        "system memory: " in text
+        and f"pinned for {still_plan._leaving(plan.models)} blocks and the VAE" in text
     )
     assert "picture:" not in text and "decode: " not in text.replace("in the decode: ", "")
 
@@ -1792,7 +1822,7 @@ def test_held_weights_count_no_pinned_memory_and_are_planned_as_the_card_alone_g
 
 
 def test_a_job_the_host_refused_is_planned_with_the_weights_held() -> None:
-    free, host = card(24), round(12 * GIB)
+    free, host = card(24), round(4 * GIB)
     with pytest.raises(PlanRefusal) as refused:
         made(EIGHT_K, free, host)
     assert refused.value.phase == "host" and "pinned for" in str(refused.value)
@@ -1872,15 +1902,15 @@ def test_each_refusal_of_a_picture_is_of_its_kind_with_its_facts() -> None:
     assert error.pin == Setting("decode_tile", "0")
     assert error.instead is not None and error.instead.name == "decode_tile"
     assert error.need is not None and error.there is not None and error.need > error.there
-    error = refused_by(FOUR_K, card(20), pins=Pins(swap_blocks=0))
+    error = refused_by(FOUR_K, card(19), pins=Pins(swap_blocks=0))
     assert type(error) is PinRefused and error.why == "memory" and error.phase == "dit"
-    assert error.pin == Setting("swap_blocks", "0") and error.instead == Setting("swap_blocks", "7")
+    assert error.pin == Setting("swap_blocks", "0") and error.instead == Setting("swap_blocks", "4")
     # The floor: a bound that doesn't fit, the phase, the figures and the largest that does.
-    error = refused_by(EIGHT_K, card(16))
+    error = refused_by(EIGHT_K, card(10))
     assert type(error) is MemoryShort and error.kind == "memory" and error.phase == "dit"
     assert error.fits is not None and error.instead is None
-    assert error.need is not None and error.there == int(card(16).counted)
-    assert error.short == error.need - int(card(16).counted) and error.freeable is True
+    assert error.need is not None and error.there == int(card(10).counted)
+    assert error.short == error.need - int(card(10).counted) and error.freeable is True
     assert error.reserve is None
     # The picture's input, copied to the GPU, which the output's size doesn't bound.
     error = refused_by(HD, held(16.0), input_pixels=2_000_000_000)
@@ -1889,10 +1919,10 @@ def test_each_refusal_of_a_picture_is_of_its_kind_with_its_facts() -> None:
     assert error.need is not None and error.there is not None and error.need > error.there
     assert error.instead == Setting("resolution")
     # The host's memory.
-    error = refused_by(EIGHT_K, card(24), round(12 * GIB))
+    error = refused_by(EIGHT_K, card(24), round(4 * GIB))
     assert type(error) is HostShort and error.kind == "host" and error.phase == "host"
-    assert error.available == round(12 * GIB) and error.need is not None
-    assert error.short == error.need - round(12 * GIB) > 0
+    assert error.available == round(4 * GIB) and error.need is not None
+    assert error.short == error.need - round(4 * GIB) > 0
 
 
 def test_a_picture_s_refusal_in_the_library_s_words_names_no_option() -> None:
@@ -1907,9 +1937,9 @@ def test_a_picture_s_refusal_in_the_library_s_words_names_no_option() -> None:
     error = refused_by(HD, held(16.0), input_pixels=2_000_000_000)
     assert "a smaller resolution" in str(error) and "a smaller --resolution" in cli_words(error)
     for each in (
-        refused_by(EIGHT_K, card(16)),
-        refused_by(EIGHT_K, card(24), round(12 * GIB)),
-        refused_by(FOUR_K, card(20), pins=Pins(swap_blocks=0)),
+        refused_by(EIGHT_K, card(10)),
+        refused_by(EIGHT_K, card(24), round(4 * GIB)),
+        refused_by(FOUR_K, card(19), pins=Pins(swap_blocks=0)),
         error,
     ):
         assert "--" not in str(each)

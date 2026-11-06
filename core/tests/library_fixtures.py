@@ -26,7 +26,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from seedvr2x import clock, memory
+from seedvr2x import clock, memory, peaks
 from seedvr2x.errors import Refusal, Setting
 
 
@@ -62,3 +62,52 @@ def no_driver_asked(
 @pytest.fixture(autouse=True)
 def one_to_one_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(clock, "pace", clock.Pace(lambda: 0.0, lambda: 0.0))
+
+
+@pytest.fixture
+def plain_fit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The DiT's fit of the plain attention, before seedvr2x's lean one (patch of 2026-11-06):
+    127.16 KiB a token and 2.726 MiB a window, SDPA 4.69% more a token and 0.141 GiB, as
+    peaks.py's comment records it. For the tests that hold plans or peaks a run measured on the
+    plain code (numz's recipes, the first matrices, the windowed shots): the planner's arithmetic
+    is held to those runs at the fit of the code they ran, the lean fit to its own measures
+    (LEAN_WINDOWS)."""
+    gib = 1024**3
+    for name in ("PER_TOKEN", "INT8_PER_TOKEN", "GGUF_PER_TOKEN"):
+        monkeypatch.setattr(peaks, name, 127.16 * 1024)
+    for name in ("PER_WINDOW", "INT8_PER_WINDOW", "GGUF_PER_WINDOW"):
+        monkeypatch.setattr(peaks, name, 2.726 * 1024**2)
+    monkeypatch.setattr(
+        peaks,
+        "DIT_ATTENTION",
+        {peaks.FLASH_ATTN_2: (0, 1.0), peaks.SDPA: (round(0.141 * gib), 1.0469)},
+    )
+
+
+# The DiT's windows on the lean attention, each the allocated peak of one forward in bytes (the
+# figures of research/docs/small-cards.md, The lean attention's peak, in bytes:
+# hold_probe.py, an RTX 5090, 2026-11-06, one sampling step, the sharp 7B fp16), in
+# seedvr2x's padding: the padded frame's rows (1104 for 1080p, 2192 for 4K), the window's
+# latents, the DiT's blocks swapped, whether the VAE's weights were on the GPU (all were).
+# FlashAttention 2 and SDPA peaked at the same figure at every one.
+LEAN_WINDOWS: list[tuple[int, int, int, bool, int]] = [
+    (1104, 1, 0, True, 17_677_632_986),
+    (1104, 1, 36, True, 2_271_102_426),
+    (1104, 3, 0, True, 18_700_522_394),
+    (1104, 3, 36, True, 3_293_991_834),
+    (1104, 5, 0, True, 19_739_284_754),
+    (1104, 5, 36, True, 4_332_754_194),
+    (1104, 7, 0, True, 20_808_704_114),
+    (1104, 7, 36, True, 5_402_173_554),
+    (1104, 9, 36, True, 6_441_170_634),
+    (1104, 11, 36, True, 7_510_887_714),
+    (1104, 13, 36, True, 8_518_121_154),
+    (1104, 15, 36, True, 9_587_384_994),
+    (1104, 17, 36, True, 10_594_619_154),
+    (1104, 19, 36, True, 11_665_064_514),
+    (2192, 1, 0, True, 19_214_845_794),
+    (2192, 1, 36, True, 3_808_315_234),
+    (2192, 2, 36, True, 5_974_921_634),
+    (2192, 3, 36, True, 8_141_528_034),
+    (2192, 4, 36, True, 10_308_134_434),
+]

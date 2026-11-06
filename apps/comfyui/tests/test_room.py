@@ -143,10 +143,10 @@ def test_the_room_is_in_the_plans_text(machine: StandIn, tmp_path) -> None:
 def test_a_run_refused_for_memory_is_refused_before_the_files_are_read(
     machine: StandIn, tmp_path
 ) -> None:
-    management.card.total = round(5.6 * GIB)
+    management.card.total = round(6.0 * GIB)
     big = torch.zeros((1, 1080, 1920, 3), dtype=torch.float32)
     with pytest.raises(words.Refused) as refused:
-        upscale_image(handle(tmp_path), SETTINGS, big, 2160, "9")
+        upscale_image(handle(tmp_path), SETTINGS, big, 3240, "9")
     assert machine.loads == [] and machine.made == []
     assert "--" not in str(refused.value)
 
@@ -156,11 +156,11 @@ def test_the_smaller_files_that_plan_the_run_are_named_in_the_nodes_terms(
 ) -> None:
     from seedvr2x import pull
 
-    management.card.total = round(5.6 * GIB)
+    management.card.total = round(6.0 * GIB)
     big = torch.zeros((1, 1080, 1920, 3), dtype=torch.float32)
     with pytest.raises(words.Refused) as refused:
         upscale_image(
-            handle(tmp_path, dit="seedvr2x_ema_7b_sharp_fp16.safetensors"), SETTINGS, big, 2160, "9"
+            handle(tmp_path, dit="seedvr2x_ema_7b_sharp_fp16.safetensors"), SETTINGS, big, 3240, "9"
         )
     text = str(refused.value)
     assert "choose the dynamic GGUF file (4.8 GB) in seedvr2x Models" in text, text

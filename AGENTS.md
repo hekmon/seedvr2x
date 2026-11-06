@@ -158,6 +158,19 @@ is and what numz changed in it.
   seedvr2x's changes in the diff.
 - **Modified files are marked**, as Apache-2.0 §4(b) requires: one line right under the original
   header, `# Modified for seedvr2x: <summary>.`, and a `# seedvr2x: <why>` comment on each change.
+- **The lean DiT attention** (DESIGN.md, Allocator, Small cards): `models/dit_7b/attention.py`,
+  `mlp.py`, `mm.py` and `nablocks/mmsr_block.py` are modified so that a window's forward holds
+  fewer buffers at once (the norm and RoPE in chunks, the varlen attention writing into one
+  output, the MLP's activation in place); the arithmetic is the plain code's. Each carries the
+  marker. `core/tests/test_lean_attention.py` holds them bit for bit to the plain code, which it
+  reads from the repository's git objects at main's commit before the change (`2ba0857`, through
+  `tools/vendor.py`'s `git_show`) and loads beside the vendored modules: not numz's own
+  `mmsr_block.py`, which imports the sequence parallelism the vendored layer removed and does not
+  run here. The test skips where that commit is not in the repository; the reference stays at
+  that commit whatever the vendored files become, and a later change to these files is held to
+  it or moves the reference with a measured reason. The sizes are stand-ins chosen so that the
+  windows are several and of unequal lengths and the chunks end partial; the pipeline's chunked
+  path, the branch without a compute dtype and both under autocast are held.
 - **Nothing in it imports numz's runtime** (`src/optimization`, `src/utils`, the rest of
   `src/core`). DESIGN.md (Vendored model code) lists what goes.
 - The StableSR-derived colour code is not vendored: its licence is non-commercial (DESIGN.md,
@@ -233,7 +246,8 @@ beside it; the `__init__.py` is seedvr2x's.
   DESIGN.md, Input).
 - **FlashAttention 2 is not a dependency.** PyPI only has its source, a long CUDA build, and
   seedvr2x runs without it: it uses FA2 when installed, else PyTorch's SDPA, and logs which one
-  runs. To use it, build a wheel for your GPU ([setup_env.sh](research/scripts/setup_env.sh),
+  runs; the two peak at the same memory since the lean attention (below), so a plan is one for
+  both. To use it, build a wheel for your GPU ([setup_env.sh](research/scripts/setup_env.sh),
   [environment.md](research/docs/environment.md)) and install it into `apps/seedvr2x/.venv` with `uv
   pip install --no-deps <wheel>` (from `apps/seedvr2x/`). `uv run` keeps it, but `uv sync` removes
   what the lock doesn't list: install it again after a sync, or sync with `--inexact`.
@@ -882,7 +896,7 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   test_still_plan.py` holds `seedvr2x/still_plan.py`, importing no torch: every picture within
   8K and 6000x4000 bounds on cards of 16 to 48 GB given tiles that fit, by `peaks.py` alone; the
   attention windows counted as the DiT's window functions count them, and their most within a
-  bound; the floor proved, and what of the DiT a pinned VAE phase keeps lowered for it; the DiT's order, int8, SDPA,
+  bound; the floor proved, and what of the DiT a pinned VAE phase keeps lowered for it; the DiT's order, int8, SDPA (the fit of FlashAttention 2's),
   pins, the host's trades and refusal, held readings and the tight reserve; the picture's own
   copies and resize on the GPU (`input_pixels`, a 100 MP input's 1.2 GB in float32 and 0.6 in
   bfloat16, the transform's tensors counted from their sizes, unmeasured): the residents lowered
@@ -948,11 +962,13 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   the plan choosing no untiled pass past the frame measured (`still_plan._untiled_measured`), a
   pin taking one there at the slice's figure; `tests/test_still_plan.py` the copies' measured rule
   (`still_plan.RESIZE`, cuBLAS's workspace held) and what a phase takes for a reservation
-  (`still_plan.Peak`, `bound_peaks`, `picture_peaks`, a picture's passes within a `budget`). No
-  video plan moves: the plan matrix's 5,480 cases are main's byte for byte (5,120 since the tests'
-  numz modes retired, 2026-11-04; since 2026-11-05 in the repository, core's
+  (`still_plan.Peak`, `bound_peaks`, `picture_peaks`, a picture's passes within a `budget`). That
+  patch moved no video plan: the plan matrix's 5,480 cases were main's byte for byte (5,120
+  since the tests' numz modes retired, 2026-11-04; since 2026-11-05 in the repository, core's
   `tools/plan_matrix.py`'s 4,760 and the CLI's `tools/plan_lines.py`'s 360 checks of a record:
-  4,760 + 360 = 5,120).
+  4,760 + 360 = 5,120, the counts still). The patches of 2026-11-06 (the lean attention, the
+  reserve by the step, the floor's rungs) move plans on purpose, each commit listing what the
+  diff of the two matrices moved.
 - A picture's refusals carry their kind, their reason and their way out apart (`errors.Refusal`'s
   `kind`, `reason`, `way`; `picture.KINDS`, and `frames.check_target`'s `too-small`), so that the
   image server words its own way out with no file name and no command (DESIGN.md, The image
@@ -1107,6 +1123,21 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   `--accept-env-change`, the warning given before the checks, the re-plan under the flag
   (`peaks.PER_TOKEN` multiplied, so that the DiT phase refuses at the stand-in's size), the
   segments and latents kept, `--plan` looking and writing nothing.
+- The DiT's fit on the lean attention (`seedvr2x/peaks.py`: `PER_TOKEN`, `PER_WINDOW`, the int8
+  and GGUF terms, `DIT_ATTENTION`; `research/docs/small-cards.md`, The lean attention's peak):
+  `core/tests/test_peaks.py` holds the prediction at or over the allocated peak of every window
+  of `library_fixtures.LEAN_WINDOWS` (one sampling step at 1080p and 4K padding, blocks swapped
+  or not, in bytes, from `research/scripts/hold_probe.py`; `research/scripts/lean_fit.py` refits
+  from its files) and near it, the two kernels sharing one fit (FlashAttention 2 and SDPA peaked
+  at the same figure, so the plan is one), int8 needing less and SDPA the same. A refit moves
+  the tests that held plans or peaks measured on the plain code. Those that hold a run measured
+  there (numz's recipes, the first matrices, the windowed shots in `test_shot_plan.py`,
+  `test_peaks.py`, `test_shot_pass.py` and the CLI's `test_planner.py`) take the
+  `library_fixtures.plain_fit` fixture, which sets the plain fit back (and the SDPA surcharge)
+  and keep their assertions as main had them; the others had their literals updated and the
+  boundaries of their scenarios re-picked, the direction of each move checked (a refused case
+  planned, a window longer, never the reverse), and nothing loosened. The ledger of the moves
+  is in the commit's message, not here.
 - The plan matrix, in two tools ([Checks](#checks)). Core's `tools/plan_matrix.py`, the
   library's alone: `shot_plan.plan` over a fixed matrix, 4,760 cases today (cards, targets, shots,
   system memory, pins, kernels, readings, plans recorded on a larger card planned again on smaller

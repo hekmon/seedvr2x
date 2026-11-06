@@ -11,7 +11,7 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
-# Modified for seedvr2x: attention runs FlashAttention 2 when installed, else SDPA.
+# Modified for seedvr2x: attention runs FlashAttention 2 when installed, else SDPA, the latter writing its windows' outputs into one tensor.
 
 import torch
 import torch.nn.functional as F
@@ -66,8 +66,13 @@ def pytorch_varlen_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q=N
     k_splits = list(torch.tensor_split(k, cu_seqlens_k[1:-1].long().cpu(), dim=0))
     v_splits = list(torch.tensor_split(v, cu_seqlens_k[1:-1].long().cpu(), dim=0))
 
-    # Process each sequence
-    output_splits = []
+    # seedvr2x: each window's output is written into one tensor as it comes, where numz keeps
+    # them all in a list and concatenates them at the end: the list and the concatenation hold the
+    # outputs twice at once (DESIGN.md, Allocator, Small cards: a 4K picture's DiT step 5.53 to
+    # 3.08 GiB with the lean attention, the same bits; research/docs/small-cards.md). A copy
+    # changes no value.
+    output = q.new_empty(q.shape[0], q.shape[1], v.shape[2])
+    start = 0
     for q_i, k_i, v_i in zip(q_splits, k_splits, v_splits):
         # Reshape for torch's scaled_dot_product_attention which expects (batch, heads, seq, dim).
         # Here, we treat each sequence as a batch of 1.
@@ -84,10 +89,10 @@ def pytorch_varlen_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q=N
 
         # Reshape the output back to the original format (seq_len, heads, head_dim)
         output_i = output_i.squeeze(0).permute(1, 0, 2)
-        output_splits.append(output_i)
-    
-    # Concatenate all outputs
-    return torch.cat(output_splits, dim=0)
+        output[start : start + output_i.shape[0]] = output_i
+        start += output_i.shape[0]
+
+    return output
 
 
 class TorchAttention(nn.Module):

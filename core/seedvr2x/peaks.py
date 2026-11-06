@@ -26,50 +26,47 @@ from seedvr2x.vendor.models.dit_7b.window import (
 GIB = 1024**3
 MIB = 1024**2
 
-# The DiT's peak (planner-limits.md, The DiT's memory: tokens plus windows): what the loaded 7B
-# fp16 holds before a forward, the VAE's weights included, as numz has them on the GPU in its DiT
-# phase (the DiT 15.35 GiB, its buffers 0.02, the VAE 0.47, the text embeddings and the
-# schedule), plus PER_TOKEN a token and PER_WINDOW an attention window, each of which repeats the
-# 58 text tokens. It fits 26 window lengths, 1-78 latents at 1080p and 1-19 at 4K, to 0.005 GiB.
+# The DiT's peak on seedvr2x's lean attention (DESIGN.md, Allocator, Small cards; research/docs/
+# small-cards.md, The lean attention's peak, refitted): what the loaded 7B fp16 holds before a
+# forward, the VAE's weights included, in its DiT phase (the DiT 15.35 GiB, its buffers 0.02, the
+# VAE 0.47, the text embeddings and the schedule), plus PER_TOKEN a token and PER_WINDOW an
+# attention window, each of which repeats the 58 text tokens. Measured by research/scripts/
+# hold_probe.py (seedvr2x's own forward, one sampling step, the VAE's weights on the GPU, the
+# sharp 7B fp16, an RTX 5090, 2026-11-06): 1080p (padded 1104x1920) with 36 blocks swapped, 1 to
+# 19 latents by 2, with none swapped 1 to 7; 4K (2192x3840) with 36 swapped 1 to 4 and with none
+# 1 latent. Least squares on the tokens and the windows of peak less (loaded less the swapped
+# blocks' saving), the 1-latent 1080p window left out: 61.243 KiB a token, 0.996 MiB a window,
+# +0.0068 GiB, every other point within 0.0004 GiB. The 1-latent 1080p window peaks 0.073 GiB over
+# that line (its peak is elsewhere in the step): the constant of DIT_ATTENTION that bounds every
+# point is 0.0798 GiB, taken as 0.081, which leaves 1 MiB over that window with the slopes
+# rounded. FlashAttention 2 and SDPA gave the same peaks to the MiB at every point: on the lean
+# code the step's peak is no longer in the attention, and one fit serves both.
+# For the record, the plain attention's fit was 127.16 KiB a token and 2.726 MiB a window, SDPA's
+# 4.69% more and 0.141 GiB.
 # By its parts as seedvr2x has them (below): the 36 blocks 15.1925 GiB, the DiT's other
 # parameters 0.1550, its buffers and tables with the text embeddings 0.058, the VAE 0.4669, in
-# all 15.8723, 0.0013 over the fit's constant, within its 0.005.
-# The constants stay numz's fit's (DESIGN.md, Memory planner, Per-phase peaks). seedvr2x's own
-# peak, one window of 1 latent at 1080p, no block swapped, measured 17.016 GiB (milestone 3,
-# 2026-10-11; tests/test_placement.py measures it), where this model gives 16.955: 0.061 GiB
-# under, of the margin's 0.6; and on nine emulated cards and the bare one, 5 to 76 latents, 0 to
-# 36 blocks swapped, the DiT's phase came within 0.07 GiB of its prediction (DESIGN.md, Memory
-# planner, Budget).
+# all 15.8723, 0.0013 over DIT_LOADED, within the fit's 0.005.
+# Other measures: the plain code's one window of 1 latent at 1080p, no block swapped, 17.016 GiB
+# (milestone 3, 2026-10-11); the lean code's 16.464. In int8 and in the sharp dynamic GGUF,
+# 5 latents at 1080p with 36 swapped measured 3.649 and 3.433 GiB, under the predicted 4.063 and
+# 3.576 (fp16: 4.035 for 4.108).
 DIT_LOADED = round(15.871 * GIB)
-PER_TOKEN = 127.16 * 1024
-PER_WINDOW = 2.726 * 1024**2
+PER_TOKEN = 61.243 * 1024
+PER_WINDOW = 0.996 * 1024**2
 # The attention windows along time, height and width that every block of the 7B asks its window
 # function for, the blocks alternating the two layouts (vendor/configs_7b/main.yaml, window and
 # window_method).
 NUM_WINDOWS = (4, 3, 3)
 # The attention backends, as the run names the one it takes (model.attention_backend), and the
-# DiT's fit under each: what it adds to DIT_LOADED, in bytes, and the factor on PER_TOKEN. The
-# fit above is FlashAttention 2's (12 latents at 1080p measured 28.316 GiB for 28.320).
-# Under SDPA, which a machine without a FlashAttention build runs, the DiT peaks higher
-# (DESIGN.md, Memory planner, Per-phase peaks): 4.69% more a token and 0.141 GiB, an upper
-# bound of 45 windows measured on two cards (2026-10-12), each window's peak the largest of its
-# runs, a predicted peak having to be one (the margin covers memory outside torch's tensors,
-# not a fit's errors):
-# - a sweep of 29 windows on the 96 GB card (seedvr2x's own forward, one sampling step): 1 to
-#   70 latents at 1080p and 1 to 17 at 4K, 22 with no block swapped and the VAE's weights there,
-#   on which the factor is fitted (least squares on the tokens, FlashAttention 2's per-window
-#   term kept: 1.0469, residuals from -0.042 to +0.072 GiB), and 7 with 12 or 36 blocks swapped
-#   or the VAE away, which hold that a swapped block and the VAE's leaving save under SDPA what
-#   they save under FlashAttention 2;
-# - 16 windows on a desktop card (an RTX 5090 behind WSL2's GPU device,
-#   research/scripts/hold_probe.py): 1 to 21 latents at 1080p, 1 to 5 at 4K, with no block
-#   swapped and with the 36, the VAE's weights on the GPU. They stand 0.02 to 0.03 GiB over
-#   the first card's at the same windows, and set the constant: the 29 alone are bounded by
-#   0.124 GiB, which the desktop's 4 latents of 4K pass by 0.016.
-# The least margin left is 0.0009 GiB, on that window; on the 96 GB card 0.017, at 8 latents
-# of 4K, and 0.13 at the most (the CLI's tests/test_planner.py holds the 45).
+# DiT's fit under each: what it adds to DIT_LOADED, in bytes, and the factor on PER_TOKEN. On the
+# lean attention both are the fit above, measured equal (the constant is the one that bounds every
+# point, 0.081 GiB, the 1-latent 1080p window's). The table stays per backend, for the day a
+# backend's peak differs again.
 FLASH_ATTN_2, SDPA = "flash_attn_2", "sdpa"
-DIT_ATTENTION = {FLASH_ATTN_2: (0, 1.0), SDPA: (round(0.141 * GIB), 1.0469)}
+DIT_ATTENTION = {
+    FLASH_ATTN_2: (round(0.081 * GIB), 1.0),
+    SDPA: (round(0.081 * GIB), 1.0),
+}
 
 # The VAE's weights, on the GPU in the VAE's phases, and in the DiT's unless the plan sends them
 # away for it, in bytes: 0.4669 GiB, its parameters by the model's shapes in the pipeline's

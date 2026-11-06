@@ -1910,7 +1910,7 @@ def test_plan_said(
         "plan: decode: untiled, the whole frame fitting the budget; --decode-tile PX tiles it",
         "plan: the VAE's room: what each VAE pass leaves free, for the large pieces of memory a"
         " pass asks for at once: 1.25 GiB of the budget",
-        "plan: predicted peaks: encode 18.11 GiB, DiT 15.91 GiB, decode 17.73 GiB; the encode"
+        "plan: predicted peaks: encode 18.11 GiB, DiT 15.97 GiB, decode 17.73 GiB; the encode"
         " bounds the plan, its room counted, 74.54 GiB under the budget",
         "plan: time: measured, not guessed: a calibration of the job's own steps once the models"
         " are loaded, its cost said then; it gives the job's time and each unit's time left and"
@@ -1976,8 +1976,8 @@ def test_pin_refused(
     pinned = ("--cuts", "cuts.txt", "--window", "6", "--swap-blocks", "0")
     assert upscale(tmp_path, source_path, "out", *pinned) == 1
     assert (
-        "--window 6: its longest window, 6 latents, takes 16.07 GiB of free VRAM with"
-        " --swap-blocks 0, and the driver reports 16.05 GiB free: the longest window that fits is"
+        "--window 6: its longest window, 6 latents, takes 16.12 GiB of free VRAM with"
+        " --swap-blocks 0, and the driver reports 16.10 GiB free: the longest window that fits is"
         " --window 5"
     ) in caplog.text
     assert steps.calls == []
@@ -2299,9 +2299,10 @@ def test_resumed_on_another_attention_backend(
     # The plan's memory is planned again at each start for the attention backend of that
     # day's run (cli._attention), as for the memory free that day: a job begun with
     # FlashAttention 2 and taken up without it keeps its shape, and where its weights are is
-    # counted by SDPA's fit, recorded with the next unit made. Here the memory that holds the
-    # 6-latent window with every weight on the GPU by FlashAttention 2's fit: by SDPA's, the
-    # VAE's weights leave the DiT's phase.
+    # counted by SDPA's fit, recorded with the next unit made. Since the lean attention
+    # (2026-11-06) FlashAttention 2 and SDPA give the same peaks to the MiB (peaks.py), so the
+    # memory that holds the 6-latent window with every weight on the GPU by one holds it by the
+    # other: the shape stays, and the record says the backend of that day.
     levels(caplog, logging.INFO)
     source_path = job(tmp_path, monkeypatch)
     options = JOB[:2]
@@ -2326,7 +2327,7 @@ def test_resumed_on_another_attention_backend(
     assert upscale(tmp_path, source_path, "out", *options) == 0
     content = json.loads(manifest.read_text())
     again = planner.plan(exact, TARGET, JOB_SHOTS, Pins(), HOST, recorded=Plan(6), attention="sdpa")
-    assert (again[0].window, again[0].swapped, again[0].vae_in_dit) == (6, 0, False)
+    assert (again[0].window, again[0].swapped, again[0].vae_in_dit) == (6, 0, True)
     assert untimed(content["plan"]) == plan_record(*again)
     assert content["plan"]["memory"]["attention"] == "sdpa"
     shape = {

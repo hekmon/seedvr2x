@@ -559,7 +559,7 @@ def windows_most(bound: Bound, picture: tuple[int, int] | None = None) -> int:
 
     Not the bound's own count: the windows are not monotone in the picture's size (vendor/models/
     dit_7b/window.py): over token grids up to 300 x 560 the count reaches 441, and neighbouring
-    shapes differ by tens (174 x 558 tokens take 240 windows, 174 x 559 take 289; 2.726 MiB a
+    shapes differ by tens (174 x 558 tokens take 240 windows, 174 x 559 take 289; 0.996 MiB a
     window, peaks.PER_WINDOW), so a smaller picture can take more windows than the bound does (a
     3000x2000 bound: 72 for its own, 81 for 2970x1898). The DiT's peak adds this to the tokens of
     the largest frame (_dit_need), each the most it can be: a bound of every picture's. Plain
@@ -1589,9 +1589,9 @@ def said(
     if plan.attention == peaks.FLASH_ATTN_2:
         lines.append(f"attention: {_ATTENTION_SAID[plan.attention]}, which is installed")
     else:
+        # The lean attention peaks alike under both kernels (peaks.DIT_ATTENTION).
         lines.append(
-            f"attention: {_ATTENTION_SAID[plan.attention]}, FlashAttention 2 not being"
-            " installed: a window takes more memory under it"
+            f"attention: {_ATTENTION_SAID[plan.attention]}, FlashAttention 2 not being installed"
         )
     if plan.dit_model == peaks.INT8:
         lines.append(

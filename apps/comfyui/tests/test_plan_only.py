@@ -105,7 +105,9 @@ def test_a_plan_only_asks_comfyui_to_free_nothing_and_says_what_a_run_would_need
 def test_a_plan_only_is_refused_as_a_run_is_before_anything_loads(
     machine: StandIn, tmp_path
 ) -> None:
-    management.card.total = round(5.6 * GIB)
+    # 4.0 GiB: a picture of 1080p fits 5.6 since the lean attention (2026-11-06), which this
+    # card's total was picked to refuse (between 4.0 and 4.5 GiB now).
+    management.card.total = round(4.0 * GIB)
     big = torch.zeros((1, 1080, 1920, 3), dtype=torch.float32)
     with pytest.raises(words.Refused) as refused:
         upscale_image(

@@ -1127,7 +1127,7 @@ def test_the_start_logs_the_smaller_files_that_swap_fewer_blocks(
     lines, service = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 12)
     blocks = next(at for at, each in enumerate(lines) if each.startswith("plan: blocks swapped"))
     assert lines[blocks + 1] == (
-        "plan: smaller DiT files plan this bound better: this plan swaps 19 blocks; for the sharp"
+        "plan: smaller DiT files plan this bound better: this plan swaps 17 blocks; for the sharp"
         " 7B (int8 0 blocks; the dynamic GGUF 0 blocks); for the 7B (int8 0 blocks; the dynamic"
         " GGUF 0 blocks); --dit-model names them"
     )
@@ -1144,7 +1144,7 @@ def test_the_start_of_an_int8_dit_names_the_gguf_alone(
 ) -> None:
     lines, _ = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 10, dit_format=peaks.INT8)
     assert (
-        "plan: smaller DiT files plan this bound better: this plan swaps 9 blocks; for the sharp 7B"
+        "plan: smaller DiT files plan this bound better: this plan swaps 5 blocks; for the sharp 7B"
         " (the dynamic GGUF 0 blocks); for the 7B (the dynamic GGUF 0 blocks); --dit-model names"
         " them"
     ) in lines
@@ -1156,10 +1156,10 @@ def test_the_start_logs_nothing_of_smaller_files_for_the_smallest_format_or_a_pl
     cpu_models: model.Models,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The dynamic GGUF is the smallest format, whatever it swaps (12 blocks on 6 GiB here); and a
+    """The dynamic GGUF is the smallest format, whatever it swaps (6 blocks on 6 GiB here); and a
     plan that swaps none has nothing a smaller file would spare (fp16 whole on 24 GiB)."""
     lines, _ = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 6, dit_format=peaks.GGUF_7B)
-    assert any(each.startswith("plan: blocks swapped: 12 ") for each in lines)
+    assert any(each.startswith("plan: blocks swapped: 6 ") for each in lines)
     assert not any("smaller DiT files" in each for each in lines)
     caplog.clear()
     lines, _ = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 24)

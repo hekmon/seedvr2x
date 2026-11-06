@@ -651,10 +651,8 @@ def said(
     if predicted.attention == peaks.FLASH_ATTN_2:
         lines.append("attention: FlashAttention 2, which is installed")
     else:
-        lines.append(
-            "attention: PyTorch's SDPA, FlashAttention 2 not being installed: a window takes"
-            " more memory under it"
-        )
+        # The lean attention peaks alike under both kernels (peaks.DIT_ATTENTION).
+        lines.append("attention: PyTorch's SDPA, FlashAttention 2 not being installed")
     if job.dit_model == peaks.INT8:
         lines.append(_int8_said())
     elif job.dit_model in (peaks.GGUF_7B, peaks.GGUF_7B_SHARP):
