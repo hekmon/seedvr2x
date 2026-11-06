@@ -142,6 +142,49 @@ def test_the_clip_is_the_shot_at_frame_0_seeded_as_such(
     assert upscale(models, frames, seed=SEED + 1, window=5).tobytes() != first.tobytes()
 
 
+def test_a_shot_of_a_longer_clip_is_seeded_by_its_first_frame_and_written_into_its_array(
+    models: model.Models, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`start` is the shot's first frame in its source: its seed the job's plus it (Shot.seed, the
+    command line's rule), so a clip cut into shots is the shots run one after the other; and
+    `output`, a slice of the clip's array, takes the frames, the array returned."""
+    stand_in_dit(monkeypatch)
+    frames = clip_of(LONG, 3)
+    shot = Shot(11, 11 + LONG)
+    assert shot.seed(SEED) == SEED + 11
+    plain = clip.upscale(
+        models, frames, TARGET, SEED + 11, window=5, encode_tiles=None, decode_tiles=None,
+        correct=True,
+    )  # fmt: skip
+    clip_array = np.zeros((11 + LONG + 4, *output_size(TARGET), 3), np.float32)
+    returned = clip.upscale(
+        models, frames, TARGET, SEED, window=5, encode_tiles=None, decode_tiles=None,
+        correct=True, start=shot.start, output=clip_array[shot.start : shot.end],
+    )  # fmt: skip
+    assert np.shares_memory(returned, clip_array) and returned.tobytes() == plain.tobytes()
+    assert clip_array[11 : 11 + LONG].tobytes() == plain.tobytes()
+    assert not clip_array[:11].any() and not clip_array[11 + LONG :].any()
+    # Not the plain seed: the start decides it.
+    at_zero = clip.upscale(
+        models, frames, TARGET, SEED, window=5, encode_tiles=None, decode_tiles=None,
+        correct=True,
+    )  # fmt: skip
+    assert at_zero.tobytes() != plain.tobytes()
+
+
+def test_an_output_array_of_another_shape_is_refused(models: model.Models) -> None:
+    wrong: list[Any] = [
+        np.zeros((SHORT + 1, *output_size(TARGET), 3), np.float32),
+        np.zeros((SHORT, *output_size(TARGET), 3), np.float64),
+    ]
+    for output in wrong:
+        with pytest.raises(ValueError, match="output"):
+            clip.upscale(
+                models, clip_of(SHORT), TARGET, SEED, window=None, encode_tiles=None,
+                decode_tiles=None, correct=False, output=output,
+            )  # fmt: skip
+
+
 @pytest.mark.parametrize(
     ("count", "window", "windows"), [(SHORT, 5, 1), (MIDDLE, 5, 2), (LONG, 5, 3)]
 )
@@ -368,10 +411,39 @@ def test_a_window_holding_nan_or_inf_is_refused(
         return out
 
     monkeypatch.setattr(model, "sample", poisoned)
-    with pytest.raises(clip.NonFinite, match=r"the clip's window 2/3: 1 of its") as caught:
+    with pytest.raises(
+        clip.NonFinite, match=r"the clip's window 2/3 \(frames 0 to 32\): 1 of its"
+    ) as caught:
         upscale(models, clip_of(LONG), window=5)
     assert isinstance(caught.value, RuntimeError)
     assert calls == 2
+
+
+def test_a_window_of_a_later_shot_holding_nan_names_the_shot_by_its_frames(
+    models: model.Models, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A clip cut into shots is one call a shot: the refusal says which, as the decode's does.
+    stand_in_dit(monkeypatch)
+    sample = model.sample
+
+    def poisoned(models: model.Models, noise: Tensor, cond: Tensor) -> Tensor:
+        out = sample(models, noise, cond)
+        out[1, 2, 3, 4] = float("nan")
+        return out
+
+    monkeypatch.setattr(model, "sample", poisoned)
+    with pytest.raises(clip.NonFinite, match=r"window 1/\d+ \(frames 9 to 29\)"):
+        clip.upscale(
+            models,
+            clip_of(21),
+            TARGET,
+            SEED,
+            window=5,
+            encode_tiles=None,
+            decode_tiles=None,
+            correct=False,
+            start=9,
+        )
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf")])
@@ -492,6 +564,26 @@ def test_the_output_array_is_counted_and_taken_off_the_host() -> None:
     # No colour correction, no split in the plan's peaks.
     plain, _ = clip.plan(FREE, (1080, 1920), 400, Pins(window=9), host, correct=False, held=True)
     assert plain.window == made[0].window == 9
+
+
+def test_a_clip_of_shots_is_planned_as_its_shots_with_the_whole_output_counted() -> None:
+    """The shots are the planner's (the longest decides), a number of frames one shot, and the
+    output array of all of them is what is taken off the host."""
+    cuts = [Shot(0, 100), Shot(100, 400), Shot(400, 450)]
+    host = 20 * GIB
+    made = clip.plan(FREE, (1080, 1920), cuts, Pins(window=9), host, correct=True, held=True)
+    taken = clip.output_bytes(450, (1080, 1920))
+    assert made == shot_plan.plan(
+        FREE, (1080, 1920), cuts, Pins(window=9), host - taken,
+        split=True, held=True, in_memory=True,
+    )  # fmt: skip
+    one = clip.plan(FREE, (1080, 1920), 450, Pins(window=9), host, correct=True, held=True)
+    assert one == clip.plan(
+        FREE, (1080, 1920), [Shot(0, 450)], Pins(window=9), host, correct=True, held=True
+    )
+    for none in ([], [Shot(0, 0)]):
+        with pytest.raises(ValueError, match="no frame"):
+            clip.plan(FREE, UHD, none, Pins(), None, correct=True)
 
 
 def test_a_host_short_of_the_output_is_refused_and_says_so() -> None:

@@ -2,12 +2,12 @@
 nodes use, and what the executor does around a node, as the tests need them.
 
 What it keeps of the real one:
-- a type (Boolean, Int, String, Combo, Image, and Custom(io_type) for a node's own) has an `Input`
-  and an `Output` class; an input has an id, a display name, a tooltip, whether it is optional,
-  and for a widget (Int, Boolean, String, Combo, a WidgetInput) a default and its options, among
-  them `force_input` (forceInput: a socket and no widget) and a BOOLEAN's labels; `as_dict` is
-  the options dictionary the frontend reads, with every field that is None left out, False
-  kept;
+- a type (Boolean, Int, Float, String, Combo, Image, and Custom(io_type) for a node's own) has
+  an `Input` and an `Output` class; an input has an id, a display name, a tooltip, whether it is
+  optional, and for a widget (Int, Float, Boolean, String, Combo, a WidgetInput) a default and its
+  options, among them `force_input` (forceInput: a socket and no widget) and a BOOLEAN's labels;
+  `as_dict` is the options dictionary the frontend reads, with every field that is None left
+  out, False kept;
 - a Schema lists the inputs and outputs in order (the order the frontend builds its widgets in:
   `v1_inputs`, the INPUT_TYPES the loader reads off a V3 node, keeps it), its hidden inputs, its
   category and description; an output with no id gets `_<index>_<TYPE>_`, and ids must be unique;
@@ -186,6 +186,42 @@ class Int:
 
     class Output(Output):
         io_type = "INT"
+
+
+class Float:
+    io_type = "FLOAT"
+
+    class Input(WidgetInput):
+        io_type = "FLOAT"
+
+        def __init__(
+            self,
+            id: str,
+            display_name: str | None = None,
+            optional: bool = False,
+            tooltip: str | None = None,
+            default: float | None = None,
+            min: float | None = None,
+            max: float | None = None,
+            step: float | None = None,
+            round: float | bool | None = None,
+            force_input: bool | None = None,
+        ) -> None:
+            super().__init__(id, display_name, optional, tooltip, default, force_input)
+            self.min = min
+            self.max = max
+            self.step = step
+            self.round = round
+
+        def as_dict(self) -> dict[str, Any]:
+            found = super().as_dict()
+            for key in ("min", "max", "step", "round"):
+                if getattr(self, key) is not None:
+                    found[key] = getattr(self, key)
+            return found
+
+    class Output(Output):
+        io_type = "FLOAT"
 
 
 class String:

@@ -29,9 +29,10 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
                          shot's pass, encode, windows and decode, on models already loaded
     picture.py png.py webp.py still.py still_plan.py     a still picture: read, written as PNG
                          or lossless WebP, upscaled on models already loaded, its plan for a bound
-    clip.py              a clip of one shot's frames in memory, upscaled on models already loaded,
-                         its plan (shot_plan's, the output and the windows and scratch kept in
-                         system memory counted)
+    clip.py              a clip's frames in memory, a call a shot (its seed by the shot's first
+                         frame, the clip's one output array written into), upscaled on models
+                         already loaded, its plan for the clip's shots (shot_plan's, the output
+                         and the windows and scratch kept in system memory counted)
     shotcuts.py          the cuts drawn from the shot detector's probabilities (Cut, detections,
                          detected, possible, the default and the possible cuts' thresholds), plain
                          Python and NumPy; the CLI's cuts.py keeps their timecodes, the cut list
@@ -77,8 +78,10 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          environment; a package ComfyUI imports from its custom_nodes (relative
                          imports, any folder name)
   __init__.py nodes.py   V3 registration (`comfy_entrypoint`, a ComfyExtension; `io.ComfyNode`,
-                         `io.Schema`); the nodes (Models, Upscale Image, Upscale Video, and the
-                         value nodes Tile, Blocks Swapped and Window Length: the settings are the
+                         `io.Schema`); the nodes (Models, Cuts, Upscale Image, Upscale Video, and
+                         the value nodes Tile, Blocks Swapped and Window Length: Upscale Video
+                         takes the Cuts node's cut list, a required input of its own type; the
+                         settings are the
                          upscale nodes' widgets, the plan's numbers their optional sockets of
                          seedvr2x's own types, no Tuning node) and ComfyUI's
                          calls (progress, Cancel, the plan said on the node, plan only); the one
@@ -423,13 +426,16 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
 - A clip of frames in memory (`seedvr2x/clip.py`; DESIGN.md, Repository and apps, the nodes), on
   the CPU: `core/tests/test_clip.py` holds it on `cpu_models`' VAE in bfloat16 and `test_still.py`'s
   stand-in DiT: the output's shape and dtype and the input left as it was, the clip's seeds (a
-  shot at frame 0), the phases entered in order and nothing loaded, 1, 2 and 3 windows, the steps
-  told in order with their counts, a step raising an `Exception` or a `BaseException` at each stage
-  leaving no decode open, none of the decode's slices alive (the traceback's frames cleared;
-  `Watched`) and nothing for `test_held.strays` to find, the refusals (not `(T, H, W, 3)`
-  float32, no frame, `NonFinite` from an encode, a window or a decode), the correction against
-  the clip's own frames, the scratch in `tiling.InMemory` and no file. The plan
-  (`clip.plan`, `shot_plan.plan`'s `in_memory`): the output array taken off the host and a host
+  shot at frame 0, and a shot of a longer clip seeded by its first frame, `start`, as the command
+  line seeds it, written into a slice of the clip's one output array, `output`), the phases
+  entered in order and nothing loaded, 1, 2 and 3 windows, the steps told in order with their
+  counts, a step raising an `Exception` or a `BaseException` at each stage leaving no decode
+  open, none of the decode's slices alive (the traceback's frames cleared; `Watched`) and nothing
+  for `test_held.strays` to find, the refusals (not `(T, H, W, 3)` float32, no frame, `NonFinite`
+  from an encode, a window or a decode, a window's naming the shot by its frames), the correction
+  against the clip's own frames, the scratch in `tiling.InMemory` and no file. The plan
+  (`clip.plan`, `shot_plan.plan`'s `in_memory`; the clip's shots planned as the planner takes them,
+  the output of all of them taken off the host): the output array taken off the host and a host
   short of it refused saying so, a tiled pass's allowance the whole scratch, the windows counted
   all together at the DiT's last window and the latent beside the merge (`host_moments`'
   `in_memory`), and `in_memory=False`
@@ -969,7 +975,21 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   bit for bit to `still.upscale` and `clip.upscale`, the batch's output allocated once and
   counted in the plan's `process`, the alpha rule, the plan said on the node, in the console and
   as text with what each auto became and the host memory beside the host's, the attention,
-  colour correction and seed, the probe, a clip as one shot run by one function; `tests/test_plans.py`
+  colour correction and seed, the probe, a clip of 1, 2 and 3 shots equal bit for bit to
+  `clip.upscale` of each shot one after the other (each seeded by its first frame, its frames
+  written into the clip's one output array, no window across a cut, the plan made once and said
+  shot by shot, the bar over all the shots), a cut list for other frames refused, a clip the host
+  can't hold refused before a model loads with the command line's way named, a seed some shot would
+  seed past 2**32 (the seed plus the last shot's first frame and the encode's offset) refused
+  before a model loads, a picture at resolution 17 refused and a clip at 17 planned, four channels
+  with an opaque alpha a view of the same memory and not a copy, the input said in the
+  plan's RAM line and out of the comparison, and the INFO line naming the command line said once
+  at import and never by a run; `tests/test_cuts_node.py` seedvr2x Cuts over the untrained
+  detector's weights and scripted probabilities (the cut list and the text of the cuts and the
+  possible cuts, one shot mode running no detector, the threshold, the file found in a folder or
+  fetched by its pin, the detector closed after, the alpha left out, its refusals, its list into
+  Upscale Video, its file's refusals naming seedvr2x Cuts and its own model folder, sizes with
+  separators); `tests/test_plans.py`
   the DiT files' names, the inputs (the pictures first, then the models, the widgets, then the
   plan's numbers as optional sockets of seedvr2x's own types, no value standing for auto, each
   type given by its value node alone: Tile, Blocks Swapped and Window Length on the planner's
@@ -980,7 +1000,7 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   none, the seed's fixed control; the Models node's model, folder and RAM tooltips; a value the
   prompt holds or a link gives refused in the nodes' words at queue time and at the node's
   start, an unwired one not given), the settings' pins
-  reaching the plan exactly, the text's lines, the V3 registration (the entrypoint, the six
+  reaching the plan exactly, the text's lines, the V3 registration (the entrypoint, the seven
   ids, names, inputs, outputs and hidden id), `nodes.py` the one user of `comfy_api`;
   `tests/test_keeping.py` keep in RAM auto/on/off against ComfyUI's cap (its MAX_PINNED_MEMORY
   or its rule), what is said, the first file's memory freed before the second is pinned,
@@ -989,7 +1009,10 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   freed, an execution blocker for the pictures); `tests/
   test_words.py` every refusal class worded without "--", and the library's real refusals (a
   damaged or unpinned file in a cache and in a directory written there, the plan with tiny
-  figures, the target check) worded with the way out; `tests/test_machine.py` the reading
+  figures, the target check) worded with the way out; the four kinds of a plan (memory, host,
+  input, pin) worded from their facts and never by the library's sentence, in none of the library's
+  terms, with the value node and the socket that take the number that fits, and a clip's host
+  refusal naming what the command line does instead; `tests/test_machine.py` the reading
   shifted by ComfyUI's models, torch's allocator setting given to `memory.startup` and the
   environment left as it was; `tests/test_process_state.py` torch's memory fraction never set
   and the global random generators as they were after a run; `tests/test_room.py` also the card
@@ -998,11 +1021,12 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   or a stock one of a table read from v0.44.0, seedvr2x's sockets, outputs and widgets equal to
   their V3 schemas' in count, order and defaults, every optional input unwired, every link
   joining an output to an input of its type, Models wired into the upscale node and no Tuning
-  node, the plan shown as text. Smoke in the real ComfyUI, CPU only, by hand: the folder
-  linked into its `custom_nodes`, then `CUDA_VISIBLE_DEVICES= python main.py --cpu
+  node, the plan shown as text, the clip's Cuts between Load Video and Upscale Video. Smoke in
+  the real ComfyUI, CPU only, by hand: the folder linked into its `custom_nodes`, then
+  `CUDA_VISIBLE_DEVICES= python main.py --cpu
   --quick-test-for-ci` in its environment with `PYTHONPATH` at `core/`, which lists the nodes
   among the custom nodes imported with no error, and a script that imports ComfyUI's `nodes`
-  as the server does, awaits `init_external_custom_nodes` and checks the six ids registered from
+  as the server does, awaits `init_external_custom_nodes` and checks the seven ids registered from
   the extension with their schemas (`GET_NODE_INFO_V1`) and run on the executor's locked clone.
 - The image server's container (DESIGN.md, The image server, The Docker image):
   `apps/imgserver/Dockerfile`, built from the repository's root (`docker build -f

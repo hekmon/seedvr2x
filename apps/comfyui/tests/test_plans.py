@@ -15,6 +15,7 @@ from standins import StandIn, execute, upscale_image
 
 from seedvr2x import peaks, pull, weights
 from seedvr2x.memory import Reading
+from seedvr2x.shots import Shot
 
 GIB = peaks.GIB
 BIG = Reading(80 * GIB, None, 80 * GIB, False)
@@ -104,6 +105,7 @@ def test_there_is_no_tuning_node() -> None:
     assert not hasattr(nodes, "Tuning")
     assert [each.GET_SCHEMA().node_id for each in nodes.NODES] == [
         "seedvr2xModels",
+        "seedvr2xCuts",
         "seedvr2xUpscaleImage",
         "seedvr2xUpscaleVideo",
         "seedvr2xTile",
@@ -144,7 +146,15 @@ def test_the_pictures_come_first_then_the_models_then_the_widgets_then_the_plans
         "decode_tile",
         "swap_blocks",
     ]
-    assert list(video) == [*list(image)[:7], "window", *list(image)[7:]]
+    # A clip's cut list is the clip's fact: a required socket, right after its frames.
+    assert list(video) == [
+        "images",
+        "cuts",
+        *list(image)[1:7],
+        "window",
+        *list(image)[7:],
+    ]
+    assert video["cuts"].io_type == "SEEDVR2X_CUTS" and not video["cuts"].optional
     for node in (nodes.UpscaleImage, nodes.UpscaleVideo):
         spec = schema_inputs(node)
         assert spec["images"].io_type == "IMAGE" and spec["models"].io_type == "SEEDVR2X_MODELS"
@@ -272,7 +282,10 @@ def test_every_input_and_output_has_a_label_and_a_tooltip() -> None:
             assert each.display_name[0].islower() and "_" not in each.display_name, each.id
     for node in (nodes.UpscaleImage, nodes.UpscaleVideo):
         schema = node.GET_SCHEMA()
-        assert [each.display_name for each in schema.inputs][:2] == ["images", "models"]
+        names = [each.display_name for each in schema.inputs]
+        assert names[:2] == (
+            ["images", "cuts"] if node is nodes.UpscaleVideo else ["images", "models"]
+        )
         assert [(each.id, each.display_name) for each in schema.outputs] == [
             ("images", "images"),
             ("plan", "plan"),
@@ -416,6 +429,7 @@ def test_the_value_nodes_outputs_reach_the_plan_as_set(machine: StandIn, tmp_pat
         nodes.UpscaleVideo,
         "1",
         images=torch.zeros(33, 24, 40, 3),
+        cuts=(Shot(0, 33),),
         models=handle(tmp_path),
         resolution=48,
         attention="auto",
@@ -484,7 +498,7 @@ def picture_plan(settings: plans.Settings):  # type: ignore[no-untyped-def]
 
 
 def clip_plan(settings: plans.Settings, frames: int = 100):  # type: ignore[no-untyped-def]
-    planned = nodes.clip_planner(settings, FULL_HD, frames)(
+    planned = nodes.clip_planner(settings, FULL_HD, [Shot(0, frames)])(
         BIG, 64 * GIB, peaks.FLASH_ATTN_2, weights.DIT_7B, False
     )
     return planned.plan
@@ -516,12 +530,12 @@ def test_a_pin_the_plan_cant_take_is_refused_in_the_nodes_words() -> None:
     with pytest.raises(PlanRefused) as refused:
         picture_plan(plans.Settings(swap_blocks=0, decode_tile=4096))
     text = str(words.refusal(refused.value))
-    assert "decode tile 4096 px on this node" in text and "--" not in text
-    assert "decode tile set to the whole image at once on this node" in text
+    assert "Decode tile 4096 px is as large as the whole image" in text and "--" not in text
+    assert "seedvr2x Tile with whole image at once on to decode tile" in text
     with pytest.raises(PlanRefused) as clip:
         clip_plan(plans.Settings(swap_blocks=99), frames=10)
     said = str(words.refusal(clip.value))
-    assert said.startswith("blocks swapped 99 on this node: the DiT has 36 blocks")
+    assert said.startswith("Blocks swapped 99 is more than the model has: 36 blocks")
     assert "--" not in said
 
 
@@ -540,6 +554,7 @@ def test_the_registered_nodes() -> None:
     schemas = {each.GET_SCHEMA().node_id: each.GET_SCHEMA() for each in listed}
     assert {key: value.display_name for key, value in schemas.items()} == {
         "seedvr2xModels": "seedvr2x Models",
+        "seedvr2xCuts": "seedvr2x Cuts",
         "seedvr2xUpscaleImage": "seedvr2x Upscale Image",
         "seedvr2xUpscaleVideo": "seedvr2x Upscale Video",
         "seedvr2xTile": "seedvr2x Tile",
@@ -551,6 +566,7 @@ def test_the_registered_nodes() -> None:
     # Models and the upscale nodes in seedvr2x's category, the value nodes in its subcategory.
     assert {key: value.category for key, value in schemas.items()} == {
         "seedvr2xModels": "seedvr2x",
+        "seedvr2xCuts": "seedvr2x",
         "seedvr2xUpscaleImage": "seedvr2x",
         "seedvr2xUpscaleVideo": "seedvr2x",
         "seedvr2xTile": "seedvr2x/plan settings",
@@ -618,7 +634,7 @@ def picture_text(settings: plans.Settings, keeping: plans.Keeping = KEPT, **kwar
 def clip_text(settings: plans.Settings, **kwargs: Any) -> str:
     made, expected = clip_plan(settings, 100)
     return plans.clip_text(
-        frames=100,
+        cuts=[Shot(0, 100)],
         source=(1920, 1080),
         output=(1920, 1080),
         resolution=1080,
@@ -679,8 +695,11 @@ def test_the_text_counts_the_ram_and_says_what_the_computer_has() -> None:
         unread.host, KEPT, 0, ["x"]
     )  # pyright: ignore[reportPrivateUsage]
     clip = next(each for each in clip_text(plans.Settings()).splitlines() if each.startswith("RAM"))
-    assert "the clip's output, 2.32 GiB, is taken from what the computer has" in clip
-    assert "the input's frames, 2.32 GiB, are already in memory" in clip
+    # The comparison has the output and the run's own work; the input, ComfyUI's, is said and
+    # left out of it (its memory is out of the RAM available already).
+    assert "for the clip's output, kept whole," in clip and "2.32 GiB for the clip's" in clip
+    assert "the input's frames, 2.32 GiB, are not in that" in clip
+    assert "ComfyUI has them in memory already, so they are out of the RAM available" in clip
     assert "the computer has 48.00 GiB available" in clip
     off = plans.Keeping("off", False, 8 * GIB, 12 * GIB, "x")
     assert "the model is not kept" in picture_text(plans.Settings(), off)

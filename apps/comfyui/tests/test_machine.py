@@ -127,9 +127,10 @@ def test_the_lending_driver_is_told_in_the_nodes_words_once(
     with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui.models"):
         run_image(handle(tmp_path))
         run_image(handle(tmp_path))
-    said = [line for line in caplog.messages if "the plan keeps the reserve" in line]
-    assert len(said) == 1 and "no limit is set on torch's memory" in said[0]
-    assert "the plan keeps the reserve" in said[0]
+    said = [line for line in caplog.messages if "borrows your computer's RAM" in line]
+    assert len(said) == 1 and "(Windows' shared GPU memory), which is slow" in said[0]
+    assert "seedvr2x's plan leaves room on the card" in said[0]
+    assert "reserve" not in said[0] and "torch" not in said[0]
 
 
 def test_the_librarys_command_line_warnings_are_not_shown_in_comfyuis_process(

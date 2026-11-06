@@ -1,4 +1,4 @@
-"""seedvr2x's nodes for ComfyUI: seedvr2x Models, Upscale Image and Upscale Video, which run
+"""seedvr2x's nodes for ComfyUI: seedvr2x Models, Cuts, Upscale Image and Upscale Video, which run
 SeedVR2 with seedvr2x's own loaders and placement (the library, `seedvr2x`, installed in ComfyUI's
 Python environment), and the value nodes of the plan's settings (Tile, Blocks Swapped, Window
 Length).
@@ -17,6 +17,17 @@ only where it finds none, so this module defines the entrypoint alone. The nodes
 published, are kept: a saved workflow names them.
 """
 
+import logging
+
 from .nodes import comfy_entrypoint
 
 __all__ = ["comfy_entrypoint"]
+
+# Said once, when ComfyUI loads the nodes, never at a run (the user, 2026-11-06): where the nodes
+# stop and the command line begins. The repository's folder and its README, no address.
+logging.getLogger("seedvr2x_comfyui").info(
+    "seedvr2x's nodes hold a clip whole in RAM, as ComfyUI does. For a whole film, seedvr2x's"
+    " command line is the tool: it reads a film shot by shot, resumes after a stop and writes"
+    " lossless files. It is in this repository's apps/seedvr2x folder, beside these nodes, and"
+    " its README says how to use it."
+)

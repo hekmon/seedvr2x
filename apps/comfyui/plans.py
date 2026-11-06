@@ -8,9 +8,11 @@ classes (nodes.py) and the run (models.py) build on it, and the tests hold it al
 words never name an option of the command line: a setting is named by the label the user sees
 on the node that has it (LABELS, words.say)."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import ROUND_DOWN, Decimal
 
-from seedvr2x import peaks, pull, shots
+from seedvr2x import peaks, pull, shotcuts, shots
 from seedvr2x.memory import GIB, Reading
 from seedvr2x.passes import Plan, Tiles
 from seedvr2x.shot_plan import Peaks
@@ -85,13 +87,13 @@ ATTENTIONS = (AUTO, peaks.SDPA, peaks.FLASH_ATTN_2)
 # The colour correction, a BOOLEAN: on is split, off none (the user, 2026-11-05).
 CORRECTIONS = ("split", "none")
 # The command line's default seed, and the highest seed it takes for a shot at frame 0, which a
-# picture and a clip both are: the seed plus the encode's offset must stay under numz's 2**32
-# (job.SEED_LIMIT, passes.ENCODE_SEED_OFFSET).
+# picture is: the seed plus the encode's offset must stay under numz's 2**32 (job.SEED_LIMIT,
+# passes.ENCODE_SEED_OFFSET). A clip's later shots add their first frame (nodes._check_seed).
 SEED = 42
 SEED_MAX = 2**32 - 1 - 1_000_000
 # The command line's default resolution (job.DEFAULT_RESOLUTION), and the bounds of the widget: a
-# short side of 18 pixels is the least the padding can be made on once the output's sides are
-# cropped to even ones (frames.check_target, frames.output_size: 17 gives 16 rows), 16,384
+# short side of 18 pixels is the least a picture's padding can be made on once the output's sides
+# are cropped to even ones (frames.check_picture_target: 17 gives 16 rows), 16,384
 # the most a lossless WebP can write, a bound no node needs but that keeps the widget finite.
 RESOLUTION = 1080
 RESOLUTION_MIN = 18
@@ -373,8 +375,7 @@ def gib(count: float) -> str:
 def _room(room: Room, reading: Reading) -> list[str]:
     lines = [
         f"graphics card: {room.card}, {gib(room.free)} free; ComfyUI's own models use"
-        f" {gib(room.comfy)} of it, and seedvr2x plans as if they were unloaded, with"
-        f" {gib(reading.counted)}"
+        f" {gib(room.comfy)} of it, and seedvr2x counts on {gib(reading.counted)}"
     ]
     if room.plan_only:
         lines.append(
@@ -510,9 +511,23 @@ def picture_text(
     return "\n".join(lines)
 
 
+def _shot_line(number: int, shot: shots.Shot, window: int | None) -> str:
+    """One shot of a clip in the plan's text: where it is in the clip (frames counted from 0, the
+    first and the last of it) and its windows of the model, by the layout the pass runs
+    (shots.shot_layout, in frames as seedvr2x Window Length sets them)."""
+    layout = shots.shot_layout(shot.frames, window)
+    longest = max(end - start for start, end in layout)
+    how = (
+        "the whole shot in one window of the model"
+        if len(layout) == 1
+        else f"{len(layout)} windows of the model, the longest {_frames(longest)}"
+    )
+    return f"shot {number}: frames {shot.start} to {shot.end - 1} ({shot.frames} frames): {how}"
+
+
 def clip_text(
     *,
-    frames: int,
+    cuts: Sequence[shots.Shot],
     source: tuple[int, int],
     output: tuple[int, int],
     resolution: int,
@@ -526,28 +541,39 @@ def clip_text(
     notes: tuple[str, ...] = (),
     held: int = 0,
 ) -> str:
-    """The plan of a clip, the frames of one shot in sliding windows, in the same words."""
-    windows = len(shots.shot_layout(frames, plan.window))
+    """The plan of a clip, the frames of its shots each in sliding windows, in the same words: a
+    clip of one shot says its windows in its first line, a clip of several a line for each shot.
+    `cuts` are the shots, frames [start, end) covering the clip."""
+    frames = sum(each.frames for each in cuts)
     inputs = frames * source[0] * source[1] * 3 * 4
     outputs = frames * output[0] * output[1] * 3 * 4
     counts = [
-        f"this run needs about {gib(expected.host)}"
+        f"this run needs about {gib(expected.host + outputs)}: {gib(outputs)} for the clip's"
+        f" output, kept whole, and {gib(expected.host)} for seedvr2x's own work"
         + (
             ""
             if expected.scratch == 0
-            else f", {gib(expected.scratch)} of it for a pass made in tiles"
+            else f" ({gib(expected.scratch)} of it for a pass made in tiles)"
         ),
-        f"the clip's output, {gib(outputs)}, is taken from what the computer has",
-        f"the input's frames, {gib(inputs)}, are already in memory",
+        f"the input's frames, {gib(inputs)}, are not in that: ComfyUI has them in memory already,"
+        " so they are out of the RAM available",
     ]
-    lines = [
-        f"seedvr2x plan{' (plan only)' if room.plan_only else ''}: a clip of {frames} frames"
-        f" {source[0]}x{source[1]} to {output[0]}x{output[1]} (resolution {resolution}): "
-        + (
+    first = f"seedvr2x plan{' (plan only)' if room.plan_only else ''}: a clip of {frames} frames"
+    first += f" {source[0]}x{source[1]} to {output[0]}x{output[1]} (resolution {resolution})"
+    if len(cuts) == 1:
+        windows = len(shots.shot_layout(cuts[0].frames, plan.window))
+        first += ": " + (
             "the whole clip in one window of the model"
             if windows == 1
             else f"{windows} windows of the model, the longest {_frames(expected.window)}"
-        ),
+        )
+        per_shot: list[str] = []
+    else:
+        first += f", in {len(cuts)} shots, each upscaled on its own"
+        per_shot = [_shot_line(number, each, plan.window) for number, each in enumerate(cuts, 1)]
+    lines = [
+        first,
+        *per_shot,
         *notes,
         *_room(room, expected.reading),
         *_common(dit, attention, plan.swapped, settings),
@@ -563,4 +589,63 @@ def clip_text(
         keeping.line,
         _host(room.host, keeping, held, counts),
     ]
+    return "\n".join(lines)
+
+
+# ---- The cuts in the nodes' words ----------------------------------------------------------------
+
+
+def probability(value: float) -> str:
+    """A cut's probability to 3 decimals, the float32 value's exact decimal cut and never rounded
+    up (as the command line's cut list shows it), so that a possible cut never shows at the
+    threshold it stays under, nor a cut under the one it reaches."""
+    return str(Decimal(float(value)).quantize(Decimal("0.001"), rounding=ROUND_DOWN))
+
+
+def one_shot_text(frames: int) -> str:
+    """The Cuts node's text for "one shot": the clip taken whole, no detection run."""
+    return f"seedvr2x Cuts: one shot, the whole clip of {frames} frames; no detection was run"
+
+
+def cuts_text(
+    frames: int,
+    threshold: float,
+    found: Sequence[shotcuts.Cut],
+    possible: Sequence[shotcuts.Cut],
+) -> str:
+    """The Cuts node's text for "detect": the shots found at `threshold`, each cut by the first
+    frame of the shot it starts (frames counted from 0, as the command line's cut list counts
+    them) with the probability of the detection, then the possible cuts, which the list does not
+    hold: runs that peak from shotcuts.POSSIBLE up to the threshold, for the eyes to check."""
+    shots_found = len(found) + 1
+    lines = [
+        f"seedvr2x Cuts: {frames} frames, {len(found)} cut{'' if len(found) == 1 else 's'} found at"
+        f" threshold {threshold:g}: {shots_found} shot{'' if shots_found == 1 else 's'}"
+    ]
+    lines += [
+        f"cut at frame {each.frame} (probability {probability(each.probability or 0.0)})"
+        for each in found
+    ]
+    if possible:
+        lines.append(
+            f"{len(possible)} possible cut{'' if len(possible) == 1 else 's'}, not in the list:"
+            f" scenes the detector found less sure than {threshold:g} (from"
+            f" {shotcuts.POSSIBLE:g}), to check by eye; a lower threshold makes them cuts"
+        )
+        lines += [
+            f"possible cut at frame {each.frame}"
+            f" (probability {probability(each.probability or 0.0)})"
+            for each in possible
+        ]
+    else:
+        if threshold <= shotcuts.POSSIBLE:
+            # The possible cuts are the scenes between POSSIBLE and the threshold: none to find.
+            lines.append(
+                f"no possible cuts: at a threshold of {shotcuts.POSSIBLE:g} or under, every scene"
+                " change the detector sees is a cut"
+            )
+        else:
+            lines.append(
+                f"no possible cuts: nothing between {shotcuts.POSSIBLE:g} and {threshold:g}"
+            )
     return "\n".join(lines)

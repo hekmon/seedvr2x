@@ -611,9 +611,11 @@ def _plan[T](
     architecture: Architecture,
     held: bool,
     handle: Handle,
+    clip: words.ClipSize | None = None,
 ) -> Planned[T]:
     """The planner's plan; a refusal for memory is worded with the smaller files of the same 7B
-    that would plan the run (pull.smaller_planning: the file never changed by itself)."""
+    that would plan the run (pull.smaller_planning: the file never changed by itself), and with
+    the clip's size where the run is a clip's (words.ClipSize)."""
     try:
         return planner(reading, host, attention, architecture, held)
     except PlanRefused as refused:
@@ -635,6 +637,7 @@ def _plan[T](
             smaller=smaller,
             model_dir=bool(handle.model_dir),
             keep=held,
+            clip=clip,
         ) from refused
 
 
@@ -698,36 +701,45 @@ def _ours(entry: Entry | None) -> list[Any]:
 
 
 def _allocator_note(machine: Machine) -> None:
-    """Where the driver lends system memory and ComfyUI's torch runs an allocator that holds a
-    run to the card less well than torch's own with expandable segments (memory.py, DESIGN.md,
-    Allocator, "Expandable segments"), said once per process, with the way to it: cudaMallocAsync,
-    ComfyUI's default, gives way to torch's own allocator with ComfyUI's --disable-cuda-malloc;
-    torch's own without the segments takes them from PYTORCH_CUDA_ALLOC_CONF set before ComfyUI
-    starts, so that a step short of room slows down instead of failing."""
+    """Where the driver lends system memory, ComfyUI's allocator and the plan's reserve said once
+    per process, with the way to torch's own allocator with expandable segments, the one that
+    holds a run to the card best (memory.py, DESIGN.md, Allocator). Under cudaMallocAsync,
+    ComfyUI's default, nothing slows and no bit moves, but its pool takes more of the card than
+    torch's limit counts, which the plan counts; on an 8 GB card a picture fits either way and a
+    1080p clip only under torch's own allocator with its segments (place-study, 2026-11-05):
+    ComfyUI's --disable-cuda-malloc and PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True, set
+    before ComfyUI starts, ComfyUI setting no segments of its own (impl-nodes' reading of
+    v0.44.0). Torch's own allocator without the segments plans with the 4.5 GiB reserve alone,
+    and a step short of room fails there where the segments slow it down."""
     if not machine.spills():
         return
     if "lends" not in _told:
         _told.add("lends")
         logger.info(
-            "seedvr2x: this driver lends system memory where the card is full: the plan keeps the"
-            " reserve for it, and no limit is set on torch's memory (ComfyUI's process is shared"
-            " with its other nodes)"
+            "seedvr2x: this graphics driver borrows your computer's RAM when the card is full"
+            " (Windows' shared GPU memory), which is slow; seedvr2x's plan leaves room on the card"
         )
     allocator = machine.allocator()
     if allocator == "cudaMallocAsync":
         _once(
             "allocator",
             "seedvr2x: this driver lends system memory where the card is full, and ComfyUI runs"
-            " torch on cudaMallocAsync, which holds a run to the card less well than torch's own"
-            " allocator does: start ComfyUI with --disable-cuda-malloc for it",
+            " torch on cudaMallocAsync, its default allocator. Nothing slows down and no picture"
+            " changes for it, but it holds more of the card than it uses, which the plan counts:"
+            " on an 8 GB card a picture fits either way, a 1080p clip only under torch's own"
+            " allocator with its expandable segments: start ComfyUI with"
+            " --disable-cuda-malloc, and set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+            " before it starts (ComfyUI sets no segments of its own)",
         )
     elif not machine.reading(machine.free()).expandable:
         _once(
             "allocator",
             "seedvr2x: this driver lends system memory where the card is full, and ComfyUI runs"
             " torch's own allocator without expandable segments, under which a step short of"
-            " room fails: set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True before starting"
-            " ComfyUI, and a short step slows down instead",
+            " room fails and the plan keeps %.1f GiB of the card free beside the model's work: set"
+            " PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True before starting ComfyUI, and a"
+            " short step slows down instead",
+            memory.RESERVE / memory.GIB,
         )
 
 
@@ -790,7 +802,12 @@ def _clear_frames(error: BaseException) -> None:
 
 @contextmanager
 def session[T](
-    handle: Handle, attention: str | None, planner: Planner[T], *, plan_only: bool = False
+    handle: Handle,
+    attention: str | None,
+    planner: Planner[T],
+    *,
+    plan_only: bool = False,
+    clip: words.ClipSize | None = None,
 ) -> Generator[Run[T]]:
     """One run of a node (the module's docstring): yields the models placed for the plan the
     planner makes, and frees the card whatever happens after. The Refused of words.py for a
@@ -800,10 +817,13 @@ def session[T](
     `plan_only`: the plan alone. The files are found and their headers and pins' sizes checked
     (a file missing from Hugging Face's cache is fetched, as the command line's --plan does), the
     card and the host read and the plan made; nothing is read whole, probed, registered, loaded
-    or placed, ComfyUI is asked to free nothing and the run's `models` is refused."""
+    or placed, ComfyUI is asked to free nothing and the run's `models` is refused.
+
+    `clip`: the size of the clip the run upscales, for its refusals to be worded with (a host
+    that can't hold it whole is told what the command line does instead)."""
     restore_rng = rng_states()
     try:
-        with _session(handle, attention, planner, plan_only) as run:
+        with _session(handle, attention, planner, plan_only, clip) as run:
             yield run
     finally:
         restore_rng()
@@ -811,7 +831,11 @@ def session[T](
 
 @contextmanager
 def _session[T](
-    handle: Handle, attention: str | None, planner: Planner[T], plan_only: bool
+    handle: Handle,
+    attention: str | None,
+    planner: Planner[T],
+    plan_only: bool,
+    clip: words.ClipSize | None,
 ) -> Generator[Run[T]]:
     """session, less the random generators."""
     machine_ = machine()
@@ -839,7 +863,7 @@ def _session[T](
         counted = (
             host if entry is not None or not keep or host is None else max(host - keeping.size, 0)
         )
-        planned = _plan(planner, reading, counted, chosen, architecture, keep, handle)
+        planned = _plan(planner, reading, counted, chosen, architecture, keep, handle, clip)
         room = plans.Room(
             card=machine_.name(),
             free=own.reported,
@@ -859,7 +883,7 @@ def _session[T](
         # A refusal comes before the read of the files: the plan for the card alone, the pinned
         # copies not counted (the host is checked by the plan that follows).
         early, _, _ = _read(machine_, None)
-        _plan(planner, early, None, chosen, architecture, True, handle)
+        _plan(planner, early, None, chosen, architecture, True, handle, clip)
         entry, note = _load_kept(handle, machine_, files, architecture)
         if note:
             notes.append(note)
@@ -870,7 +894,7 @@ def _session[T](
 
     reading, own, held = _read(machine_, ours)
     host = machine_.host()
-    planned = _plan(planner, reading, host, chosen, architecture, keep, handle)
+    planned = _plan(planner, reading, host, chosen, architecture, keep, handle, clip)
     needed = needed_free(planned.needs)
     asked = _taken(own) < needed
     if asked:

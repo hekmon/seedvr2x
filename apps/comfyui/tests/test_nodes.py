@@ -3,6 +3,7 @@ for bit to the library's still.upscale of it alone, a clip to clip.upscale, the 
 rule, the plan said three ways, the settings' choices reaching the plan and the pass."""
 
 import logging
+from typing import Any
 
 import numpy as np
 import pytest
@@ -22,6 +23,7 @@ from standins import (
 
 from seedvr2x import clip, peaks, still
 from seedvr2x.memory import Reading
+from seedvr2x.shots import Shot
 
 TARGET = (48, 80)
 GIB = peaks.GIB
@@ -37,9 +39,10 @@ def fresh(machine: StandIn) -> models.Models:  # type: ignore[name-defined]
     return standin_models(machine.vae_models, [], held=False)  # type: ignore[return-value]
 
 
-def planned_clip(machine: StandIn, settings: plans.Settings, count: int) -> clip.Plan:  # type: ignore[name-defined]
+def planned_clip(machine: StandIn, settings: plans.Settings, cuts: tuple[Shot, ...] | int):  # type: ignore[no-untyped-def]
     reading = Reading(32 * GIB, None, 32 * GIB, False)
-    made = nodes.clip_planner(settings, TARGET, count)(
+    shot_list = [Shot(0, cuts)] if isinstance(cuts, int) else cuts
+    made = nodes.clip_planner(settings, TARGET, shot_list)(
         reading, machine.host_bytes, peaks.FLASH_ATTN_2, machine.dit_format, True
     )
     return made.plan[0]
@@ -139,6 +142,63 @@ def test_an_alpha_channel_opaque_everywhere_is_dropped_and_any_other_refused(
     with pytest.raises(words.Refused, match="too small") as small:
         upscale_image(handle(tmp_path), plans.Settings(), rgb, 10, "1")
     assert "--" not in str(small.value) and "resolution" in str(small.value)
+
+
+def test_a_resolution_whose_even_crop_is_too_small_is_refused_for_a_picture_alone(
+    machine: StandIn, tmp_path
+) -> None:
+    """Resolution 17 on a 40x24 picture is 28x17, 28x16 once cropped to even sides: a picture's
+    plan is made for the crop, so the picture is refused in the nodes' words, saying the output's
+    size and the 18 rows it needs. A clip at 17 is planned as the command line plans a video: its
+    frames are padded at the target's 17 rows and cropped after the decode."""
+    rgb = pictures(1)
+    with pytest.raises(words.Refused, match="too small") as small:
+        upscale_image(handle(tmp_path), plans.Settings(), rgb, 17, "1")
+    assert str(small.value) == (
+        "resolution 17 on this node makes a 28x16 image, which is too small: seedvr2x needs 18 px"
+        " on the short side at least; raise resolution on this node"
+    )
+    assert machine.loads == []
+    out, plan = upscale_video(handle(tmp_path), plans.Settings(), pictures(5), 17, "1")
+    assert out.shape == (5, 16, 28, 3) and plan.startswith("seedvr2x plan: a clip of 5 frames")
+
+
+def test_a_seed_some_shot_would_seed_past_the_range_is_refused_before_anything_loads(
+    machine: StandIn, tmp_path
+) -> None:
+    """A shot is seeded with the seed plus its first frame, its encode with 1,000,000 more
+    (job.check_seed on the command line): the seed widget's largest value is right for a shot at
+    frame 0 only."""
+    frames = pictures(21)
+    cuts = (Shot(0, 9), Shot(9, 21))
+    with pytest.raises(
+        words.Refused, match="seed 4,293,967,295 is too high for this cut list"
+    ) as r:
+        run_shots(machine, tmp_path, frames, cuts, seed=plans.SEED_MAX)
+    assert "the last starts at frame 9" in str(r.value)
+    assert "can be 4,293,967,286 at most" in str(r.value) and "--" not in str(r.value)
+    assert machine.loads == []
+    # The highest seed that works is taken, and so is any seed with one shot.
+    run_shots(machine, tmp_path, frames, cuts, seed=plans.SEED_MAX - 9, window=5)
+    run_shots(machine, tmp_path, frames, (Shot(0, 21),), seed=plans.SEED_MAX, window=5)
+
+
+def test_four_channels_with_an_opaque_alpha_are_a_view_not_a_copy() -> None:
+    rgb = pictures(2)
+    opaque = torch.cat([rgb, torch.ones(2, *PICTURE, 1)], dim=3)
+    array = nodes._array(opaque)
+    assert array.shape == (2, *PICTURE, 3) and np.shares_memory(array, opaque.numpy())
+    assert array.tobytes() == rgb.numpy().tobytes()
+    assert np.shares_memory(nodes._array(rgb), rgb.numpy())
+
+
+def test_a_clip_with_an_opaque_alpha_is_the_clip_without_it(machine: StandIn, tmp_path) -> None:
+    rgb = pictures(9)
+    opaque = torch.cat([rgb, torch.ones(9, *PICTURE, 1)], dim=3)
+    cuts = (Shot(0, 4), Shot(4, 9))
+    with_alpha, _ = run_shots(machine, tmp_path, opaque, cuts, window=5)
+    without, _ = run_shots(machine, tmp_path, rgb, cuts, window=5)
+    assert with_alpha.numpy().tobytes() == without.numpy().tobytes()
 
 
 def test_the_plan_is_said_on_the_node_in_the_console_and_given_as_text(
@@ -277,17 +337,243 @@ def test_the_batchs_output_is_counted_in_the_process_memory_the_plan_is_given(
     assert given and set(given) == {nodes.picture_process(PICTURE, TARGET, 3)}
 
 
-def test_a_clip_is_one_shot_run_by_one_function_called_once(
+def run_shots(
+    machine: StandIn, tmp_path, frames: torch.Tensor, cuts: tuple[Shot, ...], **settings: Any
+) -> tuple[torch.Tensor, str]:
+    return upscale_video(
+        handle(tmp_path),
+        plans.Settings(**settings),
+        frames,
+        RESOLUTION,
+        "1",
+        cuts=cuts,  # type: ignore[arg-type]
+    )
+
+
+def libraries_clip(
+    machine: StandIn, frames: torch.Tensor, cuts: tuple[Shot, ...], seed: int, **plan
+):  # type: ignore[no-untyped-def]
+    """What the library gives each shot alone (clip.upscale, its seed the shot's by shots.Shot),
+    the shots' frames one after the other."""
+    settings = plans.Settings(seed=seed, **plan)
+    made = planned_clip(machine, settings, cuts)
+    alone = fresh(machine)
+    parts = [
+        clip.upscale(
+            alone,
+            frames.numpy()[each.start : each.end],
+            TARGET,
+            seed + each.start,
+            window=made.window,
+            encode_tiles=made.encode_tiles,
+            decode_tiles=made.decode_tiles,
+            correct=True,
+        )
+        for each in cuts
+    ]
+    return np.concatenate(parts)
+
+
+@pytest.mark.parametrize(
+    "cuts",
+    [
+        (Shot(0, 21),),
+        (Shot(0, 9), Shot(9, 21)),
+        (Shot(0, 5), Shot(5, 18), Shot(18, 21)),
+    ],
+    ids=["1 shot", "2 shots", "3 shots"],
+)
+def test_a_clip_of_shots_is_the_libraries_shots_one_after_the_other(
+    machine: StandIn, tmp_path, cuts: tuple[Shot, ...]
+) -> None:
+    frames = pictures(21)
+    out, _ = run_shots(machine, tmp_path, frames, cuts, seed=4, window=5)
+    expected = libraries_clip(machine, frames, cuts, 4, window=5)
+    assert out.shape == (21, 48, 80, 3) and out.dtype == torch.float32
+    assert out.numpy().tobytes() == expected.tobytes()
+
+
+def test_the_shots_are_seeded_as_the_command_line_seeds_them(machine: StandIn, tmp_path) -> None:
+    """A shot's seed is the job's plus its first frame (shots.Shot.seed): the second shot of a
+    clip is the library's clip of its frames run at the seed plus 9, and not at the seed."""
+    frames = pictures(21)
+    cuts = (Shot(0, 9), Shot(9, 21))
+    out, _ = run_shots(machine, tmp_path, frames, cuts, seed=4, window=5)
+    made = planned_clip(machine, plans.Settings(seed=4, window=5), cuts)
+    kept: dict[str, Any] = dict(
+        window=made.window,
+        encode_tiles=made.encode_tiles,
+        decode_tiles=made.decode_tiles,
+        correct=True,
+    )
+    second = frames.numpy()[9:]
+    at_13 = clip.upscale(fresh(machine), second, TARGET, 13, **kept)
+    at_4 = clip.upscale(fresh(machine), second, TARGET, 4, **kept)
+    assert out[9:].numpy().tobytes() == at_13.tobytes() != at_4.tobytes()
+
+
+def test_no_window_crosses_a_cut(
     machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A list of shots (frame ranges from a later Cuts node) is a loop around this call."""
-    calls: list[tuple[int, plans.Settings]] = []
-    real = nodes.UpscaleVideo._shot  # pyright: ignore[reportPrivateUsage]
+    """Each shot is a pass of its own over its own frames, in order, under the plan's one cap; and
+    the frames of one shot change nothing of another's output."""
+    calls: list[tuple[int, int, int | None]] = []
+    real = clip.upscale
 
-    def shot(loaded, shot_frames, target, settings, made, bar):  # type: ignore[no-untyped-def]
-        calls.append((len(shot_frames), settings))
-        return real(loaded, shot_frames, target, settings, made, bar)
+    def spy(models, shot_frames, target, seed, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((len(shot_frames), kwargs["start"], kwargs["window"]))
+        return real(models, shot_frames, target, seed, **kwargs)
 
-    monkeypatch.setattr(nodes.UpscaleVideo, "_shot", staticmethod(shot))
-    out, _ = upscale_video(handle(tmp_path), plans.Settings(seed=2), pictures(9), RESOLUTION, "1")
-    assert calls == [(9, plans.Settings(seed=2))] and out.shape == (9, 48, 80, 3)
+    monkeypatch.setattr(clip, "upscale", spy)
+    frames = pictures(21)
+    cuts = (Shot(0, 9), Shot(9, 21))
+    out, _ = run_shots(machine, tmp_path, frames, cuts, window=5)
+    assert calls == [(9, 0, 5), (12, 9, 5)]
+    other = frames.clone()
+    other[9:] = torch.flip(other[9:], dims=[0])
+    changed, _ = run_shots(machine, tmp_path, other, cuts, window=5)
+    assert changed[:9].numpy().tobytes() == out[:9].numpy().tobytes()
+    assert changed[9:].numpy().tobytes() != out[9:].numpy().tobytes()
+
+
+def test_one_output_array_is_allocated_for_the_clip_and_the_shots_written_into_it(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    given: list[tuple[int, ...]] = []
+    real = clip.upscale
+
+    def spy(models, shot_frames, target, seed, **kwargs):  # type: ignore[no-untyped-def]
+        given.append(kwargs["output"].shape)
+        return real(models, shot_frames, target, seed, **kwargs)
+
+    monkeypatch.setattr(clip, "upscale", spy)
+    out, _ = run_shots(machine, tmp_path, pictures(21), (Shot(0, 9), Shot(9, 21)), window=5)
+    assert given == [(9, 48, 80, 3), (12, 48, 80, 3)] and out.shape == (21, 48, 80, 3)
+
+
+def test_a_clips_bar_runs_over_all_its_shots_and_ends_full(machine: StandIn, tmp_path) -> None:
+    run_shots(machine, tmp_path, pictures(21), (Shot(0, 9), Shot(9, 21)), window=5)
+    (bar,) = ProgressBar.created
+    assert bar.updates == sorted(bar.updates) and bar.updates[-1] == bar.total == nodes.BAR
+    # Halfway is the first shot's end, its share the frames' (9 of 21).
+    first_end = [each for each in bar.updates if each <= nodes.BAR * 9 // 21]
+    assert first_end and max(first_end) == nodes.BAR * 9 // 21
+
+
+def test_the_plan_says_each_shot(
+    machine: StandIn, tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    cuts = (Shot(0, 5), Shot(5, 29), Shot(29, 33))
+    with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui.nodes"):
+        _, text = run_shots(machine, tmp_path, pictures(33), cuts, window=5)
+    lines = text.splitlines()
+    assert lines[0] == (
+        "seedvr2x plan: a clip of 33 frames 40x24 to 80x48 (resolution 48), in 3 shots, each"
+        " upscaled on its own"
+    )
+    assert lines[1].startswith("shot 1: frames 0 to 4 (5 frames): ")
+    assert lines[2].startswith("shot 2: frames 5 to 28 (24 frames): ")
+    assert "windows of the model, the longest" in lines[2]
+    assert lines[3].startswith("shot 3: frames 29 to 32 (4 frames): the whole shot in one window")
+    assert "window length: at most 17 frames, as you set it" in text
+    assert [m for m in caplog.messages if m.startswith("seedvr2x: shot ")] == [
+        "seedvr2x: shot 1 of 3, frames 0 to 4",
+        "seedvr2x: shot 2 of 3, frames 5 to 28",
+        "seedvr2x: shot 3 of 3, frames 29 to 32",
+    ]
+    # One shot: the clip's first line as before, no line for the shot.
+    _, one = run_shots(machine, tmp_path, pictures(5), (Shot(0, 5),))
+    assert "shot 1" not in one and "the whole clip in one window of the model" in one
+
+
+def test_the_plan_is_made_once_for_the_longest_shot(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made: list[tuple[object, ...]] = []
+    real = clip.plan
+
+    def spy(free, target, cuts, *args, **kwargs):  # type: ignore[no-untyped-def]
+        made.append(tuple(cuts))
+        return real(free, target, cuts, *args, **kwargs)
+
+    monkeypatch.setattr(clip, "plan", spy)
+    cuts = (Shot(0, 5), Shot(5, 18), Shot(18, 21))
+    run_shots(machine, tmp_path, pictures(21), cuts, window=5)
+    # Once for the clip's shots whole (the early check before the weights are read, and the plan).
+    assert made == [cuts, cuts]
+
+
+def test_a_cut_list_that_is_not_for_these_frames_is_refused(machine: StandIn, tmp_path) -> None:
+    frames = pictures(9)
+    for cuts in ((Shot(0, 5),), (Shot(0, 5), Shot(6, 9)), (Shot(0, 12),), (Shot(0, 5), Shot(4, 9))):
+        with pytest.raises(words.Refused, match="cut list covers") as refused:
+            run_shots(machine, tmp_path, frames, cuts)
+        assert "--" not in str(refused.value)
+    with pytest.raises(words.Refused, match="takes the cuts output of seedvr2x Cuts"):
+        run_shots(machine, tmp_path, frames, [Shot(0, 9)])  # type: ignore[arg-type]
+    assert machine.loads == []
+
+
+def test_a_clip_the_host_cant_hold_is_refused_before_a_model_loads_in_the_nodes_words(
+    machine: StandIn, tmp_path
+) -> None:
+    machine.host_bytes = 1 * GIB
+    with pytest.raises(words.Refused, match="This clip needs about") as refused:
+        upscale_video(
+            handle(tmp_path, keep=False),
+            plans.Settings(),
+            pictures(21),
+            RESOLUTION,
+            "1",
+            cuts=(Shot(0, 21),),
+        )
+    text = str(refused.value)
+    assert "kept whole" in text and "seedvr2x's command line" in text
+    assert "apps/seedvr2x" in text and "picks up again after a stop" in text
+    assert "give it fewer frames" in text and "--" not in text
+    assert machine.loads == []
+    # A picture says none of it.
+    with pytest.raises(words.Refused, match="This run needs about") as picture_refused:
+        upscale_image(handle(tmp_path), plans.Settings(), pictures(1), RESOLUTION, "1")
+    assert "command line" not in str(picture_refused.value)
+
+
+def test_the_plan_counts_the_input_in_what_it_says_and_not_in_the_comparison(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The input is ComfyUI's, held before the node reads the RAM available: the text says that
+    it is out of that figure, and the plan compares its own with the figure as read."""
+    given: list[int | None] = []
+    real = clip.plan
+
+    def spy(free, target, cuts, pins, host, **kwargs):  # type: ignore[no-untyped-def]
+        given.append(host)
+        return real(free, target, cuts, pins, host, **kwargs)
+
+    monkeypatch.setattr(clip, "plan", spy)
+    _, text = run_shots(machine, tmp_path, pictures(21), (Shot(0, 21),))
+    # The plan before the weights are read has no host figure; the one after has it as read.
+    assert given == [None, machine.host_bytes]
+    line = next(each for each in text.splitlines() if each.startswith("RAM: "))
+    assert "for the clip's output, kept whole," in line and "for seedvr2x's own work" in line
+    assert "the input's frames, 0.00 GiB, are not in that" in line
+    assert "ComfyUI has them in memory already, so they are out of the RAM available" in line
+
+
+def test_the_nodes_load_with_one_line_naming_the_command_line_and_no_run_says_it(
+    machine: StandIn, tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import importlib
+
+    import comfyui
+
+    with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui"):
+        importlib.reload(comfyui)
+        said = [m for m in caplog.messages if "command line" in m]
+        assert len(said) == 1
+        assert "apps/seedvr2x" in said[0] and "README" in said[0] and "http" not in said[0]
+        assert "shot by shot" in said[0] and "resumes after a stop" in said[0]
+        caplog.clear()
+        run_shots(machine, tmp_path, pictures(5), (Shot(0, 5),))
+        upscale_image(handle(tmp_path), plans.Settings(), pictures(1), RESOLUTION, "1")
+    assert not [m for m in caplog.messages if "command line" in m]

@@ -8,14 +8,16 @@ A clip is a shot, Shot(0, T), seeded as such (shots.Shot.seed), and the pass is 
 (seedvr2x/shot_pass.py): encode_shot, sample_windows over the layout of shots.shot_layout,
 merge_windows, decode_shot with the colour correction read from the frames in memory. So the
 output is bit for bit what the command line gives the same frames as a shot of one run
-(apps/seedvr2x/tests/test_clip_cli.py holds it). What differs is where things wait, all in system
-memory: each window's output goes to the CPU as soon as it is made, as the command line writes it
-to a file (units.Units.save_window), and is merged there; a tiled pass keeps its scratch in
-tiling.InMemory, whole, at 12.7 MB a 1080p frame; the output is one array, allocated once. The
-plan counts them (plan)."""
+(apps/seedvr2x/tests/test_clip_cli.py holds it). A clip cut into shots is one call a shot, `start`
+giving the shot's place in the clip (its seed, as the command line seeds it) and `output` the
+clip's array to write into. What differs is where things wait, all in system memory: each window's
+output goes to the CPU as soon as it is made, as the command line writes it to a file
+(units.Units.save_window), and is merged there; a tiled pass keeps its scratch in tiling.InMemory,
+whole, at 12.7 MB a 1080p frame; the output is one array, allocated once. The plan counts them
+(plan)."""
 
 import traceback
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
 from typing import Literal
 
@@ -65,7 +67,7 @@ def output_bytes(frames: int, target: tuple[int, int]) -> int:
 def plan(
     free: int | Reading,
     target: tuple[int, int],
-    frames: int,
+    shots: int | Sequence[Shot],
     pins: Pins,
     host_available: int | None,
     *,
@@ -74,20 +76,24 @@ def plan(
     dit_model: Architecture = peaks.FP16,
     held: bool = False,
 ) -> tuple[Plan, Peaks]:
-    """The plan for one clip of `frames` frames in memory, resized to `target`: shot_plan.plan of
-    the one Shot(0, frames), with `free` (bytes, or the reading the run made), `pins`,
-    `host_available` (bytes of system memory; None: unchecked), `correct` (the colour
-    correction, split), the attention backend, the DiT's format and `held` (the weights' pinned
-    copies exist already, Models.place) as it takes them. PlanError as it raises it.
+    """The plan for one clip in memory, resized to `target`: shot_plan.plan of its shots, with
+    `free` (bytes, or the reading the run made), `pins`, `host_available` (bytes of system memory;
+    None: unchecked), `correct` (the colour correction, split), the attention backend, the DiT's
+    format and `held` (the weights' pinned copies exist already, Models.place) as it takes them.
+    `shots` is the clip's cut into shots, each a pass of upscale (the longest shot's windows decide
+    the plan, shot_plan.plan), or a number of frames: one shot, Shot(0, frames). PlanError as it
+    raises it.
 
     The system memory is counted for a clip in memory (shot_plan.plan's in_memory): the input
     frames are the caller's and not counted; the output array (output_bytes) is taken off
-    host_available before the plan, and a refusal for the host says so; the windows are kept
-    in system memory together until the decode, and a tiled pass's scratch is the whole of it,
-    never a file, so that a host that can't hold it shortens the window or refuses the clip, as
-    for any host short of memory. ValueError for no frame."""
-    if frames < 1:
+    host_available before the plan, and a refusal for the host says so; the windows of the shot
+    that holds the most are kept in system memory together until its decode, and a tiled pass's
+    scratch is the whole of it, never a file, so that a host that can't hold it shortens the
+    window or refuses the clip, as for any host short of memory. ValueError for no frame."""
+    cut = [Shot(0, shots)] if isinstance(shots, int) else list(shots)
+    if not cut or any(each.frames < 1 for each in cut):
         raise ValueError("a clip of no frame")
+    frames = sum(each.frames for each in cut)
     taken = output_bytes(frames, target)
     available = host_available
     if available is not None:
@@ -106,7 +112,7 @@ def plan(
         return shot_plan(
             free,
             target,
-            [Shot(0, frames)],
+            cut,
             pins,
             available,
             split=correct,
@@ -170,16 +176,23 @@ def upscale(
     decode_tiles: Tiles | None,
     correct: bool,
     step: Step | None = None,
+    start: int = 0,
+    output: npt.NDArray[np.float32] | None = None,
 ) -> npt.NDArray[np.float32]:
     """The clip upscaled: (T, H', W', 3) float32 in [0, 1] on the CPU, (H', W') =
-    frames.output_size(target), one array allocated once.
+    frames.output_size(target), one array allocated once, or `output`.
 
     frames is the clip, one shot, (T, H, W, 3) float32 in [0, 1]; the array is read and left as
     it is. target is the (height, width) in pixels the encode resizes it to (frames.target_size,
-    the caller's). seed is the job's: the clip is the shot at frame 0, whose seed it is
-    (shots.Shot.seed). window, encode_tiles and decode_tiles are the plan's (plan): the cap on
-    the DiT windows in latents (None: one window) and the VAE passes' tiles (None: one pass).
-    correct runs the colour correction (colour.split) against the clip's own frames.
+    the caller's). seed is the job's: the clip is the shot starting at frame `start` of its
+    source (default 0, the plain seed), whose seed it is (shots.Shot.seed, the job's plus the
+    shot's first frame, as the command line seeds a shot); `start` names its frames in a
+    refusal for NaN too. output, when given, is the (T, H', W', 3) float32 array the frames are
+    written into and returned, a slice of a longer clip's (ValueError for another shape): a clip
+    of several shots is then one array, never a copy of each. window, encode_tiles and
+    decode_tiles are the plan's (plan): the cap on the DiT windows in latents (None: one window)
+    and the VAE passes' tiles (None: one pass). correct runs the colour correction
+    (colour.split) against the clip's own frames.
 
     The steps one after the other, a phase entered before each (Models.enter): the encode, each
     window with its output sent to system memory as it is made, the windows merged, and the decode
@@ -194,9 +207,14 @@ def upscale(
     if count < 1:
         raise ValueError("frames of no frame")
     layout = shot_layout(count, window)
-    clip_seed = Shot(0, count).seed(seed)
+    clip_seed = Shot(start, start + count).seed(seed)
     height, width = output_size(target)
-    output = np.empty((count, height, width, 3), dtype=np.float32)
+    if output is None:
+        output = np.empty((count, height, width, 3), dtype=np.float32)
+    elif output.shape != (count, height, width, 3) or output.dtype != np.float32:
+        raise ValueError(
+            f"output {output.shape} {output.dtype}, not ({count}, {height}, {width}, 3) float32"
+        )
     reference = _Frames(frames) if correct else None
     try:
         models.enter("encode")
@@ -214,7 +232,7 @@ def upscale(
             step("encode", 1, 1)
         # The latent is alive through the merge (the caller's and _merged's names hold it): the
         # plan counts it (shot_plan.host_moments, in_memory), L latents beside the merged one.
-        merged = _merged(models, latent, layout, clip_seed, step)
+        merged = _merged(models, latent, layout, clip_seed, step, (start, start + count - 1))
         del latent
         models.enter("decode")
         written = 0
@@ -233,7 +251,7 @@ def upscale(
             target,
             write,
             "the clip",
-            0,
+            start,
             reference,
             tiles=decode_tiles,
             store=tiling.InMemory(),
@@ -253,18 +271,23 @@ def _merged(
     layout: list[tuple[int, int]],
     seed: int,
     step: Step | None,
+    frames: tuple[int, int],
 ) -> torch.Tensor:
     """The clip's latents from its windows: each window sampled (shot_pass.sample_windows) with
     the DiT's phase entered before it, its output checked and moved to system memory with its
     memory layout kept (sampling.moved), as units.Units.save_window keeps it, and nothing of it
-    left on the device before `step` is told; then merged (shot_pass.merge_windows)."""
+    left on the device before `step` is told; then merged (shot_pass.merge_windows). `frames` are
+    the first and last frame of the shot in the clip, which a refusal for NaN names, as the
+    decode's does."""
     sampled: Iterator[torch.Tensor] = sample_windows(models, latent, layout, seed)
     windows: list[torch.Tensor] = []
     try:
         for number in range(len(layout)):
             models.enter("dit")
             output = next(sampled)
-            what = f"the clip's window {number + 1}/{len(layout)}"
+            what = (
+                f"the clip's window {number + 1}/{len(layout)} (frames {frames[0]} to {frames[1]})"
+            )
             finite(output, what)
             windows.append(sampling.moved(output, sampling.CPU, what))
             del output

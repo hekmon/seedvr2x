@@ -26,6 +26,7 @@ from seedvr2x.errors import (
     ModelUnreachable,
     ModelUnreadable,
     PictureRefused,
+    PinRefused,
     PlanRefused,
     Refusal,
     Setting,
@@ -206,12 +207,37 @@ def test_a_setting_is_named_as_the_widget_the_user_sees() -> None:
     assert "seedvr2x Models" in say(Setting("dit_model"))
 
 
-def test_a_pin_that_is_no_pin_names_the_widget_on_the_node() -> None:
+def test_a_pin_that_is_no_pin_names_the_widget_and_the_value_node() -> None:
     text = str(words.refusal(picture(24 * GIB, swap_blocks=99)))
-    assert text.startswith("blocks swapped 99 on this node: the DiT has 36 blocks")
+    assert text.startswith("Blocks swapped 99 is more than the model has: 36 blocks.")
+    assert "connect a seedvr2x Blocks Swapped of 0 to 36 to blocks swapped" in text
     covers = str(words.refusal(picture(24 * GIB, decode_tile=4096)))
-    assert "decode tile 4096 px on this node" in covers
-    assert "decode tile set to the whole image at once on this node" in covers
+    assert covers.startswith("Decode tile 4096 px is as large as the whole image")
+    assert "seedvr2x Tile with whole image at once on to decode tile" in covers
+    assert "a smaller seedvr2x Tile to decode tile" in covers
+
+
+def test_a_pin_that_does_not_fit_the_card_is_worded_with_the_value_that_does() -> None:
+    """The value nodes' units: a tile in px, blocks as a count, a window in frames; the figures
+    are the refusal's facts (need, there), the way out the node and the socket that take it."""
+    tile = picture(6 * GIB, decode_tile=1024)
+    assert isinstance(tile, PinRefused) and tile.why == "memory"
+    said = str(words.refusal(tile))
+    assert said.startswith("Decode tile 1024 px needs ")
+    assert f"{tile.need / GIB:.2f} GiB free on the graphics card" in said  # type: ignore[operator]
+    assert f"the card has {tile.there / GIB:.2f} GiB free" in said  # type: ignore[operator]
+    assert "to turn the model's result back into images" in said
+    assert "connect a seedvr2x Tile of " in said and " px or less to decode tile" in said
+    assert "leave decode tile unconnected, and the plan chooses one that fits" in said
+    swap = picture(6 * GIB, swap_blocks=0)
+    assert isinstance(swap, PinRefused) and swap.why == "memory"
+    said = str(words.refusal(swap))
+    assert said.startswith("Blocks swapped 0 needs ") and "while the model works" in said
+    assert "connect a seedvr2x Blocks Swapped of " in said and " or more to blocks swapped" in said
+    window = clip_refusal(24 * GIB, 33, 64 * GIB, window=9, swap_blocks=0, encode_tile=512)
+    said = str(words.refusal(window))
+    assert said.startswith("Window length 33 frames needs ")
+    assert "connect a seedvr2x Window Length of 21 frames or less to window length" in said
 
 
 def test_a_memory_refusal_names_the_smaller_files_that_plan_it_and_the_resolution() -> None:
@@ -222,7 +248,14 @@ def test_a_memory_refusal_names_the_smaller_files_that_plan_it_and_the_resolutio
     assert (
         "choose the int8 file (8.3 GB) or the dynamic GGUF file (4.8 GB) in seedvr2x Models" in text
     )
-    assert str(error.words(words.say)) in text
+    # The facts, worded: what the picture needs of the card, what the card has, and the phase.
+    assert isinstance(error, MemoryShort) and error.need is not None and error.there is not None
+    assert text.startswith(
+        f"This picture needs {error.need / GIB:.2f} GiB free on the graphics card to turn the"
+        f" model's result back into images, and the card has {error.there / GIB:.2f} GiB free for"
+        " it"
+    )
+    assert "no resolution fits" in text and "close programs that use the graphics card" in text
     with_dir = str(words.refusal(error, smaller=smaller[1:], model_dir=True))
     assert "must be in it: seedvr2x_ema_7b_sharp_dyn.gguf" in with_dir
     assert "choose" not in str(words.refusal(error))
@@ -241,22 +274,97 @@ def test_a_host_short_of_memory_names_what_pins_less() -> None:
 def test_a_clips_output_that_the_host_cant_hold_is_worded_with_the_hosts_figures() -> None:
     error = clip_refusal(24 * GIB, 100_000, 8 * GIB)
     assert isinstance(error, HostShort)
-    text = str(words.refusal(error))
-    assert "the clip's output, 100000 frames of 1920x1080 in float32" in text
+    size = words.ClipSize(100_000, clip.output_bytes(100_000, TARGET))
+    text = str(words.refusal(error, clip=size))
+    assert text.startswith("The output of this clip, 100000 frames kept whole, takes 2317.43 GiB")
+    assert "the computer has 8.00 GiB available" in text
     assert "--" not in text
+
+
+def test_a_clip_the_host_cant_hold_is_told_what_the_command_line_does() -> None:
+    """The clip's output and the run's own work summed, the input not counted (ComfyUI holds it
+    already, so it is out of the RAM available), and what seedvr2x's command line does instead."""
+    error = clip_refusal(24 * GIB, 33, 1 * GIB)
+    assert isinstance(error, HostShort) and error.need is not None and error.available is not None
+    size = words.ClipSize(33, clip.output_bytes(33, TARGET))
+    text = str(words.refusal(error, clip=size))
+    total = error.need + size.output
+    assert text.startswith(f"This clip needs about {total / GIB:.2f} GiB of your computer's RAM")
+    assert f"{size.output / GIB:.2f} GiB for the output, 33 frames kept whole" in text
+    assert f"{(error.available + size.output) / GIB:.2f} GiB are available" in text
+    # What the command line does instead, by its place beside the nodes and not by an address.
+    for part in (
+        "seedvr2x's command line",
+        "apps/seedvr2x",
+        "shot by shot and never keeps it whole",
+        "picks up again after a stop",
+        "writes lossless files",
+    ):
+        assert part in text, part
+    assert "http" not in text and "give it fewer frames" in text
+    # A picture's host refusal says none of it.
+    picture_text = str(words.refusal(picture(24 * GIB, host=1 * GIB)))
+    assert "command line" not in picture_text and "give it fewer images" in picture_text
+
+
+# The library's own words (the DiT's name is the one case-sensitive: "edit" holds "dit").
+LIBRARY_TERMS = ("vram", "pinned", "latent", "slot", "phase", "gpu", "--")
+
+
+def test_no_library_term_reaches_the_user_in_the_four_kinds_a_plan_refuses() -> None:
+    """The library's own words (item 19): memory, host, input and pin refusals, each from the
+    real planner, a picture's and a clip's, worded from their facts."""
+    size = words.ClipSize(33, clip.output_bytes(33, TARGET))
+    made = {
+        "pin range": (picture(24 * GIB, swap_blocks=99), None),
+        "pin covers": (picture(24 * GIB, decode_tile=4096), None),
+        "pin tile": (picture(6 * GIB, decode_tile=1024), None),
+        "pin swap": (picture(6 * GIB, swap_blocks=0), None),
+        "pin window": (clip_refusal(24 * GIB, 33, 64 * GIB, window=9, swap_blocks=0), size),
+        "memory": (picture(1 * GIB), None),
+        "memory clip": (clip_refusal(2 * GIB, 33, 64 * GIB), size),
+        "host": (picture(24 * GIB, host=1 * GIB), None),
+        "host clip": (clip_refusal(24 * GIB, 33, 1 * GIB), size),
+        "host output": (clip_refusal(24 * GIB, 100_000, 8 * GIB), size),
+        "input": (picture(8 * GIB, input_pixels=10**9), None),
+    }
+    kinds = set()
+    for name, (error, clip_size) in made.items():
+        kinds.add(error.kind)
+        for keep in (True, False):
+            text = str(words.refusal(error, keep=keep, clip=clip_size))
+            assert "DiT" not in text, (name, text)
+            for term in LIBRARY_TERMS:
+                assert term not in text.lower(), (name, term, text)
+    assert kinds == {"memory", "host", "input", "pin"}
 
 
 def test_an_input_too_large_says_the_resolution_that_lowers_the_outputs_part() -> None:
     error = picture(8 * GIB, input_pixels=10**9)
     assert isinstance(error, InputTooLarge)
     text = str(words.refusal(error))
-    assert "resolution on this node" in text or "largest input that fits" in text
+    assert error.fits_input is not None
+    assert f"no larger than about {error.fits_input / 1_000_000:.1f} megapixels" in text
+    assert "lower resolution on this node" in text
+    assert "megapixels" in text and "1000.0 megapixels" in text
 
 
-def test_a_memory_refusal_without_a_smaller_file_is_the_libraries_words_alone() -> None:
+def test_a_memory_refusal_without_a_smaller_file_names_none() -> None:
     error = picture(1 * GIB)
     assert isinstance(error, MemoryShort)
-    assert str(words.refusal(error)) == error.words(words.say)
+    assert "choose" not in str(words.refusal(error)) and "You can close programs" in str(
+        words.refusal(error)
+    )
+
+
+def test_a_memory_refusal_names_the_resolution_that_fits() -> None:
+    video = clip_refusal(8 * GIB, 33, 64 * GIB)
+    assert isinstance(video, MemoryShort) and video.instead == Setting("resolution", "432")
+    assert "set resolution to 432 or lower on this node" in str(words.refusal(video))
+    still = picture(3 * GIB)
+    assert isinstance(still, MemoryShort) and still.fits == (340, 192)
+    said = str(words.refusal(still))
+    assert "set resolution to 192 or lower on this node" in said and "no resolution" not in said
 
 
 def test_the_probes_refusal_says_what_failed_and_what_to_do() -> None:
@@ -289,7 +397,7 @@ def test_the_model_files_refusals_name_the_nodes_settings_and_ways() -> None:
     assert "give model folder in seedvr2x Models" in said["model: unreachable"]
     assert said["model: several"].count("\n") == 1
     host = str(words.refusal(refusals()["host copies"], keep=True))
-    assert "asking 15.00 GiB" in host and "4.00 GiB available" in host
+    assert "need 15.00 GiB of your computer's RAM" in host and "4.00 GiB are available" in host
     assert "set keep in RAM between runs to off in seedvr2x Models" in host
     assert (
         "choose the int8 file (8.3 GB) or the dynamic GGUF file (4.8 GB) in seedvr2x Models" in host

@@ -25,6 +25,8 @@ import pytest
 from comfy_api.latest import io
 from comfyui import nodes
 
+from seedvr2x import shotcuts
+
 WORKFLOWS = Path(__file__).resolve().parent.parent / "workflows"
 NAMES = ("picture", "clip")
 
@@ -175,9 +177,19 @@ def test_seedvr2x_widgets_are_those_of_the_schema_at_their_defaults(name: str) -
                     assert widget.control_after_generate == io.ControlAfterGenerate.fixed
             elif isinstance(widget, io.Boolean.Input):
                 assert type(value) is bool
+            elif isinstance(widget, io.Float.Input):
+                assert widget.min is not None and widget.max is not None
+                assert type(value) is float and widget.min <= value <= widget.max
             else:
                 assert isinstance(value, str)
-        if node["type"] != "seedvr2xModels":
+        if node["type"] == "seedvr2xCuts":
+            assert [widget.id for widget, _ in saved if widget] == [
+                "mode",
+                "threshold",
+                "model_dir",
+            ]
+            assert values == ["detect", shotcuts.THRESHOLD, ""]
+        elif node["type"] != "seedvr2xModels":
             # No widget of a number the plan makes: the workflow shows the plan's own choices.
             by_id_ = {widget.id: value for widget, value in saved if widget is not None}
             assert set(by_id_) == {
@@ -191,7 +203,7 @@ def test_seedvr2x_widgets_are_those_of_the_schema_at_their_defaults(name: str) -
             assert by_id_["plan_only"] is False and by_id_["resolution"] == 1080
         else:
             assert values[-1] == "auto", "keep in RAM between runs is auto"
-    assert seen == 2
+    assert seen == {"picture": 2, "clip": 3}[name]
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -309,3 +321,18 @@ def test_the_clip_workflow_takes_the_frame_rate_and_audio_of_the_video_it_loads(
         each for each in workflow["links"] if each[3] == upscale["id"] and each[5] == "IMAGE"
     )
     assert components["outputs"][frames_link[2]]["name"] == "images"
+
+
+def test_the_clip_workflow_finds_the_cuts_of_the_frames_it_upscales() -> None:
+    """Load Video, Cuts, Models, Upscale Video: the same frames go to Cuts and to the upscale, the
+    cut list is wired to the upscale's required cuts input, and Cuts is at its defaults (the
+    detector at the command line's threshold)."""
+    workflow = load("clip")
+    (upscale,) = of_type(workflow, "seedvr2xUpscaleVideo")
+    (cuts,) = of_type(workflow, "seedvr2xCuts")
+    (components,) = of_type(workflow, "GetVideoComponents")
+    assert source(workflow, cuts, "images") is components
+    assert source(workflow, upscale, "cuts") is cuts
+    assert source(workflow, upscale, "images") is components
+    assert cuts["order"] < upscale["order"]
+    assert not of_type(load("picture"), "seedvr2xCuts")

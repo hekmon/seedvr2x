@@ -1,8 +1,8 @@
 {
   "id": "3abe2710-6955-509b-a2f1-8cc1e4c90e86",
   "revision": 0,
-  "last_node_id": 8,
-  "last_link_id": 9,
+  "last_node_id": 9,
+  "last_link_id": 11,
   "nodes": [
     {
       "id": 1,
@@ -95,7 +95,8 @@
           "name": "images",
           "type": "IMAGE",
           "links": [
-            4
+            4,
+            10
           ]
         },
         {
@@ -140,13 +141,18 @@
         420
       ],
       "flags": {},
-      "order": 3,
+      "order": 4,
       "mode": 0,
       "inputs": [
         {
           "name": "images",
           "type": "IMAGE",
           "link": 4
+        },
+        {
+          "name": "cuts",
+          "type": "SEEDVR2X_CUTS",
+          "link": 11
         },
         {
           "name": "models",
@@ -207,6 +213,50 @@
       ]
     },
     {
+      "id": 9,
+      "type": "seedvr2xCuts",
+      "pos": [
+        830,
+        260
+      ],
+      "size": [
+        280,
+        200
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "cuts",
+          "type": "SEEDVR2X_CUTS",
+          "links": [
+            11
+          ]
+        },
+        {
+          "name": "text",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "seedvr2xCuts"
+      },
+      "widgets_values": [
+        "detect",
+        0.3,
+        ""
+      ]
+    },
+    {
       "id": 6,
       "type": "CreateVideo",
       "pos": [
@@ -218,7 +268,7 @@
         220
       ],
       "flags": {},
-      "order": 4,
+      "order": 5,
       "mode": 0,
       "inputs": [
         {
@@ -272,7 +322,7 @@
         400
       ],
       "flags": {},
-      "order": 5,
+      "order": 6,
       "mode": 0,
       "inputs": [
         {
@@ -310,7 +360,7 @@
         200
       ],
       "flags": {},
-      "order": 6,
+      "order": 7,
       "mode": 0,
       "inputs": [
         {
@@ -338,7 +388,7 @@
       1,
       0,
       5,
-      1,
+      2,
       "SEEDVR2X_MODELS"
     ],
     [
@@ -396,6 +446,22 @@
       7,
       0,
       "VIDEO"
+    ],
+    [
+      10,
+      4,
+      0,
+      9,
+      0,
+      "IMAGE"
+    ],
+    [
+      11,
+      9,
+      0,
+      5,
+      1,
+      "SEEDVR2X_CUTS"
     ]
   ],
   "groups": [

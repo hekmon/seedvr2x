@@ -8,14 +8,23 @@ MemoryShort, HostShort, InputTooLarge, PinRefused, CompileRefused) and a message
 function of how an application words a setting (errors.Say, Refusal.words). `say` is the nodes'
 words for a setting: the widget as the user sees it and the node it is in. A refusal may be
 worded long after it was raised, by whoever holds it: nothing here reads a state of the run, only
-the refusal and the facts handed in (the DiT file, whether a model folder was set, whether the
-models are kept in RAM, the smaller files of the same 7B that would plan the run).
+the refusal and the facts handed in (the model file, whether a model folder was set, whether the
+models are kept in RAM, the smaller files of the same 7B that would plan the run, the clip's size).
+
+The four kinds of a plan that a user meets (memory, host, input, pin) and the loader's host
+refusal are worded here from their facts, in a ComfyUI user's words (the card, the RAM, the
+output, the tile), never by passing on the library's sentence: its terms (the DiT, VRAM, pinned
+copies, latents, slots, phases) are the library's own and its figures are of its planner. The
+way out names the nodes' inputs and value nodes ("connect a seedvr2x Tile of 1024 px to decode
+tile"). Only the refusals the nodes can't reach (a compiled VAE, a recorded plan) keep the
+library's words.
 
 The node raises the result, `Refused`, an exception ComfyUI shows with its message."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
-from seedvr2x import pull
+from seedvr2x import peaks, pull
 from seedvr2x.errors import (
     CompileRefused,
     HostMemoryError,
@@ -29,6 +38,7 @@ from seedvr2x.errors import (
     ModelNotPinned,
     ModelsRefused,
     ModelUnreachable,
+    PinRefused,
     PlanRefused,
     Refusal,
     Setting,
@@ -41,6 +51,7 @@ from seedvr2x.weights import AGAIN
 from . import plans
 
 MODELS = "seedvr2x Models"
+CUTS = "seedvr2x Cuts"
 KEEP = plans.LABELS["keep_in_ram_between_runs"]
 FOLDER = plans.LABELS["model_dir"]
 
@@ -53,11 +64,12 @@ class Refused(Exception):
 # ---- A setting, as the nodes call it -------------------------------------------------------------
 
 
-def say(setting: Setting) -> str:
+def say(setting: Setting, node: str = MODELS) -> str:
     """The nodes' words for a setting a library refusal names (errors.Say): the input by its label,
-    its value in the unit its value node sets it in, and that it is on this node. A tile the
-    library pins at 0 is the whole image at once (seedvr2x Tile's switch), a window in latents is
-    said in frames (seedvr2x Window Length's unit)."""
+    its value in the unit its value node sets it in, and that it is on this node. The model folder
+    is the one of `node`, seedvr2x Models by default (seedvr2x Cuts has a folder of its own). A
+    tile the library pins at 0 is the whole image at once (seedvr2x Tile's switch), a window in
+    latents is said in frames (seedvr2x Window Length's unit)."""
     name, value = setting.name, setting.value
     if name in ("window", "swap_blocks", "encode_tile", "decode_tile"):
         label = plans.LABELS[name]
@@ -76,7 +88,7 @@ def say(setting: Setting) -> str:
     if name == "vae_model":
         return "the VAE file"
     if name == "model_dir":
-        return f"{FOLDER} in {MODELS}"
+        return f"{FOLDER} in {node}"
     if name == "cuts":
         return "a cut list, which the nodes don't take"
     if name == "compile":
@@ -109,6 +121,34 @@ def _smaller(smaller: Sequence[pull.Smaller], model_dir: bool) -> str:
     return way
 
 
+@dataclass(frozen=True)
+class ClipSize:
+    """What a refusal needs to know of the clip being upscaled, which only the node knows: its
+    frames and the bytes of the output array it holds whole (clip.output_bytes). None for a
+    picture's, whose arrays the plan counts itself."""
+
+    frames: int
+    output: int
+
+
+# Where a refusal's memory is needed, in the nodes' words, by the phase of the run the library
+# counts it in.
+_WHERE = {
+    "encode": "to turn the images into what the model works on",
+    "dit": "while the model works",
+    "decode": "to turn the model's result back into images",
+}
+
+# What the clip's whole in RAM and the command line's way, said in the clip's host refusal. The
+# repository's folder, not a URL (the user, 2026-11-06).
+_FILMS = (
+    "These nodes keep a clip whole in RAM, as ComfyUI does any video. seedvr2x's command line, in"
+    " the repository's apps/seedvr2x beside these nodes (see its README), is the tool for a long"
+    " film: it reads it shot by shot and never keeps it whole, picks up again after a stop, and"
+    " writes lossless files."
+)
+
+
 def _host_way(keep: bool) -> str:
     """The way out of a host short of memory: a smaller file takes less, and a model not kept
     between runs takes only what does not fit on the card, for the run."""
@@ -120,28 +160,197 @@ def _host_way(keep: bool) -> str:
     )
 
 
-def _plan(error: PlanRefused, smaller: Sequence[pull.Smaller], model_dir: bool, keep: bool) -> str:
-    text = error.words(say)
-    if isinstance(error, CompileRefused):
-        # The nodes never compile the VAE (a plan's compile flag is False), so this refusal is
-        # one they can't reach; worded all the same, the library's "command" being a run here.
-        text = text.replace("The same command", "The same run")
+def _shown(setting: Setting | None) -> str:
+    """A setting's value in the unit its value node sets it in, after its label: "decode tile 512
+    px", "blocks swapped 30", "window length 21 frames"; a tile of 0 is the whole image at once."""
+    assert setting is not None
+    name, value = setting.name, setting.value
+    label = plans.LABELS[name]
+    if name.endswith("_tile"):
+        return f"{label} set to the whole image at once" if value == "0" else f"{label} {value} px"
+    if name == "window":
+        return f"{label} {plans.window_frames(int(value))} frames"
+    return f"{label} {value}"
+
+
+def _instead(setting: Setting | None) -> str:
+    """The way out a refusal's `instead` names, in the nodes' terms: the value that fits, and the
+    value node and socket that take it. "" where the refusal names none."""
+    if setting is None:
+        return ""
+    name, value = setting.name, setting.value
+    label = plans.LABELS.get(name, name)
+    if name == "resolution":
+        return f"set resolution to {value} or lower on this node" if value else ""
+    if name.endswith("_tile"):
+        if value == "0":
+            return f"connect a seedvr2x Tile with whole image at once on to {label}"
+        return f"connect a seedvr2x Tile of {value} px or less to {label}"
+    if name == "swap_blocks":
+        return f"connect a seedvr2x Blocks Swapped of {value} or more to {label}"
+    if name == "window":
+        frames = plans.window_frames(int(value))
+        return f"connect a seedvr2x Window Length of {frames} frames or less to {label}"
+    return ""
+
+
+def _card(error: MemoryShort | PinRefused | InputTooLarge, what: str, phase: str = "") -> str:
+    """What `what` needs of the card's free memory, and what the card has for it, from the
+    refusal's facts (need and there, in bytes) and the phase it is needed in (the refusal's, else
+    `phase`: a picture's tile pin has "pin" for its phase and is a pass's)."""
+    where = _WHERE.get(error.phase) or _WHERE.get(phase, "")
+    need, there = error.need, error.there
+    if need is None or there is None:
+        return f"{what} does not fit the free memory of the graphics card"
+    return (
+        f"{what} needs {_gib(need)} free on the graphics card{' ' + where if where else ''}, and"
+        f" the card has {_gib(there)} free for it, counting ComfyUI's own models as unloaded"
+        f" ({_gib(need - there)} short)"
+    )
+
+
+type Words = tuple[str, list[str]]
+
+
+def _memory(error: MemoryShort, clip: ClipSize | None) -> Words:
+    """A job that doesn't fit the card: the facts as a sentence, then the ways out (a resolution
+    that fits, where one does; programs closed on the card, where that gives the memory back)."""
+    reason = _card(error, "this clip" if clip is not None else "this picture")
     ways: list[str] = []
-    if isinstance(error, MemoryShort | InputTooLarge):
-        # The message names the settings of the run that fit (a smaller resolution, a tile, a
-        # window); a smaller file of the same 7B that plans it is the way out apart from them.
-        way = _smaller(smaller, model_dir)
-        if way:
-            ways.append(way)
+    fits = _instead(error.instead)
+    if not fits and error.fits is not None:
+        # A picture's refusal names the largest output that fits as (long, short) pixels: its
+        # short side is the resolution.
+        fits = f"set resolution to {error.fits[1]} or lower on this node"
+    if fits:
+        ways.append(fits)
+    else:
+        reason += ": no resolution fits"
+    if error.freeable:
+        ways.append("close programs that use the graphics card")
+    return reason, ways
+
+
+def _pin(error: PinRefused) -> Words:
+    """A value connected that the plan can't take exactly: a number out of the model's range, a
+    tile as large as the image, or a value that doesn't fit the card (with the one that does)."""
+    pin = error.pin
+    assert pin is not None
+    label = plans.LABELS[pin.name]
+    if error.why == "range":
+        return (
+            f"{_shown(pin)} is more than the model has: {peaks.BLOCKS} blocks",
+            [f"connect a seedvr2x Blocks Swapped of 0 to {peaks.BLOCKS} to {label}"],
+        )
+    if error.why == "covers":
+        return (
+            f"{_shown(pin)} is as large as the whole image, so there would be no tiles",
+            [
+                f"connect a seedvr2x Tile with whole image at once on to {label}, for the whole"
+                " image in one pass",
+                f"connect a smaller seedvr2x Tile to {label}, for tiles",
+            ],
+        )
+    ways = [_instead(error.instead)] if error.instead is not None else []
+    if error.instead is not None and pin.name.endswith("_tile") and error.instead.value == "0":
+        ways = [f"connect a seedvr2x Tile with whole image at once on to {label}, no tile fitting"]
+    ways = [each for each in ways if each]
+    ways.append(f"leave {label} unconnected, and the plan chooses one that fits")
+    return _card(error, _shown(pin), pin.name.removesuffix("_tile")), ways
+
+
+def _input(error: InputTooLarge) -> Words:
+    """A picture too large to be copied to the card and resized there: its size, what its copies
+    need, the largest picture that fits and the resolution that lowers the output's part."""
+    pixels = error.pixels
+    size = "this picture" if pixels is None else f"this picture, {_megapixels(pixels)},"
+    what = f"{size} is copied to the graphics card at its own size and resized there, which"
+    fits = error.fits_input
+    ways = (
+        [
+            f"give the node a picture no larger than about {_megapixels(fits)}",
+            "lower resolution on this node, which lowers the output's part of the memory",
+        ]
+        if fits is not None
+        else ["lower resolution on this node: no picture this large fits at this resolution"]
+    )
+    return _card(error, what), ways
+
+
+def _megapixels(pixels: int) -> str:
+    return f"{pixels / 1_000_000:.1f} megapixels"
+
+
+def _host(error: HostShort, keep: bool, clip: ClipSize | None) -> Words:
+    """A plan that takes more RAM than the computer has available. For a clip, whose output the
+    plan takes off the memory available first (clip.plan), the sum is said (the output, held
+    whole, and the rest of the run's own) and what the command line does instead."""
+    ways = [
+        _host_way(keep),
+        "lower resolution on this node, or give it fewer frames"
+        if clip is not None
+        else "lower resolution on this node, or give it fewer images",
+    ]
+    window = _instead(error.instead)
+    if window:
+        ways.append(window)
+    need, available = error.need, error.available
+    if need is None or available is None:
+        return "this run needs more RAM than the computer has available", ways
+    if clip is None:
+        return (
+            f"this run needs about {_gib(need)} of your computer's RAM, and {_gib(available)} are"
+            f" available ({_gib(need - available)} short)",
+            ways,
+        )
+    if need == clip.output:
+        # The output alone is over what is available: the plan stopped there.
+        said = (
+            f"the output of this clip, {clip.frames} frames kept whole, takes {_gib(need)} of RAM,"
+            f" and the computer has {_gib(available)} available"
+        )
+    else:
+        total, there = need + clip.output, available + clip.output
+        said = (
+            f"this clip needs about {_gib(total)} of your computer's RAM: {_gib(clip.output)} for"
+            f" the output, {clip.frames} frames kept whole, and {_gib(need)} for seedvr2x's own"
+            " work (the parts of the model that wait in RAM, the longest shot's windows and the"
+            f" tiles' working copies); {_gib(there)} are available ({_gib(total - there)} short)"
+        )
+    return f"{said}. {_FILMS[:-1]}", ways
+
+
+def _plan(
+    error: PlanRefused,
+    smaller: Sequence[pull.Smaller],
+    model_dir: bool,
+    keep: bool,
+    clip: ClipSize | None,
+) -> str:
+    """A plan's refusal in the nodes' words, from its kind's facts (see the module's docstring)."""
+    if isinstance(error, CompileRefused) or (
+        isinstance(error, PinRefused) and error.why in ("compile", "recorded")
+    ):
+        # The nodes never compile the VAE and never resume a recorded plan, so these refusals are
+        # ones they can't reach; worded all the same, the library's "command" being a run here.
+        return error.words(say).replace("The same command", "The same run")
+    if isinstance(error, MemoryShort):
+        reason, ways = _memory(error, clip)
+    elif isinstance(error, PinRefused):
+        reason, ways = _pin(error)
+    elif isinstance(error, InputTooLarge):
+        reason, ways = _input(error)
     elif isinstance(error, HostShort):
-        ways.append(_host_way(keep))
-        ways.append("lower the resolution on this node, or give it fewer images")
+        reason, ways = _host(error, keep, clip)
+    else:
+        return error.words(say)
+    if not isinstance(error, PinRefused):
+        # A smaller file of the same 7B that plans the run is a way out apart from the settings.
         way = _smaller(smaller, model_dir)
         if way:
             ways.append(way)
-    if not ways:
-        return text
-    return f"{text}\nOr {'; or '.join(ways)}."
+    text = f"{reason[0].upper()}{reason[1:]}."
+    return f"{text}\nYou can {'; or '.join(ways)}." if ways else text
 
 
 # ---- The probe's ---------------------------------------------------------------------------------
@@ -166,23 +375,28 @@ _INT8, _GGUF = "seedvr2x_ema_7b_sharp_int8_convrot.safetensors", "seedvr2x_ema_7
 
 
 def _host_memory(error: HostMemoryError, keep: bool) -> str:
-    """The host that can't pin the weights: what was asked, what it has, and what pins less."""
-    asked = "" if error.need is None else f" (asking {_gib(error.need)})"
+    """The computer that can't hold the parts of the model that leave the card: what was asked,
+    what it has, and what asks for less."""
+    asked = "" if error.need is None else f" {_gib(error.need)} of"
+    has = "" if error.available is None else f", and {_gib(error.available)} are available"
     ways = [f"set {KEEP} to off in {MODELS}"] if keep else []
     ways.append(
         f"choose the int8 file ({pull.gigabytes(pull.PINNED[_INT8].size)}) or the dynamic GGUF"
         f" file ({pull.gigabytes(pull.PINNED[_GGUF].size)}) in {MODELS}"
     )
-    return f"{error.words(say)}{asked}. You can {', or '.join(ways)}."
+    return (
+        f"The parts of the model that wait in RAM while the graphics card works need{asked} your"
+        f" computer's RAM{has}. You can {', or '.join(ways)}."
+    )
 
 
-def _again(error: ModelError, model_dir: bool) -> str:
+def _again(error: ModelError, model_dir: bool, node: str = MODELS) -> str:
     """The library's message of a damaged or changed file, which ends "fetch it again", with the
     way to do it in the nodes' terms where the file is one of seedvr2x's own (pinned, in its own
     role): the library's parts carry no advice of their own (weights.check_models adds the
     command line's to the whole). A file seedvr2x doesn't pin has no source to name: the
     library's words stand."""
-    text = error.words(say)
+    text = error.words(lambda setting: say(setting, node))
     ending = f"; {AGAIN}"
     pin = pull.PINNED.get(error.file)
     if not text.endswith(ending) or pin is None or (error.role and pin.role != error.role):
@@ -190,7 +404,7 @@ def _again(error: ModelError, model_dir: bool) -> str:
     if model_dir:
         way = (
             f"replace it with seedvr2x's own file ({pull.url(error.file)}), or leave {FOLDER}"
-            f" empty in {MODELS} to use Hugging Face's cache"
+            f" empty in {node} to use Hugging Face's cache"
         )
     else:
         way = (
@@ -200,20 +414,23 @@ def _again(error: ModelError, model_dir: bool) -> str:
     return f"{text.removesuffix(ending)}; {way}"
 
 
-def _model_files(error: ModelError, model_dir: bool) -> str:
+def _model_files(error: ModelError, model_dir: bool, node: str = MODELS) -> str:
     """A model file's refusal in the nodes' words: by its kind where the nodes have a way out of
-    their own to say, else the library's message with the settings it names worded by `say`."""
+    their own to say, else the library's message with the settings it names worded by `say`.
+    `node` is the node whose model folder the files are looked for in."""
     if isinstance(error, ModelsRefused):
-        return "\n".join(_model_files(part, model_dir) for part in error.parts)
+        return "\n".join(_model_files(part, model_dir, node) for part in error.parts)
     if isinstance(error, ModelMissing):
         return (
-            f"{error.file or 'a model file'} is not in the folder set as {FOLDER} in {MODELS}:"
+            f"{error.file or 'a model file'} is not in the folder set as {FOLDER} in {node}:"
             f" put the file there under that name, or leave {FOLDER} empty to use Hugging Face's"
             " cache, where seedvr2x fetches its files"
         )
     if isinstance(error, ModelNotPinned):
-        unit = " bytes" if error.figure == "size" else ""
-        found = f"{error.figure} {error.found}{unit}, where seedvr2x's has {error.expected}{unit}"
+        if error.figure == "size" and isinstance(error.found, int):
+            found = f"size {error.found:,} bytes, where seedvr2x's has {error.expected:,} bytes"
+        else:
+            found = f"{error.figure} {error.found}, where seedvr2x's has {error.expected}"
         if error.command or not model_dir:
             # From Hugging Face's cache: seedvr2x fetches the file again once it is deleted.
             return (
@@ -223,7 +440,7 @@ def _model_files(error: ModelError, model_dir: bool) -> str:
         source = f" ({pull.url(error.file)})" if error.file in pull.PINNED else ""
         return (
             f"{error.file} in the {FOLDER} is not seedvr2x's own file ({found}): replace it with"
-            f" seedvr2x's file{source}, or leave {FOLDER} empty in {MODELS} to use Hugging Face's"
+            f" seedvr2x's file{source}, or leave {FOLDER} empty in {node} to use Hugging Face's"
             " cache"
         )
     if isinstance(error, ModelUnreachable) and error.why == "offline":
@@ -231,11 +448,11 @@ def _model_files(error: ModelError, model_dir: bool) -> str:
             f"{error.file or 'a model file'} is not in Hugging Face's cache ({pull.cache()}) and"
             " Hugging Face's offline mode is on (HF_HUB_OFFLINE is set). seedvr2x fetches its"
             " files once, at the first run: unset HF_HUB_OFFLINE and restart ComfyUI, or set"
-            f" {FOLDER} in {MODELS} to a folder that holds them"
+            f" {FOLDER} in {node} to a folder that has them"
         )
     if isinstance(error, ModelDamaged | ModelChanged):
-        return _again(error, model_dir)
-    return error.words(say)
+        return _again(error, model_dir, node)
+    return error.words(lambda setting: say(setting, node))
 
 
 # ---- The whole -----------------------------------------------------------------------------------
@@ -247,23 +464,40 @@ def refusal(
     smaller: Sequence[pull.Smaller] = (),
     model_dir: bool = False,
     keep: bool = True,
+    clip: ClipSize | None = None,
+    node: str = MODELS,
 ) -> Refused:
     """A library refusal in the nodes' words (Refused): a plan's by its kind and facts with the
     way out in the nodes' terms; the probe's; a target too small for the padding; the model
     files' and the host's by their kind and facts; any other by its words. `smaller` are the
     pinned files smaller than the DiT file that plan the run (pull.smaller_planning), `model_dir`
-    whether a model folder was set, `keep` whether the models are kept in RAM between runs."""
+    whether a model folder was set, `keep` whether the models are kept in RAM between runs, `clip`
+    the clip's size where the run is a clip's, `node` the node whose model folder holds the files
+    a model file's refusal names (seedvr2x Cuts has its own)."""
     if isinstance(error, PlanRefused):
-        return Refused(_plan(error, smaller, model_dir, keep))
+        return Refused(_plan(error, smaller, model_dir, keep, clip))
     if isinstance(error, ProbeRefusal):
         return Refused(_probe(error))
     if isinstance(error, TargetTooSmall):
-        return Refused(f"{error.words(say)}; raise resolution on this node")
+        return Refused(_too_small(error))
     if isinstance(error, ModelError):
-        return Refused(_model_files(error, model_dir))
+        return Refused(_model_files(error, model_dir, node))
     if isinstance(error, HostMemoryError):
         return Refused(_host_memory(error, keep))
-    return Refused(error.words(say))
+    return Refused(error.words(lambda setting: say(setting, node)))
+
+
+def _too_small(error: TargetTooSmall) -> str:
+    """A resolution that makes an image too small to work on, from the refusal's facts: the size
+    it makes and the least the short side takes (the rows when the image is wider than tall, the
+    columns otherwise), with the setting named as the node has it, whatever linked it."""
+    height, width = error.size
+    least = error.least[0] if height <= width else error.least[1]
+    asked = say(Setting("resolution", str(error.resolution)))
+    return (
+        f"{asked} makes a {width}x{height} image, which is too small: seedvr2x needs {least} px on"
+        f" the short side at least; raise resolution on this node"
+    )
 
 
 # ---- What the nodes refuse themselves ------------------------------------------------------------
@@ -324,3 +558,35 @@ def frames_missing() -> Refused:
 
 def non_finite(message: str) -> Refused:
     return Refused(f"{message}, so nothing is output; run it again, or with a different seed")
+
+
+def cuts_wrong(covered: int, frames: int) -> Refused:
+    """A cut list that does not cover the frames it is given: it was made for another clip."""
+    return Refused(
+        f"the cut list covers {covered} frames and the clip has {frames}: connect the images that"
+        " seedvr2x Cuts was given to this node too, or its output is for another clip"
+    )
+
+
+def seed_past_the_cuts(seed: int, start: int, highest: int) -> Refused:
+    """A seed that some shot of the cut list seeds past numz's range: each shot is seeded with the
+    seed plus its first frame, its encode with passes.ENCODE_SEED_OFFSET more, and NumPy's
+    generator takes seeds under 2**32 only. `start` is the last shot's first frame, `highest` the
+    largest seed that works with this cut list."""
+    return Refused(
+        f"seed {seed:,} is too high for this cut list: each shot is seeded with the seed plus its"
+        f" first frame, the last starts at frame {start:,}, and the seed can be {highest:,} at"
+        " most: lower the seed"
+    )
+
+
+def cuts_not_a_list() -> Refused:
+    return Refused(f"seedvr2x Upscale Video takes the cuts output of {CUTS}")
+
+
+def detector_missing(name: str) -> Refused:
+    return Refused(
+        f"{name} is not in the folder set as {FOLDER} in {CUTS}: put the file there under"
+        f" that name, or leave {FOLDER} empty to use Hugging Face's cache, where seedvr2x fetches"
+        " its files"
+    )

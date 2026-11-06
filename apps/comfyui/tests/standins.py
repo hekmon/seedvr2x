@@ -21,6 +21,7 @@ from seedvr2x import memory, model, peaks, pull, weights
 from seedvr2x.memory import Reading
 from seedvr2x.passes import ModelPlan
 from seedvr2x.pull import ModelFiles
+from seedvr2x.shots import Shot
 from seedvr2x.weights import Architecture
 
 GIB = peaks.GIB
@@ -264,14 +265,17 @@ def upscale_video(
     unique_id: str | None = "1",
     *,
     plan_only: bool = False,
+    cuts: tuple[Shot, ...] | None = None,
 ) -> tuple[Any, str]:
-    """seedvr2x Upscale Video run as ComfyUI runs it: (the frames, the plan's text)."""
+    """seedvr2x Upscale Video run as ComfyUI runs it: (the frames, the plan's text). `cuts`: the
+    cut list seedvr2x Cuts gives, one shot of the whole clip by default."""
     from comfyui import nodes
 
     out = execute(
         nodes.UpscaleVideo,
         unique_id,
         images=images,
+        cuts=(Shot(0, len(images)),) if cuts is None else cuts,
         models=handle,
         resolution=resolution,
         plan_only=plan_only,
