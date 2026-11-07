@@ -2997,13 +2997,75 @@ def test_the_ladder_by_the_phase_refused_and_the_allocator() -> None:
     assert ladder("decode", True, False) == () and ladder("decode", False, False) == ()
 
 
-def test_a_compile_job_is_refused_as_it_was_before_the_rungs() -> None:
-    # Under --compile no rung is tried, and the plain plan the compiled refusal is judged by is
-    # the plan without them (plan's `rungs`): a card where the rungs would run the plain job
-    # still gives the plain plan's refusal (MemoryShort at the plain decode's peak), never the
-    # compiled pass's CompileRefused.
-    for free in (6.5, 7.0, 8.0):
-        assert clip_plan(free)[0].tail_frames  # the rungs run it plain
+TAIL_NAMED = "the decoder's tail (its last blocks a frame at a time)"
+ROOM_NAMED = "the VAE's least room (the VAE passes' reserve floor lowered to 0.50 GiB)"
+
+
+def no_rung_compiled(compile_: str) -> str:
+    """The refusal's line that --compile takes no rung, with `compile_` as the words say it."""
+    return f"{compile_} takes none of the floor's last rungs, not measured under {compile_}"
+
+
+def test_a_compile_job_only_a_rung_fits_is_refused_saying_it_runs_without_compile() -> None:
+    # Under --compile no rung is tried (a compiled decode with the tail, or compiled in the
+    # lowered room, is not measured). A job the plain plan fits only with a rung (DESIGN.md,
+    # Allocator, Small cards, decided on 2026-11-06) is refused, CompileRefused: the compiled
+    # plan's own sentence, a line saying that --compile takes no rung, then that the same command
+    # without --compile runs, with the rungs that plan takes, named as the plan's lines name them
+    # (the CLI's planner._rungs_said), its facts carrying them.
+    least = peaks.VAE_ROOM_LEAST
+    for free, tail, floor, rungs in (
+        (8.0, True, None, TAIL_NAMED),
+        (7.0, True, None, TAIL_NAMED),
+        (6.5, True, least, f"{TAIL_NAMED} and {ROOM_NAMED}"),
+    ):
+        made = clip_plan(free)[0]
+        assert (made.tail_frames, made.vae_floor) == (tail, floor), free
+        with pytest.raises(PlanError) as refused:
+            clip_plan(free, compile_vae=True)
+        error = refused.value
+        assert type(error) is CompileRefused and error.kind == "compile", free
+        assert (error.tail_frames, error.vae_floor, error.within) == (tail, floor, ())
+        # The compiled plan's own refusal is the first line, its phase and facts the error's.
+        with pytest.raises(PlanError) as compiled:
+            clip_plan(free, compile_vae=True, compile_fixed=True)
+        first, *rest = str(error).split("\n")
+        assert first == str(compiled.value) and error.phase == compiled.value.phase == "decode"
+        assert error.instead == compiled.value.instead
+        assert rest == [
+            no_rung_compiled("compiling"),
+            f"The same command without compiling runs, with {rungs}",
+        ]
+        assert "--" not in str(error)
+        assert cli_words(error).split("\n")[1:] == [
+            no_rung_compiled("--compile"),
+            f"The same command without --compile runs, with {rungs}",
+        ]
+
+
+def test_a_compile_job_only_the_tail_fits_under_the_plain_allocator_names_the_tail_alone() -> None:
+    # Under torch's own allocator without the segments the VAE's least room is never a rung
+    # (shot_plan.plan's rungs): the refusal names the tail alone, no rung the job could not take.
+    with pytest.raises(PlanError) as refused:
+        shot_plan.plan(
+            segments_at(12.0, memory.PLAIN), HD, shots(19), NO_PINS, None, compile_vae=True
+        )
+    error = refused.value
+    assert type(error) is CompileRefused
+    assert (error.tail_frames, error.vae_floor) == (True, None)
+    assert cli_words(error).split("\n")[1:] == [
+        no_rung_compiled("--compile"),
+        f"The same command without --compile runs, with {TAIL_NAMED}",
+    ]
+    assert "least room" not in cli_words(error)
+
+
+def test_a_compile_job_no_plain_plan_fits_is_refused_as_it_was_before_the_rungs() -> None:
+    # A job the plain plan refuses with every rung too keeps the plain plan's refusal without
+    # them (plan's `rungs`), never the last rung's figures or the compiled pass's CompileRefused.
+    for free in (5.0, 6.0):
+        with pytest.raises(PlanError):
+            clip_plan(free)
         with pytest.raises(PlanError) as refused:
             clip_plan(free, compile_vae=True)
         assert type(refused.value) is MemoryShort, free
@@ -3012,6 +3074,34 @@ def test_a_compile_job_is_refused_as_it_was_before_the_rungs() -> None:
                 segments_at(free), HD, shots(19), NO_PINS, None, rungs=False, compile_fixed=True
             )
         assert str(refused.value) == str(plain.value) and refused.value.phase == plain.value.phase
+
+
+def test_a_compile_job_whose_pin_is_beyond_the_shapes_keeps_the_plain_refusal() -> None:
+    # A rung helps a VAE pass short of memory, not a pin beyond the shapes measured compiled: a
+    # 1080p job pinned untiled on a 32 GiB card, which the plain plan fits only with the tail, is
+    # refused as before the rungs (the plain plan's PinRefused), not told to drop --compile.
+    job = (32 * GIB, HD, shots(300), Pins(encode_tile=0, decode_tile=0), None)
+    options: dict[str, Any] = {"split": True, "attention": peaks.SDPA}
+    made, _ = shot_plan.plan(*job, **options)
+    assert made.tail_frames
+    with pytest.raises(PlanError) as compiled:
+        shot_plan.plan(*job, compile_vae=True, **options)
+    with pytest.raises(PlanError) as plain:
+        shot_plan.plan(*job, rungs=False, compile_fixed=True, **options)
+    assert type(compiled.value) is PinRefused and str(compiled.value) == str(plain.value)
+    # A window pin the planner rejects once memory no longer refuses it keeps the plain refusal
+    # too, the memory's, as before the rungs.
+    with pytest.raises(PlanError) as short:
+        shot_plan.plan(segments_at(8.0), HD, shots(19), Pins(window=4), None, compile_vae=True)
+    assert type(short.value) is MemoryShort
+
+
+def test_the_rungs_are_named_as_the_plans_lines_name_them() -> None:
+    named = shot_plan._rungs_named  # pyright: ignore[reportPrivateUsage]
+    least = peaks.VAE_ROOM_LEAST
+    assert named(True, None) == TAIL_NAMED
+    assert named(True, least) == f"{TAIL_NAMED} and {ROOM_NAMED}"
+    assert named(False, least) == ROOM_NAMED
 
 
 def test_a_refusal_after_every_rung_is_the_last_rungs_and_says_what_it_counted() -> None:

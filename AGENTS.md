@@ -1233,12 +1233,16 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   them, the prediction at or over each measure, the ratio taken on the part above the weights,
   the colour correction's term untouched and the least room replacing the VAE floor alone;
   `test_shot_plan.py` the rungs in order over the cards, none taken where the plain plan fits
-  or under `--compile` (a compiled decode with the tail is not measured: refused as before), a
-  pinned decode tile helped too, the DiT's and the host's refusals no help, `PLAIN` and a
-  refusing driver taking the tail alone and never the room, the record read back, a resume
-  holding the tail keeping it and one without never taking it, the refusal after every rung
-  (`rungs=False` is the plain plan whose refusal a compiled job keeps); `test_shot_pass.py` and
-  `test_clip.py` the
+  or under `--compile` (a compiled decode with the tail is not measured), a compiled job only a
+  rung would fit refused as `CompileRefused`, saying that it runs without `--compile` and with
+  which rungs, named as the plan's lines name them (its facts `tail_frames` and `vae_floor`; the
+  CLI's words in `test_compile_cli.py`; the image server and the nodes compile nothing), one no
+  plain plan fits, or whose compiled plan is refused for a pin beyond the shapes and not a
+  pass's memory, refused as before the rungs, a pinned decode tile helped too, the DiT's and the
+  host's refusals no help, `PLAIN` and a refusing driver taking the tail alone and never the
+  room, the record read back, a resume holding the tail keeping it and one without never taking
+  it, the refusal after every rung (`rungs=False` is the plain plan a compiled job's refusal is
+  judged by first); `test_shot_pass.py` and `test_clip.py` the
   switch on for the decode alone and off after, a raise included, and untouched by a plan
   without it; the CLI's `test_planner.py` the plan's lines saying the tail and the room and what
   they cost and `test_cli_run.py` a resume run with the tail; the nodes' `test_plans.py` a clip

@@ -549,9 +549,10 @@ def plan(
     tail taken (a job resumed whose recorded plan has it, which is what shapes its output:
     `recorded` says it too); False, never the tail, the room alone as a rung (a resumed job
     whose plan has not the tail). No rung under --compile: a compiled decode with the tail is
-    not measured. `rungs`: False, no rung at all (the plain plan whose refusal a compiled job's
-    is judged by, _compile_refusal: a job --compile refuses is refused as it was before the
-    rungs)."""
+    not measured. `rungs`: False, no rung at all (the plain plan a compiled job's refusal is
+    judged by first, _compile_refusal: a job no plain plan fits, rungs or not, is refused as it
+    was before the rungs; one that the plain plan fits only with a rung is refused saying that it
+    runs without --compile, with that rung, _rung_refusal)."""
     if recorded is not None:
         compile_vae, compile_fixed = recorded.compile_vae, True
         tail_frames = recorded.tail_frames
@@ -702,6 +703,20 @@ def _rungs_counted(tail: bool, floor: int | None) -> str:
     return f"with {room}, the least the plan takes"
 
 
+def _rungs_named(tail: bool, floor: int | None) -> str:
+    """The last rungs a plan takes, named as the command line's plan lines name them
+    (planner._rungs_said): the decoder's tail, its last blocks a frame at a time (`tail`), and
+    the VAE's least room, the VAE passes' reserve floor lowered to `floor` bytes (None: the
+    rule's own)."""
+    named = ["the decoder's tail (its last blocks a frame at a time)"] if tail else []
+    if floor is not None:
+        named.append(
+            "the VAE's least room (the VAE passes' reserve floor lowered to"
+            f" {floor / peaks.GIB:.2f} GiB)"
+        )
+    return " and ".join(named)
+
+
 def _helped(refused: PlanRefused) -> bool:
     """Whether a rung of the floor can help the refusal: a VAE pass short of memory, a plan's
     own (MemoryShort) or a pin's (PinRefused, why "memory")."""
@@ -779,7 +794,12 @@ def _compile_refusal(
     free, target, shots, pins and host_available, `options` its split, attention, dit_model,
     held and in_memory.
     A job no plain plan fits is refused as it was, whatever --compile asked: the plain plan's
-    refusal.
+    refusal. A job the plain plan fits only with a last rung of the floor (the decoder's tail, the
+    VAE's least room; no rung is taken compiled, unmeasured there), its compiled plan refused for
+    a VAE pass's memory, is refused too, saying so: the compiled plan's sentence, a line saying
+    that --compile takes no rung, then that the same command without --compile runs, with the
+    rungs that plan takes (_rung_refusal; DESIGN.md, Allocator, Small cards, decided on
+    2026-11-06).
 
     PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says the refusal "names the pass and the shapes
     measured" and doesn't word the lines): the compiled plan's own sentence, which names the
@@ -790,7 +810,20 @@ def _compile_refusal(
     try:
         plan(*job[:5], recorded=None, compile_vae=False, compile_fixed=True, rungs=False, **options)
     except PlanRefused as plain_refusal:
-        return plain_refusal
+        # A rung helps a VAE pass short of memory (_helped): a compiled refusal for anything else,
+        # a pin beyond the shapes measured among them, keeps the plain plan's refusal, as before.
+        if not _helped(refused):
+            return plain_refusal
+        try:
+            climbed, _ = plan(
+                *job[:5], recorded=None, compile_vae=False, compile_fixed=True, **options
+            )
+        except (PlanRefused, ValueError) as climbing:
+            # The plain plan with its rungs refused too, or a pin it rejects once memory is no
+            # longer what refuses it (a window too short to share): the refusal before the rungs.
+            logger.debug("the plain plan with the floor's rungs refused too: %s", climbing)
+            return plain_refusal
+        return _rung_refusal(refused, climbed)
     padded = _job(free, target, shots, **options, compile_vae=True).padded
     lines: list[Callable[[Say], str]] = [refused.words]
     # The plan refuses at the first pass it meets: each other pass pinned beyond the shapes is
@@ -864,6 +897,36 @@ def _compile_refusal(
         phase=refused.phase,
         instead=refused.instead,
         within=tuple(within),
+    )
+
+
+def _rung_refusal(refused: PlanRefused, climbed: Plan) -> CompileRefused:
+    """The refusal of a job --compile can't run where the plain plan fits only with a last rung of
+    the floor (`climbed`: that plan, its tail_frames or vae_floor set): the compiled plan's own
+    sentence (`refused`), a line saying that --compile takes none of the rungs (a compiled decode
+    with the tail, or a VAE pass compiled in the lowered room, is not measured), then that the
+    same command without --compile runs, with the rungs the plain plan takes (_rungs_named), each
+    on a line of its own, as _compile_refusal words its advice. Only the rungs that plan takes
+    are named: the VAE's least room is never taken under torch's own allocator without the
+    segments, nor under cudaMallocAsync."""
+    rungs = _rungs_named(climbed.tail_frames, climbed.vae_floor)
+
+    def words(say: Say) -> str:
+        compile_ = say(Setting("compile"))
+        return "\n".join(
+            (
+                refused.words(say),
+                f"{compile_} takes none of the floor's last rungs, not measured under {compile_}",
+                f"The same command without {compile_} runs, with {rungs}",
+            )
+        )
+
+    return CompileRefused(
+        words,
+        phase=refused.phase,
+        instead=refused.instead,
+        tail_frames=climbed.tail_frames,
+        vae_floor=climbed.vae_floor,
     )
 
 

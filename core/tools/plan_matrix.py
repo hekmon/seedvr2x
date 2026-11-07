@@ -80,6 +80,10 @@ REFUSAL_PARTS = (
     *("kind", "instead", "phase", "shortfall", "pin", "why", "need", "there", "short"),
     *("freeable", "reserve", "available", "pixels", "fits", "fits_input", "within"),
 )
+# The facts printed only where set: a compiled job's refusal where the plain plan fits only with
+# the floor's last rungs (errors.CompileRefused, 2026-11-07), so that every other refusal's text
+# is the same as before them.
+REFUSAL_PARTS_SET = ("tail_frames", "vae_floor")
 
 
 def gib(count: float) -> int:
@@ -177,6 +181,11 @@ class Matrix:
         the CLI's half words them as its options)."""
         parts = [
             (part, repr(getattr(error, part))) for part in REFUSAL_PARTS if hasattr(error, part)
+        ]
+        parts += [
+            (part, repr(getattr(error, part)))
+            for part in REFUSAL_PARTS_SET
+            if getattr(error, part, None) not in (None, False)
         ]
         return type(error).__name__, str(error), parts
 

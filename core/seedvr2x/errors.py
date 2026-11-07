@@ -337,7 +337,11 @@ class CompileRefused(PlanRefused):
       where it names none.
     - within: the tile pins within the shapes measured that the compiled plan takes in place of
       the ones refused (encode_tile, decode_tile), as Settings, in the order of the passes; empty
-      where the refusal advises none (a pass the pins don't give)."""
+      where the refusal advises none (a pass the pins don't give).
+    - tail_frames, vae_floor: where the plain plan fits only with the floor's last rungs, which
+      --compile never takes (no compiled pass is measured with them): the decoder's tail a frame
+      at a time (True) and the VAE passes' room, in bytes (None: the rule's own), that plan
+      takes; False and None where it takes none."""
 
     def __init__(
         self,
@@ -346,9 +350,13 @@ class CompileRefused(PlanRefused):
         phase: str = "",
         instead: Setting | None = None,
         within: tuple[Setting, ...] = (),
+        tail_frames: bool = False,
+        vae_floor: int | None = None,
     ) -> None:
         super().__init__(message, kind="compile", phase=phase, instead=instead)
         self.within = within
+        self.tail_frames = tail_frames
+        self.vae_floor = vae_floor
 
 
 class ModelError(Refusal):

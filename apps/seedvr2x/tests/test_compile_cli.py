@@ -27,7 +27,7 @@ from test_compile import (
     inductor_state,  # noqa: F401
     undo_global_state,  # noqa: F401
 )
-from test_shot_plan import HD, UHD, our_free, shots
+from test_shot_plan import HD, UHD, our_free, segments_at, shots
 from torch._dynamo.exc import FailOnRecompileLimitHit
 
 import planner
@@ -266,6 +266,32 @@ def test_a_job_that_fits_no_card_plain_is_refused_as_it_was() -> None:
     with pytest.raises(PlanError) as compiled:
         planner.plan(free, HD, shots(76), Pins(), None, compile_vae=True)
     assert str(compiled.value) == str(plain.value)
+
+
+def test_a_job_only_a_rung_fits_is_refused_saying_it_runs_without_compile() -> None:
+    # No rung is taken compiled (DESIGN.md, Allocator, Small cards, decided on 2026-11-06): a job
+    # the plain plan fits only with the decoder's tail, or with it and the VAE's least room, is
+    # refused under --compile, the command line's words saying that it runs without it and with
+    # which rungs, named as the plan's lines name them (_rungs_said; the library's lines are held
+    # in core's test_shot_plan.py, here worded with options).
+    tail = "the decoder's tail (its last blocks a frame at a time)"
+    room = "the VAE's least room (the VAE passes' reserve floor lowered to 0.50 GiB)"
+    for free, rungs in ((8.0, tail), (6.5, f"{tail} and {room}")):
+        made, _ = planner.plan(segments_at(free), HD, shots(19), Pins(), None)
+        assert made.tail_frames and not made.compile_vae
+        with pytest.raises(PlanError) as refused:
+            planner.plan(segments_at(free), HD, shots(19), Pins(), None, compile_vae=True)
+        lines = planner.worded(refused.value).split("\n")
+        # The compiled plan's own refusal first, for its decode.
+        assert lines[0].startswith("an output of 1920x1080 takes "), lines[0]
+        assert "(its decode in tiles of " in lines[0], lines[0]
+        assert lines[1:] == [
+            "--compile takes none of the floor's last rungs, not measured under --compile",
+            f"The same command without --compile runs, with {rungs}",
+        ]
+        # The plan's own lines name the rungs in the same words.
+        said = "\n".join(planner._rungs_said(made))  # pyright: ignore[reportPrivateUsage]
+        assert "the decoder's tail: its last blocks a frame at a time" in said
 
 
 def test_a_recorded_plan_keeps_its_own_compile_flag() -> None:
