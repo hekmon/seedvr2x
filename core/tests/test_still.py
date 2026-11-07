@@ -1,7 +1,7 @@
 """One picture through the models (seedvr2x/still.py) on the CPU: the VAE of cpu_models (the real
-configs, random weights) in bfloat16, as the pipeline runs it, and a stand-in DiT, so that what is
-held is still.py's own steps: the phases entered in order and nothing loaded, the encode and the
-noise seeded as a shot's first frame is, one latent sampled, the tiled passes' scratch in system
+configs narrowed, random weights) in bfloat16, as the pipeline runs it, and a stand-in DiT, so that
+what is held is still.py's own steps: the phases entered in order and nothing loaded, the encode and
+the noise seeded as a shot's first frame is, one latent sampled, the tiled passes' scratch in system
 memory, split's reference the picture itself, a NaN in the decode refused. That the output is the
 shot's pass's (seedvr2x/shot_pass.py), bit for bit, is the CLI's tests/test_still_cli.py's."""
 

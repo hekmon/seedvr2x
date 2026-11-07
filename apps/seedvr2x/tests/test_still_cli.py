@@ -36,7 +36,7 @@ import numpy.typing as npt
 import pytest
 import torch
 from PIL import Image, ImageCms
-from stand_ins import cpu_models  # noqa: F401
+from stand_ins import cpu_models, shipped_cpu_models  # noqa: F401
 from test_picture import exif_chunk, header_only_png, inserted
 from test_record import read_xmp
 from test_still import PICTURE, SEED, TARGET, TILES, pipeline_models, pixels_of, stand_in_dit
@@ -148,6 +148,15 @@ def test_a_picture_is_a_shot_of_one_frame(
         None if correct else Correction(Path("i.mkv"), Path("i.crc32"), PICTURE[1], PICTURE[0]),
     )
     assert other.tobytes() != expected.tobytes()
+
+
+def test_a_picture_is_a_shot_of_one_frame_at_the_vaes_shipped_widths(
+    monkeypatch: pytest.MonkeyPatch,
+    shipped_cpu_models: model.Models,  # noqa: F811
+) -> None:
+    # The cases above run the narrow stand-in VAE (stand_ins.NARROW); one runs it at the shipped
+    # widths: both passes tiled, corrected.
+    test_a_picture_is_a_shot_of_one_frame(monkeypatch, TILES, TILES, True, shipped_cpu_models)
 
 
 # The picture on the GPU ----------------------------------------------------------------------

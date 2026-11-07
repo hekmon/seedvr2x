@@ -1,11 +1,11 @@
 """One clip through the models (seedvr2x/clip.py) on the CPU: the VAE of cpu_models (the real
-configs, random weights) in bfloat16, as the pipeline runs it, and test_still.py's stand-in DiT, so
-that what is held is clip.py's own steps: the phases entered in order and nothing loaded, the
-clip's seeds, the windows laid out and merged, the steps told in order with their counts, a step
+configs narrowed, random weights) in bfloat16, as the pipeline runs it, and test_still.py's stand-in
+DiT, so that what is held is clip.py's own steps: the phases entered in order and nothing loaded,
+the clip's seeds, the windows laid out and merged, the steps told in order with their counts, a step
 that raises (an Exception or a BaseException) leaving no decode open and nothing of the call alive,
 the refusals, and the plan's count of the host (the output array, the windows and the scratch kept
-whole in system memory). That the output is the shot's pass's, bit for bit, as the command line
-runs it, is the CLI's tests/test_clip_cli.py's."""
+whole in system memory). That the output is the shot's pass's, bit for bit, as the command line runs
+it, is the CLI's tests/test_clip_cli.py's."""
 
 import weakref
 from typing import Any

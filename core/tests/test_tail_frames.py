@@ -1,10 +1,10 @@
 """The decoder's tail a frame at a time (Decoder3D.tail_frames, model.tail_frames) on the CPU,
-against the plain decoder, bit for bit: cpu_models' VAE (the real configs, random weights) in
-float32 and in bfloat16, the pipeline's dtype (test_still.pipeline_models), a latent of 3 x 5 whose
-decode is 24 x 40, cut in slices as model.latent_slices cuts it (2 latents with 5 frames, then 1
-latent with 4 frames at a time), so that the causal convolutions' memory is carried from slice to
-slice and, inside the tail, from frame to frame. The cards' sizes (512 px and up) are measured
-on the GPU (research/docs/small-cards.md); these hold the code's arithmetic."""
+against the plain decoder, bit for bit: cpu_models' VAE (the real configs narrowed, random weights)
+in float32 and in bfloat16, the pipeline's dtype (test_still.pipeline_models), a latent of 3 x 5
+whose decode is 24 x 40, cut in slices as model.latent_slices cuts it (2 latents with 5 frames, then
+1 latent with 4 frames at a time), so that the causal convolutions' memory is carried from slice to
+slice and, inside the tail, from frame to frame. The cards' sizes (512 px and up) are measured on
+the GPU (research/docs/small-cards.md); these hold the code's arithmetic."""
 
 import copy
 from collections.abc import Iterator

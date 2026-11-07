@@ -23,7 +23,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
-from stand_ins import cpu_models  # noqa: F401
+from stand_ins import cpu_models, shipped_cpu_models  # noqa: F401
 from test_clip import LONG, MIDDLE, SHORT, clip_of
 from test_still import SEED, TARGET, TILES, pipeline_models, stand_in_dit
 
@@ -204,6 +204,15 @@ def test_a_clip_is_a_shot_at_frame_0(
         None if correct else correction_of(frames),
     )
     assert other.tobytes() != expected.tobytes()
+
+
+def test_a_clip_is_a_shot_at_frame_0_at_the_vaes_shipped_widths(
+    monkeypatch: pytest.MonkeyPatch,
+    shipped_cpu_models: model.Models,  # noqa: F811
+) -> None:
+    # The cases above run the narrow stand-in VAE (stand_ins.NARROW); one runs it at the shipped
+    # widths: 33 frames in 3 windows, both passes tiled, corrected.
+    test_a_clip_is_a_shot_at_frame_0(monkeypatch, LONG, 5, TILES, TILES, True, shipped_cpu_models)
 
 
 # One, two and three windows, each tiled pass alone and both, with the correction and without,
