@@ -121,9 +121,29 @@ def runs_pipeline(
     windows and its correction against the shot's frames from there (Correction.first), the shot
     pass of shots_pipeline; the output's frames those job.run_of takes from each run. The reader
     of the input copy (from_memory) is the caller's, over the whole clip."""
+    made = runs_made(
+        models, frames, seed, window, encode_tiles, decode_tiles, corrected, level, target
+    )
+    return composed(made, frames.shape[0], level)
+
+
+def runs_made(
+    models: model.Models,
+    frames: npt.NDArray[np.float32],
+    seed: int,
+    window: int | None,
+    encode_tiles: Tiles | None,
+    decode_tiles: Tiles | None,
+    corrected: bool,
+    level: str,
+    target: tuple[int, int] = TARGET,
+) -> dict[int, npt.NDArray[np.float32]]:
+    """Each run of runs_pipeline, by its first frame: run 0 is shots_pipeline over the whole
+    clip with the shot's seed (the clip's own, at frame 0) and its correction from frame 0, the
+    standard clip's very pass."""
     count = frames.shape[0]
     runs = job.QUALITY[level]
-    made = {
+    return {
         each.offset: shots_pipeline(
             models,
             frames[each.offset :],
@@ -136,6 +156,14 @@ def runs_pipeline(
         )
         for each in job.shot_runs(Shot(0, count), runs)
     }
+
+
+def composed(
+    made: dict[int, npt.NDArray[np.float32]], count: int, level: str
+) -> npt.NDArray[np.float32]:
+    """The clip of `count` frames at `level` from its runs (runs_made): each frame from the run
+    job.run_of names."""
+    runs = job.QUALITY[level]
     taken = [job.run_of(runs, frame) for frame in range(count)]
     return np.stack([made[run][frame - run] for frame, run in enumerate(taken)])
 
@@ -253,9 +281,8 @@ def test_a_clip_at_a_level_is_the_shots_runs_as_the_command_line_makes_them(
     from_memory(monkeypatch, frames)
     stand_in_dit(monkeypatch)
     models = pipeline_models(cpu_models)
-    expected = runs_pipeline(
-        models, frames, SEED, window, encode_tiles, decode_tiles, correct, level
-    )
+    made = runs_made(models, frames, SEED, window, encode_tiles, decode_tiles, correct, level)
+    expected = composed(made, count, level)
     ours = clip.upscale(
         models,
         frames,
@@ -269,17 +296,9 @@ def test_a_clip_at_a_level_is_the_shots_runs_as_the_command_line_makes_them(
     )
     assert ours.shape == expected.shape == (count, 48, 80, 3) and ours.dtype == expected.dtype
     assert ours.tobytes() == expected.tobytes()
-    # The runs matter: not the standard run's frames.
-    standard = shots_pipeline(
-        models,
-        frames,
-        SEED,
-        window,
-        encode_tiles,
-        decode_tiles,
-        correction_of(frames) if correct else None,
-    )
-    assert ours.tobytes() != standard.tobytes()
+    # The runs matter: not the standard run's frames, run 0's (runs_made), the shot's pass over
+    # the whole clip at the clip's seed, corrected from frame 0.
+    assert ours.tobytes() != made[0].tobytes()
 
 
 def test_the_library_chooses_the_runs_the_command_line_does() -> None:
@@ -329,10 +348,11 @@ def test_the_windows_cut_the_output_where_the_layout_does(
             correct=False,
         )
 
-    assert run(5).tobytes() != run(None).tobytes()
-    assert run(9).tobytes() == run(None).tobytes() == run(40).tobytes()
+    five, whole = run(5), run(None)
+    assert five.tobytes() != whole.tobytes()
+    assert run(9).tobytes() == whole.tobytes() == run(40).tobytes()
     height, width = output_size(TARGET)
-    assert run(5).shape == (LONG, height, width, 3)
+    assert five.shape == (LONG, height, width, 3)
 
 
 # The clip on the GPU --------------------------------------------------------------------------

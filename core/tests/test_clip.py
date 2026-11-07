@@ -574,9 +574,9 @@ def test_a_level_takes_each_frame_from_its_run_and_each_run_is_a_clip_from_its_f
     assert out.shape == (count, 48, 80, 3) and out.tobytes() == expected.tobytes()
     assert frames.tobytes() == before.tobytes()
     # Not the standard run's frames: the runs differ, as the levels do.
-    assert out.tobytes() != upscale(models, frames, window=window, correct=correct).tobytes()
-    # Standard is the default, and the same as asked.
     plain = upscale(models, frames, window=window, correct=correct)
+    assert out.tobytes() != plain.tobytes()
+    # Standard is the default, and the same as asked.
     assert (
         plain.tobytes()
         == upscale(models, frames, window=window, correct=correct, quality="standard").tobytes()
