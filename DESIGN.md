@@ -377,13 +377,36 @@ seedvr2x/                the repository
       spent and, once measured, the time left; at the end, the plan and the frames made in
       their time. The download and the read into RAM go on the same bar first, by bytes, and
       the Cuts node's by the frames scanned, Cancel honoured between its batches. The preview
-      is the newest frame the run keeps, at ComfyUI's preview size. Decided the same day, to
-      be built: a later run names its own frames (run 3 from the shot's third frame, "frames
-      123 to 240"); the time is said each second between events too, so that a long window's
-      text never stands still; and, once a unit's time is measured, the nodes name their units
-      for the waits on the GPU ([Allocator](#allocator), the hang): a wait past its bound is
-      said on the node with the way out, ComfyUI restarted, Cancel leaves such a wait, and the
-      release after it waits on no GPU.
+      is the newest frame the run keeps, at ComfyUI's preview size. Decided the same day and
+      built on 2026-11-07 (impl-nodes' third pass): a later run names its own frames (run 3
+      from the shot's third frame, "frames 123 to 240"); the time is said each second between
+      events too, so that a long window's text never stands still (a thread for the text
+      alone, waiting on the event its stop sets, its sends queued by ComfyUI and never
+      blocking, so that its join needs no time cap); and, once a unit's time is measured, the
+      nodes name their units for the waits on the GPU ([Allocator](#allocator), the hang): a
+      wait past its bound is said on the node with the way out, ComfyUI restarted, and Cancel
+      leaves such a wait. The release after a run that a Cancel or an error ended waits for
+      the card's last work in the same poll, ComfyUI's Cancel its check (decided 2026-11-06:
+      not a stream's query, which can't tell a slow card from a dead one), the node saying
+      "freeing the card: waiting for the GPU to finish its last work; Cancel again to leave
+      it, then restart ComfyUI"; a healthy card's release ends in a moment and the text before
+      it comes back, and a release after a run that ended well checks nothing. A second Cancel
+      leaves the wait and marks the card abandoned, whatever its bound, the user's repeated
+      press deciding as a repeated signal does in the CLI: the node says "the card stopped
+      answering: restart ComfyUI", and every later run is refused. The mark is per card,
+      cleared only by a release on that card whose waits all completed, or by a new process;
+      models not kept wait for the card in the same poll (`model.synchronize`, the library's
+      brick: no release of their own until a second app needs one) before they are freed,
+      and stay held while the card is marked. README's Limits say that a card that stopped
+      answering needs ComfyUI restarted, its own cache release waiting on the card too.
+      Decided on 2026-11-07, to be built with the stop's follow-up: a mark the card itself
+      clears, since a second Cancel pressed in impatience on a healthy card would otherwise
+      cost a restart. At the next run's start the work the release left is asked, without
+      waiting, whether it has finished: finished, the release is completed then (the models
+      held are freed), the mark cleared and the run goes on; not finished, the run is
+      refused, saying that the card is still busy with its last work, to wait or to restart
+      ComfyUI; a CUDA error keeps the mark. While one card is marked, runs are refused on
+      every card, until GPU selection places runs on other cards: then by card.
     - A clip is whole in RAM, as ComfyUI's Load Video gives it: the nodes stream nothing, keep
       nothing on disk and resume nothing. The plan counts the clip's frames in host memory and
       refuses past it, saying what the CLI does instead: a film streamed shot by shot, never
