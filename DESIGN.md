@@ -3663,7 +3663,7 @@ memory after it, synchronously, about 25 ms up and 95 ms back per block
   blocks' compute
 - they stream through **two slots** on the GPU, allocated once and written in place: the
   DiT's peak falls by each swapped block's 0.42 GiB, but for those two
-- only parameters move: RoPE's tables are buffers, and stay on the GPU
+- only parameters move: the blocks' rotary caches and buffers stay on the GPU
 - **prefetch**: the next block is copied on a side stream while the current one computes. A
   copy waits for its slot's last reader and a block for its copy, by the GPU's own events,
   the host never waiting. The synchronous version is built first: it is the reference the
@@ -3674,8 +3674,9 @@ memory after it, synchronously, about 25 ms up and 95 ms back per block
   off the GPU in those phases), and the DiT's 15.35 GiB beside it would pass that card's
   budget. It comes back in 0.30 s (measured on a desktop card, 15.35 GiB). The VAE's 0.47 GiB
   leave for the DiT's phase the same way, when the window wants them. Once a model has left,
-  the GPU holds what the other alone would, and 0.06 GiB of RoPE's buffers and tables that
-  never move. What leaves is handed back to the driver at once, 0.3 s at most: torch's
+  the GPU holds what the other alone would, and the 0.06 GiB that never moves (the blocks'
+  rotary caches and buffers, the text embeddings, cuBLAS's workspace: `peaks.DIT_BUFFERS`).
+  What leaves is handed back to the driver at once, 0.3 s at most: torch's
   allocator would keep it (5.5 GiB free of a 32 GB card after the DiT had left, 29.3 once
   handed back).
 - **The loader** never puts a swapped DiT whole on the GPU, which a 16 GB card couldn't hold:
@@ -3848,8 +3849,11 @@ The GPU's memory refused stops a run in one line, before the models load as afte
     reserve there is measured by the step, and the 2.5 and its line retire.
   - **Small cards** (place-study, 2026-11-05, [small-cards.md](research/docs/small-cards.md):
     the RTX 5090 under WSL2, smaller cards emulated, 4 GiB of the card always left to the
-    desktop), decided that day with the user and built on 2026-11-06 by one baton
-    (impl-place), the milestone-1 regression bit for bit on its last code:
+    desktop, its core's clock raised by an undervolted curve throughout and its memory's and
+    crossbar's by offsets until 2026-11-07, the bits below; a stock card's times unmeasured),
+    decided that day with the user and built on 2026-11-06 by one baton (impl-place), the
+    milestone-1 regression bit for bit on its last code, its follow-ups on 2026-11-07
+    (impl-place-2):
     - The lean attention, a marked change in the vendored 7B: the projection's q, k and v
       freed once windowed, q and k cast to bfloat16 before the windows' concatenation, the
       norm, RoPE and cast 4,096 tokens at a time, the windows' outputs written into one
@@ -3866,19 +3870,25 @@ The GPU's memory refused stops a run in one line, before the models load as afte
       FlashAttention 2 or faster (a 4K picture's DiT step 2.80 s against 2.87, a 1080p window
       of 11 latents 7.37 against 8.16), so neither is said to be the faster.
     - The reserve under the segments is measured by the step (decided 2026-11-06, after the
-      night below): max(0.6, 0.3 × P) GiB beyond a DiT step's peak P, P its peak over the
+      night below): max(0.6, 0.33 × P) GiB beyond a DiT step's peak P, P its peak over the
       weights it keeps resident, by the lean attention, and max(1.25, 0.2 × P) beyond a VAE
       pass's, over the models resident in its phase. The DiT's is capped at 4.5 GiB, max(0.6,
-      min(0.3 × P, 4.5)), by impl-place's scan on the evening of 2026-11-06, the room the
-      lean windows want having grown faster than P at first (0.18, 0.20, then 0.29 × P): the
-      sharp 7B in int8, every block swapped, its windows of 19, 27 and 31 latents (P 9.34,
-      13.21 and 15.14 GiB) kept their speed down to 3.0, 4.0 and 3.25 GiB beside them (0.32,
-      0.30 and 0.21 × P), took 1.13 to 1.34 times as long a quarter of a GiB under that, and
-      2.1 to 2.7 times at 1.0 GiB: the want stops growing past 27 latents. Provisional past
-      P = 15 GiB, where a window of 35 latents could not reach its want beside the desktop,
-      the 96 GB card's to measure; at 19 and 27 latents 0.3 × P (2.80 and 3.96 GiB) lies
-      within the scan's quarter of a GiB of the want, which a finer scan is to settle. The
-      4.5 and the 2.5 retire there;
+      min(0.33 × P, 4.5)), reached from P = 13.6 GiB, by impl-place's scan on the evening of
+      2026-11-06, the room the lean windows want having grown faster than P at first (0.18,
+      0.20, then 0.29 × P): the sharp 7B in int8, every block swapped, its windows of 19, 27
+      and 31 latents (P 9.34, 13.21 and 15.14 GiB) kept their speed down to 3.0, 4.0 and 3.25
+      GiB beside them (0.32, 0.30 and 0.21 × P), took 1.13 to 1.34 times as long a quarter of
+      a GiB under that, and 2.1 to 2.7 times at 1.0 GiB: the want stops growing past 27
+      latents. Scanned again by 0.05 GiB on 2026-11-07 (impl-place-2), the windows of 19 and
+      27 latents kept their speed down to 2.70 and 3.95 GiB in int8 and 2.80 and 4.05 in fp16
+      (0.29 to 0.31 × P), a room 0.05 GiB under that costing 1.1 to 2.1 times their time; the
+      same window of 19 had wanted 0.30 GiB more the night before. The share, decided on
+      2026-11-07, is the least to two decimals that leaves every want of both sessions 0.04
+      GiB more: 0.33 × 9.34 = 3.08 over that night's 3.0, where 0.32 leaves 2.99, and fp16's
+      27-latent window, the largest want, has 4.36 for its 4.05; 0.03 × P more costs at most
+      a latent of window where the DiT's step binds the plan. Provisional past P = 15 GiB,
+      where a window of 35 latents could not reach its want beside the desktop, the 96 GB
+      card's to measure. The 4.5 and the 2.5 retire there;
       under torch's own allocator without the segments the 4.5 stays, and under
       `cudaMallocAsync` the reserve is its pool's (below). On a card left exactly its size,
       really full, at night (place-study, 2026-11-05 to 06), twelve whole jobs on emulated 16,
@@ -3889,9 +3899,23 @@ The GPU's memory refused stops a run in one line, before the models load as afte
       beyond its measured peak, the scan's 3.0 being its edge): they need more room beside
       them than the plain ones' tenth. Windows of 7, 11 and 19 latents (P 4.56, 6.53 and
       10.40 GiB) ran 2.7 to 3.4 times as long with 0.1 × P, and keep their speed from
-      0.18 to 0.29 × P, their bits all the way down; in the int8 scan the window of 31
-      latents gave other bits at 2.75 GiB, under its reserve (every other step of the three
-      scans the same bits): the bits hold under the room a plan leaves, not under any.
+      0.18 to 0.29 × P, their bits all the way down. The other bits some steps gave were the
+      card's, not the room's (impl-place-2's study, 2026-11-07): the window of 31 latents at
+      2.75 GiB in the int8 scan, and in the finer scans int8's window of 27 latents at 6 of
+      its 55 rungs, from 5.10 down to 3.70 GiB of room, fp16's at one, none at 19 latents.
+      The same window gave them with no limit set (12 calls in 40) and with no block swapped
+      (6 in 40); seedvr2x left out, a chain of its kernels in plain torch did (4 passes in
+      40), and so did one bf16 cuBLAS product on fixed inputs (5 calls in 18,898, a few values
+      in one row or one column of one output tile: one input read wrong). The card's memory
+      ran at 14,801 MHz under that load, where its maximum reads 14,001, its memory and
+      crossbar clocked over stock by offsets; without them, the same afternoon, none in 36,659
+      such products and none in 40 windows. So no bit followed the room, and a card clocked
+      past its maker's settings can give a long window other bits now and then, which seedvr2x
+      cannot tell from a sound result. Torch's deterministic algorithms, their new tensors
+      filled, gave none on that card (none in 60 calls, 1.17 to 1.35 times as long; 2 in 30
+      without the fill) and are no option: the clocks were the cause. No GPU test is added for
+      a card's clocks; MANUAL says it where two runs of a job differ (the pre-release docs
+      pass).
       October's 1.4 to 1.5 times as long did not come back: the same jobs on the full card
       ran 69.4 s at both reserves pinned to one shape, and 121 against 132 s unpinned, all of
       it the decode, in the 2.5 plan's 1280-px tiles where the 4.5 took 1152, which no run
@@ -3912,7 +3936,11 @@ The GPU's memory refused stops a run in one line, before the models load as afte
       measured (elsewhere a pass packed that close can give other frames and say nothing, as
       the room's own measures found); no rung under `--compile`, unmeasured there: a compiled
       job only a rung would fit is refused, saying that it runs without `--compile` (decided
-      2026-11-06, to be built). A refusal after every rung gives the least the plan takes, its
+      2026-11-06, built 2026-11-07: `CompileRefused`, its facts `tail_frames` and `vae_floor`,
+      "The same command without --compile runs, with the decoder's tail (its last blocks a
+      frame at a time)" and, where the plan takes it, "and the VAE's least room (the VAE
+      passes' reserve floor lowered to 0.50 GiB)"; a job no plain plan fits, rungs or not, is
+      refused as before). A refusal after every rung gives the least the plan takes, its
       rungs said. With
       the lean attention and the measured reserve, a 1080p clip ran on an emulated 8 GB card
       in 101 s (93 on 16 GB), and the 4K picture in 11.9 s; on the card really full, at night,
@@ -3962,20 +3990,47 @@ The GPU's memory refused stops a run in one line, before the models load as afte
       on 8 GB (the tail taken), 85.4 and 89.7 on 12 and 74.6 and 82.5 on 16, and the 4K
       picture in 10.6 and 12.1 s on 8, 11.2 and 12.1 on 12 and 13.1 and 14.0 on 16 (larger
       tiles). Every unit's allocated peak was at or under its prediction but two decodes',
-      inside their reserve and at speed: the 8 GB picture's in 832-px tiles by 0.17 GiB (its
-      output copies seem to overlap the tiles' working memory, which the plan counts a
-      moment apart) and the 16 GB clip's in 768-px tiles by 1.1 MiB. Both are to be measured
-      and corrected: the picture's one-frame decode at every tile side with its copies, and
-      the 768-px slice.
-- **The vendored RoPE's tables** (`vendor/models/dit_7b/rope.py:44`, an `lru_cache` of 128,
-  one table on the card per window shape), live since numz's wrapper went
-  ([bug 24](research/bugs/24-rope-wrapper-late-binding.md)): about 2 MB a latent at 1080p,
-  which the planner counts once (`peaks.DIT_BUFFERS`), and which a film of many shot lengths
-  would grow past that (impl-nodes, 2026-11-05). Cleared when a node's run ends (built that
-  day, `model.forget`) and, decided that day, at each shot's start in every app, built with
-  the placement on 2026-11-06 (`model.forget_rope_tables`, in `shot_pass.sample_windows` and
-  `still.sampled`: 80 shots of many lengths held one shot's tables at most, the same bits): a
-  shot's windows share their shapes, and a table is made again from the same numbers.
+      inside their reserve and at speed: the 8 GB picture's in 832-px tiles by 0.17 GiB and
+      the 16 GB clip's in 768-px tiles by 1.1 MiB. Both were measured and corrected on
+      2026-11-07 (impl-place-2). The 4K picture's one-frame decode at the 25 sides the planner
+      takes, 512 to 2048 px: its peak set during the tiles at every side, the copies and the
+      colour correction after them, a moment apart as the plan counts them; 832 px the one
+      side over, 0.3463 of the slice's figure where the plan took its neighbour 768's 0.33,
+      the other sides counted at or over their measure (by 1.31 times at most), so
+      `peaks.ONE_FRAME_DECODE_4K` holds each side's ratio and a picture's decode takes the
+      larger of it and the rule (832 px alone moves). The clip's 1.1 MiB: the vendored RoPE's
+      tables kept into the VAE's phases (below). With both, the emulated 8 GB picture and clip
+      and the 16 GB clip ran every unit under its prediction, by 3.2 MiB to 0.40 GiB, and the
+      milestone-1 regression bit for bit. Against the plans before (the plan matrix's 4,760
+      cases a DiT file): the tables' clearing keeps a block of the DiT more beside a VAE pass,
+      or takes a tile larger (fp16 2 cases, int8 14, the GGUFs 23 and 41); the share of 0.33
+      swaps more blocks or runs a shorter window in 88 fp16 cases, 93 int8 and 82 each GGUF,
+      none longer, and refuses one case planned before (int8 on a 12 GB card, a compiled
+      1080p job pinned to `--window 8` with 20 blocks swapped, 0.02 GiB short, the refusal
+      naming `--window 7`); the compiled jobs only a rung would fit, 4 to 9 a file, are
+      refused as above.
+- **The vendored RoPE's tables** (`vendor/models/dit_7b/rope.py:44`, an `lru_cache` of 128
+  keyed by each block's rotary module and the window's shape, float16, 60 values a
+  position), live since numz's wrapper went
+  ([bug 24](research/bugs/24-rope-wrapper-late-binding.md)), which a film of many shot
+  lengths would grow past what the planner counts (impl-nodes, 2026-11-05). Cleared when a
+  node's run ends (built that day, `model.forget`), at each shot's start in every app (built
+  with the placement on 2026-11-06, `model.forget_rope_tables`, in
+  `shot_pass.sample_windows` and `still.sampled`: 80 shots of many lengths held one shot's
+  tables at most, the same bits) and where the DiT's work on a shot ends, a raise included
+  (decided and built on 2026-11-07, impl-place-2: a 16 GB card's clip decode had found the
+  128 beside it, 11.27 MB kept into the VAE's phases, its 1.1 MiB over). A shot's windows
+  share their shapes, and a table is made again from the same numbers. No VAE pass holds or
+  counts one now: at every VAE phase's entry, after windows of 19 and of 7 latents, the card
+  held the VAE's weights and 59,613,696 bytes beside them, under `peaks.DIT_BUFFERS`,
+  59,643,736 (the census before the clearing, the larger kept): the blocks' rotary caches
+  (24,772,608), the text embeddings and the rotary buffers (1,250,290), and cuBLAS's 32 MiB
+  workspace with 66 KB more that no tensor holds (33,620,838). The windows' fit counts a
+  window's own tables; a shot's later windows found the earlier ones' beside theirs (4.4 to
+  4.5 MB) and peaked 75 MiB under their prediction. cuBLAS's workspace is counted twice in a
+  picture's VAE phases, in `DIT_BUFFERS` and in the one-frame figures measured with it (32
+  to 64 MiB over, the safe side): left so, to be taken out of one when a picture's VAE
+  figures are measured on the 96 GB card.
 - **A hang** (place-study, 2026-11-06 02:32, on the card really full at the 4.5 reserve): a
   66-frame job's second run stopped in its second shot's decode and never moved, the card
   4.25 GiB free and 6% busy, the main thread in a timed sleep, CUDA's threads polling, both
@@ -3984,7 +4039,10 @@ The GPU's memory refused stops a run in one line, before the models load as afte
   before, took 69.4 s; nothing else hung that night. The cause, most likely (design's
   investigation the same morning, read only): a GPU fault below seedvr2x. Windows' System log
   holds an NVIDIA driver error (nvlddmkm, event 153) 3.5 s into that decode, the only one in
-  place-study's 307 runs, on a machine whose stability was in question since 2026-11-04; the
+  place-study's 307 runs, on a machine whose stability was in question since 2026-11-04 (its
+  card's memory and crossbar clocked over stock by offsets, which on 2026-11-07 were found to
+  give wrong reads, Small cards above: the likeliest cause of that fault as well, inferred);
+  the
   work it stopped neither completed nor failed, so the decode's wait on the GPU, inferred to
   be `model.synchronize`'s poll (the only sleep on that path, with no bound), waited, while
   seedvr2x's threads and pipes were in their usual state. The stop was handled at once, and
