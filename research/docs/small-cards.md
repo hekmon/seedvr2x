@@ -1,6 +1,7 @@
 # Small cards: where a 4K picture's seconds go, what a step needs beyond its peak under expandable segments, what the VAE's decode and the DiT's step hold
 
-> Status: **measured** (2026-11-05, and the night to 11-06). One card: an RTX 5090 (32 GB)
+> Status: **measured** (2026-11-05, and the night to 11-06; again on 2026-11-07, the placement's
+> follow-ups, in their own section). One card: an RTX 5090 (32 GB)
 > under WSL2, torch 2.14.1+cu130, seedvr2x at `6967542` (its own runtime, the 7B fp16 and the
 > VAE; attention on PyTorch's SDPA unless a column says FlashAttention 2). By day, beside a
 > desktop: seedvr2x's runs counted on the card less the 4 GiB left to the desktop; at night
@@ -600,8 +601,9 @@ peak lowered by 0.25 GiB, `s:N:FROM:TO:0.25`; nothing else on the machine; P is 
 
 - **The want stops growing past 27 latents** (4.0 GiB there, 3.25 at 31): the DiT's reserve under
   the segments is capped at 4.5 GiB, half a GiB over the largest want measured: max(0.6, min(0.3
-  x P, 4.5)). Beyond P = 15 GiB the cap rests on these three windows alone; 35 latents (0.3 x P
-  5.3) could not be scanned to its want beside the desktop.
+  x P, 4.5)) (the share 0.33 since 2026-11-07: the placement's follow-ups, below). Beyond P =
+  15 GiB the cap rests on these three windows alone; 35 latents (0.3 x P 5.3) could not be
+  scanned to its want beside the desktop.
 - **Slower, then much slower**: at the first rung under its want a window ran 1.13 to 1.34 times
   as long, at 1.0 GiB of room 2.1 to 2.7 times (2.8 at 0.5 GiB, 19 latents), each rung run once.
 - **One rung changed the bits**: the 31-latent window at 2.75 GiB of room gave other frames than
@@ -758,6 +760,249 @@ with 1280-px decode tiles.
   itself; the colour study's judgement (its eyes found the tiles invisible after `split`) is the
   one made against a GT.
 
+## Measured again for the placement's follow-ups (2026-11-07)
+
+The same card and setting, seedvr2x at main's `5ca5e92` (the placement of 2026-11-06 built), by
+day beside the desktop's 4 GiB, nothing else on the machine. Two of that day's units had peaked
+over their prediction, inside their reserve and at speed: an emulated 8 GB card's 4K picture, its
+decode in 832-px tiles by 0.17 GiB, and an emulated 16 GB card's 1080p clip, its decode in 768-px
+tiles by 1.1 MiB. [`decode_peaks.py`](../scripts/decode_peaks.py) runs seedvr2x's command as a
+user's and reads torch's allocated counters along each unit, which move on the host as tensors
+are made and freed (no synchronisation added): before the unit, its peak, and the peak so far at
+each tile, slice, transform and colour correction, so that the part during which the peak rose
+is known; for a picture, the same latent decoded again on the loaded models at each tile side;
+with `--census`, the CUDA tensors alive at each phase's entry.
+
+### A 4K picture's decode at every tile side, with its copies
+
+The 4K picture (a 1920x1080 picture to 3840x2160, padded to 3840x2192), `--swap-blocks 36` (the
+DiT's two slots on the card in the VAE's phases), its colour correction on (`split`), on the whole
+card; the decode step whole (`still.decoded`: the tiles, the frame's crop and check, the
+picture's copy through the transform in float32, the correction), each side twice. The peak over
+what was allocated before the decode, cuBLAS's 32 MiB workspace (allocated by the DiT's phase,
+so in "before" here) added back, as the 2026-11-03 figures count it:
+
+| side (px) | measured (GiB) | predicted before | its ratio to the slice's figure | ratio before |
+|---|---|---|---|---|
+| 512 | 1.8858 | 1.9437 | 0.3202 | 0.33 |
+| 576 | 2.3767 | 2.4585 | 0.3190 | 0.33 |
+| 640 | 2.5367 | 2.6697 | 0.3136 | 0.33 |
+| 704 | 3.0612 | 3.2307 | 0.3127 | 0.33 |
+| 768 | 3.6354 | 3.6663 | 0.3272 | 0.33 |
+| 832 | **4.2596** | **4.0590** | **0.3463** | 0.33 |
+| 896 | 3.9184 | 4.6530 | 0.2779 | 0.33 |
+| 960 | 4.4846 | 5.1711 | 0.2862 | 0.33 |
+| 1024 | 4.7844 | 4.8888 | 0.2740 | 0.28 |
+| 1088 | 4.9952 | 5.5020 | 0.2542 | 0.28 |
+| 1152 | 5.5951 | 6.1572 | 0.2544 | 0.28 |
+| 1216 | 5.6705 | 6.7592 | 0.2349 | 0.28 |
+| 1280 | 6.2721 | 7.3920 | 0.2376 | 0.28 |
+| 1344 | 6.4510 | 8.0752 | 0.2237 | 0.28 |
+| 1408 | 7.1035 | 8.7696 | 0.2268 | 0.28 |
+| 1472 | 7.3508 | 9.5144 | 0.2163 | 0.28 |
+| 1536 | 8.0072 | 8.8200 | 0.2179 | 0.24 |
+| 1600 | 8.3100 | 9.5160 | 0.2096 | 0.24 |
+| 1664 | 8.6505 | 10.1904 | 0.2037 | 0.24 |
+| 1728 | 9.3688 | 10.9656 | 0.2051 | 0.24 |
+| 1792 | 9.8193 | 11.7432 | 0.2007 | 0.24 |
+| 1856 | 10.3244 | 12.5952 | 0.1967 | 0.24 |
+| 1920 | 10.8071 | 13.3656 | 0.1941 | 0.24 |
+| 1984 | 11.5233 | 15.0704 | 0.1835 | 0.24 |
+| 2048 | 12.1039 | 12.6700 | 0.1911 | 0.20 |
+
+- **The copies do not overlap the tiles.** At every side the step's peak was set during its
+  tiles: the frame's crop, the picture's copy through the transform and the correction came
+  after the tiles' working memory had gone, as the plan counts them (a moment apart, 0.38 GiB
+  above the models, and the correction's 0.73), and never raised it.
+- **832 px is the one side over its prediction**, by 0.20 GiB: the plan took the larger of its
+  two measured neighbours' ratios, 768's 0.33, and 832 px takes 0.3463 of the slice's figure.
+  The peak does not grow evenly with the tile: 896 px takes less than 832 (3.92 against 4.26
+  GiB), as the video's 21-frame squares do not (12.30 and 14.10).
+- **The measures at 768, 1024, 1536 and 2048 px are the 2026-11-03 figures** to 0.1 MiB, on
+  another tree and two days later; each side gave the same bits and the same peak to the byte in
+  its two runs.
+- **Elsewhere the plan counts the decode at or over its measure**, by 1.31 times at the most
+  (1984 px), the sides between the five measured before taking the larger of their neighbours'.
+- **Untiled**, the decode was refused out of memory at 21.68 GiB allocated, torch held 4.5 GiB
+  under the card beside the desktop; place-study's night had it at 23.65 GiB.
+
+Built: `peaks.ONE_FRAME_DECODE_4K`, each side's ratio rounded up to the thousandth, taken where it
+is over the ratio before (832 px alone: 0.347, the decode predicted at 4.268 GiB above the
+models); no prediction falls, since no other frame was measured at these sides. The decode's ratio
+for a still picture moves at 832 px alone, a video's not at all.
+
+### A clip's decode in 768-px tiles: what the card held besides the pass
+
+The 16 GB card's 73-frame 1080p clip again (`--cuts /dev/null`, the shipped plan: a window of 19
+latents, 34 blocks swapped, the decode in 768-px tiles, the DiT off the GPU in the decode), the
+decode unit read from the command's own reset of the peak, then twice more with `--census`, once
+at `--window 7`:
+
+| | bytes |
+|---|---|
+| the decode's peak, measured | 12,494,063,616 |
+| predicted before (`decode_peak`) | 12,492,855,571 (1.15 MiB under) |
+| allocated at the decode's entry | 572,220,416 |
+| the plan's count of it (VAE 501,306,880 + `DIT_BUFFERS` 62,277,026) | 563,583,906 |
+| the tile's own peak above that entry | 11,921,843,200 (MEASURED's 768 px: 11.11 GiB, 7.1 MiB more) |
+
+The pass itself was under its figure; the 8.6 MB over was in what the decode found on the card.
+The census at the decode's entry, by storage:
+
+| what | window 19 | window 7 |
+|---|---|---|
+| the VAE's weights | 501,306,880 | 501,306,880 |
+| 36 rotary caches, (8192, 21) float32 | 24,772,608 | 24,772,608 |
+| the text embeddings, the RoPE buffers and the rest | 1,250,290 | 1,250,290 |
+| the RoPE tables, (frames, rows, columns, 60) float16 | **11,269,800** (128 tables) | **4,544,640** (128 tables) |
+| no tensor's (cuBLAS's 32 MiB workspace and 66 KB) | 33,620,838 | 33,621,718 |
+
+- **The RoPE tables are the difference.** The vendored rope.py memoises `get_axial_freqs` in an
+  `lru_cache` of 128 entries keyed by the block's rotary module (each of the 36 blocks its own)
+  and the attention window's shape; it was full at both lengths, and its tables stay until the
+  next shot's start. `DIT_BUFFERS` (0.058 GiB) had been measured after windows of 1 latent, about
+  2.6 MB of tables in it; the rest of the DiT's resident bytes is 59,643,736 and 59,644,616 at
+  the two lengths.
+- **The tables are float16 with 60 values a position**, not the float32 the model's docstring
+  assumed; 2 bytes a value in every DiT file (the RoPE buffers are F16 in each).
+
+Built (design's ruling of 2026-11-07): the tables are cleared where the DiT's work on a shot ends
+as well as where it starts, a raise included (`shot_pass.sample_windows`'s generator, exhausted,
+closed or left by a raise; `still.sampled`), so that no VAE pass holds one and no VAE peak counts
+one; `peaks.DIT_BUFFERS` is the census's rest, 59,643,736 bytes, 2.6 MB under the 0.058 GiB it
+replaces. On the patch's tree (the proofs, 2026-11-07), the same census after windows of 19 and of
+7 latents found no table at the decode's entry, 59,613,696 bytes beside the VAE's weights at both
+lengths, 30,040 under `DIT_BUFFERS`; at a window of 7, each later window of 6 found the 128 tables
+of the window before, of the same shapes as its own (4,544,640 bytes), and peaked 75 MiB under its
+prediction, the decode 7.1 MiB under its own. On the emulated 8 GB card's clip (windows of 7, 6,
+6 and 6, every block swapped, the decoder's tail a frame at a time), the later windows found
+4,390,200 and 4,544,640 bytes of the earlier windows' tables (128) and peaked 75 MiB under their
+predictions, its decode 3.2 MiB under, its encode 412 MiB.
+
+### The DiT's reserve under the segments, scanned finer
+
+hold_probe.py as above (the sharp 7B, every block swapped, the VAE away, `--allocator native
+--conf expandable_segments:True --under 4.5`), 1080p windows of 19 and 27 latents in int8 and in
+fp16, the room beside the step from the 0.05 GiB at or over 0.40 x P down to the one at or under
+0.20 x P (`s:N:FROM:TO:0.05`), each rung once; the usual speed within 5% of the roomy runs'
+(the step's two warm calls before the scan and the scan's own at its peak). P is the step's peak
+over what the loaded model holds (0.633 GiB in int8, 1.055 in fp16, its two slots), the same in
+both formats to 0.001 GiB:
+
+| window, 1080p | P (GiB) | usual step | least room at speed | share of P | the first rungs under it | 0.3 x P, as before |
+|---|---|---|---|---|---|---|
+| int8, 19 latents | 9.343 | 13.88 s | 2.70 GiB | 0.289 | 1.16 to 1.32 times from 2.65 | 2.80: covers |
+| int8, 27 latents | 13.212 | 16.73 s | 3.95 GiB | 0.299 | 1.11 times at 3.90, 1.42 from 3.75 | 3.96: by 0.014 |
+| fp16, 19 latents | 9.342 | 11.54 s | 2.80 GiB | 0.300 | 1.84 to 2.11 times from 2.75 | 2.80: by 0.003 |
+| fp16, 27 latents | 13.211 | 16.45 s | 4.05 GiB | 0.307 | 1.22 times at 4.00, 2.4 from 3.75 | 3.96: **short by 0.087** |
+
+- **fp16's 27-latent window wants more than 0.3 x P**: at speed down to 4.05 GiB, 1.22 times as
+  long at 4.00.
+- **fp16's 19-latent window read twice more about its want** (3.00 to 2.70 GiB, two passes): at
+  speed at 2.85 and 2.80 both times and 1.9 times as long from 2.75. The scan's single 2.85 rung
+  had run 1.052 times the roomy time, just past the 5%: the day's spread (the scan's rungs at speed
+  ran 1.026 to 1.050 times), not the room's.
+- **impl-place's 0.25-GiB scan of 2026-11-06 found int8's 19-latent window slower at 2.75 GiB**
+  (1.13 times, its want put at 3.0); this one ran it at speed at 2.75 and 2.70. Two sessions, one
+  window: the want moved by 0.30 GiB between them.
+- **Faster than the roomy runs**: several of int8's 19-latent rungs at speed took 0.86 to 0.97
+  times the roomy time, and its 1.95 and 1.90 GiB rungs ran at speed between slower ones. A
+  scan's rung is one call; the day moves a call by 10% either way.
+- **Other bits, scattered**: int8's 27-latent window gave other frames at 6 of its 55 rungs (5.10,
+  4.25, 4.05, 4.00, 3.95 and 3.70 GiB of room), fp16's at one (4.00); none at 19 latents; each
+  with its own digest. The study below finds them with no limit set at all.
+
+Built (design's ruling of 2026-11-07): the DiT's share 0.33, max(0.6, min(0.33 x P, 4.5)), the cap
+reached from P = 13.6 GiB: the least share to two decimals that leaves every want either session
+measured 0.04 GiB more, the 2026-11-06 int8 19-latent window's 3.0 among them (0.33 x 9.343 =
+3.08; 0.32 leaves 2.99, 0.31 2.90). `tests/test_peaks.py` holds the seven wants under the rule
+(`DIT_WANTS`). A room 0.05 GiB under a want cost 1.1 to 2.1 times the window's time; 0.03 x P more
+reserve costs at most a latent of window where the DiT's step binds the plan.
+
+### Other bits from the same window: the study
+
+The scan's other frames came at scattered rungs, each with its own digest. Was it the limit, the
+swapped blocks, a race between streams, an algorithm? The same window, one condition changed at a
+time: hold_probe.py, the sharp 7B in int8, a 1080p window of 27 latents, the VAE away, expandable
+segments, no limit set at all (no `--under`), each step two calls (seeds 42 and 43), each call's
+digest against the reference's (2026-11-07, the desktop's 4 GiB watched by `small_card.py
+ballast --card whole`, nothing else on the machine). The outputs that differed are kept, with
+the reference's (`--outputs`).
+
+| condition | calls | other bits | s a call |
+|---|---|---|---|
+| (a) every block swapped, no limit | 40 | 12 | 17.0 |
+| (b) no block swapped, the whole DiT on the card, no limit | 40 | 6 | 17.0 for 15 calls, then 20.1 |
+| (d) as (a), torch's deterministic algorithms and `CUBLAS_WORKSPACE_CONFIG=:4096:8` (hold_probe.py's `--deterministic` then set both; its record names the first) | 30 | 0 | 23.0 |
+| (d1) as (a), `CUBLAS_WORKSPACE_CONFIG=:4096:8` alone | 30 | 7 | 17.6 |
+| (d2) as (a), the deterministic algorithms alone (torch.empty's memory filled, the default) | 30 | 0 | 19.9 |
+| (d3) as (a), the deterministic algorithms, torch.empty's memory left as it is (`--no-fill`) | 30 | 2 | 17.6 |
+| (e) as (b), every block's integer sums on the compute stream (`--watch-blocks`) | 30 | 1 | 18.3 |
+
+- **Neither the limit nor the swap**: (a) gave other bits with no limit, at 12 calls in 40, and
+  (b) with no block swapped, no side stream, no slot. The scan's limit and blockswap's copies are
+  not the cause; the 20 calls at full room of the scan's day that gave none were chance.
+- **One block, the same inputs, other outputs**: in (e)'s one differing call, block 11's weights
+  as it started and as it ended, and its inputs, were the reference call's to the integer sum;
+  its outputs were not, nor every block's after it. No block's weights ever differed.
+- **The spread**: 11 of (a)'s 12 differing outputs differ in 77 to 82% of their values, by 0.009
+  to 0.011 on average, 0.09 to 0.17 at the most (the reference's values reach 2.7): a difference
+  made early in the window and carried through the blocks. One differs in 0.2% of its values, in
+  one box: latent frames 17 to 23, rows 44 to 73, columns 188 to 239, the size of one shifted
+  attention window at the frame's right edge, by 0.03 at the most: made in one of the last
+  blocks, in that window's tokens alone.
+- **None in the slower calls**: none in 60 calls under torch's deterministic mode with
+  torch.empty's memory filled ((d), (d2)), 1.17 to 1.35 times as long a call; 2 in 30 with the
+  mode and no fill (d3), as fast as (a); 7 in 30 with cuBLAS's workspace setting alone (d1). The
+  fill writes NaN into every new tensor and the outputs stayed the reference's bit for bit, so no
+  kernel reads that memory: it changes how long a call takes, not the data. (b) itself ran its
+  first 15 calls at 17.0 s, 4 of its 6 other bits among them, then slowed to 20.1 s with no
+  other change: 2 more in its 2 calls at 19.4 and 18.6 s, none in the 16 at 20.1 s and over.
+  The data fits slower calls giving none as well as the fill removing them.
+
+Then without seedvr2x: [`repeat_chain.py`](../scripts/repeat_chain.py), 36 blocks of the
+window's kind of work at its sizes in plain torch (bf16 products of 223,560 tokens by 3,072 x 3,072, 3,072 x 12,288 and back,
+FlashAttention 2's varlen forward over windows of 3,024 tokens, elementwise work between), on
+fixed inputs, 10.3 s a pass: **4 passes of 40 gave other bits**, each its own digest, none in the
+first 20. And [`repeat_kernel.py`](../scripts/repeat_kernel.py), one kernel again and again on
+the same inputs, each result compared on the card with the first, 240 s each:
+
+| kernel | calls | other results | what differed |
+|---|---|---|---|
+| bf16 GEMM, 33,120 x 3,072 by 3,072 x 12,288 | 18,898 | 5 | 3, 6, 6, 43 and 48 values, by 1 to 57 units in the last place; the places recorded (the first 8) each time in one row or one column of one output tile |
+| FlashAttention 2 varlen forward, 27 latents of 1080p tokens in 3,024-token windows | 5,634 | 0 | |
+
+- **A wrong read in the card, the likeliest reading**: the same cuBLAS kernel on the same inputs
+  gave other values at 5 calls in 18,898, the places recorded in one row or one column of one
+  tile, as one input element read wrong into one tile would; another order of the arithmetic
+  would move values all over the output. A wrong value in one token's row of one window's
+  projection is what (a)'s one-window output shows.
+- **The card's clocks**: under that load, in all of the 434 one-second samples, the memory ran at
+  14,801 MHz, where `nvidia-smi` gives 14,001 MHz as its maximum, the SM clock at 3,007 to 3,090
+  MHz (its maximum 3,090), at 53 to 72 °C and up to 667 W; 15 of the samples, at 527 to 667 W,
+  recorded the software power cap, none a thermal slowdown. The card's memory ran with a clock
+  offset, and its crossbar with one (its core's curve undervolted besides).
+- **The same runs without the memory's and the crossbar's offsets** (the core's curve and the
+  power limit kept), the same afternoon: the GEMM for 480 s, **none of 36,659 calls** other (5 in
+  18,898 before, about 10 expected at that rate); condition (a), **none of 40 calls** (12 of 40
+  before), 18.1 s a call (17.0 before). Under load the memory read 13,801 MHz in every sample
+  (429 and 686), the SM clock 2,880 to 3,067 MHz in the GEMM and 2,595 to 3,030 in (a), at 455
+  to 666 W and 349 to 475 W, 46 to 74 °C, the software power cap in most samples. The GEMM drew
+  the same power as before at its peak: of what changed, the memory's clock is what the other
+  bits follow. The cause is the memory and crossbar offsets.
+- **Longer windows**: none of the 19-latent calls of the scans gave other bits (110), 7 of their
+  27-latent ones (142).
+
+Not built: the cause is outside seedvr2x's code, the card's memory and crossbar clocked over
+their own; without those offsets the same runs gave none. Torch's deterministic mode with its
+fill, 1.17 times a 27-latent window's time, gave none too, by its slower calls or its fill.
+Milestone 1's cases on this card run one window of 12 latents at 720p with no block swapped
+(their references' logs, and their plans that day); the GPU tests that hold swapped blocks' bits
+run windows of 2 latents at 540p (`test_blockswap.py`,
+`test_placement.py`): none holds a long window. A per-module watch (`--watch-modules`) was
+stopped by the desktop's guard after 58 s (its copies took the card under the desktop's 4 GiB)
+and not run again.
+
 ## Not measured
 
 - **No real small card, no Windows-native run.** Every 8, 12 and 16 GB figure above is the RTX
@@ -784,6 +1029,13 @@ with 1280-px decode tiles.
   section); no Python stack was taken, and it did not come back.
 - **The tiles against a ground truth.** The night's tile costs are against the untiled output;
   only the colour study judged tiles against a GT, at 1080p.
+- **The card at its stock clocks and voltages.** The rerun without the memory's and crossbar's
+  offsets kept the core's undervolted curve and the power limit; nothing ran at stock.
+- **The other bits' rate by window length and by format past one day**: none at 19 latents in
+  110 calls, 7 of 142 at 27 in the scans, 12 of 40 in the study's first condition; fp16's
+  27-latent window once in its scan.
+- **The DiT's want past 27 latents in fp16**, and 31 latents again: the cap (4.5 GiB) rests on
+  impl-place's int8 scan of 2026-11-06.
 - **Three brought-up scripts.** `vae_room.py`, `tile_peaks.py` and `one_output_peaks.py` were
   brought up to the library and checked statically, not run on a GPU; `hold_probe.py`, brought
   up too, ran the scans above.

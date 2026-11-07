@@ -26,6 +26,29 @@ The ways (options, combined freely):
   --without vae|dit          one model's weights off the GPU once loaded: the VAE's, as a plan
                              has them during its windows (window steps only); or the DiT's,
                              which a VAE pass doesn't need (VAE steps only, --placement 0)
+  --outputs DIR              a window's outputs kept as .npy files in DIR (bfloat16's bits as
+                             int16, the window's shape): each that is not its reference's, and
+                             the first that is, per seed, so that two can be compared value by
+                             value (impl-place-2's study of the other bits, 2026-11-07)
+  --deterministic            torch.use_deterministic_algorithms(True, warn_only=True): the
+                             deterministic kernels where torch has them, a warning naming each
+                             operation that has none, and torch.empty's memory filled (NaN)
+  --no-fill                  with --deterministic, torch.empty's memory left as it is
+                             (torch.utils.deterministic.fill_uninitialized_memory False)
+  --cublas-workspace CONFIG  CUBLAS_WORKSPACE_CONFIG set to CONFIG before torch (:4096:8)
+  --watch-blocks             for each window's call, integer sums of each DiT block's bytes
+                             on the compute stream, where the block reads them, with no wait of
+                             the host's: its weights as it starts (after the placement's wait
+                             for its copy) and as it ends (before the placement marks it done),
+                             its inputs and its outputs; the line's `blocks` gives, per call,
+                             the first block whose sums differ from the run's first call of that
+                             seed, and which of them, and every sum (impl-place-2's study,
+                             2026-11-07)
+  --watch-modules            as --watch-blocks, for every module inside the blocks (attention,
+                             its kernel, the linears, the norms, the MLP), in the order they run:
+                             its inputs' and outputs' sums; the line's `modules` gives, per call,
+                             the first module whose outputs differ from the run's first call of
+                             that seed, and whether its inputs did
   --trace FILE               every --trace-every seconds (0.1) through the whole process, from
                              before the models load, one JSON line: the time, both free figures
                              and what torch has reserved, read before them and after (the three
@@ -129,6 +152,12 @@ def main() -> int:
     parser.add_argument("--trim", action="store_true")
     parser.add_argument("--without", choices=("vae", "dit"))
     parser.add_argument("--trace")
+    parser.add_argument("--outputs")
+    parser.add_argument("--deterministic", action="store_true")
+    parser.add_argument("--no-fill", action="store_true")
+    parser.add_argument("--cublas-workspace")
+    parser.add_argument("--watch-blocks", action="store_true")
+    parser.add_argument("--watch-modules", action="store_true")
     parser.add_argument("--trace-every", type=float, default=0.1)
     parser.add_argument("--past", type=int, default=0)
     parser.add_argument("--placement", type=int, default=0)
@@ -146,6 +175,8 @@ def main() -> int:
     if args.conf:
         conf += f",{args.conf}"
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = conf  # before torch, and before placement_bench
+    if args.cublas_workspace:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = args.cublas_workspace
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import hashlib
@@ -164,6 +195,10 @@ def main() -> int:
 
     gib = bench.GIB
     device = torch.device("cuda:0")
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        if args.no_fill:
+            torch.utils.deterministic.fill_uninitialized_memory = False  # type: ignore[attr-defined]
     out = open(args.out, "a") if args.out else None
 
     def say(record: dict) -> None:
@@ -266,6 +301,8 @@ def main() -> int:
         with open(args.reference) as file:
             reference = json.load(file)
     say({"conf": conf, "cap": args.cap, "under": args.under, "trim": args.trim,
+         "deterministic": args.deterministic, "no_fill": args.no_fill,
+         "cublas_workspace": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
          "placement": args.placement, "without": args.without, "steps": args.steps,
          "size": args.size,
          "free_start": free(), "card_start": card(),
@@ -290,6 +327,86 @@ def main() -> int:
         torch.cuda.empty_cache()
         placement = blockswap.Placement(dit, device, args.placement, parts=parts, backend=backend)
         placement.enter("dit")
+    watched: dict = {}
+    if args.watch_blocks:
+        # Sums of bytes as integers, exact and order-free: (block, [weights at its start, weights
+        # at its end, inputs, outputs]), written on the compute stream as the block's own work is.
+        count = len(dit.blocks)
+        watched["sums"] = torch.zeros((count, 4), dtype=torch.int64, device=device)
+        watched["first"] = {}
+
+        def summed(tensors) -> "torch.Tensor":
+            total = torch.zeros((), dtype=torch.int64, device=device)
+            for tensor in tensors:
+                if isinstance(tensor, torch.Tensor) and tensor.is_cuda and tensor.numel():
+                    flat = tensor.detach().contiguous().view(-1)
+                    ints = flat.view(torch.int16) if flat.element_size() == 2 else (
+                        flat.view(torch.int32) if flat.element_size() == 4 else
+                        flat.view(torch.int8) if flat.element_size() == 1 else flat.view(torch.int64))
+                    total += ints.sum(dtype=torch.int64)
+            return total
+
+        def weights_of(block) -> list:
+            return [parameter for parameter in block.parameters()]
+
+        for j, block in enumerate(dit.blocks):
+            def before(module, args_, kwargs, j=j):
+                watched["sums"][j, 0].copy_(summed(weights_of(module)))
+                watched["sums"][j, 2].copy_(summed([*args_, *kwargs.values()]))
+
+            def after(module, args_, output, j=j):
+                watched["sums"][j, 1].copy_(summed(weights_of(module)))
+                watched["sums"][j, 3].copy_(summed(output if isinstance(output, tuple) else [output]))
+
+            # After the placement's own pre-hook (its wait for the copy), before its forward hook
+            # (the mark of the block's end, after which the slot is written again).
+            block.register_forward_pre_hook(before, with_kwargs=True)
+            block.register_forward_hook(after, prepend=True)
+    if args.watch_modules:
+        # Every module of every block, its inputs' and outputs' sums written in the order the
+        # modules run into one device buffer (an index on the host), nothing waited for.
+        watched["names"] = []
+        watched["order"] = []
+        watched["buffer"] = torch.zeros((1 << 16, 2), dtype=torch.int64, device=device)
+        watched["at"] = [0]
+        watched["module_first"] = {}
+
+        def flat(value) -> list:
+            if isinstance(value, torch.Tensor):
+                return [value]
+            if isinstance(value, (tuple, list)):
+                return [t for v in value for t in flat(v)]
+            if isinstance(value, dict):
+                return [t for v in value.values() for t in flat(v)]
+            return []
+
+        def module_sum(tensors) -> "torch.Tensor":
+            total = torch.zeros((), dtype=torch.int64, device=device)
+            for tensor in tensors:
+                if tensor.is_cuda and tensor.numel():
+                    flat_ = tensor.detach().contiguous().view(-1)
+                    size = flat_.element_size()
+                    ints = flat_.view({1: torch.int8, 2: torch.int16, 4: torch.int32, 8: torch.int64}[size])
+                    total += ints.sum(dtype=torch.int64)
+            return total
+
+        for j, block in enumerate(dit.blocks):
+            for name, module in block.named_modules():
+                label = f"{j}.{name or 'block'}"
+
+                def pre(module_, args_, kwargs, label=label):
+                    at = watched["at"][0]
+                    watched["order"].append(label)
+                    watched["buffer"][at, 0].copy_(module_sum(flat(args_) + flat(kwargs)))
+                    watched["stack"] = watched.get("stack", []) + [at]
+                    watched["at"][0] = at + 1
+
+                def post(module_, args_, output, label=label):
+                    at = watched["stack"].pop()
+                    watched["buffer"][at, 1].copy_(module_sum(flat(output)))
+
+                module.register_forward_pre_hook(pre, with_kwargs=True)
+                module.register_forward_hook(post, prepend=True)
     if args.without == "vae":
         models.runner.vae.to("cpu")
     elif args.without == "dit":
@@ -379,12 +496,72 @@ def main() -> int:
         return {"peak": round(allocated / gib, 3), "peak_reserved": round(reserved / gib, 3),
                 "peak_bytes": allocated, "peak_reserved_bytes": reserved}
 
+    last: dict = {}
+    if args.outputs:
+        os.makedirs(args.outputs, exist_ok=True)
+        plain_digest = bench.digest
+
+        def digest_kept(torch_, out):
+            """placement_bench's digest, the output it hashes kept for --outputs."""
+            last["out"] = out
+            return plain_digest(torch_, out)
+
+        bench.digest = digest_kept
+    saved: set = set()
+
+    def save(length: int, seed: int, sha: str) -> str | None:
+        """The last output into --outputs where it is not its reference's, or is and no output
+        of that seed was kept yet as the reference's; the file's name, or None."""
+        before = known(str(length))
+        if not args.outputs or before is None or "out" not in last:
+            return None
+        equal = sha == before[SEEDS.index(seed)]
+        if equal and (length, seed) in saved:
+            return None
+        saved.add((length, seed)) if equal else None
+        name = f"{args.size}-{length}-{seed}-{'ref' if equal else 'other'}-{sha[:12]}.npy"
+        if not os.path.exists(os.path.join(args.outputs, name)):
+            values = last["out"].contiguous().view(torch.int16).numpy()
+            numpy.save(os.path.join(args.outputs, name), values)
+        return name
+
     def window(length: int, seeds=SEEDS) -> dict:
         latent = bench.make_latent(torch, model.COMPUTE_DTYPE, length, height // 8, width // 8)
-        digests, walls, most = [], [], peaks()
+        digests, walls, most, files = [], [], peaks(), []
         for seed in seeds:
+            if args.watch_blocks:
+                watched["sums"].zero_()
+            if args.watch_modules:
+                watched["buffer"].zero_()
+                watched["at"][0], watched["order"], watched["stack"] = 0, [], []
             run = bench.one_forward(torch, model, models, latent, seed)  # resets the peaks
+            if args.watch_modules:
+                count = watched["at"][0]
+                sums = watched["buffer"][:count].cpu().tolist()
+                order = watched["order"]
+                first = watched["module_first"].setdefault((length, seed), (order, sums))
+                differ = None
+                if first[0] == order:
+                    for k in range(count):
+                        if sums[k][1] != first[1][k][1]:
+                            differ = {"module": order[k], "index": k,
+                                      "inputs_same": sums[k][0] == first[1][k][0]}
+                            break
+                watched.setdefault("module_calls", []).append(
+                    {"seed": seed, "modules": count, "same_order": first[0] == order,
+                     "first_differing": differ})
+            if args.watch_blocks:
+                sums = watched["sums"].cpu().tolist()
+                first = watched["first"].setdefault((length, seed), sums)
+                parts = ("weights_start", "weights_end", "inputs", "outputs")
+                differ = [(j, [parts[k] for k in range(4) if sums[j][k] != first[j][k]])
+                          for j in range(len(sums)) if sums[j] != first[j]]
+                watched.setdefault("calls", []).append(
+                    {"seed": seed, "first_differing": differ[:3], "blocks_differing": len(differ),
+                     "sums": sums})
             digests.append(run["sha256"])
+            files.append(save(length, seed, run["sha256"]))
+            last.pop("out", None)
             walls.append(round(run["wall_s"], 3))
             now = peaks()
             if seed == seeds[0]:
@@ -398,8 +575,13 @@ def main() -> int:
             lambda both: [both[SEEDS.index(s)] for s in seeds],
             keeps=tuple(seeds) == SEEDS,
         )
+        kept = {"outputs": files} if args.outputs else {}
+        if args.watch_blocks:
+            kept["blocks"] = watched.pop("calls", [])
+        if args.watch_modules:
+            kept["modules"] = watched.pop("module_calls", [])
         return {"digests": [d[:12] for d in digests], "walls": walls, **most, **said,
-                "latents": length}
+                "latents": length, **kept}
 
     def latent_of(frames: int):
         """A shot's latent of `frames` latent frames, (T', h, w, 16) in channel-major memory, in
