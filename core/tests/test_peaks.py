@@ -59,6 +59,15 @@ def gib(count: float) -> float:
     return count / GIB
 
 
+# DIT_BUFFERS before 2026-11-07, 0.058 GiB, measured after windows of 1 latent (milestone 3): the
+# RoPE tables of the windows before a VAE pass were in it, which a run held then and no VAE phase
+# holds since they are cleared where the DiT's work ends (DIT_BUFFERS, the census's rest). A
+# test that holds a run measured before is held with it; a figure computed before moves by
+# BUFFERS_MOVED.
+BUFFERS_THEN = round(0.058 * GIB)
+BUFFERS_MOVED = BUFFERS_THEN - peaks.DIT_BUFFERS
+
+
 @pytest.mark.parametrize(("padded", "latents", "tokens", "windows", "peak"), DIT_POINTS)
 def test_dit_tokens_and_windows(
     padded: tuple[int, int], latents: int, tokens: int, windows: int, peak: float
@@ -184,14 +193,17 @@ def test_dit_swapped_and_vae_away() -> None:
 
 def test_dit_on_gpu() -> None:
     # What of the DiT a VAE phase finds on the GPU, as blockswap.Placement.enter leaves it there
-    # (milestone 3): its buffers and tables always; with None, nothing moving, its other
+    # (milestone 3): its buffers always, the RoPE tables cleared before it (peaks.DIT_BUFFERS);
+    # with None, nothing moving, its other
     # parameters, the blocks that aren't swapped and the slots; with 0, nothing more; with a
     # number, that many blocks and the other parameters, the slots freed.
     block, other, never = peaks.BLOCK, peaks.DIT_OTHER, peaks.DIT_BUFFERS
     assert peaks.dit_on_gpu(None, 0) == never + other + 36 * block
-    # All of the loaded models but the VAE's weights, as the DiT's fit has them: 0.0013 GiB over.
+    # All of the loaded models but the VAE's weights, as the DiT's fit has them: 0.0011 GiB under
+    # (0.0013 over while the buffers held a 1-latent window's tables, 2.6 MB, which come with a
+    # window: the fit holds them).
     loaded = peaks.DIT_LOADED - peaks.VAE_WEIGHTS
-    assert gib(peaks.dit_on_gpu(None, 0) - loaded) == pytest.approx(0.0013, abs=5e-5)
+    assert gib(peaks.dit_on_gpu(None, 0) - loaded) == pytest.approx(-0.0011, abs=5e-5)
     assert peaks.dit_on_gpu(0, 0) == never
     assert peaks.dit_on_gpu(12, 0) == never + other + 12 * block
     assert peaks.dit_on_gpu(36, 0) == peaks.dit_on_gpu(None, 0)
@@ -810,7 +822,12 @@ def test_vae_untiled_small_frames() -> None:
         assert peaks.encode_peak(padded) - there == fitted + peaks.ENCODE_EXTRA
         predicted = peaks.decode_peak(padded, target, split=True)
         assert -0.05 <= gib(predicted) - decode <= 0.6
-        over[target] = (gib(peaks.encode_peak(padded)) - encode, gib(predicted) - decode)
+        # Measured before the RoPE tables were cleared at the DiT's end: the passes held them.
+        then = gib(BUFFERS_MOVED)
+        over[target] = (
+            gib(peaks.encode_peak(padded)) + then - encode,
+            gib(predicted) + then - decode,
+        )
     assert over[HD] == pytest.approx((0.766, 0.519), abs=1e-3)
     # The 540p encode's fit is 0.31 GiB under its measured peak, with the small tiles' fit too
     # (0.59 under by the untiled fit): one of the three excesses ENCODE_EXTRA, 0.4 GiB, is the
@@ -1092,21 +1109,24 @@ def test_the_video_figures_are_unmoved_by_the_pictures() -> None:
     # A 1080p frame (1104x1920), no block of the DiT resident, none swapped, untiled and in
     # 1024-px tiles: computed on 2026-11-03 from the functions before the picture's were added
     # (peaks.py's diff only adds), so that the video path's plan is the one measured at milestone 3.
+    # DIT_BUFFERS lost the RoPE tables it held (2026-11-07): each figure less BUFFERS_MOVED.
     padded, output = OURS_1080, (1080, 1920)
-    assert peaks.encode_peak(padded, None, 0, 0) == 22_310_274_636
-    assert peaks.encode_peak(padded, Tiles(1024), 0, 0) == 12_235_157_533
-    assert peaks.decode_peak(padded, output, None, 0, 0, False) == 38_066_001_384
-    assert peaks.decode_peak(padded, output, None, 0, 0, True) == 38_817_620_660
-    assert peaks.decode_peak(padded, output, Tiles(1024), 0, 0, False) == 19_311_116_153
-    assert peaks.decode_peak(padded, output, Tiles(1024), 0, 0, True) == 19_311_116_153
+    moved = BUFFERS_MOVED
+    assert moved == 2_633_290
+    assert peaks.encode_peak(padded, None, 0, 0) == 22_310_274_636 - moved
+    assert peaks.encode_peak(padded, Tiles(1024), 0, 0) == 12_235_157_533 - moved
+    assert peaks.decode_peak(padded, output, None, 0, 0, False) == 38_066_001_384 - moved
+    assert peaks.decode_peak(padded, output, None, 0, 0, True) == 38_817_620_660 - moved
+    assert peaks.decode_peak(padded, output, Tiles(1024), 0, 0, False) == 19_311_116_153 - moved
+    assert peaks.decode_peak(padded, output, Tiles(1024), 0, 0, True) == 19_311_116_153 - moved
     # With the DiT's blocks as the planner's default leaves them (resident None).
-    assert peaks.encode_peak(padded, None) == 38_789_490_380
-    assert peaks.encode_peak(padded, Tiles(1024)) == 28_714_373_277
-    assert peaks.decode_peak(padded, output, None) == 54_545_217_128
-    assert peaks.decode_peak(padded, output, Tiles(1024)) == 35_790_331_897
+    assert peaks.encode_peak(padded, None) == 38_789_490_380 - moved
+    assert peaks.encode_peak(padded, Tiles(1024)) == 28_714_373_277 - moved
+    assert peaks.decode_peak(padded, output, None) == 54_545_217_128 - moved
+    assert peaks.decode_peak(padded, output, Tiles(1024)) == 35_790_331_897 - moved
     # One frame's figures are the pictures' own: the video's decode of a frame is not them.
-    assert peaks.decode_peak(padded, output, None, 0, 0, True, frames=1) == 38_216_325_239
-    assert peaks.picture_decode_peak(padded, output, None, 0, 0, True) != 38_216_325_239
+    assert peaks.decode_peak(padded, output, None, 0, 0, True, frames=1) == 38_216_325_239 - moved
+    assert peaks.picture_decode_peak(padded, output, None, 0, 0, True) != 38_216_325_239 - moved
 
 
 # ---- The DiT's and the VAE's working set, and the reserve by the step (DESIGN.md, Allocator, Small

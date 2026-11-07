@@ -1730,12 +1730,13 @@ def test_a_landscape_1080p_picture_pinned_untiled_is_taken_where_its_own_plan_is
         found = still_plan.tiles(both, picture)
         assert found.encode is None and found.decode is None
     # Past 4K's frame it still takes the slice's figure: the 4K bound's pin of 0 is refused on a
-    # 96 GiB card (139.83 GiB of free VRAM).
+    # 96 GiB card (139.82 GiB of free VRAM; 139.83 before the buffers lost the RoPE tables,
+    # 2026-11-07).
     with pytest.raises(PlanRefusal) as refused:
         made(FOUR_K, card(96), pins=Pins(0, 0))
     assert refused.value.phase == "pin"
     assert cli_words(refused.value).startswith(
-        "--decode-tile 0: the decode untiled, for the pictures within 3840x2160, takes 139.83"
+        "--decode-tile 0: the decode untiled, for the pictures within 3840x2160, takes 139.82"
     )
 
 

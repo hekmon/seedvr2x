@@ -45,8 +45,9 @@ MIB = 1024**2
 # For the record, the plain attention's fit was 127.16 KiB a token and 2.726 MiB a window, SDPA's
 # 4.69% more and 0.141 GiB.
 # By its parts as seedvr2x has them (below): the 36 blocks 15.1925 GiB, the DiT's other
-# parameters 0.1550, its buffers and tables with the text embeddings 0.058, the VAE 0.4669, in
-# all 15.8723, 0.0013 over DIT_LOADED, within the fit's 0.005.
+# parameters 0.1550, its buffers with the text embeddings and cuBLAS's workspace 0.0555
+# (DIT_BUFFERS, the RoPE tables apart: a window makes them, and the fit holds them), the VAE
+# 0.4669, in all 15.8699, 0.0011 under DIT_LOADED, within the fit's 0.005.
 # Other measures: the plain code's one window of 1 latent at 1080p, no block swapped, 17.016 GiB
 # (milestone 3, 2026-10-11); the lean code's 16.464. In int8 and in the sharp dynamic GGUF,
 # 5 latents at 1080p with 36 swapped measured 3.649 and 3.433 GiB, under the predicted 4.063 and
@@ -103,11 +104,21 @@ SLOTS = weights.SLOTS
 # file, which holds them in fp16. They leave the GPU only with the last block a VAE phase keeps
 # (dit_on_gpu).
 DIT_OTHER = FP16.other
-# What of the DiT never leaves the GPU (seedvr2x/blockswap.py: only parameters move): RoPE's
-# buffers with the text embeddings, 0.025 GiB, and the tables its blocks cache from them once a
-# window has run; 0.058 GiB in all, measured on seedvr2x after windows of 1 latent at 1080p
-# (milestone 3, 2026-10-11).
-DIT_BUFFERS = round(0.058 * GIB)
+# What of the DiT never leaves the GPU (seedvr2x/blockswap.py: only parameters move): the 36
+# blocks' rotary_embedding_torch caches ((8192, 21) float32 each, 24.77 MB), the two text
+# embeddings (1.25 MB) and the RoPE buffers, 26,022,898 bytes of tensors, and cuBLAS's workspace
+# (CUBLAS_WORKSPACE and 66 KB more, which no tensor holds), 33,620,838 bytes: the CUDA tensors
+# alive at a decode's entry and torch's allocated figure beside them, the VAE's weights and the
+# vendored RoPE's tables apart (RTX 5090, impl-place-2, 2026-11-07,
+# research/scripts/decode_peaks.py --census, a 1080p clip after windows of 19 and of 7 latents:
+# 59,643,736 and 59,644,616 bytes; 59,613,696 at both once the tables are cleared at the DiT's
+# end, the same census on the patch's tree). The tables (model.forget_rope_tables) are cleared
+# where the DiT's work on a shot ends, so no VAE phase holds one; the windows' fit holds those a
+# window makes. Before,
+# 0.058 GiB, measured after windows of 1 latent at 1080p (milestone 3, 2026-10-11), that
+# window's 2.6 MB of tables in it: a longer window's passed it (a 16 GB card's clip, 2026-11-06,
+# its decode 1.1 MiB over its prediction, the tables kept into the VAE's phase).
+DIT_BUFFERS = 59_643_736
 
 # The DiT in seedvr2x's int8 files (INT8; DESIGN.md, Weights, "int8 before v0.1.0 is tagged"):
 # its peak is the fp16 fit's with its weights' bytes in the place of fp16's (loaded), exact, and

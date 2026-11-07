@@ -1,11 +1,12 @@
-"""The vendored RoPE's tables cleared at each shot's start (model.forget_rope_tables; DESIGN.md,
-Allocator, "The vendored RoPE's tables"), on the CPU: the real vendored rotary module
-(NaRotaryEmbedding3d, whose get_axial_freqs rope.py:44 memoises per window shape) asked for the
-tables of each window by a stand-in DiT, run through the library's own entries (shot_pass.
-sample_windows, still.sampled, still.upscale, clip.upscale). A long run of many shot lengths holds
-at most one shot's tables, the entries call the clearing, and no output bit moves with it."""
+"""The vendored RoPE's tables cleared where the DiT's work on each shot starts and where it ends
+(model.forget_rope_tables; DESIGN.md, Allocator, "The vendored RoPE's tables"), on the CPU: the
+real vendored rotary module (NaRotaryEmbedding3d, whose get_axial_freqs rope.py:44 memoises per
+window shape) asked for the tables of each window by a stand-in DiT, run through the library's own
+entries (shot_pass.sample_windows, still.sampled, still.upscale, clip.upscale). A long run of many
+shot lengths holds at most one shot's tables while its windows run and none after them, a raise
+included, the entries call the clearing, and no output bit moves with it."""
 
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from typing import Any
 
 import numpy as np
@@ -98,9 +99,10 @@ def test_a_long_run_of_many_shot_lengths_holds_at_most_one_shots_tables(
         _, shapes, held = run_shot(models, frames, window, rows)
         asked |= shapes
         # Nothing of the shots before is still held, and the shot's own windows share their
-        # shapes: a table per distinct shape, no more.
+        # shapes: a table per distinct shape, no more; and none once its windows are done.
         assert max(held) <= len(shapes)
         assert held[-1] == len(shapes)
+        assert tables().cache_info().currsize == 0
     assert len(asked) > 40  # the run asked for many more than one shot holds
 
 
@@ -121,20 +123,93 @@ def test_without_the_clearing_the_same_run_grows_past_one_shot(
     assert most == len(asked) > 40
 
 
-def test_a_picture_run_step_by_step_holds_one_table_at_a_time(
+def test_a_picture_run_step_by_step_holds_one_table_while_it_samples_and_none_after(
     cpu_models: model.Models,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The image server calls still.sampled for each picture: one window, one shape.
-    stand_in_dit(monkeypatch)
+    # The image server calls still.sampled for each picture: one window, one shape, its table
+    # made in the window and gone before the picture's decode.
+    rope = stand_in_dit(monkeypatch)
     models = pipeline_models(cpu_models)
+    sample = model.sample
+    during: list[int] = []
+
+    def counted(models: model.Models, noise: Tensor, cond: Tensor) -> Tensor:
+        output = sample(models, noise, cond)
+        during.append(tables().cache_info().currsize)
+        return output
+
+    monkeypatch.setattr(model, "sample", counted)
     for rows in range(1, 12):
+        rope.get_axial_freqs(9, rows, 9)  # a table of some other window, held before
         latent = latent_of(1, rows, 3)
         still.sampled(models, latent, SEED)
-        assert tables().cache_info().currsize == 1
+        assert during[-1] == 1
+        assert tables().cache_info().currsize == 0
 
 
-def test_every_entry_clears_the_tables_once_per_shot_before_its_first_window(
+def test_the_tables_are_gone_once_a_shots_windows_end_however_they_end(
+    cpu_models: model.Models,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The DiT's work on a shot ends with its generator: exhausted (a for loop), closed before its
+    # last window (clip.py closes it in a finally, a step's stop included), dropped (run.py's del,
+    # the calibration's one window taken by next), or left by a raise in a window; the tables are
+    # cleared at each, before any VAE pass.
+    rope = stand_in_dit(monkeypatch)
+    models = pipeline_models(cpu_models)
+    layout = shot_layout(LONG, 5)
+    assert len(layout) == 3
+
+    def windows() -> Iterator[Tensor]:
+        return shot_pass.sample_windows(models, latent_of(LONG, *SIZE), layout, 1)
+
+    for _ in windows():
+        assert tables().cache_info().currsize > 0
+    assert tables().cache_info().currsize == 0
+    started = windows()
+    assert isinstance(started, Generator)
+    next(started)
+    assert tables().cache_info().currsize > 0
+    started.close()
+    assert tables().cache_info().currsize == 0
+    started = windows()
+    next(started)
+    next(started)
+    del started
+    assert tables().cache_info().currsize == 0
+    next(windows())
+    assert tables().cache_info().currsize == 0
+    sample = model.sample
+    calls: list[int] = []
+
+    def raising(models: model.Models, noise: Tensor, cond: Tensor) -> Tensor:
+        output = sample(models, noise, cond)
+        calls.append(tables().cache_info().currsize)
+        if len(calls) == 2:
+            raise RuntimeError("the second window fails")
+        return output
+
+    monkeypatch.setattr(model, "sample", raising)
+    with pytest.raises(RuntimeError, match="the second window fails"):
+        for _ in windows():
+            pass
+    assert calls[-1] > 0 and tables().cache_info().currsize == 0
+    # A picture's window that raises leaves none either.
+    calls.clear()
+    rope.get_axial_freqs(9, 9, 9)
+
+    def raises(models: model.Models, noise: Tensor, cond: Tensor) -> Tensor:
+        sample(models, noise, cond)
+        raise RuntimeError("the picture's window fails")
+
+    monkeypatch.setattr(model, "sample", raises)
+    with pytest.raises(RuntimeError, match="the picture's window fails"):
+        still.sampled(models, latent_of(1, *SIZE), SEED)
+    assert tables().cache_info().currsize == 0
+
+
+def test_every_entry_clears_the_tables_once_before_a_shots_first_window_and_once_after_its_last(
     cpu_models: model.Models,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -148,30 +223,35 @@ def test_every_entry_clears_the_tables_once_per_shot_before_its_first_window(
         clear()
 
     monkeypatch.setattr(model, "forget_rope_tables", recorded)
-    # A shot in three windows: cleared once, when the first is asked for and not before.
+    # A shot in three windows: cleared when the first is asked for and not before, then once its
+    # last is done, the shot's tables with it.
     layout = shot_layout(LONG, 5)
     assert len(layout) == 3
+    shapes = len({e - s for s, e in layout})
     windows = shot_pass.sample_windows(models, latent_of(LONG, *SIZE), layout, 1)
     assert cleared == []
     next(windows)
     next(windows)
     next(windows)
     assert cleared == [0]  # nothing held before it
-    assert tables().cache_info().currsize == len({e - s for s, e in layout})
-    # Another shot: what the first held is dropped at its start.
+    assert tables().cache_info().currsize == shapes
+    with pytest.raises(StopIteration):
+        next(windows)
+    assert cleared == [0, shapes]
+    # Another shot: what was held before it is dropped at its start, its own at its end.
     cleared.clear()
     rope.get_axial_freqs(9, 9, 9)
     list(shot_pass.sample_windows(models, latent_of(SHORT, *SIZE), shot_layout(SHORT, 5), 1))
-    assert cleared == [len({e - s for s, e in layout}) + 1]
+    assert cleared == [1, len({e - s for s, e in shot_layout(SHORT, 5)})]
     # A picture's DiT step, and the whole picture and clip through their own entries.
     cleared.clear()
     still.sampled(models, latent_of(1, *SIZE), SEED)
-    assert len(cleared) == 1
+    assert cleared == [0, 1]
     cleared.clear()
     still.upscale(
         models, pixels_of(), TARGET, SEED, encode_tiles=None, decode_tiles=None, correct=False
     )
-    assert len(cleared) == 1
+    assert cleared == [0, 1]
     cleared.clear()
     clip.upscale(
         models,
@@ -183,7 +263,8 @@ def test_every_entry_clears_the_tables_once_per_shot_before_its_first_window(
         decode_tiles=None,
         correct=False,
     )
-    assert len(cleared) == 1  # a clip is one shot: its three windows share one clearing
+    # A clip is one shot: its three windows share the clearing before them and the one after.
+    assert cleared == [0, shapes]
 
 
 def test_clearing_moves_no_bit(

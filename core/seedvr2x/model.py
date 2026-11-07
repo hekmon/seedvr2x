@@ -754,11 +754,11 @@ def forget(models: Models) -> None:
     Models, loaded with passes.HELD or for a job's plan: the VAE's causal convolutions' memory
     from slice to slice (_forget) and the RoPE frequencies the DiT's rotary modules cache
     (_forget_rope), the latter an lru_cache of the vendored class that keeps the module alive
-    and, per window shape, its frequencies on the device (1.99 MB a latent at 1080p), up to 128
-    shapes. Whoever drops a Models without release (a run's models not kept, an error) calls
-    it first, or the cache keeps the dropped DiT's first module and its tensors until 128 other
-    shapes push them out. Safe at any time: the values are recomputed from the module's buffer
-    to the same bits."""
+    and, per window shape, its frequencies on the device (float16, 11.27 MB in all after a 1080p
+    window of 19 latents), up to 128 shapes. Whoever drops a Models without release (a run's
+    models not kept, an error) calls it first, or the cache keeps the dropped DiT's first module
+    and its tensors until 128 other shapes push them out. Safe at any time: the values are
+    recomputed from the module's buffer to the same bits."""
     _forget(models.runner.vae)
     _forget_rope(models.runner.dit)
 
@@ -820,8 +820,8 @@ def _forget_rope(dit: Any) -> None:
     """Drop the RoPE frequencies the DiT's rotary modules cache, per (frames, rows, columns) of
     a window, on the device: the vendored rope.py memoises get_axial_freqs with an lru_cache on
     the class, of up to 128 entries keyed by the module and the shape, which keeps the first
-    block's module alive and (frames x rows x columns) x 60 float32 values of the 7B a shape
-    (1.99 MB a latent at 1080p), 126 of the 3B's. The values are recomputed from the module's
+    block's module alive and (frames x rows x columns) x 60 float16 values of the 7B a shape
+    (forget_rope_tables), 126 of the 3B's. The values are recomputed from the module's
     buffer when a shape comes again, to the same bits."""
     cleared: set[Any] = set()
     for module in dit.modules():
@@ -833,14 +833,16 @@ def _forget_rope(dit: Any) -> None:
 
 
 def forget_rope_tables() -> None:
-    """Clear the RoPE frequencies of every DiT in the process, at a shot's start (the library's
-    entries to the DiT call it: shot_pass.sample_windows, still.sampled). The vendored rope.py
-    memoises get_axial_freqs with an lru_cache on the class (rope.py:44, 128 entries), one table
-    of (frames x rows x columns) x 60 float32 values on the device per window shape (1.99 MB a
-    latent at 1080p, 7B), which a film of many shot lengths would fill with shapes it never asks
-    for again (DESIGN.md, Allocator: the vendored RoPE's tables). A shot's windows share their
-    shapes, so one shot's tables are made again once each, from the module's buffer to the same
-    bits, and the planner counts them once (peaks.DIT_BUFFERS).
+    """Clear the RoPE frequencies of every DiT in the process, where the DiT's work on a shot
+    starts and where it ends (the library's entries to the DiT call it: shot_pass.sample_windows,
+    still.sampled). The vendored rope.py memoises get_axial_freqs with an lru_cache on the class
+    (rope.py:44, 128 entries), one table of (frames x rows x columns) x 60 float16 values on the
+    device per block's rotary module and attention window's shape (decode_peaks.py's census,
+    2026-11-07: the cache full after a 1080p window of 19 latents, 11.27 MB), which a film of
+    many shot lengths would fill with shapes it never asks for again (DESIGN.md, Allocator: the
+    vendored RoPE's tables). A shot's windows share their shapes, so one shot's tables are made
+    again once each, from the module's buffer to the same bits: the DiT's peaks hold them (the
+    windows' fit was measured with them, peaks.PER_TOKEN), and no VAE phase finds any.
 
     The cache belongs to the class, not to a Models, so no models are needed: the 3B's and the
     7B's classes are cleared both, which is all the cache there is. Called with the DiT's phase

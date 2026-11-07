@@ -449,18 +449,25 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   hold the plan the card alone gives where the host is short, no pinned copy counted, a job the
   host refused planned, `held=False` changing no plan (the plan matrix's 5,120 cases too), and
   `_vae_kept` and `_dit_kept` returning nothing for weights held.
-- The vendored RoPE's tables at a shot's start (`model.forget_rope_tables`; DESIGN.md,
-  Allocator, "The vendored RoPE's tables"): `NaRotaryEmbedding3d.get_axial_freqs` (rope.py:44)
-  memoises the tables of each window shape for the class, so a long run of many shot lengths
-  grew them without end. `shot_pass.sample_windows` clears them before a shot's first window and
-  `still.sampled` after it enters the DiT, `still.upscale` and `clip.upscale` through those.
+- The vendored RoPE's tables where the DiT's work on a shot starts and where it ends
+  (`model.forget_rope_tables`; DESIGN.md, Allocator, "The vendored RoPE's tables"):
+  `NaRotaryEmbedding3d.get_axial_freqs` (rope.py:44) memoises the tables of each window shape for
+  the class, so a long run of many shot lengths grew them without end, and they stayed into the
+  VAE's phases (a 16 GB card's clip decode 1.1 MiB over its prediction, 2026-11-06).
+  `shot_pass.sample_windows` clears them before a shot's first window and again in a `finally`
+  once its generator is exhausted, closed or left by a raise (`clip.py` closes it, `run.py` drops
+  it, the calibration's is dropped after its one window), and `still.sampled` before its window
+  and after it, a raise included; `still.upscale` and `clip.upscale` go through those. No VAE
+  pass holds a table, so no VAE peak counts one (`peaks.DIT_BUFFERS`, the census's rest).
   `core/tests/test_rope_tables.py` runs the real rotary module, asked for each window's tables
   by a stand-in DiT, through those entries: a long run of many shot lengths holding at most one
-  shot's tables, the same run growing past one without the clearing (the test proving the
-  clearing is what holds it), a picture run step by step holding one table at a time, every
-  entry clearing once per shot before its first window, and no output bit moved by it; its
-  autouse fixture empties the class's cache before and after each test, so that no test sees
-  another's tables. `test_held.py` has one line of isolation for the same reason.
+  shot's tables while its windows run and none after, the same run growing past one without the
+  clearing (the test proving the clearing is what holds it), a picture run step by step holding
+  one table while it samples and none after, the tables gone however a shot's windows end
+  (exhausted, closed early, dropped, a window raising; a picture's window raising), every entry
+  clearing once before a shot's first window and once after its last, and no output bit moved by
+  it; its autouse fixture empties the class's cache before and after each test, so that no test
+  sees another's tables. `test_held.py` has one line of isolation for the same reason.
 - A clip of frames in memory (`seedvr2x/clip.py`; DESIGN.md, Repository and apps, the nodes), on
   the CPU: `core/tests/test_clip.py` holds it on `cpu_models`' VAE in bfloat16 and `test_still.py`'s
   stand-in DiT: the output's shape and dtype and the input left as it was, the clip's seeds (a

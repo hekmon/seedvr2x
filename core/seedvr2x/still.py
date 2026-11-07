@@ -94,14 +94,18 @@ def sampled(models: Models, latent: Tensor, seed: int) -> Tensor:
     """The DiT's output for the picture's latent (encoded), (1, h, w, 16) moved to system memory,
     its layout kept: the DiT's phase entered, the noise drawn in system memory from seed
     (sampling.drawn, a generator of its own: nothing of the pass draws from torch's global
-    ones), the one window [(0, 1)], which merge_windows returns as it is. The RoPE tables of the
-    pictures before are cleared first (model.forget_rope_tables), as a shot's start clears them
-    (shot_pass.sample_windows)."""
+    ones), the one window [(0, 1)], which merge_windows returns as it is. The RoPE tables the
+    DiT caches are cleared before the window and after it, a raise included
+    (model.forget_rope_tables), as a shot's start and end clear them (shot_pass.sample_windows):
+    the picture's decode finds none."""
     models.enter("dit")
     model.forget_rope_tables()
-    noise, latent = sampling.drawn(models, latent, seed)
-    out = sampling.window(models, noise, latent)
-    del noise, latent
+    try:
+        noise, latent = sampling.drawn(models, latent, seed)
+        out = sampling.window(models, noise, latent)
+        del noise, latent
+    finally:
+        model.forget_rope_tables()
     # decode_shot's start: the window's output leaves the device for system memory, and is
     # decoded from there (shot_pass._slices). Here before the decode's phase is entered, so that a
     # picture waiting for the VAE holds nothing on the device.

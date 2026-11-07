@@ -313,9 +313,10 @@ def test_a_4k_bound_from_50_mp_on_96_gib_reserves_a_part_of_the_card() -> None:
     made = reservation.make(asked(96))
     # Not the whole card: the models (15.87 GiB) and the room and share of the pictures the
     # bound's own take, about 45.6 GiB (40.7 before the decode's untiled frame was 4K's), where
-    # the plan's budget is the card's 95.4.
+    # the plan's budget is the card's 95.4. (45.59 before the DiT's buffers lost the RoPE
+    # tables, 2.6 MB, 2026-11-07.)
     assert made.reservation < 0.5 * 96 * GIB
-    assert reservation.gib(made.reservation) == "45.59"
+    assert reservation.gib(made.reservation) == "45.58"
     assert made.budget < made.plan.budget
     assert made.budget == reservation.picture_budget(made.plan, INPUT)
     assert made.reservation == reservation.reserved(reservation.ceilings(made.plan, made.budget), 1)
@@ -570,8 +571,9 @@ def test_the_tries_stay_under_the_limit_on_cards_between(
             outcomes[outcome] = outcomes.get(outcome, 0) + 1
     assert sum(seen.values()) == 654
     if count == 1:
-        # {2: 88, 4: 82} before the 4K decode's ratio at 832 px was its measure's (2026-11-07).
-        assert seen == {1: 414, 2: 86, 3: 64, 4: 84, 5: 6}
+        # {2: 88, 3: 64, 4: 82} before the 4K decode's ratio at 832 px was its measure's, then
+        # {2: 86, 4: 84} before the DiT's buffers lost the RoPE tables (2026-11-07).
+        assert seen == {1: 414, 2: 84, 3: 66, 4: 84, 5: 6}
     else:
         assert seen[1] == 366 and seen[2] == 64
         assert min(plans for plans in seen if plans > 2) == 14 and max(seen) == 33
@@ -690,8 +692,8 @@ def test_two_pictures_on_the_int8_dit_keep_it_whole_in_tiles_of_1216() -> None:
     assert made.reservation <= wanted.reading.counted - made.plan.margin
     assert reservation.gib(made.reservation) == "18.43"
     assert (
-        reservation.gib(made.models) == "8.29"
-    )  # the int8 DiT and the VAE, as the plan counts them
+        reservation.gib(made.models) == "8.28"
+    )  # the int8 DiT and the VAE, as the plan counts them (8.29 with the RoPE tables, before)
     assert made.reservation == reservation.reserved(reservation.ceilings(made.plan, made.budget), 2)
     # The first side that does: every larger one moves the models or reserves too much.
     for side in reservation.tile_sides(FULL_HD):
@@ -768,7 +770,8 @@ def test_the_wsl2_card_under_the_segments_keeps_more_of_the_dit_than_under_the_f
     plain_int8 = reservation.make(night(peaks.INT8, 1))
     for allocator, count, dit, expected in (
         (memory.SEGMENTS, 1, peaks.INT8, ((None, None), "17.23")),
-        (memory.SEGMENTS, 1, peaks.FP16, ((None, 31), "22.71")),
+        # 22.71 before the DiT's buffers lost the RoPE tables (2026-11-07).
+        (memory.SEGMENTS, 1, peaks.FP16, ((None, 31), "22.70")),
         (memory.POOL, 1, peaks.INT8, ((None, None), "18.35")),
         (memory.POOL, 1, peaks.FP16, ((35, 28), "22.56")),
     ):

@@ -49,7 +49,9 @@ def test_constants() -> None:
     # The figures the documents give, in bytes: DESIGN.md, Memory planner (Budget, Host RAM,
     # Per-phase peaks) and BlockSwap, rewritten; the weights' parts as milestone 3 measured them
     # on seedvr2x (2026-10-11): a block 0.4220 GiB, the 36 15.19, the DiT's other parameters
-    # 0.155, the VAE 0.4669, DESIGN.md's 0.47, and 0.058 of buffers and tables that never move.
+    # 0.155, the VAE 0.4669, DESIGN.md's 0.47; and 59,643,736 bytes of buffers that never move,
+    # cuBLAS's workspace among them (the census of 2026-11-07, the RoPE tables cleared before a VAE
+    # phase; 0.058 GiB before, measured after windows of 1 latent, their tables in it).
     assert gib(peaks.MARGIN) == pytest.approx(0.6)
     assert gib(peaks.DIT_LOADED) == pytest.approx(15.871)
     assert peaks.PER_TOKEN == 61.243 * 1024 and peaks.PER_WINDOW == 0.996 * 1024**2
@@ -75,14 +77,15 @@ def test_constants() -> None:
     assert f"{gib(peaks.BLOCK):.4f}" == "0.4220" and f"{gib(36 * peaks.BLOCK):.2f}" == "15.19"
     assert f"{gib(peaks.DIT_OTHER):.3f}" == "0.155"
     assert f"{gib(peaks.VAE_WEIGHTS):.4f}" == "0.4669"
-    assert gib(peaks.DIT_BUFFERS) == pytest.approx(0.058)
+    assert peaks.DIT_BUFFERS == 59_643_736
     # The DiT's 15.35 GiB, and with the VAE the 15.81 a plan pins that keeps the two apart.
     dit = 36 * peaks.BLOCK + peaks.DIT_OTHER
     assert f"{gib(dit):.2f}" == "15.35" and f"{gib(dit + peaks.VAE_WEIGHTS):.2f}" == "15.81"
-    # The loaded models by their parts: 15.8723 GiB, 0.0013 over the fit's constant, within the
-    # 0.005 GiB it holds its points to.
+    # The loaded models by their parts: 15.8699 GiB, 0.0011 under the fit's constant, within the
+    # 0.005 GiB it holds its points to (0.0013 over while the buffers held a 1-latent window's
+    # RoPE tables, before 2026-11-07).
     parts = dit + peaks.DIT_BUFFERS + peaks.VAE_WEIGHTS
-    assert gib(parts - peaks.DIT_LOADED) == pytest.approx(0.0013, abs=5e-5)
+    assert gib(parts - peaks.DIT_LOADED) == pytest.approx(-0.0011, abs=5e-5)
     assert gib(shot_plan.HOST_RESIDENT) == pytest.approx(2.4)
     assert (peaks.TILE_MIN, peaks.TILE_STEP, peaks.SLICE) == (512, 64, 5)
     # The corrections of the planner's first two matrices (test_first_matrix): 0.4 GiB on every
@@ -257,10 +260,11 @@ def test_a_pass_takes_the_tile_that_takes_the_most() -> None:
 def test_vae_phase_peaks() -> None:
     # A VAE phase's peak: its fit, the VAE's weights (0.47 GiB) and what of the DiT stays there;
     # DESIGN.md, BlockSwap, rewritten: an untiled 1080p decode "takes about 35 GiB with the VAE
-    # alone", and the DiT's 15.35 GiB beside it pass a 48 GB card's budget.
+    # alone", and the DiT's 15.35 GiB beside it pass a 48 GB card's budget (35.45 alone, 35.5
+    # to a tenth before the buffers lost the RoPE tables, 2026-11-07).
     alone = peaks.decode_peak(OURS_1080, (1080, 1920), resident=0)
     beside = peaks.decode_peak(OURS_1080, (1080, 1920))
-    assert round(gib(alone), 1) == 35.5 and round(gib(beside), 1) == 50.8
+    assert round(gib(alone), 1) == 35.4 and round(gib(beside), 1) == 50.8
     assert beside - alone == 36 * peaks.BLOCK + peaks.DIT_OTHER
     assert f"{gib(beside - alone):.2f}" == "15.35"
     assert beside > (48 - 1.4285) * GIB - peaks.MARGIN > alone
@@ -537,8 +541,8 @@ def test_vae_choices() -> None:
     assert (made.resident_encode, made.resident_decode) == (None, None)
     # 48 GB at 1080p: the untiled decode, about 35 GiB with the VAE alone, fits with 24 of the
     # DiT's blocks beside it and not 25 (DESIGN.md, BlockSwap, rewritten, Per phase) by its peak;
-    # with the room every VAE pass is held to, 1.25 GiB under the budget, 21 stay, by 258.6 MiB,
-    # whatever the shot's length.
+    # with the room every VAE pass is held to, 1.25 GiB under the budget, 21 stay, by 261.1 MiB
+    # (258.6 before the buffers lost the RoPE tables, 2026-11-07), whatever the shot's length.
     free, room = our_free(48), peaks.VAE_ROOM
     budget = free - MARGIN
     made, predicted = shot_plan.plan(free, HD, shots(21), Pins(), None)
@@ -546,7 +550,7 @@ def test_vae_choices() -> None:
     untiled = [peaks.decode_peak(OURS_1080, HD, None, blocks) for blocks in (21, 22, 24, 25)]
     assert untiled[3] > budget >= untiled[2]
     assert untiled[1] + room > budget >= untiled[0] + room
-    assert round((budget - untiled[0] - room) / 1024**2, 1) == 258.6
+    assert round((budget - untiled[0] - room) / 1024**2, 1) == 261.1
     assert (
         predicted.decode == untiled[0] and predicted.bound == "decode"
     )  # the peak, without the room
@@ -561,7 +565,7 @@ def test_vae_choices() -> None:
     assert peaks.decode_peak(OURS_1080, HD, Tiles(1600), 0) + room > budget
     more = peaks.decode_peak(OURS_1080, HD, Tiles(1536), 2)
     assert more + room > budget >= predicted.decode + room
-    assert round((budget - predicted.decode - room) / 1024**2) == 327
+    assert round((budget - predicted.decode - room) / 1024**2) == 330  # 327 with the tables
     more = peaks.encode_peak(OURS_1080, None, 19)
     assert more + room > budget >= predicted.encode + room
     # 24 GB at 1080p: the untiled encode fits with the DiT away by its peak, and not with its
@@ -593,7 +597,7 @@ def test_vae_choices() -> None:
     assert predicted.scratch == peaks.scratch(OURS_4K, 17) and predicted.tokens == 32_880
     budget = our_free(24) - MARGIN
     away = peaks.encode_peak(OURS_4K, Tiles(1472), 0, 36)
-    assert round((budget - away - room) / 1024**2) == 58
+    assert round((budget - away - room) / 1024**2) == 60  # 58 with the tables
     assert peaks.encode_peak(OURS_4K, Tiles(1472), None, 36) + room > budget
     assert peaks.encode_peak(OURS_4K, Tiles(1536), 0, 36) + room > budget
     assert peaks.decode_peak(OURS_4K, UHD, Tiles(1088), None, 36) + room > budget
@@ -966,6 +970,11 @@ def test_first_matrix(
     # latent as measured then (2.02 MiB a latent at 1080p, 8.03 at 4K). Their measured peaks
     # held it, where the model no longer counts it.
     kept_then = 0.954 * padded[0] * padded[1] / 1e6 * latents / 1024
+    # And the RoPE tables of its windows, which no VAE phase holds since they are cleared where
+    # the DiT's work ends (2026-11-07): the DiT's buffers were counted 0.058 GiB then, a 1-latent
+    # window's tables in it, 2.6 MB over the census's DIT_BUFFERS; the run's own windows' tables
+    # were at least that.
+    kept_then += 0.058 - gib(peaks.DIT_BUFFERS)
 
     if measured is None:
         # The plan that ran out of memory in its encode is no longer one, nor the one it ran
@@ -1171,7 +1180,8 @@ def test_floor() -> None:
     assert bare(made) == Plan(12, Tiles(640), Tiles(512), 34, 1, 0, vae_in_dit=False)
     made, _ = shot_plan.plan(round(8.52 * GIB), HD, shots(40), Pins(), None)
     assert bare(made) == Plan(12, Tiles(640), Tiles(512), 35, 1, 0, vae_in_dit=False)
-    made, _ = shot_plan.plan(round(8.27 * GIB), HD, shots(40), Pins(), None)
+    # (8.265: 8.27 GiB keeps a block in the encode since the buffers lost the RoPE tables, 2.6 MB.)
+    made, _ = shot_plan.plan(round(8.265 * GIB), HD, shots(40), Pins(), None)
     assert bare(made) == Plan(12, Tiles(640), Tiles(512), 35, 0, 0, vae_in_dit=False)
     assert refused(round(8.26 * GIB), HD, shots(40), Pins(), None).endswith(
         "and the driver reports 8.26 GiB free: the largest output that fits there is"
@@ -1243,14 +1253,14 @@ def test_floor() -> None:
     made, predicted = shot_plan.plan(untiled + room + MARGIN, narrow, shots(20), Pins(), None)
     assert (made.encode_tiles, made.decode_tiles, predicted.bound) == (None, None, "decode")
     assert refused(untiled + room + MARGIN - 1, narrow, shots(20), Pins(), None) == (
-        "an output of 528x488 takes 8.20 GiB of free VRAM (its decode untiled, with the DiT off"
-        " the GPU: a peak of 6.35 GiB, 1.25 of room a VAE pass is held to, and 0.60 of margin),"
-        " and the driver reports 8.19 GiB free: the largest output that fits there is"
+        "an output of 528x488 takes 8.19 GiB of free VRAM (its decode untiled, with the DiT off"
+        " the GPU: a peak of 6.34 GiB, 1.25 of room a VAE pass is held to, and 0.60 of margin),"
+        " and the driver reports 8.18 GiB free: the largest output that fits there is"
         " --resolution 464, about 502x464"
     )
     assert refused(untiled + room + MARGIN, narrow, shots(20), Pins(decode_tile=512), None) == (
         "--decode-tile 512: the decode in tiles of 512 px takes 8.27 GiB of free VRAM, the DiT"
-        " off the GPU, 1.25 of them the room a VAE pass is held to, and the driver reports 8.19"
+        " off the GPU, 1.25 of them the room a VAE pass is held to, and the driver reports 8.18"
         " GiB free: no tile fits, the untiled decode does, --decode-tile 0"
     )
     made, _ = shot_plan.plan(tiled + room + MARGIN, narrow, shots(20), Pins(decode_tile=512), None)
@@ -1980,14 +1990,14 @@ def test_fits() -> None:
         " reports 22.57 GiB free, 9.08 GiB short"
     )
     assert fits(Plan(12, swapped=17, resident_encode=19), free, *job) == (
-        "the encode, untiled, with 19 of the DiT's blocks on the GPU, takes 30.81 GiB of free"
+        "the encode, untiled, with 19 of the DiT's blocks on the GPU, takes 30.80 GiB of free"
         " VRAM, 1.25 of them the room a VAE pass is held to, and the driver reports 22.57 GiB free,"
-        " 8.24 GiB short"
+        " 8.23 GiB short"
     )
     away = Plan(12, Tiles(1600), None, 17, 0, 0, vae_in_dit=False)
     assert fits(away, free, *job) == (
-        "the decode, untiled, with the DiT off the GPU, takes 37.31 GiB of free VRAM, 1.25 of"
-        " them the room a VAE pass is held to, and the driver reports 22.57 GiB free, 14.74 GiB"
+        "the decode, untiled, with the DiT off the GPU, takes 37.30 GiB of free VRAM, 1.25 of"
+        " them the room a VAE pass is held to, and the driver reports 22.57 GiB free, 14.73 GiB"
         " short"
     )
     # (The DiT's phase needs a longer window to fall short on the lean attention: 12 latents with
@@ -2024,14 +2034,14 @@ def test_fits() -> None:
         " reports 22.57 GiB free, 16.16 GiB short"
     )
     assert fits(Plan(12, Tiles(1600), swapped=36), free, *job) == (
-        "the decode, untiled, with the DiT's 2 slots on the GPU, takes 38.31 GiB of free VRAM,"
-        " 1.25 of them the room a VAE pass is held to, and the driver reports 22.57 GiB free, 15.74"
+        "the decode, untiled, with the DiT's 2 slots on the GPU, takes 38.30 GiB of free VRAM,"
+        " 1.25 of them the room a VAE pass is held to, and the driver reports 22.57 GiB free, 15.73"
         " GiB short"
     )
     assert fits(replace(tiled, resident_decode=1), free, *job) == (
-        "the decode, in tiles of 1088 px, with 1 of the DiT's blocks on the GPU, takes 22.61 GiB"
+        "the decode, in tiles of 1088 px, with 1 of the DiT's blocks on the GPU, takes 22.60 GiB"
         " of free VRAM, 1.25 of them the room a VAE pass is held to, and the driver reports 22.57"
-        " GiB free, 0.04 GiB short"
+        " GiB free, 0.03 GiB short"
     )
     # With split, its slice is an untiled decode's too: on 48 GB 21 blocks fit beside it
     # without it, 19 with it. A tiled decode's peak doesn't hold it: the same plan fits.
