@@ -877,6 +877,48 @@ ONE_FRAME_TILED: dict[int, tuple[float, float]] = {
     1536: (0.29, 0.24),
     2048: (0.24, 0.20),
 }
+# The 4K picture's one-frame decode at every side the planner takes, 512 to 2048 px by 64: its peak
+# against the slice's figure (_fit) at the 4K frame (2192x3840), rounded up to the thousandth.
+# Measured on the RTX 5090 (impl-place-2, 2026-11-07, research/scripts/decode_peaks.py through
+# seedvr2x's own command; every DiT block swapped, SDPA, expandable segments; the same bits and
+# the same peak to the byte twice at each side), the peak over what was allocated before the
+# decode with cuBLAS's workspace (CUBLAS_WORKSPACE) counted in it, as the 2026-11-03 figures
+# counted it, which these reproduce at 768, 1024, 1536 and 2048 px to 0.1 MiB. The whole decode
+# step, its copies and colour correction as a run makes them, peaked during its tiles at every
+# side: the copies' moment and the correction (still_plan.COPIES, colour_one_frame) come once the
+# tiles' working memory is gone, as the plan counts them. A side takes the larger of this and of
+# ONE_FRAME_TILED's ratio (one_frame_ratio), so that no frame's prediction falls (no other frame
+# was measured at these sides): 832 px, which took 768's 0.33, measured 0.3463 (4.26 GiB above
+# the models where 4.06 was predicted; the emulated 8 GB card's 4K picture ran 0.17 GiB over it
+# on 2026-11-06); at every other side the ratio before stands at or over the measure, by 1.31
+# times at the most (1984 px).
+ONE_FRAME_DECODE_4K: dict[int, float] = {
+    512: 0.321,
+    576: 0.320,
+    640: 0.314,
+    704: 0.313,
+    768: 0.328,
+    832: 0.347,
+    896: 0.278,
+    960: 0.287,
+    1024: 0.275,
+    1088: 0.255,
+    1152: 0.255,
+    1216: 0.235,
+    1280: 0.238,
+    1344: 0.224,
+    1408: 0.227,
+    1472: 0.217,
+    1536: 0.218,
+    1600: 0.210,
+    1664: 0.204,
+    1728: 0.206,
+    1792: 0.201,
+    1856: 0.197,
+    1920: 0.195,
+    1984: 0.184,
+    2048: 0.192,
+}
 # An untiled pass, by the frame it was measured on. At 1080p (1104x1920): the encode 0.255 and the
 # decode 0.207 of their figures (2026-11-03). At 4K (2192x3840), on the RTX 5090 (place-study's
 # night, 2026-11-05 to 06, picture_phases.py --then, 36 blocks swapped, a fresh process, the same
@@ -934,7 +976,8 @@ def one_frame_ratio(
     """One frame's VAE pass against the video slice's figure (_fit), the encode's (column 0) or
     the decode's (1), for the pass in `tiles` (None: untiled) over frames padded to `padded`:
     ONE_FRAME_TILED at a measured side, the larger of its two neighbours' between them, the
-    smallest's below; ONE_FRAME_UNTILED_1080P / _4K untiled within the frame measured
+    smallest's below, and for the decode the larger of that and of the 4K frame's measure at the
+    side (ONE_FRAME_DECODE_4K); ONE_FRAME_UNTILED_1080P / _4K untiled within the frame measured
     (ONE_FRAME_UNTILED_MEASURED, either orientation; `padded` None: within, the 1080p's). 1.0,
     the slice's own figure, past what was measured: an untiled pass over a larger frame, a tile
     past the largest side measured."""
@@ -954,15 +997,19 @@ def one_frame_ratio(
         cap = ONE_FRAME_UNTILED_4K[column] * _fit(fitted, None, column) / _fit(padded, None, column)
         return min(ONE_FRAME_UNTILED_1080P[column], cap)
     sides = sorted(ONE_FRAME_TILED)
-    if tiles.size in ONE_FRAME_TILED:
-        return ONE_FRAME_TILED[tiles.size][column]
-    if tiles.size < sides[0]:
-        return ONE_FRAME_TILED[sides[0]][column]
     if tiles.size > sides[-1]:
         return 1.0
-    above = min(side for side in sides if side > tiles.size)
-    below = max(side for side in sides if side < tiles.size)
-    return max(ONE_FRAME_TILED[below][column], ONE_FRAME_TILED[above][column])
+    if tiles.size in ONE_FRAME_TILED:
+        rule = ONE_FRAME_TILED[tiles.size][column]
+    elif tiles.size < sides[0]:
+        rule = ONE_FRAME_TILED[sides[0]][column]
+    else:
+        above = min(side for side in sides if side > tiles.size)
+        below = max(side for side in sides if side < tiles.size)
+        rule = max(ONE_FRAME_TILED[below][column], ONE_FRAME_TILED[above][column])
+    if column == 1:
+        return max(rule, ONE_FRAME_DECODE_4K.get(tiles.size, 0.0))
+    return rule
 
 
 def colour_one_frame(padded: tuple[int, int], output: tuple[int, int]) -> int:

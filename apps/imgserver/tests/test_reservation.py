@@ -570,7 +570,8 @@ def test_the_tries_stay_under_the_limit_on_cards_between(
             outcomes[outcome] = outcomes.get(outcome, 0) + 1
     assert sum(seen.values()) == 654
     if count == 1:
-        assert seen == {1: 414, 2: 88, 3: 64, 4: 82, 5: 6}
+        # {2: 88, 4: 82} before the 4K decode's ratio at 832 px was its measure's (2026-11-07).
+        assert seen == {1: 414, 2: 86, 3: 64, 4: 84, 5: 6}
     else:
         assert seen[1] == 366 and seen[2] == 64
         assert min(plans for plans in seen if plans > 2) == 14 and max(seen) == 33
@@ -788,7 +789,8 @@ def test_the_wsl2_card_under_the_segments_keeps_more_of_the_dit_than_under_the_f
     )  # the flat reserve's, lowered beside the decode
     # Two pictures keep the DiT whole in the plan's own tiles on the int8 file (18.82 GiB) where
     # the flat reserve needed 1216-px tiles (18.43), and the fp16 pair, refused under the flat
-    # reserve, is served in 832-px tiles.
+    # reserve, is served in 832-px tiles (22.67 GiB: 22.46 before the 4K decode's ratio at 832 px
+    # was its measure's, 0.347 for 768's 0.33, 2026-11-07).
     two = reservation.make(night(peaks.INT8, 2, memory.SEGMENTS, 22.95))
     assert two.plan.pins == Pins(swap_blocks=0) and reservation.gib(two.reservation) == "18.82"
     pooled = reservation.make(night(peaks.INT8, 2, memory.POOL, 22.95))
@@ -797,7 +799,7 @@ def test_the_wsl2_card_under_the_segments_keeps_more_of_the_dit_than_under_the_f
     )
     pair = reservation.make(night(peaks.FP16, 2, memory.SEGMENTS, 22.95))
     assert pair.plan.pins == Pins(832, 832, swap_blocks=0)
-    assert reservation.gib(pair.reservation) == "22.46"
+    assert reservation.gib(pair.reservation) == "22.67"
     with pytest.raises(ReservationRefused) as flat:
         reservation.make(night(peaks.FP16, 2))
     assert flat.value.most == 1 and flat.value.largest == (540, 304)

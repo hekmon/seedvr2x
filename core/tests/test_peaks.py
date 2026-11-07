@@ -914,6 +914,31 @@ def test_one_frame_ratio_between_two_measured_sides_is_the_larger_of_the_two() -
     )
 
 
+def test_the_decodes_ratio_takes_the_4k_frames_measure_where_it_is_over_the_rule() -> None:
+    # The 4K picture's one-frame decode measured at every side the planner takes (2026-11-07):
+    # each side's decode ratio is the larger of ONE_FRAME_TILED's and of that measure, the encode's
+    # untouched; 832 px alone moves, from 768's 0.33 to its own 0.347.
+    sides = list(range(peaks.TILE_MIN, peaks.TILE_MAX + 1, peaks.TILE_STEP))
+    assert sorted(peaks.ONE_FRAME_DECODE_4K) == sides
+    moved = []
+    for side in sides:
+        tiled = sorted(peaks.ONE_FRAME_TILED)
+        if side in peaks.ONE_FRAME_TILED:
+            rule = peaks.ONE_FRAME_TILED[side][1]
+        else:
+            below = max(each for each in tiled if each < side)
+            above = min(each for each in tiled if each > side)
+            rule = max(peaks.ONE_FRAME_TILED[below][1], peaks.ONE_FRAME_TILED[above][1])
+        measured = peaks.ONE_FRAME_DECODE_4K[side]
+        for padded in (None, OURS_4K, (1104, 1920)):
+            assert peaks.one_frame_ratio(Tiles(side), 1, padded) == max(rule, measured)
+        if measured > rule:
+            moved.append(side)
+    assert moved == [832] and peaks.one_frame_ratio(Tiles(832), 1) == 0.347
+    assert peaks.one_frame_ratio(Tiles(832), 0) == 0.34  # the encode's: 768's and 1024's larger
+    assert peaks.one_frame_ratio(Tiles(448), 1) == peaks.ONE_FRAME_TILED[512][1]
+
+
 def test_one_frame_ratio_above_the_largest_tile_is_the_slices_own_figure() -> None:
     # Past 2048 px, which only a pin gives, nothing was measured: the slice's figure, 1.0 (the
     # review of 2026-11-03), whatever the frame it is over and in either column.

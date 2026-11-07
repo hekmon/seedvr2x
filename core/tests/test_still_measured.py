@@ -43,6 +43,41 @@ DECODE: dict[str, dict[int, float]] = {
     "8K": {2048: 12.1273, 1536: 8.0072, 1024: 4.7844, 768: 3.6354, 512: 1.8858},
 }
 
+# The 4K picture's one-frame decode at every side the planner takes (impl-place-2, 2026-11-07, the
+# RTX 5090, research/scripts/decode_peaks.py through seedvr2x's own command, every DiT block
+# swapped, SDPA, expandable segments, the same bits and the same peak to the byte twice at each
+# side): GiB above what was allocated before the decode, cuBLAS's workspace (32 MiB, allocated by
+# the DiT's phase before it) added back, as the figures above count it (768, 1024, 1536 and 2048
+# px are theirs to 0.1 MiB). The decode step whole, its copies and colour correction as a run makes
+# them: its peak was set during the tiles at every side.
+DECODE_4K_SIDES: dict[int, float] = {
+    512: 1.8858,
+    576: 2.3767,
+    640: 2.5367,
+    704: 3.0612,
+    768: 3.6354,
+    832: 4.2596,
+    896: 3.9184,
+    960: 4.4846,
+    1024: 4.7844,
+    1088: 4.9952,
+    1152: 5.5951,
+    1216: 5.6705,
+    1280: 6.2721,
+    1344: 6.4510,
+    1408: 7.1035,
+    1472: 7.3508,
+    1536: 8.0072,
+    1600: 8.3100,
+    1664: 8.6505,
+    1728: 9.3688,
+    1792: 9.8193,
+    1856: 10.3244,
+    1920: 10.8071,
+    1984: 11.5233,
+    2048: 12.1039,
+}
+
 # The colour correction of one frame, above the weights: the decoded frame, the reference, split
 # and the workspace. (Output size, padded frame, GiB).
 COLOUR = [
@@ -69,8 +104,9 @@ COPIES = [
 # two slots (no block resident, none swapped: peaks.dit_on_gpu(0, 0)), as the cases ran.
 MODELS = peaks.VAE_WEIGHTS + peaks.dit_on_gpu(0, 0)
 
-# How far over a measure the prediction may be, tiled or not: the most the table has is 1.14
-# (the 6000x4000 encode at 512 px, where 1080p's cut-off tiles took 0.283 over the rest), the
+# How far over a measure the prediction may be, tiled or not: the most ENCODES and DECODES have
+# is 1.14 (the 6000x4000 encode at 512 px, where 1080p's cut-off tiles took 0.283 over the rest),
+# DECODE_4K_SIDES 1.31 (1984 px, between the five sides of ONE_FRAME_TILED), the
 # untiled passes 1.02 at the most since the 4K frame has its own ratio (it was 1.34, the 4K untiled
 # encode at the 1080p ratio). The slack stays 1.45, which a change opening a gap would cross.
 SLACK = 1.45
@@ -153,6 +189,24 @@ def test_the_4k_untiled_passes_are_within_a_tenth_of_a_gib_over_their_measure() 
         (decoded(PADDED["4K"], 0), 23.6538),
     ):
         assert measured <= predicted <= measured + 0.1
+
+
+def test_the_4k_decode_at_every_side_is_under_its_prediction_and_near_it() -> None:
+    # Every side the planner takes (peaks.ONE_FRAME_DECODE_4K): at or over the measure, within
+    # SLACK; 832 px, which ran 0.17 GiB over its prediction before (an emulated 8 GB card,
+    # 2026-11-06), now within 0.01 GiB over its measure, and the most over-counted 1984 px, by
+    # the ratio its neighbours give (1.31 times), the sides between the five of ONE_FRAME_TILED
+    # being counted at the larger of theirs.
+    assert sorted(DECODE_4K_SIDES) == sorted(peaks.ONE_FRAME_DECODE_4K)
+    assert all(DECODE_4K_SIDES[side] == DECODE["4K"][side] for side in (768, 1024, 1536, 2048))
+    over = {}
+    for side, measured in DECODE_4K_SIDES.items():
+        predicted = decoded(PADDED["4K"], side)
+        assert measured <= predicted <= measured * SLACK, side
+        over[side] = predicted / measured
+    assert decoded(PADDED["4K"], 832) - DECODE_4K_SIDES[832] < 0.01
+    most = max(over, key=lambda side: over[side])
+    assert most == 1984 and 1.3 < over[most] < 1.32
 
 
 def test_a_tile_of_the_grids_shape_takes_the_same_at_every_picture_size() -> None:
