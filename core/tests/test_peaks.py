@@ -1213,11 +1213,12 @@ SEGMENT_RULES = {
 
 
 def test_the_reserves_figures_are_designs() -> None:
-    # DESIGN.md, Allocator, Small cards: max(0.6, 0.3 x P) beyond a DiT step, max(1.25, 0.2 x P)
-    # beyond a VAE pass under the segments; the pool's: 0.2 x P (provisional) and 0.35 x P.
+    # DESIGN.md, Allocator, Small cards: max(0.6, 0.33 x P) beyond a DiT step (design's ruling of
+    # 2026-11-07), max(1.25, 0.2 x P) beyond a VAE pass under the segments; the pool's: 0.24 x P
+    # and 0.35 x P.
     assert peaks.DIT_RESERVE_FLOOR == round(0.6 * GIB) == peaks.MARGIN
     assert peaks.VAE_RESERVE_FLOOR == round(1.25 * GIB) == peaks.VAE_ROOM
-    assert (peaks.DIT_RESERVE_SHARE, peaks.VAE_RESERVE_SHARE) == (0.3, 0.2)
+    assert (peaks.DIT_RESERVE_SHARE, peaks.VAE_RESERVE_SHARE) == (0.33, 0.2)
     assert (peaks.POOL_DIT, peaks.POOL_VAE) == (0.24, 0.35)
     assert peaks.POOL_DIT_FLOOR == round(0.85 * GIB)
 
@@ -1231,7 +1232,7 @@ def test_under_the_segments_a_step_is_left_the_larger_of_its_floor_and_its_share
     edge = floor / share
     for working in (0, GIB // 4, round(edge) - 1000):
         assert peaks.reserve(phase, working, memory.SEGMENTS) == floor
-    # (the DiT's share is capped at 4.5 GiB, from P of 15: its own test)
+    # (the DiT's share is capped at 4.5 GiB, from P of 13.6: its own test)
     for working in (round(edge) + 1000, 8 * GIB, 14 * GIB, 20 * GIB, 60 * GIB):
         want = round(share * working)
         if phase == peaks.DIT_PHASE:
@@ -1241,15 +1242,52 @@ def test_under_the_segments_a_step_is_left_the_larger_of_its_floor_and_its_share
     assert abs(peaks.reserve(phase, round(edge), memory.SEGMENTS) - floor) <= 1
 
 
+# The DiT's wants under the segments, every block swapped, the VAE away, torch held 4.5 GiB under
+# the card's free memory (hold_probe.py's scans, RTX 5090, 1080p): (date, DiT file, latents, P,
+# the least room at the usual speed), GiB. 2026-11-06, impl-place, by 0.25 GiB; 2026-11-07,
+# impl-place-2, by 0.05 GiB within 5% of the roomy runs' speed.
+DIT_WANTS = [
+    ("2026-11-06", "int8", 19, 9.34, 3.0),
+    ("2026-11-06", "int8", 27, 13.21, 4.0),
+    ("2026-11-06", "int8", 31, 15.14, 3.25),
+    ("2026-11-07", "int8", 19, 9.343, 2.70),
+    ("2026-11-07", "int8", 27, 13.212, 3.95),
+    ("2026-11-07", "fp16", 19, 9.342, 2.80),
+    ("2026-11-07", "fp16", 27, 13.211, 4.05),
+]
+
+
+@pytest.mark.parametrize(("date", "dit", "latents", "working", "want"), DIT_WANTS)
+def test_under_the_segments_the_dits_reserve_covers_every_want_measured_by_0_04_gib(
+    date: str, dit: str, latents: int, working: float, want: float
+) -> None:
+    # Design's ruling of 2026-11-07: the share covers every want either session measured, the two
+    # sessions 0.30 GiB apart on the same window (int8, 19 latents), by 0.04 GiB at least.
+    left = peaks.reserve(peaks.DIT_PHASE, round(working * GIB), memory.SEGMENTS)
+    assert left >= round((want + 0.04) * GIB), (date, dit, latents, gib(left))
+
+
+def test_the_dits_share_is_the_least_to_two_decimals_that_covers_every_want() -> None:
+    # 0.32 leaves the 2026-11-06 int8 19-latent window 2.99 GiB, under its 3.0.
+    def covers(share: float) -> bool:
+        return all(
+            min(share * working, gib(peaks.DIT_RESERVE_CAP)) >= want + 0.04
+            for _, _, _, working, want in DIT_WANTS
+        )
+
+    assert covers(peaks.DIT_RESERVE_SHARE) and not covers(round(peaks.DIT_RESERVE_SHARE - 0.01, 2))
+
+
 def test_the_dit_reserve_is_capped_at_4_5_gib_and_the_vae_passes_are_not() -> None:
     # hold_probe.py's scan, 2026-11-06: the DiT's want stops growing past 27 latents (P 13.21
-    # GiB), so max(0.6, min(0.3 x P, 4.5)); 0.3 x P is 4.5 GiB from P of 15 GiB.
+    # GiB), so max(0.6, min(0.33 x P, 4.5)); 0.33 x P is 4.5 GiB from P of 13.6 GiB (4.5 / 0.33
+    # = 13.64).
     cap = round(4.5 * GIB)
     assert peaks.DIT_RESERVE_CAP == cap
     dit = peaks.DIT_PHASE
-    under = round(14 * GIB)
-    assert peaks.reserve(dit, under, memory.SEGMENTS) == round(0.3 * under) < cap
-    for working in (15 * GIB + GIB // 100, 20 * GIB, 100 * GIB):
+    under = round(13.6 * GIB)
+    assert peaks.reserve(dit, under, memory.SEGMENTS) == round(0.33 * under) < cap
+    for working in (round(13.64 * GIB) + GIB // 100, 20 * GIB, 100 * GIB):
         assert peaks.reserve(dit, working, memory.SEGMENTS) == cap
     assert peaks.reserve(dit, 0, memory.SEGMENTS) == round(0.6 * GIB)
     # The pool's DiT rule and the VAE passes' are not capped (0.2 x P is over 4.5 from P of 22.5).
@@ -1304,10 +1342,10 @@ def test_a_measured_margin_counts_where_it_is_larger_than_the_rules_share() -> N
     # The probe's allocator margin (a share of P, Reading.margin) is read, not measured (probe.py):
     # peaks.reserve counts the larger of it and the rule's share for SEGMENTS and POOL, never
     # under the floor, and PLAIN's flat reserve takes none. P of 10 GiB: the rule's DiT share
-    # is 0.3 (3.0 GiB) under SEGMENTS, 0.24 (2.4) under the pool; the VAE's 0.2 and 0.35.
+    # is 0.33 (3.3 GiB) under SEGMENTS, 0.24 (2.4) under the pool; the VAE's 0.2 and 0.35.
     working = 10 * GIB
     for allocator, phase, rule in (
-        (memory.SEGMENTS, peaks.DIT_PHASE, 0.3),
+        (memory.SEGMENTS, peaks.DIT_PHASE, 0.33),
         (memory.SEGMENTS, peaks.ENCODE_PHASE, 0.2),
         (memory.POOL, peaks.DIT_PHASE, 0.24),
         (memory.POOL, peaks.DECODE_PHASE, 0.35),

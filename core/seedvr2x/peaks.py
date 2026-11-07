@@ -760,20 +760,31 @@ def decode_peak(
 # Measured by place-study on an RTX 5090 under WSL2 with a card left exactly its size, at night:
 # the lean windows want 0.18, 0.20 then 0.29 x P beyond their peak to keep their speed (a room
 # short of it costs 2.7 to 3.4 times the window's time), and keep it from there down to no bit
-# changed, so the DiT's 0.3 is the largest of those with a little over; a VAE pass keeps its speed
-# from 0.2 x P. The DiT's rule is capped (DIT_RESERVE_CAP, below); a VAE pass's is not. The floors:
-# the planner's MARGIN for a window (0.6 GiB) and VAE_ROOM for a pass (1.25 GiB), the figures a
-# driver that refuses has always left, kept as the rule's lower bound.
+# changed; a VAE pass keeps its speed from 0.2 x P. The DiT's share is 0.33 (design's ruling of
+# 2026-11-07), the least to two decimals that leaves every want two sessions measured 0.04 GiB
+# more, with every block swapped, the VAE away and torch held 4.5 GiB under the card's free memory
+# (hold_probe.py): on 2026-11-06, the int8 sharp 7B at 1080p, windows of 19, 27 and 31 latents (P
+# 9.34, 13.21, 15.14 GiB) at speed down to 3.0, 4.0 and 3.25 GiB (the 19-latent one slower at
+# 2.75); on 2026-11-07 (impl-place-2, the room from 0.40 to 0.20 x P by 0.05 GiB, the usual speed
+# within 5% of the roomy runs'), int8 at 19 and 27 latents down to 2.70 and 3.95 GiB (P 9.343,
+# 13.212), fp16 down to 2.80 and 4.05 (P 9.342, 13.211). The same window wanted 0.30 GiB more on
+# one night than on the other: 0.33 x 9.34 = 3.08 GiB covers its 3.0 by 0.08, where 0.32 leaves
+# 2.99, and fp16's 27-latent window, 4.36 for 4.05. A room 0.05 GiB under a want cost 1.1 to 2.1
+# times the window's time. The DiT's rule is capped (DIT_RESERVE_CAP, below); a VAE pass's is
+# not. The floors: the planner's MARGIN for a window (0.6 GiB) and VAE_ROOM for a pass (1.25
+# GiB), the figures a driver that refuses has always left, kept as the rule's lower bound.
 DIT_RESERVE_FLOOR = MARGIN
-DIT_RESERVE_SHARE = 0.3
-# The cap on a DiT step's reserve under the segments: max(0.6, min(0.3 x P, 4.5)) GiB. Measured by
+DIT_RESERVE_SHARE = 0.33
+# The cap on a DiT step's reserve under the segments: max(0.6, min(0.33 x P, 4.5)) GiB, the cap
+# from P = 13.6 GiB. Measured by
 # hold_probe.py's scan (RTX 5090, 2026-11-06, the sharp 7B in int8, every block swapped, the VAE
 # away, expandable segments, torch held 4.5 GiB under the card's free memory, each window's room
 # scanned down by 0.25 GiB): at 1080p, windows of 19, 27 and 31 latents (P 9.34, 13.21, 15.14 GiB)
 # kept their usual speed (13.3, 19.1, 25.4 s) down to 3.0, 4.0 and 3.25 GiB of room (0.32, 0.30,
 # 0.21 x P), slower below: the want stops growing past 27 latents, so the rule stops at 4.5 GiB,
-# half a GiB over the largest want measured. PROVISIONAL beyond P = 15 GiB, unmeasured (design's
-# ruling of 2026-11-06 asked for this scan). The VAE passes' rule has no cap.
+# 0.45 GiB over the largest want measured since (fp16's 27-latent window, 4.05 GiB, 2026-11-07;
+# the share above). PROVISIONAL beyond P = 15 GiB, unmeasured (design's ruling of 2026-11-06
+# asked for this scan). The VAE passes' rule has no cap.
 DIT_RESERVE_CAP = round(4.5 * GIB)
 VAE_RESERVE_FLOOR = VAE_ROOM
 VAE_RESERVE_SHARE = 0.2

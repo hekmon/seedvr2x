@@ -1712,13 +1712,14 @@ def test_the_host_s_window_is_searched_from_the_next_one_down_to_the_smallest() 
     assert "of system memory" in refused(40 * GIB, UHD, film, replace(pins, window=19), host)
     # The smallest window the job can run. 4K (1080p before the refit: on the lean attention its
     # shot of 45 latents never comes down to 5), a shot of 45 latents, a run held to its card
-    # that counts on 16.95 GiB, under SDPA, 18 GiB of system memory: the card alone holds
-    # windows of 6, every part of the weights pinned, 18.66 GiB; windows of 5, the smallest, plan,
-    # with the VAE's weights kept on the GPU, and are taken, where the job was refused had the
-    # search stopped a window short. The figure counted is the card's less torch's limit, each
-    # step left its own reserve beyond its peak (peaks.reserve; it was 13.125 GiB when the flat
-    # 4.5 GiB was taken off it, 17.625 less 4.5).
-    held = Reading(13 * GIB, None, round(16.95 * GIB), True, round(0.5 * GIB))
+    # that counts on 17.05 GiB (16.95 before the DiT's share went from 0.3 to 0.33 of P, which
+    # left the card alone windows of 5 there), under SDPA, 18 GiB of system memory: the card
+    # alone holds windows of 6, every part of the weights pinned, 18.66 GiB; windows of 5, the
+    # smallest, plan, with the VAE's weights kept on the GPU, and are taken, where the job was
+    # refused had the search stopped a window short. The figure counted is the card's less
+    # torch's limit, each step left its own reserve beyond its peak (peaks.reserve; it was 13.125
+    # GiB when the flat 4.5 GiB was taken off it, 17.625 less 4.5).
+    held = Reading(13 * GIB, None, round(17.05 * GIB), True, round(0.5 * GIB))
     job = (held, UHD, shots(45))
     alone, _ = shot_plan.plan(*job, Pins(), None, attention=peaks.SDPA)
     made, predicted = shot_plan.plan(*job, Pins(), 18 * GIB, attention=peaks.SDPA)
@@ -2601,14 +2602,14 @@ def test_the_reserve_is_the_step_s_beyond_its_peak(monkeypatch: pytest.MonkeyPat
                 assert predicted.need(phase) <= predicted.budget, (allocator, target, phase)
             assert predicted.reserve_taken() == predicted.reserves
             assert predicted.record()["reserve"] == predicted.reserves
-    # Both sides of the floors: a small window at 1080p is under the DiT's 0.3 x P = 0.6 GiB, and
-    # its reserve is the floor (MARGIN); a long one at 4K is over it, capped where 0.3 x P
+    # Both sides of the floors: a small window at 1080p is under the DiT's 0.33 x P = 0.6 GiB, and
+    # its reserve is the floor (MARGIN); a long one at 4K is over it, capped where 0.33 x P
     # is over 4.5 GiB (a window of 40 latents at 4K is left 4.5 GiB, hold_probe.py's scan).
     small = shot_plan.plan(reading(memory.SEGMENTS), HD, shots(1), Pins(), None)[1]
     assert small.reserves["dit"] == MARGIN
     large = shot_plan.plan(reading(memory.SEGMENTS, 96.0), UHD, shots(40), Pins(), None)[1]
     working = peaks.dit_working(padded_size(UHD), large.window)
-    assert working * 0.3 > peaks.DIT_RESERVE_CAP
+    assert working * 0.33 > peaks.DIT_RESERVE_CAP
     assert MARGIN < large.reserves["dit"] == peaks.DIT_RESERVE_CAP == round(4.5 * GIB)
     assert large.reserves["dit"] == memory.RESERVE
     # The plan of such a case is the one made with a reserve of 4.5 GiB for the window, whatever
@@ -2641,7 +2642,7 @@ def test_the_reserve_is_the_step_s_beyond_its_peak(monkeypatch: pytest.MonkeyPat
 def test_the_segments_need_less_than_the_flat_reserve_where_the_step_is_small() -> None:
     # The same card under both: the flat 4.5 GiB off the figure (PLAIN) and the segments' reserve,
     # the figure counted being the card's less torch's limit. On a card where each step's reserve
-    # is under 4.5 GiB (0.3 x P under it for the DiT, 0.2 x P for a VAE pass) the plan holds a
+    # is under 4.5 GiB (0.33 x P under it for the DiT, 0.2 x P for a VAE pass) the plan holds a
     # window, tiles and a placement at least as large; the cases that need more are over it.
     def taken(allocator: str, free: float) -> Reading:
         driver = round(free * GIB)

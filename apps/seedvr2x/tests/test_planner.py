@@ -1826,7 +1826,7 @@ def _segments_card(card: float, allocator: str = memory.SEGMENTS) -> Reading:
 
 def test_a_held_plan_says_the_reserve_of_each_step() -> None:
     # DESIGN.md, Allocator, Small cards (decided 2026-11-06): the reserve of 4.5 and the 2.5 retire
-    # under the segments, a step is left a reserve by its own peak, max(0.6, 0.3 x P) for the
+    # under the segments, a step is left a reserve by its own peak, max(0.6, 0.33 x P) for the
     # DiT's window and max(1.25, 0.2 x P) for a VAE pass; under cudaMallocAsync the pool's,
     # max(0.85, 0.24 x P) and max(1.25, 0.35 x P). The budget line says the three, in the
     # plan's own figures (Peaks.reserves); the "up to 1.5 times as long" line is gone.
@@ -1855,11 +1855,11 @@ def test_a_held_plan_says_the_reserve_of_each_step() -> None:
         assert predicted.record()["reserve"] == {
             phase: reserves[phase] for phase in ("encode", "dit", "decode")
         }
-    # A long window of a tall shot is over the DiT's floor: 0.3 x P (0.24 under the pool), P the
+    # A long window of a tall shot is over the DiT's floor: 0.33 x P (0.24 under the pool), P the
     # window's peak over the weights it keeps (peaks.dit_working); the segments' is capped at
-    # 4.5 GiB, from P of 15 GiB.
+    # 4.5 GiB, from P of 13.6 GiB.
     long = Pins(window=17, swap_blocks=0)
-    for allocator, share in ((memory.SEGMENTS, 0.3), (memory.POOL, 0.24)):
+    for allocator, share in ((memory.SEGMENTS, 0.33), (memory.POOL, 0.24)):
         reading = _segments_card(60, allocator)
         made, predicted = planner.plan(reading, HD, shots(17), long, None)
         working = peaks.dit_working(padded, 17)
@@ -2158,9 +2158,10 @@ def test_a_recorded_plan_with_the_tail_planned_again_keeps_it() -> None:
     # plan_again (a resume's shape that no longer fits, --accept-env-change) keeps what shapes the
     # output: the tail as recorded, whatever tiles are released.
     # (A window of 7 latents: the plan's own on this card, the DiT's phase fits and the decode
-    # is what refuses; a window of 19 was refused in the DiT's phase first.)
+    # is what refuses; a window of 19 was refused in the DiT's phase first. A card of 6.4 GiB:
+    # on 6.25, under the DiT's share of 0.33 of P, the window of 7 is refused there first.)
     recorded = Plan(7, Tiles(512), Tiles(768), tail_frames=True)
-    card = _segments_card(6.25)
+    card = _segments_card(6.4)
     with pytest.raises(PlanError) as refused:
         planner.plan(card, HD, shots(19), NO_PINS, None, recorded=recorded)
     assert refused.value.phase == "decode"
@@ -2169,7 +2170,7 @@ def test_a_recorded_plan_with_the_tail_planned_again_keeps_it() -> None:
     )
     assert made.tail_frames and made.decode_tiles != Tiles(768)
     # A recorded plan without it is planned again without it.
-    # (On a card of 9 GiB: a plain decode does not fit the 6.25 GiB card at all, only the tail
+    # (On a card of 9 GiB: a plain decode does not fit the 6.4 GiB card at all, only the tail
     # does, so that card would refuse the plain shape whatever is released.)
     plain = Plan(7, Tiles(512), Tiles(768))
     card = _segments_card(9.0)

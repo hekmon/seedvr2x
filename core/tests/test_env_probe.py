@@ -381,13 +381,13 @@ def test_the_margin_a_future_measure_wrote_is_kept_when_checks_are_added(
     assert stored["allocator_margin"] == 0.5
 
 
-@pytest.mark.parametrize(("margin", "over"), [(0.1, False), (0.3, False), (0.5, True)])
+@pytest.mark.parametrize(("margin", "over"), [(0.1, False), (0.33, False), (0.5, True)])
 def test_a_cached_margin_counts_in_the_plan_where_it_is_over_the_rules_share(
     stand_in_environment: dict[str, str], cache: Path, margin: float, over: bool
 ) -> None:
     # The reading side of the allocator's margin (the measurement is not built): the cache's
     # value rides on the reading (Reading.margin) and peaks.reserve counts the larger of it and
-    # the rule's share, here the segments' DiT share 0.3. Written into the cache by hand.
+    # the rule's share, here the segments' DiT share 0.33. Written into the cache by hand.
     from dataclasses import replace
 
     from seedvr2x import peaks
@@ -403,7 +403,7 @@ def test_a_cached_margin_counts_in_the_plan_where_it_is_over_the_rules_share(
     working = 10 * peaks.GIB
     rule = peaks.reserve(peaks.DIT_PHASE, working, held.allocator)
     taken = peaks.reserve(peaks.DIT_PHASE, working, counted.allocator, counted.margin)
-    assert rule == round(0.3 * working)
+    assert rule == round(0.33 * working)
     assert (taken > rule) is over and taken == max(rule, round(margin * working))
 
 

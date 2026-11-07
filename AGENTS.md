@@ -865,7 +865,7 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   carried by an app into `memory.Reading.margin`, which `peaks.reserve` counts where it is
   larger than the rule's share, under the segments and the pool; the nodes do it,
   `apps/comfyui/models.py`), held by `test_a_cached_margin_counts_in_the_plan_where_it_is_over_the_rules_share`
-  (under, equal to and over the 0.3 share) and, through the plans, by `test_peaks.py`,
+  (under, equal to and over the 0.33 share) and, through the plans, by `test_peaks.py`,
   `test_shot_plan.py`, `test_still_plan.py` and the nodes' `test_machine.py`.
 - A still picture (DESIGN.md, Still images), on the CPU, in `core/tests/`: `tests/test_picture.py`
   holds `seedvr2x/picture.py` to files it makes, bytes in: every format and mode read (PNG in
