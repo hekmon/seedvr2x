@@ -32,10 +32,9 @@ TESTS = Path(__file__).resolve().parent
 
 # main.serve on the stand-in machine of serving.py, as a process: the CPU models of the library's
 # tests, the driver asked nothing, and a pass that takes `argv[4]` seconds, announced as RUNNING on
-# stderr, for every picture after the warm-up's first (the old tests' habit; it sleeps in the
-# warm-up too); with `argv[6]` "cuda", the first request after the warm-up's two pictures fails
-# with a CUDA error instead. The server's log goes to stderr as
-# bare messages, `listening on http://HOST:PORT` among them.
+# stderr, for every request's picture, the warm-up's two (landscape and portrait) passing at once;
+# with `argv[6]` "cuda", the first request's picture fails with a CUDA error instead. The server's
+# log goes to stderr as bare messages, `listening on http://HOST:PORT` among them.
 DRIVER = r"""
 import logging
 import sys
@@ -65,12 +64,13 @@ calls = []
 
 def slow():
     calls.append(1)
+    # The warm-up's two pictures (landscape and portrait) pass at once: only a request's picture
+    # is slowed down, or fails.
     if sys.argv[6] == "cuda":
-        # The warm-up's two pictures (landscape and portrait) pass; the first request fails.
         if len(calls) > 2:
             print("RUNNING", file=sys.stderr, flush=True)
             raise RuntimeError("CUDA error: an illegal memory access was encountered")
-    elif len(calls) > 1:
+    elif len(calls) > 2:
         print("RUNNING", file=sys.stderr, flush=True)
         time.sleep(float(sys.argv[4]))
 
