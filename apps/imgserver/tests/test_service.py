@@ -1201,3 +1201,37 @@ def test_the_start_logs_nothing_of_smaller_files_for_the_smallest_format_or_a_pl
     lines, _ = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 24)
     assert any(each.startswith("plan: blocks swapped: none") for each in lines)
     assert not any("smaller DiT files" in each for each in lines)
+
+
+def test_the_starts_plan_lines_word_their_pointers_as_the_servers_own_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cpu_models: model.Models,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """still_plan.said gives the settings its lines point at (the DiT file, the swapped blocks,
+    the tiles, the debug lines) to the server's words, reservation.option: the server's own
+    --dit-model and --swap-blocks (apps/imgserver/main.py), no command-line option beyond them.
+    The library's own words leave the pointers out, so that these lines name them by the server's
+    say alone."""
+    lines, _ = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 12)
+    assert next(each for each in lines if each.startswith("plan: blocks swapped")).endswith(
+        "slower, not worse; --swap-blocks N"
+    )
+    caplog.clear()
+    lines, _ = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 24, dit_format=peaks.INT8)
+    assert next(each for each in lines if each.startswith("plan: DiT:")).endswith(
+        "int8's buffers until int8's own is measured; --dit-model names the file"
+    )
+    assert next(each for each in lines if each.startswith("plan: blocks swapped: none")).endswith(
+        "the DiT fitting whole on the GPU; --swap-blocks N swaps some"
+    )
+    caplog.clear()
+    lines, _ = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 24, dit_format=peaks.GGUF_7B)
+    assert next(each for each in lines if each.startswith("plan: DiT:")).endswith(
+        "for the dequantisation's buffers; --dit-model names the file"
+    )
+    # No option the server does not have (--window, --resolution: a video's and a picture's),
+    # and none of the tiles' pointers, a bound's plan having no target.
+    options_named = {word for each in lines for word in each.split() if word.startswith("--")}
+    assert options_named <= {"--dit-model", "--swap-blocks"}, options_named

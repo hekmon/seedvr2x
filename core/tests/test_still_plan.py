@@ -16,7 +16,7 @@ from dataclasses import replace
 from typing import Any
 
 import pytest
-from library_fixtures import cli_words
+from library_fixtures import cli_say, cli_words
 
 from seedvr2x import memory, peaks, still_plan
 from seedvr2x.errors import (
@@ -667,7 +667,7 @@ def test_the_gguf_dit_is_planned_by_its_own_blocks(gguf: Architecture) -> None:
     small = made(FOUR_K, card(8), dit_model=gguf)
     assert small.models.swapped == 9 and small.models.vae_in_dit is False
     # The plan says what the file is and what its buffers are counted as.
-    text = "\n".join(still_plan.said(made(FOUR_K, card(24), dit_model=gguf)))
+    text = "\n".join(still_plan.said(made(FOUR_K, card(24), dit_model=gguf), say=cli_say))
     assert (
         "DiT: its weights in seedvr2x's dynamic GGUF, 4.43 GiB, under a third of fp16's; a"
         f" window's memory counted as fp16's plus {peaks.GGUF_BUFFERS / GIB:.2f} GiB for the"
@@ -1157,7 +1157,7 @@ def test_said_with_a_target_gives_the_pictures_passes_and_their_peaks() -> None:
 
 def test_said_names_the_pins_and_the_formats() -> None:
     plan = made(FOUR_K, card(48), pins=Pins(decode_tile=1024, swap_blocks=12), dit_model=peaks.INT8)
-    text = "\n".join(still_plan.said(plan, (2160, 3840)))
+    text = "\n".join(still_plan.said(plan, (2160, 3840), say=cli_say))
     assert "pinned by --swap-blocks" in text and "pinned by --decode-tile" in text
     assert "DiT: its weights in int8" in text
     sdpa = "\n".join(still_plan.said(made(FOUR_K, card(48), attention=peaks.SDPA)))
@@ -1719,7 +1719,7 @@ def test_a_landscape_1080p_picture_pinned_untiled_is_taken_where_its_own_plan_is
     pinned = made(HD, TONIGHT, pins=Pins(0, 0), picture=LANDSCAPE_HD)
     assert still_plan.tiles(pinned, LANDSCAPE_HD) == chosen
     assert pinned.models == own.models
-    text = "\n".join(still_plan.said(pinned, LANDSCAPE_HD))
+    text = "\n".join(still_plan.said(pinned, LANDSCAPE_HD, say=cli_say))
     assert "encode: untiled, pinned by --encode-tile" in text
     assert "decode: untiled, pinned by --decode-tile" in text
     # The image server's bound, either orientation, takes the pin too since the decode's untiled
@@ -2093,3 +2093,29 @@ def test_a_measured_margin_over_the_rule_is_each_phases_room_in_a_picture_s_plan
         )
     plain = held(12.0, 0.5, memory.PLAIN)
     assert replace(made(HD, replace(plain, margin=0.6)), reading=plain) == made(HD, plain)
+
+
+def test_said_names_no_option_of_any_application_in_its_own_words() -> None:
+    # The lines point at the DiT file, the swapped blocks and the tiles by the application's
+    # `say` (errors.Setting), as a refusal's message does: the library's own words
+    # (plain) leave the pointers out, and an application's put them back where they were, so that
+    # the command line's lines are those of before. The image server words them by its own
+    # options (apps/imgserver/tests/test_service.py).
+    cases = (
+        (made(FOUR_K, card(48), pins=Pins(decode_tile=1024, swap_blocks=12)), (2160, 3840)),
+        (made(FOUR_K, card(24), dit_model=peaks.INT8), (270, 480)),
+        (made(FOUR_K, card(24), dit_model=peaks.GGUF_7B), None),
+        (made(EIGHT_K, card(24), 64 * GIB), (4320, 7680)),
+        (made(FOUR_K, card(48)), (270, 480)),
+    )
+    for plan, target in cases:
+        library = still_plan.said(plan, target)
+        worded = still_plan.said(plan, target, say=cli_say)
+        assert not any("--" in line for line in library), library
+        assert len(library) == len(worded)
+        pointers = [(a, b) for a, b in zip(library, worded, strict=True) if a != b]
+        assert pointers and all("--" in b and "--" not in a for a, b in pointers)
+    # The library's pins read as English, with the article.
+    pinned = made(FOUR_K, card(48), pins=Pins(decode_tile=1024, swap_blocks=12))
+    text = "\n".join(still_plan.said(pinned, (2160, 3840)))
+    assert "pinned by the swapped blocks" in text and "pinned by the decode tile" in text

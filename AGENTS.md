@@ -945,6 +945,12 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   judged by its own frame, `tiles` taking its target alone), the server's every picture in either
   orientation, unchanged without it. `tests/test_peaks.py`
   holds the colour correction's term by its frames, a video's `SLICE` unchanged.
+  `still_plan.said`'s lines point at the DiT file, the swapped blocks and the tiles by a `say`,
+  as a refusal's message does (default `errors.plain`: the pointers left out, no `--` in a line):
+  `tests/test_still_plan.py` holds the library's own words naming no option and the command
+  line's (`library_fixtures.cli_say`) equal to the lines of before; the CLI's `stills.py` gives
+  `planner.option`, the server's `service.py` `reservation.option` (its own `--dit-model` and
+  `--swap-blocks`: `tests/test_service.py`).
 - The command line's still path (`stills.py`, `main.py`'s branch by content): `tests/
   test_still_cli.py` holds `still.upscale` bit for bit to `shot_pass.py`'s pass over a shot of one
   frame, tiled and corrected, and under `-m gpu` on CUDA with the sharp 7B and the VAE from

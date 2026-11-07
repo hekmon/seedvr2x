@@ -345,7 +345,10 @@ class Service:
             options.model_dir is not None,
         )
         made = reservation.make(asked)
-        for line in still_plan.said(made.plan, smaller=reservation.smaller_line(asked, made)):
+        # The settings the lines point at are worded as the server's own options (its
+        # --dit-model and --swap-blocks; reservation.option), never the library's.
+        smaller = reservation.smaller_line(asked, made)
+        for line in still_plan.said(made.plan, smaller=smaller, say=reservation.option):
             logger.info("%s", line)
         self.made = made
         return made

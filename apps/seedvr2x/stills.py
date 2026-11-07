@@ -149,6 +149,7 @@ def run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
 def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     from fractions import Fraction
 
+    import planner
     from job import DEFAULT_RESOLUTION, default_smaller
     from seedvr2x import memory, picture, png, pull, still_plan, webp
     from seedvr2x.errors import JobError, Refusal
@@ -257,7 +258,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
         planned, reads.dit_model(dit), dit.name, model_dir=args.model_dir is not None
     )
     logger.info("plan: card: %s", torch.cuda.get_device_name(device))
-    for line in still_plan.said(plan, target, smaller):
+    for line in still_plan.said(plan, target, smaller, planner.option):
         logger.info("%s", line)
     if args.plan is not None:
         # No upscale, as a video's --plan: the models are not loaded, nothing is written.

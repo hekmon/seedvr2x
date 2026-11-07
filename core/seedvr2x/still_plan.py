@@ -49,6 +49,8 @@ from seedvr2x.errors import (
     PlanRefused,
     Say,
     Setting,
+    aside,
+    plain,
 )
 from seedvr2x.frames import MULTIPLE, output_size, padded_size, padding
 from seedvr2x.memory import Reading
@@ -1689,8 +1691,17 @@ def _planned(job: _Job) -> StillPlan:
 _ATTENTION_SAID = {peaks.FLASH_ATTN_2: "FlashAttention 2", peaks.SDPA: "PyTorch's SDPA"}
 
 
+def _the(say: Say, setting: Setting) -> str:
+    """`say`'s words for a setting after "pinned by": an application's as they are, the library's
+    own (`plain`, a noun phrase) with its article, "the encode tile"."""
+    return f"the {plain(setting)}" if say is plain else say(setting)
+
+
 def said(
-    plan: StillPlan, target: tuple[int, int] | None = None, smaller: str | None = None
+    plan: StillPlan,
+    target: tuple[int, int] | None = None,
+    smaller: str | None = None,
+    say: Say = plain,
 ) -> list[str]:
     """The plan as --plan prints it and a run logs it, a line per choice in plain words, each
     opening with what it says, "plan: memory: ...", as the planner's lines do (planner.said):
@@ -1699,8 +1710,11 @@ def said(
     phase with the DiT's peak, what of the DiT stays on the GPU in each VAE phase, the system
     memory; and with `target` (frames.target_size's), the picture's encode and decode, untiled or
     in tiles with the grid and the predicted peaks. `smaller`: the line of the smaller DiT files
-    that plan the picture better (stills.py), put after the blocks
-    swapped; None says none."""
+    that plan the picture better (stills.py), put after the blocks swapped; None says none. The
+    settings the lines point at (the DiT file, the swapped blocks, the tiles) are worded by `say`,
+    an application's words for them as a refusal's are (errors.Refusal.words): the command line's
+    and the image server's give their options; the library's own (`plain`) leaves the pointers
+    out, naming no option."""
     frame = _most(plan.bound, plan.picture)
     height, width = frame
     tokens = f"{peaks.tokens(frame, 1):,} tokens, one latent"
@@ -1726,32 +1740,34 @@ def said(
         lines.append(
             f"DiT: its weights in int8, {_gib(peaks.weights_bytes(peaks.INT8))} GiB, half of"
             f" fp16's; a window's memory counted as fp16's plus {_gib(peaks.INT8_BUFFERS)} GiB for"
-            " int8's buffers until int8's own is measured; --dit-model names the file"
+            " int8's buffers until int8's own is measured"
+            + aside(say, f"; {say(Setting('dit_model'))} names the file")
         )
     elif plan.dit_model in (peaks.GGUF_7B, peaks.GGUF_7B_SHARP):
         weights_gib = _gib(peaks.weights_bytes(plan.dit_model))
         lines.append(
             f"DiT: its weights in seedvr2x's dynamic GGUF, {weights_gib} GiB, under a third of"
             " fp16's; a window's memory counted as fp16's plus"
-            f" {_gib(peaks.GGUF_BUFFERS)} GiB for the dequantisation's buffers;"
-            " --dit-model names the file"
+            f" {_gib(peaks.GGUF_BUFFERS)} GiB for the dequantisation's buffers"
+            + aside(say, f"; {say(Setting('dit_model'))} names the file")
         )
     models = plan.models
     if plan.pins.swap_blocks is not None:
-        why = "pinned by --swap-blocks"
+        why = f"pinned by {_the(say, Setting('swap_blocks'))}"
     elif not models.swapped:
         why = "the DiT fitting whole on the GPU"
     elif models.vae_in_dit:
         why = "more than the DiT needs: the VAE stays on the GPU, which spares system memory"
     else:
         why = "the fewest that hold the DiT"
+    swap_some = say(Setting("swap_blocks", "N"))
     if models.swapped:
         lines.append(
             f"blocks swapped: {models.swapped} of the DiT's {peaks.BLOCKS}, {why}: slower, not"
-            " worse; --swap-blocks N"
+            f" worse{aside(say, f'; {swap_some}')}"
         )
     else:
-        lines.append(f"blocks swapped: none, {why}; --swap-blocks N swaps some")
+        lines.append(f"blocks swapped: none, {why}{aside(say, f'; {swap_some} swaps some')}")
     if smaller is not None:
         lines.append(smaller)
     if models.vae_in_dit:
@@ -1809,7 +1825,7 @@ def said(
             ("encode", found.encode, found.encode_peak, plan.pins.encode_tile),
             ("decode", found.decode, found.decode_peak, plan.pins.decode_tile),
         ):
-            lines.append(_pass_said(phase, chosen, peak, pin, padded, plan))
+            lines.append(_pass_said(phase, chosen, peak, pin, padded, plan, say))
         if plan.reading.allocator == memory.PLAIN:
             lines.append(
                 "the VAE's room: what each VAE pass leaves free, for the large pieces of memory a"
@@ -1888,12 +1904,14 @@ def _pass_said(
     pin: int | None,
     padded: tuple[int, int],
     plan: StillPlan,
+    say: Say,
 ) -> str:
     """The plan's line of a picture's VAE pass (said): untiled, or its tiles, their overlap and
     grid; why: pinned, the whole frame fitting, or the largest tiles that fit under the plan's
-    placement (the planner's _vae_pass_said); the predicted peak; --encode-tile or
-    --decode-tile."""
-    option = f"--{phase}-tile"
+    placement (the planner's _vae_pass_said); the predicted peak; the phase's tile setting
+    (`say`'s words for it, none in the library's own)."""
+    option = _the(say, Setting(f"{phase}_tile"))
+    pointer = say(Setting(f"{phase}_tile", "PX"))
     if pin is not None:
         why = f"pinned by {option}" if chosen is not None or pin == 0 else "the pin covering it"
     elif chosen is None:
@@ -1916,11 +1934,11 @@ def _pass_said(
             f" {_gib(plan.budget - peak - room)} GiB under the budget"
         )
     if chosen is None:
-        return f"{phase}: untiled, {why}; {peak_said}; {option} PX tiles it"
+        return f"{phase}: untiled, {why}; {peak_said}{aside(say, f'; {pointer} tiles it')}"
     rows, columns = peaks.grid_shapes(padded, chosen)
     return (
         f"{phase}: tiles of {chosen.size} px overlapping by {chosen.overlap}, {columns} across,"
-        f" {rows} down, {why}; {peak_said}; {option} PX"
+        f" {rows} down, {why}; {peak_said}{aside(say, f'; {pointer}')}"
     )
 
 

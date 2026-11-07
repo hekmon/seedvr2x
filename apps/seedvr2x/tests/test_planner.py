@@ -1066,7 +1066,8 @@ def test_a_gguf_dit_plans_by_its_own_figures() -> None:
             )
             # The same as the picture's plan says it.
             assert said_line(said, "DiT").removeprefix("plan: ") in [
-                line.removeprefix("plan: ") for line in still_plan.said(still_for(dit_model))
+                line.removeprefix("plan: ")
+                for line in still_plan.said(still_for(dit_model), say=planner.option)
             ]
     # A record from before the GGUF, with no format, is fp16's.
     assert planner.recorded_dit_model({"attention": "sdpa"}) == peaks.FP16
