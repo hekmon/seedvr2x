@@ -303,11 +303,30 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
 
 ## Tests
 
-- `pytest` (as in [Checks](#checks)) runs on the CPU and needs no model. The four projects took
-  42 minutes on 2026-11-05 on a desktop, nothing else running: the library 7, the CLI 28, the
-  image server 5, the nodes 1. While working, run the test files of what changed; the whole
-  suite once at the end. Tests that need ffmpeg skip without a build seedvr2x accepts (see
+- `pytest` (as in [Checks](#checks)) runs on the CPU and needs no model. The four projects run at
+  once, each in its own process, basetemp and log, with a quarter of the machine's threads
+  (`OMP_NUM_THREADS`), and started with SIGINT at its default (a shell's background job has it
+  ignored, which `tests/test_stop.py`'s `test_terminable` reads): 28 minutes on 2026-11-07 on a
+  desktop of 32 threads, nothing else running, the CLI's minutes the wall: the library 5.5, the CLI
+  28.4, the image server 2.4, the nodes 0.8 (62 minutes the same day before, the projects one after
+  another, the stand-in VAE at its shipped widths, ffmpeg's listings asked by every run). While
+  building, run only the test files of the code just written, with ruff and pyright of the project
+  touched; the whole suite once at the end. A failure there is fixed in its patch and only its files
+  run again, never a second suite; a patch re-cut on a moved main runs the files its conflicts
+  touched. Tests that need ffmpeg skip without a build seedvr2x accepts (see
   [Environment](#environment)).
+- The stand-in VAE of the CPU tests, `cpu_models` (`core/tests/stand_ins.py`), is the shipped one
+  narrowed to 32, 32, 64 and 64 channels a block (`NARROW`: two widths, so that its resnets'
+  shortcuts are built, the decoder's tail's among them; the library reads no channel count of
+  the VAE), about nine times faster a pass; `shipped_cpu_models`, at the shipped widths, runs
+  one case of `tests/test_clip_cli.py` and one of `tests/test_still_cli.py`, and
+  `tests/test_tiling.py`'s `real` its own. In the CLI's tests, ffmpeg's listings
+  (`media/ffmpeg.py`'s check) and the conversions' fingerprint are asked once per build
+  (`tests/conftest.py`: the program PATH finds, by its path, inode, size, times and, under a
+  mebibyte, its bytes, its loader's environment, the options or the conversions): a fake build
+  is asked again only when its own bytes change, not files it prints from. They are asked every
+  time in `tests/test_ffmpeg_check.py`, `test_fingerprint.py` and `test_ends_with_us.py`
+  (`MEMO_OFF`), whose subject they are, and in any process of its own.
 - `pytest -m gpu` runs the tests that need CUDA, never selected by default; run it in each
   directory.
 - **Where a test file sits.** `tests/test_x.py` is in the directory of the package it tests:
