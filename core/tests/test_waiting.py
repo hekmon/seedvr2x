@@ -2,9 +2,10 @@
 on the CPU: the line said once past four times the unit's estimate and never under it, the floor,
 the waits that say nothing (no estimate, no unit, a wait that ends in time), NVML's reading in
 the line, the stacks with the process's first line alone, a stop or an error answered through the
-wait and recorded, the running waits read from another thread, the unit per thread, torch's flags
-read without a CUDA call, and the module importing no torch. Time is a fake clock whose sleep
-advances it: nothing sleeps."""
+wait and recorded, the running waits read from another thread, the unit per thread, an app's check
+called at each poll of its thread's waits and ending one by what it raises, a wait past its bound
+that an exception ended abandoned until one completes, torch's flags read without a CUDA call, and
+the module importing no torch. Time is a fake clock whose sleep advances it: nothing sleeps."""
 
 import logging
 import os
@@ -79,11 +80,14 @@ def world(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> 
     monkeypatch.setattr(memory, "activity", activity)
     monkeypatch.setattr(waiting, "_stacks", stacks)
     monkeypatch.setattr(waiting, "_ended", None)
+    monkeypatch.setattr(waiting, "_abandoned", set())
     monkeypatch.setattr(waiting, "_stacks_written", False)
     monkeypatch.setattr(waiting, "_running", {})
     waiting.clear()
+    waiting.check(None)
     yield state
     waiting.clear()
+    waiting.check(None)
 
 
 def warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -366,6 +370,106 @@ def test_named_gives_back_the_unit_before(world: World, caplog: pytest.LogCaptur
     assert not caplog.records
 
 
+class Cancel(BaseException):
+    """An app's cancel, as the check raises one."""
+
+
+def test_the_check_is_called_at_each_poll_after_the_sleep_and_a_wait_done_at_once_never_calls_it(
+    world: World,
+) -> None:
+    fake, calls = world.clock, []
+    waiting.check(lambda: calls.append(fake.now))
+    waiting.wait(fake.until(0.0), 1.0)
+    assert calls == []
+    waiting.wait(fake.until(3.0), 1.0)
+    assert calls == [1.0, 2.0, 3.0]
+
+
+def test_what_the_check_raises_ends_the_wait_recorded_past_its_bound_or_not(world: World) -> None:
+    fake = world.clock
+
+    def hook() -> None:
+        if fake.now >= 50.0:
+            raise Cancel
+
+    waiting.check(hook)
+    waiting.unit(UNIT, 30.0)  # bound 120 s: the cancel comes under it
+    with pytest.raises(Cancel):
+        waiting.wait(lambda: False, 10.0)
+    ended = waiting.ended()
+    assert ended is not None and ended.unit == UNIT and ended.seconds == 50.0
+    assert ended.kind is Cancel
+    assert not waiting.abandoned(), "under its bound: a cancel of a slow wait, not a stall"
+    assert waiting.longest() is None
+
+
+def test_a_wait_past_its_bound_that_the_check_ended_is_abandoned_until_a_release_completes(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake = world.clock
+
+    def hook() -> None:
+        if fake.now >= 200.0:
+            raise Cancel
+
+    waiting.check(hook)
+    waiting.unit(UNIT, 30.0)
+    with pytest.raises(Cancel):
+        waiting.wait(lambda: False, 10.0)
+    assert len(warnings(caplog)) == 1, "the line was said at 130 s"
+    assert waiting.abandoned()
+    # A wait that completes no longer clears it; a release of the card whose waits all completed
+    # does.
+    waiting.check(None)
+    fake.now = 0.0
+    waiting.wait(fake.until(5.0), 1.0)
+    assert waiting.abandoned()
+    with waiting.releasing():
+        fake.now = 0.0
+        waiting.wait(fake.until(5.0), 1.0)
+    assert not waiting.abandoned()
+
+
+def test_an_error_from_the_query_past_the_bound_abandons_it_too(world: World) -> None:
+    fake = world.clock
+
+    def done() -> bool:
+        if fake.now >= 200.0:
+            raise RuntimeError("CUDA error")
+        return False
+
+    waiting.unit(UNIT, 30.0)
+    with pytest.raises(RuntimeError):
+        waiting.wait(done, 10.0)
+    assert waiting.abandoned()
+
+
+def test_the_check_is_the_calling_threads_and_checking_gives_the_one_before_back(
+    world: World,
+) -> None:
+    fake, outer, inner = world.clock, [], []
+    seen: list[BaseException] = []
+    waiting.check(lambda: outer.append(1))
+
+    def run() -> None:
+        try:
+            waiting.wait(fake.until(3.0), 1.0)
+        except BaseException as error:
+            seen.append(error)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(5.0)
+    assert not seen and outer == [], "another thread's waits call the check of their own"
+    fake.now = 0.0
+    with waiting.checking(lambda: inner.append(1)):
+        waiting.wait(fake.until(2.0), 1.0)
+    assert inner == [1, 1] and outer == []
+    fake.now = 0.0
+    waiting.wait(fake.until(2.0), 1.0)
+    assert outer == [1, 1]
+
+
 def test_cuda_is_used_where_torch_initialised_it(monkeypatch: pytest.MonkeyPatch) -> None:
     # This environment has no GPU (CUDA_VISIBLE_DEVICES is empty): torch's flag is false.
     assert not torch.cuda.is_initialized() and not waiting.cuda_used()
@@ -453,3 +557,96 @@ def test_a_line_that_fails_never_ends_the_wait(
     calls = iter([False] * 30 + [True])
     waiting.wait(lambda: next(calls), 10.0)
     assert any("can't be said" in r.message for r in caplog.records)
+
+
+# ---- Abandoned per card, and by a release --------------------------------------------------------
+
+
+def stall(world: World, index: int) -> None:
+    """A wait on card `index` past its bound that a check ends."""
+    fake = world.clock
+    fake.now = 0.0
+
+    def hook() -> None:
+        if fake.now >= 200.0:
+            raise Cancel
+
+    waiting.check(hook)
+    waiting.unit(UNIT, 30.0)
+    with pytest.raises(Cancel):
+        waiting.wait(lambda: False, 10.0, index)
+    waiting.check(None)
+    waiting.clear()
+
+
+def test_the_mark_is_per_card_and_a_release_clears_its_own_card_only(world: World) -> None:
+    stall(world, 1)
+    assert waiting.abandoned(1) and not waiting.abandoned(0) and not waiting.abandoned()
+    stall(world, 0)
+    assert waiting.abandoned(0)
+    with waiting.releasing(0):
+        world.clock.now = 0.0
+        waiting.wait(world.clock.until(5.0), 1.0, 0)
+    assert not waiting.abandoned(0) and waiting.abandoned(1), "the other card is untouched"
+    with waiting.releasing(1):
+        pass
+    assert not waiting.abandoned(1)
+
+
+def test_a_wait_ended_inside_a_release_marks_the_card_with_no_unit_and_under_any_bound(
+    world: World,
+) -> None:
+    fake = world.clock
+
+    def hook() -> None:
+        if fake.now >= 20.0:
+            raise Cancel
+
+    waiting.check(hook)
+    assert getattr(waiting._named, "unit", None) is None  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(Cancel):
+        with waiting.releasing(2):
+            waiting.wait(lambda: False, 10.0, 0)
+    assert waiting.abandoned(2), "the release's card"
+    assert not waiting.abandoned(0), "a wait outside its bound marks nothing of its own"
+    # Outside a release the same wait marks nothing.
+    fake.now = 0.0
+    with pytest.raises(Cancel):
+        waiting.wait(lambda: False, 10.0, 3)
+    assert not waiting.abandoned(3)
+
+
+def test_a_completed_wait_clears_nothing_and_a_release_that_raised_does_not_clear(
+    world: World,
+) -> None:
+    stall(world, 0)
+    world.clock.now = 0.0
+    waiting.wait(world.clock.until(5.0), 1.0)
+    assert waiting.abandoned()
+    with pytest.raises(ValueError):
+        with waiting.releasing(0):
+            raise ValueError("not a wait")
+    assert waiting.abandoned()
+    with waiting.releasing(0):
+        pass
+    assert not waiting.abandoned()
+
+
+def test_a_wait_that_raised_and_was_caught_in_a_release_keeps_the_mark(world: World) -> None:
+    fake = world.clock
+    stall(world, 0)
+    fake.now = 0.0
+    with waiting.releasing(0):
+        waiting.check(lambda: (_ for _ in ()).throw(Cancel()))
+        try:
+            waiting.wait(lambda: False, 10.0)
+        except Cancel:
+            pass
+        waiting.check(None)
+        fake.now = 0.0
+        waiting.wait(fake.until(5.0), 1.0)
+    assert waiting.abandoned(0), "the block ended cleanly, but one of its waits did not complete"
+    with waiting.releasing(0):
+        fake.now = 0.0
+        waiting.wait(fake.until(5.0), 1.0)
+    assert not waiting.abandoned(0)

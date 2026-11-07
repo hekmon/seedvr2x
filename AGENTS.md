@@ -48,7 +48,8 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
     frames.py passes.py peaks.py files.py clock.py errors.py     what the bricks share (errors.py:
                          a refusal's message worded by each app, and the plan's refusals by kind)
     waiting.py           a wait on the GPU, polled and timed: said once past 4 times its unit's
-                         estimate, the unit and its estimate named by each app
+                         estimate, the unit and its estimate named by each app, and an app's
+                         check called at each poll, which may end the wait
     vendor/              model layer, vendored from numz (below)
     transnetv2/          the shot detector's model, vendored from TransNetV2 (below)
   tests/                 the library's, with library_fixtures.py, stand_ins.py and conftest.py
@@ -98,7 +99,9 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
   progress.py            what the nodes show while they run: the upscale's bar as its expected
                          time, the text on the node (the plan, where the run is, the time), the
                          previews, the download and the reading of the files on one bar, the Cuts
-                         node's scan; on the library's callbacks, which only observe
+                         node's scan; on the library's callbacks, which only observe; a thread
+                         for the text alone (the time each second between events); the units
+                         named for the library's waits on the GPU, ComfyUI's Cancel their check
   words.py               the nodes' words for each refusal, with the way out in ComfyUI's terms
   workflows/ README.md   the two example workflows (picture.json, clip.json: ComfyUI's UI format,
                          Models wired in), and the nodes' README, for users
@@ -735,23 +738,29 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   the main thread in Python's sleep and in C calls (libc's `usleep`, mode `c-call`): the main
   thread's stack with the step's frame and the other threads', the run ending 0 with every
   segment. SIGUSR1 goes to seedvr2x alone there, never its process group: ffmpeg ends on it.
-- A wait on the GPU (`seedvr2x/waiting.py`; DESIGN.md, Allocator, the hang of 2026-11-06), the
-  poll `model.synchronize` and `blockswap.Cuda.wait` go through: `core/tests/test_waiting.py`
-  holds it on a fake clock whose sleep advances it, nothing sleeping: the line once past 4 times
-  its unit's estimate and never under it, the floor of 60 s, nothing said without a unit or an
-  estimate, NVML's reading or its absence in the line, the stacks with the process's first such
-  line only (and the real `faulthandler` dump to a file), the end of a wait said once it was, a
-  stop raised inside the poll (an exception, a real signal's handler) propagating with the wait
-  recorded (`ended`, `ended_by`: by the exception's identity, the exception itself not kept, its
-  frames with it), a line that fails (a replaced NVML reading that raises, as a research
-  script's did on the GPU) said at debug and the wait going on, the waits running seen from
-  another thread
-  (`longest`, `stalled`), units per thread, `cuda_used` and `cuda_failed`, and its import making
-  no torch; `tests/test_memory.py` NVML's activity (`memory.activity`) on its stand-in. The CLI
-  names each unit in `run._begin` with the calibration's estimate; the image server each step of
-  a picture inside its model's lock, the warm-up's longest time of that step its estimate:
-  `tests/test_service.py` the estimates and the units named, `tests/test_web.py` /health's
-  `stalled` (503, a ready server only, ready again after) and the gauge of the longest wait,
+- A wait on the GPU (`seedvr2x/waiting.py`; DESIGN.md, Allocator, the hang of 2026-11-06), the poll
+  `model.synchronize` and `blockswap.Cuda.wait` go through: `core/tests/test_waiting.py` holds it on
+  a fake clock whose sleep advances it, nothing sleeping: the line once past 4 times its unit's
+  estimate and never under it, the floor of 60 s, nothing said without a unit or an estimate, NVML's
+  reading or its absence in the line, the stacks with the process's first such line only (and the
+  real `faulthandler` dump to a file), the end of a wait said once it was, a stop raised inside the
+  poll (an exception, a real signal's handler) propagating with the wait recorded (`ended`,
+  `ended_by`: by the exception's identity, the exception itself not kept, its frames with it), a
+  line that fails (a replaced NVML reading that raises, as a research script's did on the GPU) said
+  at debug and the wait going on, the waits running seen from another thread (`longest`, `stalled`),
+  units per thread, an app's check (`check`, `checking`: a callable the poll calls after each sleep,
+  the calling thread's alone, that may raise and so end the wait; the nodes set ComfyUI's Cancel)
+  called at each poll and never by a wait done at once, a wait past its bound that an exception
+  ended, or a wait inside a release (`releasing`) that one ended whatever its bound and with no
+  unit, abandoned per card (`abandoned(index)`, CUDA's numbering; cleared only by a release of that
+  card whose waits all completed, never by another wait or card); `Models.release` sends nothing
+  back while its own card's mark holds (`core/tests/test_held.py`,
+  `apps/comfyui/tests/test_release.py`), `cuda_used` and `cuda_failed`, and its import making no
+  torch; `tests/test_memory.py` NVML's activity (`memory.activity`) on its stand-in. The CLI names
+  each unit in `run._begin` with the calibration's estimate; the image server each step of a picture
+  inside its model's lock, the warm-up's longest time of that step its estimate:
+  `tests/test_service.py` the estimates and the units named, `tests/test_web.py` /health's `stalled`
+  (503, a ready server only, ready again after) and the gauge of the longest wait,
   `tests/test_metrics.py` its family.
 - The one clock (`seedvr2x/clock.py`): `tests/test_clock.py` holds it on fake monotonic and wall
   readers, nothing sleeping (`Readers`, `Pace`): the ratio of the wall to the run's clock before and
@@ -1089,8 +1098,10 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   kind's cost the card's figure until its first unit is made, then the run's own, the rest spread
   again over what remains, monotone, full at the last unit only, an untiled decode moving it by
   its frames written), the text of each form ("Shot 2 of 4 (frames 121 to 240): encoding, tile 3
-  of 6", "Shot 2 of 4, run 3 of 4 (frames 121 to 240): upscaling, window 2 of 3", "Frames 1 to
-  480, run 2 of 2: ...", a clip of one shot, "Picture 3 of 8: decoding, tile 2 of 4", "Picture:
+  of 6", "Shot 2 of 4, run 3 of 4 (frames 123 to 240): upscaling, window 2 of 3" (a later run
+  names its own frames from its first and counts its decode in them, "decoding, 60 of 118
+  frames"), "Frames 3 to 480, run 2 of 2: ...", a clip of one shot, "Picture 3 of 8: decoding, tile
+  2 of 4", "Picture:
   decoding", the time so far and "about ... left" only once a window is measured, the plan and
   "480 frames in 4 min 32 s" at the end, the box replaced and not appended to), the previews (one
   a decode slice or a picture, the newest frame, ComfyUI's preview size, a smaller frame at its
@@ -1101,8 +1112,29 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   each VAE pass: the bits the library's, the bar, text and previews through the tiles (at
   maximum too, each preview a frame the output then holds, the slice's newest that its run keeps),
   Cancel after a tile freeing the card, the load told on a bar of its own before the upscale's
-  (Cancel between runs is `test_release.py`'s, on the run's text); `tests/test_cuts_node.py` seedvr2x Cuts over the untrained
-  detector's weights and scripted probabilities (the cut list and the text of the cuts and the
+  (Cancel between runs is `test_release.py`'s, on the run's text); the time said between events
+  (`Progress.running`, `Ticker`: a daemon thread, joined at the end with no time cap (it ends at
+  once at the stop, its sends never block), on Cancel and on an error,
+  its pause cued by the test and its clock the progress's own: the text the events' own with the
+  time moved on, nothing before the first event or after the end, the bar never touched, no
+  thread alive after a run that ended, was cancelled or failed, a text that can't be sent ending
+  the thread and not the run; `conftest.py`'s autouse `no_ticks` keeps it from ticking in the
+  other tests, whose runs are slower than its second); `tests/test_stall.py` a wait on the GPU
+  that lasts, on the nodes (an event that never completes, `waiting.wait(lambda: False, ...)` on a
+  fake wait clock):
+  each event naming the next unit with its estimate once a unit of its kind is measured and none
+  before, the text and ComfyUI's console saying a wait past its bound with the way out (restart
+  ComfyUI) and the text normal again when it ends, Cancel leaving it at a poll, torch's cache not
+  emptied and models not kept held rather than dropped after it (Unload models too), `running`
+  giving the check and the unit back, and every later run refused at its start, nothing read or
+  placed, until ComfyUI restarts; the release after a run an exception ended (Cancel or an error)
+  run inside ComfyUI's interrupt as the check, the node's text `progress.FREEING` meanwhile, a
+  second Cancel leaving it with the card marked whatever the bound, torch's cache not emptied and
+  the next run refused, `progress.STOPPED` after it, models not kept waiting for the device in the
+  poll first (`model.synchronize`) under the same text and second Cancel, a healthy release putting
+  the text back (none said before: cleared) and marking nothing, and one after a normal end with no
+  check and no text; `tests/test_cuts_node.py` seedvr2x Cuts over the untrained detector's
+  weights and scripted probabilities (the cut list and the text of the cuts and the
   possible cuts, one shot mode running no detector, the threshold, the file found in a folder or
   fetched by its pin, the detector closed after, the alpha left out, its refusals, its list into
   Upscale Video, its file's refusals naming seedvr2x Cuts and its own model folder, sizes with

@@ -18,7 +18,7 @@ from standins import GIB, PICTURE, RESOLUTION, StandIn, handle, upscale_image, u
 from test_blockswap import Sim
 from test_held import Card, Files, strays
 
-from seedvr2x import model
+from seedvr2x import model, waiting
 from seedvr2x.memory import Reading
 from seedvr2x.passes import HELD, ModelPlan
 from seedvr2x.pull import ModelFiles
@@ -105,7 +105,7 @@ def test_cancel_between_a_clips_runs_frees_the_card_and_makes_no_run_after(
 
     monkeypatch.setattr(model, "sample", counting)
 
-    # The node's text as the second run starts ("Frames 1 to 33, run 2 of 4: encoding"), said
+    # The node's text as the second run starts ("Frames 2 to 33, run 2 of 4: encoding"), said
     # before the bar is moved for it: Cancel as that update is made.
     def hook(value: float) -> None:
         instance = server.PromptServer.instance
@@ -202,6 +202,56 @@ def test_nothing_of_the_models_is_left_on_the_card_after_a_run(
     with models.session(h, None, toy_planner) as run:  # type: ignore[arg-type]
         run.models.enter("dit")
     assert strays(held, toy.card) == []
+
+
+def test_nothing_waits_on_the_card_to_give_the_models_back_after_an_abandoned_wait(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A wait on the GPU past its bound that Cancel ended (waiting.abandoned): the real
+    Models.release sends nothing back (every step of it waits on the device) and torch's cache is
+    not emptied, and the next run is refused at its start with nothing read, placed or waited on
+    (a card that stopped answering is for restarting ComfyUI)."""
+    toy = ToyMachine(machine.vae_models)
+    toy.toy = Files(tmp_path, Sim("random-1"), monkeypatch)
+    toy.card = Card(monkeypatch)
+    models.use(toy)
+    h = handle(tmp_path)
+    sent: list[str] = []
+    send_back = model.Models._send_back  # pyright: ignore[reportPrivateUsage]
+
+    def spy(self: model.Models) -> None:
+        sent.append("back")
+        send_back(self)
+
+    monkeypatch.setattr(model.Models, "_send_back", spy)
+    monkeypatch.setattr(waiting, "_abandoned", set())
+    held: model.Models | None = None
+    emptied = 0
+    with pytest.raises(management.InterruptProcessingException):
+        with models.session(h, None, toy_planner) as run:  # type: ignore[arg-type]
+            held = run.models
+            held.enter("dit")
+            held.enter("decode")
+            sent.clear()
+            emptied = len(management.empties)
+            monkeypatch.setattr(waiting, "_abandoned", {0})
+            raise management.InterruptProcessingException()
+    assert held is not None
+    assert sent == [] and len(management.empties) == emptied
+    assert "not sent back to their pinned copies" in caplog.text
+    assert strays(held, toy.card), "left as they were: the card's buffers are still there"
+    assert held.phase is None and held.model_plan is None
+    with pytest.raises(RuntimeError, match="released"):
+        held.enter("encode")
+    entry = models.kept(h)
+    assert entry is not None and not entry.busy
+    # The next run is refused before the card is read or the models are placed.
+    reads = len(management.empties)
+    with pytest.raises(words.Refused, match="restart ComfyUI"):
+        with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+            pytest.fail("a run went on")
+    assert sent == [] and len(management.empties) == reads == emptied
+    assert toy.loads == [HELD], "nothing was loaded again either"
 
 
 def test_models_not_kept_are_gone_while_the_exception_that_ended_the_run_is_held(

@@ -228,15 +228,29 @@ def _show(text: str, node: str | None) -> None:
         instance.send_progress_text(text, node)
 
 
-def _say(text: str, node: str | None) -> None:
-    """The plan on the node and in ComfyUI's console, at INFO."""
+def _say(text: str, show: Callable[[str], None]) -> None:
+    """The plan on the node, through its `show` (so that it is the text a Shower keeps), and in
+    ComfyUI's console, at INFO."""
     logger.info("%s", text)
-    _show(text, node)
+    show(text)
+
+
+class Shower:
+    """What puts a progress text on the node `node` (_show), and keeps the last one (`last`), so
+    that a text said for a moment (models._freeing) can be replaced by the one before it."""
+
+    def __init__(self, node: str | None) -> None:
+        self.node = node
+        self.last: str | None = None
+
+    def __call__(self, text: str) -> None:
+        self.last = text
+        _show(text, self.node)
 
 
 def _shower(node: str | None) -> Callable[[str], None]:
-    """What puts a progress text on the node `node` (_show)."""
-    return lambda text: _show(text, node)
+    """What puts a progress text on the node `node` (Shower)."""
+    return Shower(node)
 
 
 def _node_id(node: type[io.ComfyNode]) -> str | None:
@@ -575,7 +589,7 @@ class UpscaleImage(io.ComfyNode):
                 notes=run.notes,
                 held=run.held,
             )
-            _say(text, _node_id(cls))
+            _say(text, show)
             if plan_only:
                 return _plan_only(text)
             # The bar over the batch's expected time (progress.Progress), the text and a preview
@@ -591,15 +605,18 @@ class UpscaleImage(io.ComfyNode):
             # the pictures stacked after would hold them twice (the plan counts it once,
             # picture_process).
             outputs = np.empty((count, out_height, out_width, 3), dtype=np.float32)
-            try:
-                for index in range(count):
-                    moving.begin(index)
-                    outputs[index] = cls._one(
-                        run.models, batch[index], target, settings, tiles, moving
-                    )
-            except still.NonFinite as error:
-                raise words.non_finite(str(error)) from error
-            moving.finish(f"{count} picture{'s' if count > 1 else ''}")
+            # The time said each second, Cancel the waits' check and the units named for them
+            # (progress.Progress.running), stopped however the run ends.
+            with moving.running():
+                try:
+                    for index in range(count):
+                        moving.begin(index)
+                        outputs[index] = cls._one(
+                            run.models, batch[index], target, settings, tiles, moving
+                        )
+                except still.NonFinite as error:
+                    raise words.non_finite(str(error)) from error
+                moving.finish(f"{count} picture{'s' if count > 1 else ''}")
         logger.info("seedvr2x: %d picture(s) upscaled in %.1f s", count, time.monotonic() - started)
         return io.NodeOutput(_output(outputs), text)
 
@@ -827,7 +844,7 @@ class UpscaleVideo(io.ComfyNode):
                 held=run.held,
                 quality=quality,
             )
-            _say(text, _node_id(cls))
+            _say(text, show)
             if plan_only:
                 return _plan_only(text)
             moving = progress.Progress(
@@ -848,20 +865,23 @@ class UpscaleVideo(io.ComfyNode):
             # counts it once, clip.output_bytes), the shots one after the other: the windows of a
             # shot never reach another's frames.
             out = np.empty((count, out_height, out_width, 3), dtype=np.float32)
-            for number, each in enumerate(shot_list, 1):
-                if len(shot_list) > 1:
-                    logger.info(
-                        "seedvr2x: shot %d of %d, frames %d to %d",
-                        number,
-                        len(shot_list),
-                        each.start,
-                        each.end - 1,
+            # The time said each second, Cancel the waits' check and the units named for them
+            # (progress.Progress.running), stopped however the run ends.
+            with moving.running():
+                for number, each in enumerate(shot_list, 1):
+                    if len(shot_list) > 1:
+                        logger.info(
+                            "seedvr2x: shot %d of %d, frames %d to %d",
+                            number,
+                            len(shot_list),
+                            each.start,
+                            each.end - 1,
+                        )
+                    cls._shot(
+                        *(run.models, clip_frames, each, target, settings, made, moving, out),
+                        *(quality, number),
                     )
-                cls._shot(
-                    *(run.models, clip_frames, each, target, settings, made, moving, out),
-                    *(quality, number),
-                )
-            moving.finish(f"{count} frame{'s' if count > 1 else ''}")
+                moving.finish(f"{count} frame{'s' if count > 1 else ''}")
         logger.info("seedvr2x: %d frame(s) upscaled in %.1f s", count, time.monotonic() - started)
         return io.NodeOutput(_output(out), text)
 
@@ -1042,7 +1062,7 @@ class Cuts(io.ComfyNode):
             cut_list = tuple(
                 Shot(start, end) for start, end in zip(starts, [*starts[1:], count], strict=True)
             )
-        _say(text, _node_id(cls))
+        _say(text, _shower(_node_id(cls)))
         return io.NodeOutput(cut_list, text)
 
     @staticmethod

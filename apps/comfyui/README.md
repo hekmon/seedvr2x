@@ -108,11 +108,23 @@ The node shows how far it has got, in what ComfyUI gives a node:
   a unit of one kind (an encode tile, a window, a decode tile) it uses your computer's own speed
   for that kind and spreads the rest of the bar over what is left; it never goes back.
 - **The text on the node** is the plan, then where the run is ("Shot 2 of 4 (frames 121 to 240):
-  upscaling, window 2 of 3", and at enhanced or maximum "Shot 2 of 4, run 3 of 4 (frames 121 to
+  upscaling, window 2 of 3", and at enhanced or maximum "Shot 2 of 4, run 3 of 4 (frames 123 to
   240): upscaling, window 2 of 3"; "Picture 3 of 8: decoding, tile 2 of 4"), then the time so
-  far and, once the first window is done, about how long is left. It updates when a tile, a window or a
-  few frames are done, not between: a long window leaves it unchanged until it is done. At the end
-  it shows the plan and "480 frames in 4 min 32 s".
+  far and, once the first window is done, about how long is left. At enhanced and maximum a run
+  that starts later in the shot names its own frames ("run 3 of 4 (frames 123 to 240)", and its
+  decode counts them: "decoding, 60 of 118 frames"). The place changes when a tile, a window or a
+  few frames are done, and the time moves each second between them, so a long window's text does
+  not stand still. At the end it shows the plan and "480 frames in 4 min 32 s".
+- **A wait that lasts.** Once the node has made one unit of a kind, it knows how long the next
+  should take. If the card has not answered for more than four times that (and at least a
+  minute), the text says so with how long it has waited, and ComfyUI's console says it with the
+  card's reading. The wait is not given up on its own: a slow card (shared with a game) answers
+  in the end, and the text goes back to normal. Cancel leaves the wait. If the card has stopped
+  answering, though, the work queued on it can't be undone inside ComfyUI: restart ComfyUI. A
+  run left that way gives nothing back to the card on its way out, as that would wait on it
+  again, and the next run is refused at its start, naming the restart, until ComfyUI is restarted.
+  After a Cancel or an error the node's text says "freeing the card" while the models are given
+  back: on a card that answers it ends in a moment, and pressing Cancel again leaves it.
 - **The preview** is the newest frame decoded, as ComfyUI's samplers show their steps, once for each
   few frames of a clip and once for each picture of a batch, at ComfyUI's preview size
   (`--preview-size`, 512 by default).
@@ -181,9 +193,17 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   lossless files (the `apps/seedvr2x` folder of this repository; ComfyUI's console says so once,
   when the nodes load).
 - **Nothing resumes.** A run that stops starts again.
+- **A card that stopped answering needs ComfyUI restarted.** Besides the nodes, ComfyUI's own
+  release of its cache after the run waits on the card too, so no node can free it: only a new
+  ComfyUI has a card that answers.
 - **ComfyUI's image.** The output is its `IMAGE`, float32, and its savers write 8 bits or lossy
   video. The command line writes 16-bit PNG and lossless masters, with seedvr2x's record in each
   output; the nodes write no file and carry no record.
+- **8-bit YUV sources.** From an 8-bit YUV video (most files: H.264, H.265, VP9, AV1) the nodes
+  upscale what ComfyUI's own decode gives, 8 bits a channel, where the command line converts the
+  video to 16 bits a channel first. The two outputs differ by a fraction of a level: 0.26 of one
+  level (of 255) at most on the clip measured. From an RGB source (a lossless RGB
+  video) the nodes give the command line's frames bit for bit.
 
 ## Memory
 

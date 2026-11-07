@@ -19,7 +19,7 @@ from safetensors.torch import save_file
 from test_blockswap import CPU, WIDTH, Block, Sim, Toy, overlap, run, same, toy
 from torch import Tensor
 
-from seedvr2x import blockswap, model
+from seedvr2x import blockswap, model, waiting
 from seedvr2x.blockswap import Placement
 from seedvr2x.passes import HELD, ModelPlan
 
@@ -246,6 +246,32 @@ def test_released_models_hold_nothing_on_the_device_and_release_is_idempotent(
     models.place(ModelPlan(swapped=1))
     models.enter("dit")
     assert same(run(dit, sim, forwards=2), run(toy(BLOCKS, sim), sim, forwards=2))
+
+
+def test_release_skips_under_its_own_devices_mark_only(
+    files: Files, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sim = files.sim
+    models = files.load(HELD)
+    models.place(ModelPlan(swapped=3, resident_encode=1, resident_decode=0, vae_in_dit=True))
+    models.enter("dit")
+    assert sim.live() > 0
+    # The device's own card (0, a device that is no card) marked: nothing is sent back.
+    monkeypatch.setattr(waiting, "_abandoned", {0})
+    models.release()
+    assert sim.live() > 0 and models.phase is None and models.model_plan is None
+    # Another card marked: this release goes through, and clears nothing of the other's.
+    models.place(ModelPlan(swapped=3, resident_encode=1, resident_decode=0, vae_in_dit=True))
+    models.enter("dit")
+    monkeypatch.setattr(waiting, "_abandoned", {1})
+    models.release()
+    assert sim.live() == 0 and waiting.abandoned(1)
+    # A release that runs on an unmarked card leaves it unmarked; the clear is the block's
+    # (test_waiting.py).
+    monkeypatch.setattr(waiting, "_abandoned", set())
+    models.place(ModelPlan(swapped=1))
+    models.release()
+    assert not waiting.abandoned(0)
 
 
 def test_models_are_placed_again_after_a_run_that_raised(files: Files) -> None:

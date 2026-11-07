@@ -9,10 +9,19 @@ driver error in Windows' log 3.5 s into it and CUDA in the guest never told.
 The app names the unit in progress, its estimate and the way out in its own words (unit, named):
 the CLI before each unit, from its calibration (run.py), the image server for each step of a
 picture, from its warm-up. A wait with no unit named, or a unit with no estimate (the
-calibration's own, an input copy, a picture of the CLI's, the server's warm-up, ComfyUI's nodes),
-says nothing. The waits running are kept per thread, for the server's /health and /metrics, and
-the last one a stop or an error ended, for the stop's line (the CLI's main); reading them makes
-no CUDA call.
+calibration's own, an input copy, a picture of the CLI's, the server's warm-up, the nodes'
+before their first unit is measured), says nothing. The waits running are kept per thread, for the
+server's /health and /metrics, and the last one a stop or an error ended, for the stop's line
+(the CLI's main); reading them makes no CUDA call.
+
+An app may also set a check, a callable the poll calls once a poll for the calling thread's waits
+(check, checking), which may raise and so end the wait: the nodes set their Cancel's, so that a wait
+that never ends can be left. A wait past its bound that an exception ended, or any wait inside a
+release (releasing) that one ended, whatever its bound, marks its card abandoned (abandoned): the
+card may never answer again, and whoever gives the models back (Models.release) leaves alone what
+would wait on it. The mark is per card, by CUDA's index, and only a release on that card whose
+waits all completed clears it, no other wait: a card that answered one wait may not answer the
+next, and a process that ran on several cards keeps each one's state apart.
 
 Importing it imports no torch."""
 
@@ -71,6 +80,12 @@ class Ended:
 
 
 @dataclass
+class _Release:
+    index: int
+    ended: bool = False  # a wait in the block was ended by an exception, caught or not
+
+
+@dataclass
 class _Running:
     began: float
     unit: Unit | None
@@ -86,6 +101,9 @@ _lock = threading.Lock()
 _running: dict[int, _Running] = {}
 _ended: Ended | None = None
 _stacks_written = False
+# The cards (CUDA's indices) on which a wait was ended by an exception past its bound, or inside a
+# release, and no release has completed since.
+_abandoned: set[int] = set()
 
 
 def bound(estimate: float | None) -> float | None:
@@ -102,6 +120,49 @@ def unit(name: str, estimate: float | None, way: str = WAY) -> None:
 def clear() -> None:
     """No unit named for the calling thread's waits from now on: they say nothing."""
     _named.unit = None
+
+
+def check(hook: Callable[[], None] | None) -> None:
+    """Call `hook` at each poll of the calling thread's waits from now on, None for none. It may
+    raise: the wait then ends with that exception, as a stop's does (wait). It is called after the
+    sleep, so a wait that is done at once never calls it; it runs on the calling thread, which
+    is the one that waits, and no other thread's waits call it."""
+    _named.check = hook
+
+
+@contextmanager
+def checking(hook: Callable[[], None]) -> Generator[None]:
+    """The calling thread's waits call `hook` at each poll inside the with block, the check
+    before given back after."""
+    before: Callable[[], None] | None = getattr(_named, "check", None)
+    check(hook)
+    try:
+        yield
+    finally:
+        _named.check = before
+
+
+@contextmanager
+def releasing(index: int = 0) -> Generator[None]:
+    """The calling thread's waits inside the with block are a release of card `index` (CUDA's
+    numbering): a wait there that an exception ended marks the card abandoned whatever its bound
+    (the user's second Cancel decides, as a repeated signal does in the CLI), and the block
+    ending without any such wait clears the mark: every wait of the release completed, so the
+    card answers. A wait that raised and was caught inside the block counts: the mark stays. No
+    unit or estimate is needed. Nested blocks are the innermost's. The mark and its clear are the
+    process's for that card, not the thread's: the nodes' release runs on ComfyUI's one worker
+    thread."""
+    before: _Release | None = getattr(_named, "releasing", None)
+    block = _Release(index)
+    _named.releasing = block
+    try:
+        yield
+    finally:
+        _named.releasing = before
+    # Only reached where the block ended without an exception.
+    if not block.ended:
+        with _lock:
+            _abandoned.discard(index)
 
 
 @contextmanager
@@ -121,9 +182,12 @@ def wait(done: Callable[[], bool], poll: float, index: int = 0) -> None:
     between two calls. Past its unit's bound (bound), the wait is said once at WARNING, with NVML's
     reading of card `index` (CUDA's numbering) and the way out, every thread's stack after the
     first such line of the process, and it goes on; its end is then said too. done is an
-    event's query: it raises where CUDA reports an error."""
+    event's query: it raises where CUDA reports an error. The thread's check (check) is called
+    after each sleep, and what it raises ends the wait."""
     global _ended
     current: Unit | None = getattr(_named, "unit", None)
+    hook: Callable[[], None] | None = getattr(_named, "check", None)
+    release: _Release | None = getattr(_named, "releasing", None)
     limit = None if current is None else bound(current.estimate)
     began = monotonic()
     key = threading.get_ident()
@@ -141,9 +205,17 @@ def wait(done: Callable[[], bool], poll: float, index: int = 0) -> None:
                 except Exception as error:
                     # Never the run's failure: the wait goes on, whatever the line met.
                     logger.debug("the long wait's line can't be said: %r", error)
+            if hook is not None:
+                hook()
     except BaseException as error:
         name = None if current is None else current.name
         _ended = Ended(name, monotonic() - began, id(error), type(error))
+        with _lock:
+            if state.past:
+                _abandoned.add(index)
+            if release is not None:
+                release.ended = True
+                _abandoned.add(release.index)
         raise
     finally:
         with _lock:
@@ -169,6 +241,17 @@ def stalled() -> bool:
     """Whether a wait running has passed its unit's bound and was said."""
     with _lock:
         return any(each.past for each in _running.values())
+
+
+def abandoned(index: int = 0) -> bool:
+    """Whether card `index` (CUDA's numbering) was abandoned: a wait on it that had passed its
+    bound was ended by an exception (a Cancel, a stop, an error), or a wait inside its release
+    (releasing) was, whatever its bound, and no release of it has completed since. The card has
+    not answered, and may never. A caller that gives work back to the card (Models.release, a
+    cache's emptying) leaves alone what would wait on it. Cleared by a release of that card whose
+    waits all completed, by no other wait, and never by another card's."""
+    with _lock:
+        return index in _abandoned
 
 
 def ended() -> Ended | None:

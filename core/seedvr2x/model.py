@@ -139,13 +139,36 @@ class Models:
         Nothing of the models is left on the device: the buffers of the DiT and of the VAE (the
         7B's RoPE tables, 108 of them, 24,774,336 B) and the text embeddings (1,249,280 B) are
         copied to system memory, pageable, and place copies them back, exactly: a copy changes no
-        bit."""
-        self._send_back()
-        _move_buffers(self.runner.dit, _to_host)
-        _move_buffers(self.runner.vae, _to_host)
-        self.text_pos = _to_host(self.text_pos)
-        self.text_neg = _to_host(self.text_neg)
-        blockswap.Cuda(self.device).trim()
+        bit.
+
+        After a wait on the GPU that was abandoned (waiting.abandoned of this device's card: past
+        its bound or inside a release, ended by an exception, no release completed since) nothing is
+        sent back: every step of it waits on the device (the placement's close waits for its work,
+        the buffers' copies to the host and torch's cache trimmed synchronise), and the card may
+        never answer. The models are left as they were, with no phase and no plan, so that `enter`
+        refuses them. A later `place` sends them back, waiting in the poll, which says what it
+        waits for and which an app's check can leave; whether to place them again is the app's:
+        the nodes refuse the next run instead (DESIGN.md, Allocator, the hang of 2026-11-06)."""
+        self._held("release")
+        index = card_index(self.device)
+        if waiting.abandoned(index):
+            logger.warning(
+                "the models are not sent back to their pinned copies: a wait on the GPU was"
+                " abandoned and every step of it would wait on the card again; the next run"
+                " sends them back"
+            )
+            self.phase = None
+            self.model_plan = None
+            return
+        # Its waits are a release's (waiting.releasing): one a Cancel ends marks the card, and a
+        # release that completes clears the mark.
+        with waiting.releasing(index):
+            self._send_back()
+            _move_buffers(self.runner.dit, _to_host)
+            _move_buffers(self.runner.vae, _to_host)
+            self.text_pos = _to_host(self.text_pos)
+            self.text_neg = _to_host(self.text_neg)
+            blockswap.Cuda(self.device).trim()
 
     def _send_back(self) -> None:
         """The weights of release and place: the placement closed, the VAE's part left, the
@@ -609,6 +632,12 @@ def synchronize(device: torch.device) -> None:
 def _index(device: torch.device) -> int:
     """CUDA's index of device, the current one where it names none."""
     return torch.cuda.current_device() if device.index is None else device.index
+
+
+def card_index(device: torch.device) -> int:
+    """The card `device` is, in the numbering of waiting.abandoned: CUDA's index, 0 for a device
+    that is no card (the tests' stand-ins on the CPU make no wait on one)."""
+    return _index(device) if device.type == "cuda" else 0
 
 
 def set_seed(seed: int) -> None:

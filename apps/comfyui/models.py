@@ -52,7 +52,7 @@ import numpy as np
 import torch
 from comfy.model_patcher import ModelPatcher
 
-from seedvr2x import blockswap, memory, model, peaks, pull, weights
+from seedvr2x import blockswap, memory, model, peaks, pull, waiting, weights
 from seedvr2x.errors import PlanRefused, Refusal
 from seedvr2x.memory import Reading
 from seedvr2x.model import Models
@@ -61,7 +61,7 @@ from seedvr2x.pull import ModelFiles
 from seedvr2x.weights import Architecture
 
 from . import plans, words
-from .progress import Preparing, file_size
+from .progress import FREEING, STOPPED, Preparing, file_size
 
 logger = logging.getLogger("seedvr2x_comfyui.models")
 
@@ -403,12 +403,18 @@ class Entry:
             logger.warning("seedvr2x's models are in use by a run: %s, and are kept", why)
             return
         logger.info("seedvr2x's models are dropped (%s): the next run reads the files again", why)
+        lost = self.models is not None and waiting.abandoned(model.card_index(self.models.device))
+        if lost and self.models is not None:
+            # After an abandoned wait the finalizers of the pinned copies (cudaHostUnregister)
+            # would wait on the card: held, not collected (_left_on_card).
+            _hold(self.models)
         self.models = None
         if _entries.get(self.handle.key) is self:
             del _entries[self.handle.key]
         if by_comfy:
             _dropped.add(self.handle.key)
-        gc.collect()
+        if not lost:
+            gc.collect()
 
 
 _entries: dict[tuple[str, str], Entry] = {}
@@ -416,19 +422,35 @@ _entries: dict[tuple[str, str], Entry] = {}
 # share of a step's P, probe.Probed.allocator_margin; None: none measured, the measurement being
 # unbuilt), which the plans of this process count with the rule's share, the larger of the two.
 _probed: dict[tuple[str, str], float | None] = {}
+
+# The models of runs not kept that ended in an abandoned wait on the GPU (waiting.abandoned),
+# held on purpose: dropping them runs their finalizers (blockswap.HostCopy's cudaHostUnregister),
+# which wait on the card that stopped answering, as the hang of 2026-11-06 did (DESIGN.md,
+# Allocator). The process is for restarting.
+_left_on_card: list[Models] = []
+
+
+def _hold(models: Models) -> None:
+    """Keep `models` alive for the process (_left_on_card), once."""
+    if not any(each is models for each in _left_on_card):
+        _left_on_card.append(models)
+
+
 # The handles whose weights were dropped (Entry.drop): the next load of one says so.
 _dropped: set[tuple[str, str]] = set()
 _told: set[str] = set()
 
 
 def reset() -> None:
-    """The module as new (the tests): the entries dropped, the probe and the notes forgotten."""
+    """The module as new (the tests): the entries dropped, the probe and the notes forgotten, the
+    models left on the card by an abandoned wait let go."""
     for entry in list(_entries.values()):
         entry.models = None
     _entries.clear()
     _dropped.clear()
     _probed.clear()
     _told.clear()
+    _left_on_card.clear()
 
 
 def kept(handle: Handle) -> Entry | None:
@@ -852,6 +874,34 @@ def _clear_frames(error: BaseException) -> None:
 
 
 @contextmanager
+def _freeing(show: Callable[[str], None] | None) -> Generator[None]:
+    """The release of the models after a run an exception ended, in the with block: the node says
+    what it waits for (FREEING), ComfyUI's Cancel is the check of the release's waits
+    (waiting.checking: the first Cancel's flag is gone, ComfyUI's check clearing it as it raises,
+    so only a second press raises), and a release that completes puts back the text the node
+    showed before, a healthy card taking a moment. A wait there that an exception ended (a second
+    Cancel, a CUDA error) leaves the card behind: the node says so (STOPPED) and the exception goes
+    through; another exception goes through with the text before put back."""
+    last: str | None = getattr(show, "last", None)
+    if show is not None:
+        show(FREEING)
+    try:
+        with waiting.checking(management.throw_exception_if_processing_interrupted):
+            yield
+    except BaseException as error:
+        if show is not None:
+            # A wait left (a second Cancel) or failed: the card is not given back. Any other
+            # error says nothing of the card.
+            stopped = waiting.ended_by(error) is not None
+            show(STOPPED if stopped else "" if last is None else last)
+        raise
+    if show is not None:
+        # The text before, or none where the run had said nothing yet (an error before its first
+        # event): never FREEING left on a card that answered.
+        show("" if last is None else last)
+
+
+@contextmanager
 def session[T](
     handle: Handle,
     attention: str | None,
@@ -895,6 +945,12 @@ def _session[T](
 ) -> Generator[Run[T]]:
     """session, less the random generators."""
     machine_ = machine()
+    card = model.card_index(machine_.device)
+    # Process-wide until runs go to other cards: models left on any card refuse every run.
+    if waiting.abandoned(card) or _left_on_card:
+        # Nothing is read from the card, placed or waited on: an earlier run left a wait on the
+        # GPU that never ended, and the models it left are as they were (Models.release).
+        raise words.card_stopped()
     _allocator_note(machine_)
     keeping = decide_keeping(handle)
     keep = keeping.kept
@@ -1002,6 +1058,7 @@ def _session[T](
         margin=ASK_MARGIN if asked else 0,
     )
     models: Models | None = None
+    ended = False
     if entry is not None:
         entry.busy = True
     try:
@@ -1035,19 +1092,63 @@ def _session[T](
             raise
         finally:
             run.over()
+    except BaseException:
+        ended = True
+        raise
     finally:
+        # After a wait on the GPU that was abandoned, nothing here waits on the card: the kept
+        # models' release leaves them as they are (Models.release), models not kept are held, not
+        # dropped, and torch's cache is not emptied (it synchronises). A release after a run an
+        # exception ended (a Cancel, an error) may wait on a card that stopped answering: it is
+        # shown on the node and left by a second Cancel (_freeing).
+        lost = waiting.abandoned(card)
+        show = None if preparing is None else preparing.show
         try:
             if entry is not None:
                 if models is not None:
-                    models.release()
-            else:
+                    try:
+                        if ended and not lost:
+                            with _freeing(show):
+                                models.release()
+                        else:
+                            models.release()
+                    finally:
+                        if waiting.abandoned(card):
+                            _hold(models)
+            elif lost:
                 if models is not None:
-                    # What the models keep on the device besides their parameters (the vendored
-                    # RoPE's lru_cache, the VAE's convolution memory) would outlive them.
-                    model.forget(models)
+                    _hold(models)
+                    logger.warning(
+                        "seedvr2x: the models of this run are left on the card: a wait on the GPU"
+                        " was abandoned, and giving them back would wait on it again; restart"
+                        " ComfyUI"
+                    )
                 models = None
-                gc.collect()
+            else:
+                if models is not None and ended:
+                    # Nothing below goes through the poll: the models' finalizers
+                    # (blockswap.HostCopy's cudaHostUnregister, in gc.collect) and torch's cache
+                    # (soft_empty_cache) synchronise in C. The device's work is waited for first,
+                    # in the poll, so that a card that stopped answering in a kind's first unit
+                    # (no bound, no mark) can be left by a second Cancel.
+                    try:
+                        with _freeing(show), waiting.releasing(card):
+                            model.synchronize(machine_.device)
+                    finally:
+                        if waiting.abandoned(card):
+                            _hold(models)
+                if waiting.abandoned(card):
+                    models = None
+                else:
+                    if models is not None:
+                        # What the models keep on the device besides their parameters (the
+                        # vendored RoPE's lru_cache, the VAE's convolution memory) would outlive
+                        # them.
+                        model.forget(models)
+                    models = None
+                    gc.collect()
         finally:
-            management.soft_empty_cache()
+            if not waiting.abandoned(card):
+                management.soft_empty_cache()
             if entry is not None:
                 entry.busy = False

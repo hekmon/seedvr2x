@@ -18,7 +18,7 @@ from comfy_api.latest import io
 from comfyui import models, plans
 from test_still import pipeline_models, stand_in_dit
 
-from seedvr2x import memory, model, peaks, pull, weights
+from seedvr2x import memory, model, peaks, pull, waiting, weights
 from seedvr2x.memory import Reading
 from seedvr2x.passes import ModelPlan
 from seedvr2x.pull import ModelFiles
@@ -225,6 +225,8 @@ def machine(cpu_models: model.Models, monkeypatch: pytest.MonkeyPatch) -> StandI
     monkeypatch.setattr(weights, "check_models", lambda *args: None)
     monkeypatch.setattr(pull, "check_pinned", lambda *args, **kwargs: None)
     stand_in_dit(monkeypatch)
+    # The stand-in card has no stream: the wait on its work is the poll, done at once.
+    monkeypatch.setattr(model, "synchronize", lambda device: waiting.wait(lambda: True, 0.01))
     found = StandIn(cpu_models)
     models.use(found)
     return found

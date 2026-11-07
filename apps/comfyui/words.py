@@ -537,6 +537,17 @@ def not_freed(*, need: int, there: int, comfy: int) -> Refused:
     )
 
 
+def card_stopped() -> Refused:
+    """A run refused at its start: a wait on the GPU of an earlier run was left (Cancel) after it
+    had lasted past its bound, so that the card did not answer, and nothing can be given back to
+    it or read from it without waiting on it again (waiting.abandoned)."""
+    return Refused(
+        "the card stopped answering during an earlier seedvr2x run, and what was queued on it can't"
+        " be undone inside ComfyUI: restart ComfyUI, then run again. Nothing was read from the card"
+        " and nothing was run"
+    )
+
+
 def transparent() -> Refused:
     return Refused(
         "the image has transparent pixels, which seedvr2x refuses: the model would redraw the"

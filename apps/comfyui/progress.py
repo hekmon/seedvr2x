@@ -22,12 +22,15 @@ seedvr2x's files and their reading into memory share a bar of their own, in byte
 the Cuts node's by frames scanned (Preparing for the detector's file, then a ProgressBar by frame).
 
 Everything here observes the library's callbacks and says what they tell: it moves no value of the
-upscale. The one thing it does besides is ComfyUI's Cancel, checked at each event."""
+upscale. The things it does besides are ComfyUI's Cancel, checked at each event and at each poll of
+a wait on the GPU, the time said each second between events (Ticker), and the units named for the
+waits on the GPU, so that one that lasts past its bound is said on the node (Progress.running)."""
 
 import logging
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -38,7 +41,7 @@ import numpy.typing as npt
 from comfy.utils import ProgressBar
 
 from seedvr2x import frames as frame_sizes
-from seedvr2x import pull
+from seedvr2x import pull, waiting
 from seedvr2x.clock import spoken, taking, wall
 from seedvr2x.passes import Tiles
 from seedvr2x.shotruns import shot_runs
@@ -51,6 +54,29 @@ logger = logging.getLogger("seedvr2x_comfyui.progress")
 BAR = 1000
 
 Kind = Literal["encode", "window", "decode"]
+
+# The way out a wait on the GPU that lasts is said with, in a ComfyUI user's words (waiting.py;
+# DESIGN.md, Allocator, the hang of 2026-11-06). Cancel leaves the wait, but work queued on a card
+# that stopped answering can't be undone in the process: only a new one has a card that answers.
+WAY = (
+    "Cancel leaves the wait; if the card does not answer after that, restart ComfyUI, since work"
+    " queued on a stopped GPU can't be undone inside its process"
+)
+
+# What the node says while the models are given back to the card after a run an exception ended
+# (models._freeing): that wait ends by itself on a card that answers, and a second Cancel leaves it
+# (waiting.releasing) where it does not.
+FREEING = (
+    "freeing the card: waiting for the GPU to finish its last work; Cancel again to leave it,"
+    " then restart ComfyUI"
+)
+
+# What the node says once the release was left by a second Cancel or ended in an error: the card
+# is marked (waiting.abandoned) and the next run is refused (words.card_stopped).
+STOPPED = "the card stopped answering: restart ComfyUI"
+
+# How often the time on the node is said between two events, in seconds (the user, 2026-11-06).
+TICK = 1.0
 
 # The pixels a DiT token's side spans: the VAE's 8, then the DiT's patches of 2 latent pixels
 # (vendor/configs_7b/main.yaml, patch_size [1, 2, 2]; apps/seedvr2x/timing.py's TOKEN).
@@ -171,18 +197,20 @@ def clip_passes(
     1, 2 or 4; a shot too short for a run has no such run): a run is a pass over the shot from its
     first frame, so it has its own windows and tiles and its frames are the shot's less its offset.
     Labelled "Shot 2 of 4 (frames 121 to 240)", the frames counted from 1 as a user counts them,
-    or "Frames 1 to 480" for a clip of one shot; with several runs "Shot 2 of 4, run 3 of 4 (frames
-    121 to 240)" and "Frames 1 to 480, run 2 of 2". A shot of one run has no run part."""
+    or "Frames 1 to 480" for a clip of one shot; with several runs the frames are the run's own,
+    from its first: "Shot 2 of 4, run 3 of 4 (frames 123 to 240)" and "Frames 3 to 480, run 2 of
+    2". A shot of one run has no run part."""
     passes: list[Pass] = []
     for number, shot in enumerate(shots, 1):
-        span = f"frames {shot.start + 1} to {shot.end}"
         each_run = shot_runs(Shot(0, shot.frames), runs)
         for index, each in enumerate(each_run, 1):
             part = f", run {index} of {len(each_run)}" if len(each_run) > 1 else ""
+            # The run's own frames: it starts at its offset in the shot, and so does its decode.
+            first = shot.start + each.offset + 1
             if len(shots) > 1:
-                label = f"Shot {number} of {len(shots)}{part} ({span})"
+                label = f"Shot {number} of {len(shots)}{part} (frames {first} to {shot.end})"
             else:
-                label = f"Frames {shot.start + 1} to {shot.end}{part}"
+                label = f"Frames {first} to {shot.end}{part}"
             made = make_pass(
                 label, shot.frames - each.offset, target, window, encode_tiles, decode_tiles
             )
@@ -264,6 +292,17 @@ class Progress:
     measured, which says the DiT's rate too). The preview: the newest frame decoded, once per
     slice (`decoded`).
 
+    Between events the time moves on: `running` starts a Ticker, a thread that says the text again
+    each second (`tick`), so that a long window's text never stands still. The node's thread and
+    the ticker's share the state under a lock; only the node's thread moves the bar.
+
+    The waits on the GPU. Each event names the unit that follows it for the library's waits
+    (waiting.unit), with the estimate that unit should take once a unit of its kind is measured,
+    and none before: a wait of a unit with no estimate says nothing. A wait past its bound is
+    said by the library on ComfyUI's console, and by the text here (`tick`) with the way out
+    (WAY). `running` also gives the waits ComfyUI's Cancel as their check, so that a wait is left
+    by Cancel.
+
     `now` is the clock, injected for the tests; `show(text)` puts the text on the node."""
 
     def __init__(
@@ -291,6 +330,13 @@ class Progress:
         # (seconds, weight) of the units made, by kind.
         self.made: dict[Kind, list[float]] = {"encode": [0, 0], "window": [0, 0], "decode": [0, 0]}
         self.mismatch = False
+        # Held by an event and by a tick: the units' times and rates, the pass and the words are
+        # read by the ticker's thread while the node's moves them.
+        self._lock = threading.RLock()
+        self.finished = False
+        # Set when the run's block ends (running), however it ends: a tick still on its way, or
+        # one after the join gave up, says nothing.
+        self.stopped = False
 
     # -- The estimate ----------------------------------------------------------------------------
 
@@ -338,9 +384,10 @@ class Progress:
 
     def begin(self, index: int) -> None:
         """Pass `index` (0-based) starts: its encode."""
-        self.pass_ = index
-        self.partial = 0.0
-        self._say("encoding")
+        with self._lock:
+            self.pass_ = index
+            self.partial = 0.0
+            self._say("encoding")
 
     def run(self, shot: int, run: int) -> None:
         """Run `run` (1-based) of shot `shot` (0-based) starts: its encode. A shot of one run
@@ -354,6 +401,10 @@ class Progress:
     def tile(self, pass_: Literal["encode", "decode"], done: int, total: int) -> None:
         """A tiled pass has made `done` of its `total` tiles (0 before the first). The last is
         made with the pass (encoded, decoded)."""
+        with self._lock:
+            self._tile(pass_, done, total)
+
+    def _tile(self, pass_: Literal["encode", "decode"], done: int, total: int) -> None:
         units = getattr(self.passes[self.pass_], "encode" if pass_ == "encode" else "decode")
         if total != len(units) and not self.mismatch:
             self.mismatch = True
@@ -369,12 +420,17 @@ class Progress:
 
     def encoded(self) -> None:
         """The pass's encode is made."""
-        current = self.passes[self.pass_]
-        self._finish(current.encode, len(current.encode))
-        self._say(self._window_text(0))
+        with self._lock:
+            current = self.passes[self.pass_]
+            self._finish(current.encode, len(current.encode))
+            self._say(self._window_text(0))
 
     def window(self, number: int) -> None:
         """Window `number` (1-based) of the pass is made."""
+        with self._lock:
+            self._window(number)
+
+    def _window(self, number: int) -> None:
         current = self.passes[self.pass_]
         self._finish(current.windows, number)
         if number < len(current.windows):
@@ -391,6 +447,12 @@ class Progress:
     ) -> None:
         """`written` of the pass's `total` frames are decoded and written (a slice has been);
         `frame` is the newest, the preview. The last makes the pass."""
+        with self._lock:
+            self._decoded(written, total, frame)
+
+    def _decoded(
+        self, written: int, total: int, frame: npt.NDArray[np.float32] | None = None
+    ) -> None:
         current = self.passes[self.pass_]
         if written >= total:
             self.partial = 0.0
@@ -409,10 +471,12 @@ class Progress:
 
     def finish(self, what: str) -> None:
         """The run is over: the bar full, and the plan with `what` made and the time it took
-        ("480 frames in 4 min 32 s") on the node."""
-        self.bar.update_absolute(BAR, BAR)
-        summary = f"{what} in {spoken(wall(self.now() - self.started))}"
-        self.show(f"{self.plan}\n{summary}" if self.plan else summary)
+        ("480 frames in 4 min 32 s") on the node. No tick says anything after it."""
+        with self._lock:
+            self.finished = True
+            self.bar.update_absolute(BAR, BAR)
+            summary = f"{what} in {spoken(wall(self.now() - self.started))}"
+            self.show(f"{self.plan}\n{summary}" if self.plan else summary)
 
     # -- Words -----------------------------------------------------------------------------------
 
@@ -439,11 +503,66 @@ class Progress:
     def _say(self, what: str, frame: npt.NDArray[np.float32] | None = None) -> None:
         """The status, the bar and the preview: sent, then ComfyUI's Cancel honoured."""
         self.what = what
-        label = self.passes[self.pass_].label
-        lines = [f"{label}: {what}", self._time()]
-        self.show("\n".join(([self.plan] if self.plan else []) + lines))
+        self.show(self._text())
         self.bar.update_absolute(self.position(), BAR, None if frame is None else preview_of(frame))
+        self._name_unit()
         management.throw_exception_if_processing_interrupted()
+
+    def _text(self) -> str:
+        """The node's text: the plan, the pass and where it is, the time, and a wait on the GPU
+        past its bound where there is one."""
+        label = self.passes[self.pass_].label
+        lines = [*([self.plan] if self.plan else []), f"{label}: {self.what}", self._time()]
+        lasted = waiting.longest() if waiting.stalled() else None
+        if lasted is not None:
+            lines.append(
+                f"A wait on the GPU has lasted {spoken(wall(lasted))}, much longer than this step"
+                f" should take: {WAY}."
+            )
+        return "\n".join(lines)
+
+    def tick(self) -> None:
+        """The text again, the time moved on: said by the Ticker between two events. Nothing
+        before the first event, none after the end, and the bar is never touched."""
+        with self._lock:
+            if self.finished or self.stopped or not self.what:
+                return
+            self.show(self._text())
+
+    def _name_unit(self) -> None:
+        """Name the unit that follows the event for the waits on the GPU of the node's thread
+        (waiting.unit): the pass's first unit not made, with the time it should take at its
+        kind's rate once a unit of the kind is measured (rate), none before: a wait of a unit
+        with no estimate says nothing. The unit is a tile, a window or an untiled decode, the
+        wait a part of it (waiting.py)."""
+        current = self.passes[self.pass_]
+        name = f"{current.label}: {self.what}"
+        coming = next((each for each in current.units if each.seconds is None), None)
+        estimate = None
+        if coming is not None and self.made[coming.kind][1] > 0:
+            estimate = coming.weight * self.rate(coming.kind)
+        waiting.unit(name, estimate, WAY)
+
+    @contextmanager
+    def running(
+        self, period: float = TICK, pause: Callable[[threading.Event, float], None] | None = None
+    ) -> Generator[None]:
+        """The upscale's run, in the with block: the Ticker saying the time each `period` seconds
+        (`pause(stopped, period)` waits that long, or until `stopped` is set: the tests'
+        hook), ComfyUI's Cancel the check of every wait on the GPU the node's thread makes
+        (waiting.check), and the units named for those waits (_name_unit). At the block's end,
+        however it ends, the ticker is stopped and joined and the unit forgotten."""
+        ticker = Ticker(self, period, pause)
+        self.stopped = False
+        ticker.start()
+        try:
+            with waiting.checking(management.throw_exception_if_processing_interrupted):
+                yield
+        finally:
+            with self._lock:
+                self.stopped = True
+            ticker.stop()
+            waiting.clear()
 
     def _time(self) -> str:
         """The time line: the time so far, and the time left once a window has been measured."""
@@ -451,6 +570,62 @@ class Progress:
         if self.made["window"][1] > 0:
             text += f", {taking(wall(self.left()))} left"
         return text
+
+
+def _wait(stopped: threading.Event, seconds: float) -> None:
+    stopped.wait(seconds)
+
+
+class Ticker:
+    """The thread that says the time on the node between the library's events: every `period`
+    seconds it has the Progress say its text again (tick), nothing else. It never touches the bar
+    (which only the node's thread moves, event by event), and it reads the Progress's clock, so
+    that its text is the events' own. Started and stopped by Progress.running, at the run's end,
+    on Cancel and on an error alike.
+
+    A daemon thread, joined at the stop with no time cap: the join is what leaves nothing
+    running. It ends at once at the stop, since it waits on an event the stop sets, not on a
+    sleep, and it sends nothing that can block: ComfyUI's text send only queues the message for
+    its event loop, which the loop sends later. A cap on the join would be a timeout standing in
+    for that method. It stays a daemon because it holds no model, no tensor and no GPU call, so
+    that it has nothing to finish at a shutdown, whatever else ends the process.
+
+    `pause(stopped, period)` waits for the period or until `stopped` is set; the tests replace it
+    to tick on their own cue, the default waits on the event."""
+
+    def __init__(
+        self,
+        progress: Progress,
+        period: float = TICK,
+        pause: Callable[[threading.Event, float], None] | None = None,
+    ) -> None:
+        self.progress = progress
+        self.period = period
+        self.pause = pause or _wait
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="seedvr2x-progress-text", daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        """No tick from now on, and the thread gone (idempotent)."""
+        self.stopped.set()
+        if not self.thread.is_alive():
+            return
+        self.thread.join()
+
+    def _run(self) -> None:
+        while True:
+            self.pause(self.stopped, self.period)
+            if self.stopped.is_set():
+                return
+            try:
+                self.progress.tick()
+            except Exception as error:
+                # Only the text: the run goes on without the seconds between events.
+                logger.warning("seedvr2x: the time can't be said between events: %r", error)
+                return
 
 
 # ---- Before the upscale: files downloaded and read ----------------------------------------------

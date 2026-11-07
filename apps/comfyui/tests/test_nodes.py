@@ -477,13 +477,14 @@ def test_a_bar_with_several_runs_moves_forward_over_them_and_ends_full(
     (bar,) = ProgressBar.created
     assert bar.updates == sorted(bar.updates) and bar.updates[-1] == bar.total == progress.BAR
     # The bar's units are every run's own (tests/test_progress.py holds the arithmetic): each run
-    # of each shot is said by its label on the node, four runs a shot.
+    # of each shot is said by its label on the node, four runs a shot, each from its own first
+    # frame.
     instance = server.PromptServer.instance
     assert instance is not None
     said = {text.splitlines()[-2].split(":")[0] for text, _ in instance.texts[1:-1]}
     assert said == {
-        *(f"Shot 1 of 2, run {n} of 4 (frames 1 to 9)" for n in (1, 2, 3, 4)),
-        *(f"Shot 2 of 2, run {n} of 4 (frames 10 to 21)" for n in (1, 2, 3, 4)),
+        *(f"Shot 1 of 2, run {n} of 4 (frames {n} to 9)" for n in (1, 2, 3, 4)),
+        *(f"Shot 2 of 2, run {n} of 4 (frames {9 + n} to 21)" for n in (1, 2, 3, 4)),
     }
 
 

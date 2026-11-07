@@ -25,7 +25,7 @@ from standins import upscale_video as run_video
 from test_nodes import TARGET, fresh, pictures
 from test_still import TILES
 
-from seedvr2x import clip, pull, still
+from seedvr2x import clip, model, pull, still
 from seedvr2x.clock import taking, wall
 from seedvr2x.passes import Tiles
 from seedvr2x.shots import Shot
@@ -297,11 +297,12 @@ def test_the_status_of_a_run_of_a_shot_and_of_a_clip_of_one_shot() -> None:
     p, _, shown, _ = make(passes)
     windows = len(passes[1 * 4 + 2].windows)  # shot 2's third run: 120 - 2 frames
     p.run(1, 3)
-    assert lines(shown[-1])[1] == "Shot 2 of 4, run 3 of 4 (frames 121 to 240): encoding"
+    # The run starts at its third frame of the shot, 121 + 2 of the clip: its own frames.
+    assert lines(shown[-1])[1] == "Shot 2 of 4, run 3 of 4 (frames 123 to 240): encoding"
     p.encoded()
     p.window(1)
     assert lines(shown[-1])[1] == (
-        f"Shot 2 of 4, run 3 of 4 (frames 121 to 240): upscaling, window 2 of {windows}"
+        f"Shot 2 of 4, run 3 of 4 (frames 123 to 240): upscaling, window 2 of {windows}"
     )
     alone = progress.clip_passes([Shot(0, 480)], TARGET, 5, None, None, runs=2)
     p, _, shown, _ = make(alone)
@@ -309,7 +310,7 @@ def test_the_status_of_a_run_of_a_shot_and_of_a_clip_of_one_shot() -> None:
     p.encoded()
     p.window(4)
     count = len(alone[1].windows)
-    assert lines(shown[-1])[1] == f"Frames 1 to 480, run 2 of 2: upscaling, window 5 of {count}"
+    assert lines(shown[-1])[1] == f"Frames 3 to 480, run 2 of 2: upscaling, window 5 of {count}"
     # Standard has no run part.
     p, _, shown, _ = make(progress.clip_passes([Shot(0, 480)], TARGET, 5, None, None))
     p.run(0, 1)
@@ -331,6 +332,258 @@ def test_the_bar_counts_every_runs_units_and_ends_full_at_the_last_run() -> None
     # Four runs of the same units: the first shot's two end at half the bar, give or take the
     # rates re-measured as the first run goes.
     assert abs(halfway - progress.BAR // 2) <= progress.BAR // 10
+
+
+def test_a_later_run_names_its_own_frames_and_counts_its_decode_in_them() -> None:
+    passes = progress.clip_passes(shots_of(4), TARGET, 5, None, None, runs=4)
+    p, _, shown, _ = make(passes)
+    # Run 3 of shot 2 starts at the shot's third frame (clip frame 123, counted from 1) and has
+    # 118 of its 120 frames.
+    assert passes[1 * 4 + 2].label == "Shot 2 of 4, run 3 of 4 (frames 123 to 240)"
+    assert passes[1 * 4 + 2].frames == 118
+    assert [each.label for each in passes[4:8]] == [
+        "Shot 2 of 4, run 1 of 4 (frames 121 to 240)",
+        "Shot 2 of 4, run 2 of 4 (frames 122 to 240)",
+        "Shot 2 of 4, run 3 of 4 (frames 123 to 240)",
+        "Shot 2 of 4, run 4 of 4 (frames 124 to 240)",
+    ]
+    p.run(1, 3)
+    p.encoded()
+    for number in range(1, len(passes[6].windows) + 1):
+        p.window(number)
+    label = "Shot 2 of 4, run 3 of 4 (frames 123 to 240)"
+    assert lines(shown[-1])[1] == f"{label}: decoding, 0 of 118 frames"
+    p.decoded(60, 118)
+    assert lines(shown[-1])[1] == f"{label}: decoding, 60 of 118 frames"
+    p.decoded(118, 118)
+    assert lines(shown[-1])[1] == f"{label}: decoding, 118 of 118 frames"
+    # A clip of one shot, the same: its second run begins at frame 3.
+    alone = progress.clip_passes([Shot(0, 480)], TARGET, 5, None, None, runs=2)
+    assert [each.label for each in alone] == [
+        "Frames 1 to 480, run 1 of 2",
+        "Frames 3 to 480, run 2 of 2",
+    ]
+    # A clip that is a shot cut from a longer film starts where the shot does.
+    inside = progress.clip_passes([Shot(100, 130)], TARGET, 5, None, None, runs=2)
+    assert [each.label for each in inside] == [
+        "Frames 101 to 130, run 1 of 2",
+        "Frames 103 to 130, run 2 of 2",
+    ]
+
+
+def test_a_run_at_maximum_counts_its_decode_in_its_own_frames_on_the_node(
+    machine: StandIn, tmp_path
+) -> None:
+    run_video(
+        handle(tmp_path), plans.Settings(window=5), pictures(33), RESOLUTION, "7", quality="maximum"
+    )
+    said = [each.splitlines()[-2] for each in node_texts("7") if len(each.splitlines()) >= 3]
+    # Run 3 of the clip of one shot begins at its third frame and has 31 frames.
+    assert "Frames 3 to 33, run 3 of 4: encoding" in said
+    assert "Frames 3 to 33, run 3 of 4: decoding, 31 of 31 frames" in said
+    assert "Frames 2 to 33, run 2 of 4: decoding, 32 of 32 frames" in said
+    assert not any("run 3 of 4" in each and "of 33 frames" in each for each in said)
+
+
+# ---- The time between events --------------------------------------------------------------------
+
+THREAD = "seedvr2x-progress-text"
+
+
+def ticker_threads() -> list[threading.Thread]:
+    return [each for each in threading.enumerate() if each.name == THREAD]
+
+
+class Cue:
+    """The ticker's pause, driven by the test: the thread waits at `pause` until `fire` lets one
+    tick through, and `fire` returns once that tick is made and the thread is back at the pause
+    (or has ended), so that a tick is awaited by what it does, not by a sleep."""
+
+    def __init__(self) -> None:
+        self.go = threading.Semaphore(0)
+        self.back = threading.Semaphore(0)
+        self.pauses = 0
+
+    def pause(self, stopped: threading.Event, period: float) -> None:
+        self.pauses += 1
+        self.back.release()
+        while not stopped.is_set():
+            if self.go.acquire(timeout=0.02):
+                return
+
+    def settle(self) -> None:
+        assert self.back.acquire(timeout=5), "the ticker never reached its pause"
+
+    def fire(self) -> None:
+        self.go.release()
+        self.settle()
+
+
+def test_the_time_is_said_between_events_by_a_thread_that_leaves_the_bar_alone() -> None:
+    p, clock, shown, bar = make(clip_passes(shots_of(2, 33)))
+    cue = Cue()
+    with p.running(pause=cue.pause):
+        cue.settle()
+        assert [each.name for each in ticker_threads()] == [THREAD]
+        assert ticker_threads()[0].daemon
+        # Nothing is said before the first event.
+        cue.fire()
+        assert shown == []
+        p.begin(0)
+        updates, count = list(bar.updates), len(shown)
+        text = shown[-1]
+        assert lines(text)[2] == "0 s so far"
+        # The same text as the event's, the time moved on, once a second.
+        clock.t += 5.0
+        cue.fire()
+        assert len(shown) == count + 1
+        assert lines(shown[-1])[:2] == lines(text)[:2]
+        assert lines(shown[-1])[2] == "5 s so far"
+        clock.t += 1.0
+        cue.fire()
+        assert lines(shown[-1])[2] == "6 s so far"
+        assert bar.updates == updates, "a tick never moves the bar"
+        # The next event says the time as well, from the same clock.
+        clock.t += 2.0
+        p.encoded()
+        assert lines(shown[-1])[2] == "8 s so far"
+    assert ticker_threads() == []
+
+
+def test_the_time_left_is_in_the_tick_once_a_window_is_measured() -> None:
+    p, clock, shown, _ = make(clip_passes(shots_of(2, 33)))
+    cue = Cue()
+    with p.running(pause=cue.pause):
+        cue.settle()
+        p.begin(0)
+        clock.t += 10.0
+        p.encoded()
+        clock.t += 20.0
+        p.window(1)
+        clock.t += 3.0
+        cue.fire()
+        assert lines(shown[-1])[2] == f"33 s so far, {taking(wall(p.left()))} left"
+
+
+def test_no_tick_after_the_end_and_no_thread_alive() -> None:
+    p, clock, shown, bar = make(clip_passes(shots_of(1, 33)), plan="the plan")
+    cue = Cue()
+    with p.running(pause=cue.pause):
+        cue.settle()
+        p.begin(0)
+        clock.t += 4.0
+        p.finish("33 frames")
+        summary = shown[-1]
+        clock.t += 9.0
+        cue.fire()
+        assert shown[-1] == summary == "the plan\n33 frames in 4 s"
+    assert ticker_threads() == [] and shown[-1] == summary
+    assert bar.updates[-1] == progress.BAR
+
+
+def test_the_thread_ends_on_an_error_and_on_cancel() -> None:
+    for error in (RuntimeError("boom"), management.InterruptProcessingException()):
+        p, _, shown, _ = make(clip_passes(shots_of(1, 33)))
+        cue = Cue()
+        with pytest.raises(type(error)):
+            with p.running(pause=cue.pause):
+                cue.settle()
+                p.begin(0)
+                raise error
+        assert ticker_threads() == []
+        count = len(shown)
+        cue.go.release()  # a tick after the stop would be said now
+        assert len(shown) == count
+
+
+def test_a_text_that_cannot_be_sent_ends_the_ticker_not_the_run(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock, calls = Clock(), []
+    bar = ProgressBar(progress.BAR)
+
+    def show(text: str) -> None:
+        calls.append(text)
+        if threading.current_thread().name == THREAD:
+            raise OSError("the server went away")
+
+    p = progress.Progress(clip_passes(shots_of(1, 33)), progress.CLIP, bar, show, "", clock)
+    cue = Cue()
+    with p.running(pause=cue.pause):
+        cue.settle()
+        p.begin(0)
+        thread = ticker_threads()[0]
+        cue.go.release()
+        thread.join(5)
+        assert not thread.is_alive() and len(calls) == 2
+        # The ticker has ended; the node's thread goes on with its own events.
+        p.encoded()
+        assert len(calls) == 3
+    assert "can't be said between events" in caplog.text
+    assert ticker_threads() == []
+
+
+def test_no_tick_is_said_once_the_block_has_ended_even_one_on_its_way() -> None:
+    p, _, shown, _ = make(clip_passes(shots_of(1, 33)))
+    cue = Cue()
+    with pytest.raises(RuntimeError):
+        with p.running(pause=cue.pause):
+            cue.settle()
+            p.begin(0)
+            raise RuntimeError("boom")
+    count = len(shown)
+    p.tick()  # a tick that was on its way when the error came
+    assert len(shown) == count
+
+
+def test_the_join_returns_at_the_stop_with_no_time_cap_and_the_thread_is_gone() -> None:
+    """The default pause on a real event, a short period: the stop sets the event and joins with
+    no timeout, and the thread is not alive right after stop returns, however long the period."""
+    assert not hasattr(progress.Ticker, "JOIN")
+    p, _, _, _ = make(clip_passes(shots_of(1, 33)))
+    for period in (0.01, 3600.0):
+        ticker = progress.Ticker(p, period)
+        ticker.start()
+        ticker.stop()
+        assert not ticker.thread.is_alive()
+        ticker.stop()  # idempotent
+    assert ticker_threads() == []
+
+
+def test_the_default_pause_waits_a_second_and_a_stop_does_not_wait_for_it() -> None:
+    assert progress.TICK == 1.0
+    p, _, _, _ = make(clip_passes(shots_of(1, 33)))
+    with p.running():
+        assert len(ticker_threads()) == 1
+    assert ticker_threads() == []
+
+
+@pytest.mark.parametrize("how", ["end", "cancel", "error"])
+def test_a_node_leaves_no_thread_running(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    h = handle(tmp_path)
+    real = model.sample
+    if how == "cancel":
+        stop_at(3)
+    elif how == "error":
+        monkeypatch.setattr(model, "sample", lambda *args: (_ for _ in ()).throw(KeyError("x")))
+    expected: Any = {
+        "end": None,
+        "cancel": management.InterruptProcessingException,
+        "error": KeyError,
+    }[how]
+    if expected is None:
+        run_video(h, plans.Settings(window=5), pictures(9), RESOLUTION, "6")
+    else:
+        with pytest.raises(expected):
+            run_video(h, plans.Settings(window=5), pictures(9), RESOLUTION, "6")
+    assert ticker_threads() == []
+    # The next run goes through and leaves none either.
+    ProgressBar.on_update = None
+    monkeypatch.setattr(model, "sample", real)
+    upscale_image(h, plans.Settings(), pictures(1), RESOLUTION, "6")
+    assert ticker_threads() == []
 
 
 # ---- The previews -------------------------------------------------------------------------------
