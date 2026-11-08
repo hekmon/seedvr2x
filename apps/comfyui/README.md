@@ -3,8 +3,8 @@
 [ComfyUI](https://github.com/Comfy-Org/ComfyUI) nodes that run
 [SeedVR2](https://github.com/ByteDance-Seed/SeedVR) with seedvr2x's own model files, loaders and
 memory planner: a picture, a batch of pictures or the frames of a short clip upscaled shot by shot
-on the card you have, with the plan said on the node and a refusal, where one is due, before any
-model loads.
+on the card you have, with the plan said in ComfyUI's console and a refusal, where one is due,
+before any model loads.
 
 > **Not published yet.** The nodes are built and tested against ComfyUI v0.44.0 and are installed by
 > hand, as below; they are published with version 0.2.0 ([DESIGN.md](../../DESIGN.md)). Whole
@@ -24,7 +24,8 @@ model loads.
   unconnected by default, reads the files from a folder you give instead of the cache. Nothing is
   loaded here: the first upscale run loads.
 - **seedvr2x Cuts** finds where a clip changes scene ([Cuts and shots](#cuts-and-shots)): it takes
-  the clip's frames, and gives the cut list that Upscale Video needs and a text of the cuts.
+  the clip's frames, and gives the cut list that Upscale Video needs; the cuts are said in
+  ComfyUI's console.
 - **seedvr2x Upscale Image** upscales each picture of a batch on its own, to the output's short
   side given by `resolution` (1080 by default).
 - **seedvr2x Upscale Video** upscales a clip's frames shot by shot, each shot in sliding windows
@@ -34,7 +35,7 @@ model loads.
   ([Setting a value yourself](#setting-a-value-yourself)). The other three are in `seedvr2x`.
 
 Each upscale node takes `images` first (Upscale Video then takes `cuts`), then `models`, and gives
-`images` and `plan`. Its settings are widgets, each at its default:
+`images`. Its settings are widgets, each at its default:
 
 | Widget | Default | Notes |
 | --- | --- | --- |
@@ -43,13 +44,14 @@ Each upscale node takes `images` first (Upscale Video then takes `cuts`), then `
 | attention | `auto` | FlashAttention 2 where ComfyUI's environment has it, else PyTorch's SDPA. |
 | colour correction | on (`split`) | On, `split`, keeps the input's overall colours and brightness with the model's fine detail; off, `none`, leaves the model's own colours, which can drift. |
 | seed | `42` | ComfyUI's seed with its control after generate, `fixed`. |
-| plan only | off | Make the plan, say it and give it as text, and stop: no model is loaded and the nodes after the images output do not run. |
+| plan only | off | Make the plan, say it in the console, and stop: no model is loaded and the nodes after the images output do not run. |
 
 The numbers the plan makes are optional inputs: [Setting a value yourself](#setting-a-value-yourself).
 
 Each upscale node makes its plan at run time, where the input's size and the card are known, and
-says it three ways: on the node, in ComfyUI's console, and as its `plan` output, text that
-`Preview as Text` shows. The plan is made for the card as it would be without ComfyUI's own models.
+says it whole in ComfyUI's console; the node itself shows one short line saying where the run is
+([While it runs](#while-it-runs)). The nodes have no text output: the plan and the cuts are read in
+the console. The plan is made for the card as it would be without ComfyUI's own models.
 
 ## Cuts and shots
 
@@ -73,16 +75,17 @@ seedvr2x Cuts has two modes:
   cache, as in seedvr2x Models.
 - `one shot` runs no detector: the whole clip is one shot, for a clip you know has no cut.
 
-Its `text` output, also shown on the node, lists each cut by the frame its shot starts at, counted
-from 0, with the detector's probability, and the **possible cuts**: scenes it found less sure than
-the threshold, which are not in the list. Look at them in the clip; a threshold under a possible
-cut's probability makes it a cut.
+The console lists each cut by the frame its shot starts at, counted from 0, with the detector's
+probability, and the **possible cuts**: scenes it found less sure than the threshold, which are not
+in the list. Look at them in the clip; a threshold under a possible cut's probability makes it a
+cut. The node's own line says how many: `2 shots · 1 possible cut below 0.30`.
 
 ## Setting a value yourself
 
 The numbers the plan makes are optional inputs of the upscale nodes, each a socket of its own
 type: `encode tile` and `decode tile`, `blocks swapped`, and Upscale Video's `window length`.
-Unconnected, the plan chooses, and its text says what it chose (`encode tile: auto -> 1024 px`).
+Unconnected, the plan chooses, and the plan in ComfyUI's console says what it chose
+(`encode tile: auto -> 1024 px`).
 To set one, drag a link out of the socket and release it on the canvas: ComfyUI offers the one
 node that gives that type, first in its search box, where Enter adds it already connected, and
 among the suggestions of its link menu, which a release with Shift opens instead (ComfyUI's
@@ -109,26 +112,55 @@ The node shows how far it has got, in what ComfyUI gives a node:
   size. It starts from the speed seedvr2x measured on an RTX 5090, and as soon as the node has made
   a unit of one kind (an encode tile, a window, a decode tile) it uses your computer's own speed
   for that kind and spreads the rest of the bar over what is left; it never goes back.
-- **The text on the node** is the plan, then where the run is ("Shot 2 of 4 (frames 121 to 240):
-  upscaling, window 2 of 3", and at enhanced or maximum "Shot 2 of 4, run 3 of 4 (frames 123 to
-  240): upscaling, window 2 of 3"; "Picture 3 of 8: decoding, tile 2 of 4"), then the time so
-  far and, once the first window is done, about how long is left. At enhanced and maximum a run
-  that starts later in the shot names its own frames ("run 3 of 4 (frames 123 to 240)", and its
-  decode counts them: "decoding, 60 of 118 frames"). The place changes when a tile, a window or a
-  few frames are done, and the time moves each second between them, so a long window's text does
-  not stand still. At the end it shows the plan and "480 frames in 4 min 32 s".
+- **The text on the node** is one short line, at most 40 characters, a progress hint and never a
+  log (ComfyUI squeezes the box when the node shows a preview, and a longer text has to be
+  scrolled). It moves when a tile, a window or a few frames are done, and its time each second
+  between them, so that a long window's line does not stand still. A line that would be longer
+  than 40 characters drops a part: the word `shot` or `picture` first (`2/4 · run 3/4 · window
+  2/3 · ~3 min left`), then the run (the bar counts the runs), then the time left, the run
+  coming back where the time can't fit anyway; never the step:
+
+  | State | Line |
+  | --- | --- |
+  | the node starts | `planning…` |
+  | downloading, reading the files | `downloading 3.1/8.3 GB`, `reading 2.0/8.8 GB` |
+  | a clip, encoding | `shot 2/4 · encoding`, `shot 2/4 · encode tile 3/6` |
+  | a clip, the model | `shot 2/4 · window 2/3 · ~3 min left` (before the first window is done, the time so far: `1 min 5 s`) |
+  | a clip, decoding | `shot 2/4 · decoding 60/118`, `shot 2/4 · decode tile 2/4` |
+  | enhanced or maximum | `run 3/4 · window 2/3 · ~3 min left`, and with several shots `2/4 · run 3/4 · window 2/3 · ~3 min left`, the word `shot` making room |
+  | a picture of a batch | `picture 3/8 · encode tile 2/4`, `picture 3/8 · upscaling`, `picture 3/8 · decoding` |
+  | finished | `480 frames in 4 min 32 s`, `8 pictures in 41 s` |
+  | plan only | `plan: window 41 frames · decode 1088 px`, `plan: encode 1024 px · decode 1088 px` |
+  | seedvr2x Cuts | `scanning: 64/120 frames`, `2 shots · 1 possible cut below 0.30`, `one shot: 120 frames` |
+
+  A clip of one shot has no shot part, and a run part is there only at enhanced and maximum. The
+  time left is rough: seconds under a minute, whole minutes under an hour.
+- **ComfyUI's console** has the rest, each of seedvr2x's lines beginning with `[seedvr2x]`, the
+  library's included, so that they read apart from other nodes' lines, which are left as they are:
+  the plan whole before a run (with `plan only`, the same), the cuts with their probabilities and
+  the possible cuts, each shot's frames, the time a run took ("480 frames upscaled in 4 min
+  32 s"), where each model file is, and the full sentence of everything the node's line only
+  points at.
+- **A refusal** shows `refused: see the error` on the node. Its text is in ComfyUI's error and,
+  once, in the console, with the way out in the nodes' terms.
 - **A wait that lasts.** Once the node has made one unit of a kind, it knows how long the next
   should take. If the card has not answered for more than four times that (and at least a
-  minute), the text says so with how long it has waited, and ComfyUI's console says it with the
-  card's reading. The wait is not given up on its own: a slow card (shared with a game) answers
-  in the end, and the text goes back to normal. Cancel leaves the wait. If the card has stopped
-  answering, though, the work queued on it can't be undone inside ComfyUI. A run left that way
-  gives nothing back to the card on its way out, as that would wait on it again. At the next
-  run's start the node asks the card, without waiting, whether the work has finished: if so it
-  gives the models back and goes on; if not, the run is refused, saying that the card is still
-  busy, and you can wait and run again or restart ComfyUI.
-  After a Cancel or an error the node's text says "freeing the card" while the models are given
-  back: on a card that answers it ends in a moment, and pressing Cancel again leaves it.
+  minute), the node says `GPU not answering for 3 min` (the minutes it has waited), and ComfyUI's
+  console says it with the card's reading and the way out. The wait is not given up on its own: a
+  slow card (shared with a game) answers in the end, and the line goes back to normal. Cancel leaves
+  the wait. If the card has stopped answering, though, the work queued on it can't be undone inside
+  ComfyUI. A run left that way gives nothing back to the card on its way out, as that would wait on
+  it again. At the next run's start the node asks the card, without waiting, whether the work has
+  finished: if so it gives the models back and goes on; if not, the run is refused, saying that the
+  card is still busy, and you can wait and run again or restart ComfyUI.
+- **The card's states** have a line each, and the full sentence in the console:
+
+  | State | Line |
+  | --- | --- |
+  | the models are given back after a Cancel or an error | `freeing the GPU… Cancel again to leave` (a second Cancel leaves it, run again once the card has finished, or restart ComfyUI) |
+  | the card has not finished its last work, after that, or a run refused for it | `GPU busy: run again or restart ComfyUI` |
+  | a CUDA error failed the card, now or in an earlier run | `GPU failed: restart ComfyUI` |
+
 - **The preview** is the newest frame decoded, as ComfyUI's samplers show their steps, once for each
   few frames of a clip and once for each picture of a batch, at ComfyUI's preview size
   (`--preview-size`, 512 by default).
@@ -136,13 +168,10 @@ The node shows how far it has got, in what ComfyUI gives a node:
   short line on the node ("downloading 3.1/8.3 GB"), then the file chosen and whether it is kept
   ("Sharp 7B int8 · kept in RAM"); ComfyUI keeps the node's output, so this happens once for as
   long as the node's inputs stay as they are. The upscale node's bar starts with the reading of
-  the files into memory, in bytes, with a line each ("reading the sharp 7B (float16) into memory:
-  9.0 of 16.5 GB"), and again at 0 for the upscale; if a file has gone from the cache since
-  seedvr2x Models ran, the upscale node says so in ComfyUI's console and downloads it again on
-  that bar. seedvr2x Cuts shows the frames it has scanned, and downloads its detector's file on
-  its own bar.
-- **ComfyUI's console** has the rest, each of seedvr2x's lines beginning with `[seedvr2x]`, the
-  library's included, so that they read apart from other nodes' lines, which are left as they are.
+  the files into memory, in bytes ("reading 2.0/8.8 GB"), and again at 0 for the upscale; if a
+  file has gone from the cache since seedvr2x Models ran, the upscale node says so in ComfyUI's
+  console and downloads it again on that bar. seedvr2x Cuts shows the frames it has scanned, and
+  downloads its detector's file on its own bar.
 - **Cancel** stops the run after the tile or the window being made, or the piece of a file being
   read, and frees the card. Hugging Face's fast downloader (Xet) reports from a thread of its own,
   where a Cancel cannot stop it: the node leaves the pressed Cancel as it is and honours it as soon
@@ -229,13 +258,13 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   work: if it has, the nodes give their models back and the run goes on; if not, the run is
   refused ("the graphics card is still busy"), and only a new ComfyUI is certain to have a card
   that answers.
-- **A graphics card that failed needs ComfyUI restarted too.** A CUDA error other than running
-  out of memory (an illegal memory access, a "CUDA error: out of memory" that a kernel met) leaves
-  the card's state untrusted, and under ComfyUI's cudaMallocAsync freeing memory there can end
-  ComfyUI's process at once, with no message. So the nodes free nothing on that card: the node
-  says "the graphics card failed" with CUDA's own words, ComfyUI's console says it too, and every
-  later run is refused at its start until ComfyUI is restarted. Running out of memory (torch's
-  "out of memory" error) is not a failure: the card is freed as after any error.
+- **A graphics card that failed needs ComfyUI restarted too.** A CUDA error other than running out
+  of memory (an illegal memory access, a "CUDA error: out of memory" that a kernel met) leaves the
+  card's state untrusted, and under ComfyUI's cudaMallocAsync freeing memory there can end ComfyUI's
+  process at once, with no message. So the nodes free nothing on that card: the node shows `GPU
+  failed: restart ComfyUI`, ComfyUI's console and error say it with CUDA's own words, and every
+  later run is refused at its start until ComfyUI is restarted. Running out of memory (torch's "out
+  of memory" error) is not a failure: the card is freed as after any error.
 - **ComfyUI's image.** The output is its `IMAGE`, float32, and its savers write 8 bits or lossy
   video. The command line writes 16-bit PNG and lossless masters, with seedvr2x's record in each
   output; the nodes write no file and carry no record.
@@ -261,7 +290,7 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   `auto -> not kept: 15.81 GiB is over the 12.80 GiB ComfyUI allows`. Under ComfyUI's
   `--disable-smart-memory`, which unloads every model after each prompt, nothing is kept.
   ComfyUI's `Unload models` frees them, and ComfyUI may drop them itself when its own models need
-  the room: the next run then reads the files again, and says so on the node. Choosing another
+  the room: the next run then reads the files again, and says so in the console. Choosing another
   file frees the first one's memory before the second is pinned.
 - **On the card, only while a node runs.** The plan counts on the card as it would be without
   ComfyUI's models and less the room ComfyUI keeps for the system (its `--reserve-vram`, 0.4 to

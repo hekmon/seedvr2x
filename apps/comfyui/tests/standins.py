@@ -4,7 +4,10 @@ other models on the stand-in card, and the settings every test starts from. Comf
 are tests/comfy_stand_in."""
 
 import inspect
-from collections.abc import Callable
+import logging
+import re
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +18,7 @@ import pytest
 import torch
 from comfy.model_patcher import ModelPatcher
 from comfy_api.latest import io
-from comfyui import models, plans
+from comfyui import models, plans, progress
 from test_still import pipeline_models, stand_in_dit
 
 from seedvr2x import memory, model, peaks, pull, waiting, weights
@@ -250,6 +253,60 @@ def execute(node: type[io.ComfyNode], unique_id: str | None = "1", **inputs: Any
     return node.EXECUTE_NORMALIZED({io.Hidden.unique_id: unique_id}, **inputs)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
 
 
+class Said(logging.Handler):
+    """What the nodes' logger says, the messages as the nodes make them (before the console's
+    prefix, which a parent logger's handler puts on)."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.INFO)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+@contextmanager
+def nodes_console() -> Generator[Said]:
+    """The nodes' own console lines (`seedvr2x_comfyui.nodes`, at INFO) of the block, whatever the
+    logging configuration: the plan whole and the cuts are said there, no longer given as an
+    output."""
+    logger = logging.getLogger("seedvr2x_comfyui.nodes")
+    said, level = Said(), logger.level
+    logger.addHandler(said)
+    logger.setLevel(logging.INFO)
+    try:
+        yield said
+    finally:
+        logger.removeHandler(said)
+        logger.setLevel(level)
+
+
+def plan_of(said: Said) -> str:
+    """The plan the nodes said whole in the console: the message that begins "plan: " or
+    "plan (plan only): "."""
+    return next((text for text in said.messages if text.startswith(PLAN_LEADS)), "")
+
+
+PLAN_LEADS = ("plan: ", "plan (plan only): ")
+
+
+TIME = re.compile(r"(\d+ (s|min|h|d)( \d+ (s|min|h))?|~.* left)")
+
+
+def where(text: str) -> str:
+    """A status line without its time part, which is its last, or none where it did not fit."""
+    head, _, last = text.rpartition(progress.SEPARATOR)
+    return head if head and TIME.fullmatch(last) else text
+
+
+def not_one_short_line(texts: list[str]) -> list[str]:
+    """The texts a node's text box must never get: over progress.LIMIT characters, on several
+    lines, or naming seedvr2x (the node's title does)."""
+    return [
+        text for text in texts if len(text) > progress.LIMIT or "\n" in text or "seedvr2x" in text
+    ]
+
+
 def inputs(settings: plans.Settings, *, video: bool = False) -> dict[str, Any]:
     """The inputs an upscale node is given for settings (the library's pins, None: left to the
     plan): the widgets' values, and a pin only where it is set, as a value node connected to its
@@ -279,19 +336,21 @@ def upscale_image(
     *,
     plan_only: bool = False,
 ) -> tuple[Any, str]:
-    """seedvr2x Upscale Image run as ComfyUI runs it: (the pictures, the plan's text)."""
+    """seedvr2x Upscale Image run as ComfyUI runs it: (the pictures, the plan's text as the
+    console had it)."""
     from comfyui import nodes
 
-    out = execute(
-        nodes.UpscaleImage,
-        unique_id,
-        images=image,
-        models=handle,
-        resolution=resolution,
-        plan_only=plan_only,
-        **inputs(settings),
-    )
-    return out[0], out[1]
+    with nodes_console() as said:
+        out = execute(
+            nodes.UpscaleImage,
+            unique_id,
+            images=image,
+            models=handle,
+            resolution=resolution,
+            plan_only=plan_only,
+            **inputs(settings),
+        )
+    return out[0], plan_of(said)
 
 
 def upscale_video(
@@ -305,23 +364,25 @@ def upscale_video(
     cuts: tuple[Shot, ...] | None = None,
     quality: str = "standard",
 ) -> tuple[Any, str]:
-    """seedvr2x Upscale Video run as ComfyUI runs it: (the frames, the plan's text). `cuts`: the
+    """seedvr2x Upscale Video run as ComfyUI runs it: (the frames, the plan's text as the console
+    had it). `cuts`: the
     cut list seedvr2x Cuts gives, one shot of the whole clip by default; `quality`: the widget's
     value (ComfyUI gives every widget's, the default standard)."""
     from comfyui import nodes
 
-    out = execute(
-        nodes.UpscaleVideo,
-        unique_id,
-        images=images,
-        cuts=(Shot(0, len(images)),) if cuts is None else cuts,
-        models=handle,
-        resolution=resolution,
-        plan_only=plan_only,
-        quality=quality,
-        **inputs(settings, video=True),
-    )
-    return out[0], out[1]
+    with nodes_console() as said:
+        out = execute(
+            nodes.UpscaleVideo,
+            unique_id,
+            images=images,
+            cuts=(Shot(0, len(images)),) if cuts is None else cuts,
+            models=handle,
+            resolution=resolution,
+            plan_only=plan_only,
+            quality=quality,
+            **inputs(settings, video=True),
+        )
+    return out[0], plan_of(said)
 
 
 def validate(node: type[io.ComfyNode], **constants: Any) -> bool | str:

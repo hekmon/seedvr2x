@@ -17,7 +17,7 @@ from typing import Any
 import comfy.model_management as management
 import pytest
 import server
-from comfyui import models, plans, progress, words
+from comfyui import console, models, plans, progress, words
 from standins import RESOLUTION, StandIn, handle
 from standins import upscale_video as run_video
 from test_nodes import pictures
@@ -25,7 +25,6 @@ from test_progress import (
     TILES,
     Cue,
     clip_passes,
-    lines,
     make,
     node_texts,
     shots_of,
@@ -154,7 +153,7 @@ def test_running_sets_cancel_as_the_waits_check_and_forgets_the_unit_at_its_end(
 def test_a_wait_past_its_bound_is_said_on_the_node_and_in_the_console_and_cancel_leaves_it(
     world: WaitClock, caplog: pytest.LogCaptureFixture
 ) -> None:
-    p, clock, shown, bar = make(clip_passes(shots_of(2, 33), 5), plan="the plan")
+    p, clock, shown, bar = make(clip_passes(shots_of(2, 33), 5))
     cue = Cue()
     said: dict[str, str] = {}
     steps = {"n": 0}
@@ -184,13 +183,9 @@ def test_a_wait_past_its_bound_is_said_on_the_node_and_in_the_console_and_cancel
         with pytest.raises(management.InterruptProcessingException):
             waiting.wait(lambda: False, 10.0)
     # Under the bound the text said nothing of it; past it, how long and the way out.
-    assert "A wait on the GPU" not in said["before"]
-    assert lines(said["during"])[:2] == ["the plan", f"{name}"]
-    assert (
-        "A wait on the GPU has lasted 1 min 20 s, much longer than this step should take: "
-        f"{progress.WAY}." in said["during"]
-    )
-    assert "restart ComfyUI" in said["during"]
+    assert said["before"].startswith("shot 1/2 \u00b7 window 2/")
+    # One short line: how long, in whole minutes; the way out is the console's.
+    assert said["during"] == "GPU not answering for 1 min"
     # The library's own line, on ComfyUI's console (a WARNING of seedvr2x.waiting), names the unit
     # and the way out; the bar was never touched by the ticker.
     (console,) = stall_lines(caplog)
@@ -231,9 +226,9 @@ def test_the_text_goes_back_to_normal_when_the_wait_ends_by_itself(
 
         world.on_sleep = on_sleep
         waiting.wait(lambda: world.now >= 100.0, 10.0)
-        assert "A wait on the GPU" in during[0], "said while it lasted"
+        assert during[0] == "GPU not answering for 1 min", "said while it lasted"
         cue.fire()
-        assert "A wait on the GPU" not in shown[-1]
+        assert "GPU not answering" not in shown[-1]
     assert not waiting.abandoned()
     assert any("the wait on the GPU ended after" in r.getMessage() for r in caplog.records)
 
@@ -246,7 +241,7 @@ def test_a_wait_before_any_unit_is_measured_says_nothing(world: WaitClock) -> No
         p.begin(0)
         world.on_sleep = lambda: cue.fire() if world.now == 600.0 else None
         waiting.wait(lambda: world.now >= 1000.0, 100.0)
-        assert "A wait on the GPU" not in shown[-1]
+        assert "GPU not answering" not in shown[-1]
     assert not waiting.stalled()
 
 
@@ -298,10 +293,10 @@ def test_a_node_stalled_in_a_window_says_so_and_cancel_leaves_it_and_gives_nothi
     h = handle(tmp_path)
     with pytest.raises(management.InterruptProcessingException):
         run_video(h, plans.Settings(window=5), pictures(33), RESOLUTION, "9")
-    assert "A wait on the GPU" not in happened["before"]
-    assert "A wait on the GPU has lasted 1 min 20 s" in happened["during"]
-    assert "restart ComfyUI" in happened["during"]
+    assert "GPU not answering" not in happened["before"]
+    assert happened["during"] == "GPU not answering for 1 min"
     assert happened["during"] in node_texts("9")
+    assert all(len(each) <= progress.LIMIT for each in node_texts("9"))
     (console,) = stall_lines(caplog)
     assert "upscaling, window 2 of" in console and "restart ComfyUI" in console
     assert waiting.abandoned()
@@ -489,22 +484,32 @@ def never_ending_release(world: WaitClock, press_at: float | None) -> Callable[[
 
 
 def test_a_release_that_never_ends_says_so_and_a_second_cancel_leaves_it_and_marks_the_card(
-    machine: StandIn, tmp_path, world: WaitClock, monkeypatch: pytest.MonkeyPatch
+    machine: StandIn,
+    tmp_path,
+    world: WaitClock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level("INFO", "seedvr2x_comfyui")
     h, happened = cancelled_run(
         machine, tmp_path, world, monkeypatch, never_ending_release(world, 30.0)
     )
-    # Exactly the words, as the node's text, while the release waited.
-    assert happened["text"] == progress.FREEING
-    assert progress.FREEING == (
+    # Exactly the words, as the node's text, while the release waited: one short line, the
+    # sentence in the console (at INFO), and the state left at WARNING.
+    assert happened["text"] == progress.FREEING == "freeing the GPU\u2026 Cancel again to leave"
+    assert progress.FREEING_SAID == (
         "freeing the card: waiting for the GPU to finish its last work; Cancel again to leave it,"
         " then run again once the card has finished, or restart ComfyUI"
     )
+    said = [(r.levelname, r.getMessage().removeprefix(console.PREFIX)) for r in caplog.records]
+    assert ("INFO", progress.FREEING_SAID) in said
+    assert ("WARNING", progress.STOPPED_SAID) in said
+    assert progress.STOPPED == "GPU busy: run again or restart ComfyUI"
     # The second Cancel left it: the card is marked whatever the bound (no unit was named), torch's
     # cache was not emptied after it, and the models are held, not collected.
     assert waiting.abandoned()
     assert len(management.empties) == happened["empties"]
-    assert node_texts("9")[-1] == progress.STOPPED, "no more 'Cancel again to leave it'"
+    assert node_texts("9")[-1] == progress.STOPPED, "no more 'Cancel again to leave'"
     entry = models.kept(h)
     assert entry is not None and not entry.busy
     assert len(models._left_on_card) == 1  # pyright: ignore[reportPrivateUsage]
@@ -515,6 +520,11 @@ def test_a_release_that_never_ends_says_so_and_a_second_cancel_leaves_it_and_mar
     with pytest.raises(words.Refused, match="still busy with the last work"):
         run_video(h, plans.Settings(window=5), pictures(5), RESOLUTION, "9")
     assert len(machine.loads) == loads
+    # The refused node says the card's state in one line, and the refusal once in the console.
+    assert node_texts("9")[-1] == progress.STOPPED
+    refused = [r for r in caplog.records if r.getMessage().startswith(console.PREFIX + "refused")]
+    assert len(refused) == 1 and refused[0].levelname == "WARNING"
+    assert "still busy with the last work" in refused[0].getMessage()
 
 
 def test_a_healthy_release_after_a_cancel_puts_the_text_back_and_marks_nothing(

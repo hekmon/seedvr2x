@@ -216,7 +216,7 @@ def test_nothing_given_or_an_empty_value_is_the_cache_and_an_empty_one_is_said(
 
 
 def test_a_value_that_is_no_folder_is_refused_in_the_nodes_words(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(pull, "resolve", lambda *args, **kwargs: pytest.fail("went on"))
     (tmp_path / "file.txt").write_text("x")
@@ -228,7 +228,11 @@ def test_a_value_that_is_no_folder_is_refused_in_the_nodes_words(
         assert 'the "model folder" input of seedvr2x Models' in text
         assert text.endswith("or unwire the input to use Hugging Face's cache")
         assert "--" not in text
-    assert node_texts("4") == []
+    # The node says only that it refused; the text is in the error and once each in the console.
+    assert node_texts("4") == ["refused: see the error"] * 2
+    refusals = [line for line in unprefixed(caplog) if line.startswith("refused: ")]
+    assert len(refusals) == 2 and all("is not a folder: wire a folder" in each for each in refusals)
+    assert all(r.levelname == "WARNING" for r in caplog.records if "refused: " in r.getMessage())
 
 
 def test_a_refusal_of_the_download_is_worded_for_the_models_node(
@@ -298,7 +302,7 @@ def test_the_downloading_line_is_one_line_in_the_totals_unit() -> None:
     assert progress.amount_short(3_100_000_000, 8_800_000_000) == "3.1/8.8 GB"
     assert progress.amount_short(12_100_000, 30_482_632) == "12.1/30.5 MB"
     shown: list[str] = []
-    downloading = progress.Downloading(shown.append, plans.file_label)
+    downloading = progress.Preparing(shown.append, plans.file_label)
     downloading.download(INT8, 0, SIZES[0])
     downloading.download(VAE, 0, SIZES[1])
     downloading.download(INT8, 4_000_000_000, SIZES[0])

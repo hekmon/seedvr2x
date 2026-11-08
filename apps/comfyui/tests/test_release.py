@@ -107,12 +107,12 @@ def test_cancel_between_a_clips_runs_frees_the_card_and_makes_no_run_after(
 
     monkeypatch.setattr(model, "sample", counting)
 
-    # The node's text as the second run starts ("Frames 2 to 33, run 2 of 4: encoding"), said
-    # before the bar is moved for it: Cancel as that update is made.
+    # The node's text as the second run starts ("run 2/4 · encoding"), said before the bar is
+    # moved for it: Cancel as that update is made.
     def hook(value: float) -> None:
         instance = server.PromptServer.instance
         assert instance is not None
-        if "run 2 of 4" in instance.texts[-1][0]:
+        if "run 2/4" in instance.texts[-1][0]:
             management.interrupt_current_processing()
 
     ProgressBar.on_update = hook

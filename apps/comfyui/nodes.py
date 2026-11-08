@@ -20,17 +20,22 @@ What the V3 schema changes for a node, read in ComfyUI v0.44.0:
   where what is missing is downloaded here, on a bar of the node's). Gives a light handle
   (models.Handle); no file is read here.
 - seedvr2x Cuts: the shot detector on a clip's frames (or the clip taken as one shot), giving the
-  cut list Upscale Video takes and the text of the cuts and the possible cuts.
+  cut list Upscale Video takes; the cuts and the possible cuts are said in ComfyUI's console.
 - seedvr2x Upscale Image and seedvr2x Upscale Video: the pictures and the models' handle, then
   the settings as widgets (resolution, attention, colour correction, seed, plan only), then the
   numbers the plan makes as optional inputs of seedvr2x's own types (each pass's tile, the blocks
   swapped, a clip's window length; the user's Desktop test, 2026-11-05): unwired, the plan
   chooses; wired, the value is taken exactly. No value stands for auto. The plan is made at run
-  time, where the input's size and the card are known (models.session), said on the node and in
-  ComfyUI's console and given as text, then the library's pass over the pictures or the frames in
-  memory; a clip's, one pass for each shot of its cut list (a required input of seedvr2x's own
-  type, a clip's fact), the plan made once for the longest shot's windows. With "plan only" the
-  node stops there: the plan is its text output and what follows its pictures is not run.
+  time, where the input's size and the card are known (models.session), said in ComfyUI's
+  console, then the library's pass over the pictures or the frames in memory; a clip's, one pass
+  for each shot of its cut list (a required input of seedvr2x's own type, a clip's fact), the
+  plan made once for the longest shot's windows. With "plan only" the node stops there: the plan
+  is in the console, the node's line says its main numbers and what follows its pictures is not
+  run.
+
+A node's text box is one short status line (progress.py), never a log: what a node has to say
+besides goes to ComfyUI's console through the module's logger, and a refusal shows "refused: see
+the error" on the node (_refusing), its text in ComfyUI's error and once in the console.
 
 V3 classes hold no state (the executor runs `execute` on a clone of the class, and ignores
 `__init__`): what the nodes keep between runs, the weights in RAM, is in models.py's registry.
@@ -42,7 +47,8 @@ carry no seedvr2x record (the CLI's 16-bit PNG has one)."""
 
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, cast, override
@@ -57,6 +63,7 @@ from comfy_execution.graph_utils import ExecutionBlocker
 
 from seedvr2x import clip, frames, peaks, pull, shotcuts, still, still_plan, waiting
 from seedvr2x import detector as shot_detector
+from seedvr2x.clock import spoken, wall
 from seedvr2x.errors import Refusal
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Plan
@@ -184,13 +191,14 @@ class Models(io.ComfyNode):
         characters, no name: the title has it) is the download's bytes while one runs, then the
         file and whether it is kept in RAM; the files' places go to the console."""
         show = _shower(_node_id(cls))
-        handle = models_module.Handle(
-            DIT_BY_LABEL[model], models_module.model_folder(model_dir), keep_in_ram_between_runs
-        )
-        models_module.provide(handle, show)
-        kept = "kept" if models_module.decide_keeping(handle).kept else "not kept"
-        show(f"{plans.short_label(handle.dit)} \u00b7 {kept} in RAM")
-        return io.NodeOutput(handle)
+        with _refusing(show):
+            handle = models_module.Handle(
+                DIT_BY_LABEL[model], models_module.model_folder(model_dir), keep_in_ram_between_runs
+            )
+            models_module.provide(handle, show)
+            kept = "kept" if models_module.decide_keeping(handle).kept else "not kept"
+            show(f"{plans.short_label(handle.dit)} \u00b7 {kept} in RAM")
+            return io.NodeOutput(handle)
 
 
 # ---- What the upscale nodes share ----------------------------------------------------------------
@@ -245,11 +253,26 @@ def _show(text: str, node: str | None) -> None:
         instance.send_progress_text(text, node)
 
 
-def _say(text: str, show: Callable[[str], None]) -> None:
-    """The plan on the node, through its `show` (so that it is the text a Shower keeps), and in
-    ComfyUI's console, at INFO."""
-    logger.info("%s", text)
-    show(text)
+@contextmanager
+def _refusing(show: Callable[[str], None]) -> Generator[None]:
+    """The body of a node's execute: a refusal (words.Refused) it raises puts the refusal's short
+    line on the node (`line`: "refused: see the error", or the card's state) through `show`, and
+    its text in the console once, at WARNING (the model session says a failed card at ERROR
+    already: `logged`). The exception goes on to ComfyUI, whose error dialog has the text."""
+    try:
+        yield
+    except words.Refused as error:
+        if not error.logged:
+            logger.warning("refused: %s", error)
+            error.logged = True
+        show(error.line)
+        raise
+    except BaseException:
+        # Anything else (an error, a Cancel, out of memory) before the run's first line of its
+        # own: no "planning…" left beside ComfyUI's error. A later line stays: where it stopped.
+        if getattr(show, "last", None) == progress.PLANNING:
+            show("")
+        raise
 
 
 class Shower:
@@ -400,10 +423,10 @@ def _plan_only_input() -> Any:
         "plan_only",
         default=False,
         display_name=plans.LABELS["plan_only"],
-        tooltip="Make the plan, show it on the node and give it as the plan output, and stop: no"
-        " model is loaded, ComfyUI's loaded models stay as they are, and the nodes connected to"
-        " the images output are skipped. The model files are found, and one missing from"
-        " Hugging Face's cache is downloaded.",
+        tooltip="Make the plan, say it in ComfyUI's console, and stop: no model is loaded,"
+        " ComfyUI's loaded models stay as they are, and the nodes connected to the images output"
+        " are skipped. The model files are found, and one missing from Hugging Face's cache is"
+        " downloaded.",
     )
 
 
@@ -426,15 +449,6 @@ def _models_input() -> Any:
     )
 
 
-def _plan_output() -> Any:
-    return io.String.Output(
-        "plan",
-        display_name="plan",
-        tooltip="The plan as text: the settings, what seedvr2x chose for each one left to it, and"
-        " the memory the run needs. Preview as Text shows it.",
-    )
-
-
 def _settings(**values: Any) -> plans.Settings:
     """The inputs' values as the settings of the run, or the node's refusal for a value no input
     takes (a value a link gives is not held to an input's grid by ComfyUI)."""
@@ -444,11 +458,15 @@ def _settings(**values: Any) -> plans.Settings:
         raise words.Refused(f"{error}.") from error
 
 
-def _plan_only(text: str) -> io.NodeOutput:
-    """What a plan only gives: the plan as text, and no picture. The picture output is an
-    execution blocker with no message, which the executor passes to every node that takes it
-    (silently, as a node that has nothing to give); a message would be reported as an error."""
-    return io.NodeOutput(ExecutionBlocker(None), text)
+def _plan_only() -> io.NodeOutput:
+    """What a plan only gives: no picture. The picture output is an execution blocker with no
+    message, which the executor passes to every node that takes it (silently, as a node that has
+    nothing to give); a message would be reported as an error."""
+    return io.NodeOutput(ExecutionBlocker(None))
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}{'' if number == 1 else 's'}"
 
 
 # ---- seedvr2x Upscale Image ----------------------------------------------------------------------
@@ -522,9 +540,10 @@ class UpscaleImage(io.ComfyNode):
             description=(
                 "Upscales each image of the batch on its own with seedvr2x. Each time it runs,"
                 " seedvr2x works out how to fit the job on your graphics card, as if ComfyUI's"
-                " other models were unloaded: the plan, shown on the node and given as the plan"
-                " output. The optional numbers are the plan's: unconnected, it chooses them; a"
-                " number connected is used exactly, and the plan is built around it."
+                " other models were unloaded: the plan, said in ComfyUI's console, while the node"
+                " shows where the run is. The optional numbers are the plan's: unconnected, it"
+                " chooses them; a number connected is used exactly, and the plan is built around"
+                " it."
             ),
             inputs=[
                 io.Image.Input(
@@ -547,7 +566,6 @@ class UpscaleImage(io.ComfyNode):
                     display_name="images",
                     tooltip="The upscaled images, in the batch's order.",
                 ),
-                _plan_output(),
             ],
             hidden=[io.Hidden.unique_id],
         )
@@ -566,76 +584,81 @@ class UpscaleImage(io.ComfyNode):
         decode_tile: int | None = None,
         swap_blocks: int | None = None,
     ) -> io.NodeOutput:
-        _checked(models)
-        settings = _settings(
-            encode_tile=encode_tile,
-            decode_tile=decode_tile,
-            swap_blocks=swap_blocks,
-            attention=attention,
-            color_correction=color_correction,
-            seed=seed,
-        )
-        batch = _array(images)
-        count, height, width = batch.shape[:3]
-        target = _target(width, height, resolution, picture=True)
-        out_height, out_width = frames.output_size(target)
-        planner = picture_planner(settings, target, (height, width), count)
-
-        started = time.monotonic()
         show = _shower(_node_id(cls))
-        with models_module.session(
-            models,
-            settings.attention,
-            planner,
-            plan_only=plan_only,
-            preparing=progress.Preparing(show, plans.file_label),
-        ) as run:
-            made, tiles = run.planned.plan
-            text = plans.picture_text(
-                count=count,
-                source=(width, height),
-                output=(out_width, out_height),
-                resolution=resolution,
-                dit=models.dit,
-                attention=run.attention,
-                plan=made,
-                tiles=tiles,
-                room=run.room,
-                settings=settings,
-                keeping=run.keeping,
-                notes=run.notes,
-                held=run.held,
+        with _refusing(show):
+            show(progress.PLANNING)
+            _checked(models)
+            settings = _settings(
+                encode_tile=encode_tile,
+                decode_tile=decode_tile,
+                swap_blocks=swap_blocks,
+                attention=attention,
+                color_correction=color_correction,
+                seed=seed,
             )
-            _say(text, show)
-            if plan_only:
-                return _plan_only(text)
-            # The bar over the batch's expected time (progress.Progress), the text and a preview
-            # a picture.
-            moving = progress.Progress(
-                progress.picture_passes(count, target, tiles.encode, tiles.decode),
-                progress.PICTURE,
-                ProgressBar(progress.BAR),
-                show,
-                text,
-            )
-            # The batch's output, allocated once and written into picture by picture: a list of
-            # the pictures stacked after would hold them twice (the plan counts it once,
-            # picture_process).
-            outputs = np.empty((count, out_height, out_width, 3), dtype=np.float32)
-            # The time said each second, Cancel the waits' check and the units named for them
-            # (progress.Progress.running), stopped however the run ends.
-            with moving.running():
-                try:
-                    for index in range(count):
-                        moving.begin(index)
-                        outputs[index] = cls._one(
-                            run.models, batch[index], target, settings, tiles, moving
-                        )
-                except still.NonFinite as error:
-                    raise words.non_finite(str(error)) from error
-                moving.finish(f"{count} picture{'s' if count > 1 else ''}")
-        logger.info("%d picture(s) upscaled in %.1f s", count, time.monotonic() - started)
-        return io.NodeOutput(_output(outputs), text)
+            batch = _array(images)
+            count, height, width = batch.shape[:3]
+            target = _target(width, height, resolution, picture=True)
+            out_height, out_width = frames.output_size(target)
+            planner = picture_planner(settings, target, (height, width), count)
+
+            started = time.monotonic()
+            with models_module.session(
+                models,
+                settings.attention,
+                planner,
+                plan_only=plan_only,
+                preparing=progress.Preparing(show, plans.file_label),
+            ) as run:
+                made, tiles = run.planned.plan
+                logger.info(
+                    "%s",
+                    plans.picture_text(
+                        count=count,
+                        source=(width, height),
+                        output=(out_width, out_height),
+                        resolution=resolution,
+                        dit=models.dit,
+                        attention=run.attention,
+                        plan=made,
+                        tiles=tiles,
+                        room=run.room,
+                        settings=settings,
+                        keeping=run.keeping,
+                        notes=run.notes,
+                        held=run.held,
+                    ),
+                )
+                if plan_only:
+                    show(plans.picture_line(tiles, made.models.swapped))
+                    return _plan_only()
+                # The bar over the batch's expected time (progress.Progress), the text and a preview
+                # a picture.
+                moving = progress.Progress(
+                    progress.picture_passes(count, target, tiles.encode, tiles.decode),
+                    progress.PICTURE,
+                    ProgressBar(progress.BAR),
+                    show,
+                )
+                # The batch's output, allocated once and written into picture by picture: a list of
+                # the pictures stacked after would hold them twice (the plan counts it once,
+                # picture_process).
+                outputs = np.empty((count, out_height, out_width, 3), dtype=np.float32)
+                # The time said each second, Cancel the waits' check and the units named for them
+                # (progress.Progress.running), stopped however the run ends.
+                with moving.running():
+                    try:
+                        for index in range(count):
+                            moving.begin(index)
+                            outputs[index] = cls._one(
+                                run.models, batch[index], target, settings, tiles, moving
+                            )
+                    except still.NonFinite as error:
+                        raise words.non_finite(str(error)) from error
+                    moving.finish(_count(count, "picture"))
+            took = spoken(wall(time.monotonic() - started))
+            logger.info("%s upscaled in %s", _count(count, "picture"), took)
+            return io.NodeOutput(_output(outputs))
 
     @staticmethod
     def _one(
@@ -753,10 +776,10 @@ class UpscaleVideo(io.ComfyNode):
                 " cuts or takes the clip as one shot. The clip is kept whole in your computer's"
                 " RAM, and a run stopped part way starts over from its first frame; for a long"
                 " film use seedvr2x's command line, which resumes. Each time it runs, seedvr2x"
-                " works out how to fit the job on your card: the plan, shown on the node and"
-                " given as the plan output, shot by shot. The optional numbers are the plan's:"
-                " unconnected, it chooses them; a number"
-                " connected is used exactly, and the plan is built around it."
+                " works out how to fit the job on your card: the plan, said shot by shot in"
+                " ComfyUI's console, while the node shows where the run is. The optional numbers"
+                " are the plan's: unconnected, it chooses them; a number connected is used"
+                " exactly, and the plan is built around it."
             ),
             inputs=[
                 io.Image.Input(
@@ -787,7 +810,6 @@ class UpscaleVideo(io.ComfyNode):
                     display_name="images",
                     tooltip="The upscaled frames, in order, for ComfyUI's video nodes.",
                 ),
-                _plan_output(),
             ],
             hidden=[io.Hidden.unique_id],
         )
@@ -809,98 +831,103 @@ class UpscaleVideo(io.ComfyNode):
         decode_tile: int | None = None,
         swap_blocks: int | None = None,
     ) -> io.NodeOutput:
-        _checked(models)
-        if quality not in QUALITY:
-            # A combo is held to its options at queue time; a link may carry anything.
-            raise words.Refused(
-                f"{plans.LABELS['quality']} {quality!r}: must be one of {', '.join(QUALITY)}."
-            )
-        settings = _settings(
-            window=window,
-            encode_tile=encode_tile,
-            decode_tile=decode_tile,
-            swap_blocks=swap_blocks,
-            attention=attention,
-            color_correction=color_correction,
-            seed=seed,
-        )
-        clip_frames = _array(images)
-        count, height, width = clip_frames.shape[:3]
-        shot_list = _cut_list(cuts, count)
-        _check_seed(seed, shot_list)
-        target = _target(width, height, resolution, picture=False)
-        out_height, out_width = frames.output_size(target)
-
-        planner = clip_planner(settings, target, shot_list)
-        size = words.ClipSize(count, clip.output_bytes(count, target))
-
-        started = time.monotonic()
         show = _shower(_node_id(cls))
-        with models_module.session(
-            models,
-            settings.attention,
-            planner,
-            plan_only=plan_only,
-            clip=size,
-            preparing=progress.Preparing(show, plans.file_label),
-        ) as run:
-            made, expected = run.planned.plan
-            text = plans.clip_text(
-                cuts=shot_list,
-                source=(width, height),
-                output=(out_width, out_height),
-                resolution=resolution,
-                dit=models.dit,
-                attention=run.attention,
-                plan=made,
-                expected=expected,
-                room=run.room,
-                settings=settings,
-                keeping=run.keeping,
-                notes=run.notes,
-                held=run.held,
-                quality=quality,
+        with _refusing(show):
+            show(progress.PLANNING)
+            _checked(models)
+            if quality not in QUALITY:
+                # A combo is held to its options at queue time; a link may carry anything.
+                raise words.Refused(
+                    f"{plans.LABELS['quality']} {quality!r}: must be one of {', '.join(QUALITY)}."
+                )
+            settings = _settings(
+                window=window,
+                encode_tile=encode_tile,
+                decode_tile=decode_tile,
+                swap_blocks=swap_blocks,
+                attention=attention,
+                color_correction=color_correction,
+                seed=seed,
             )
-            _say(text, show)
-            if plan_only:
-                return _plan_only(text)
-            moving = progress.Progress(
-                progress.clip_passes(
-                    shot_list,
-                    target,
-                    made.window,
-                    made.encode_tiles,
-                    made.decode_tiles,
-                    QUALITY[quality],
-                ),
-                progress.CLIP,
-                ProgressBar(progress.BAR),
-                show,
-                text,
-            )
-            # The clip's one output array, each shot written into its place in it (the plan
-            # counts it once, clip.output_bytes), the shots one after the other: the windows of a
-            # shot never reach another's frames.
-            out = np.empty((count, out_height, out_width, 3), dtype=np.float32)
-            # The time said each second, Cancel the waits' check and the units named for them
-            # (progress.Progress.running), stopped however the run ends.
-            with moving.running():
-                for number, each in enumerate(shot_list, 1):
-                    if len(shot_list) > 1:
-                        logger.info(
-                            "shot %d of %d, frames %d to %d",
-                            number,
-                            len(shot_list),
-                            each.start,
-                            each.end - 1,
+            clip_frames = _array(images)
+            count, height, width = clip_frames.shape[:3]
+            shot_list = _cut_list(cuts, count)
+            _check_seed(seed, shot_list)
+            target = _target(width, height, resolution, picture=False)
+            out_height, out_width = frames.output_size(target)
+
+            planner = clip_planner(settings, target, shot_list)
+            size = words.ClipSize(count, clip.output_bytes(count, target))
+
+            started = time.monotonic()
+            with models_module.session(
+                models,
+                settings.attention,
+                planner,
+                plan_only=plan_only,
+                clip=size,
+                preparing=progress.Preparing(show, plans.file_label),
+            ) as run:
+                made, expected = run.planned.plan
+                logger.info(
+                    "%s",
+                    plans.clip_text(
+                        cuts=shot_list,
+                        source=(width, height),
+                        output=(out_width, out_height),
+                        resolution=resolution,
+                        dit=models.dit,
+                        attention=run.attention,
+                        plan=made,
+                        expected=expected,
+                        room=run.room,
+                        settings=settings,
+                        keeping=run.keeping,
+                        notes=run.notes,
+                        held=run.held,
+                        quality=quality,
+                    ),
+                )
+                if plan_only:
+                    show(plans.clip_line(made))
+                    return _plan_only()
+                moving = progress.Progress(
+                    progress.clip_passes(
+                        shot_list,
+                        target,
+                        made.window,
+                        made.encode_tiles,
+                        made.decode_tiles,
+                        QUALITY[quality],
+                    ),
+                    progress.CLIP,
+                    ProgressBar(progress.BAR),
+                    show,
+                )
+                # The clip's one output array, each shot written into its place in it (the plan
+                # counts it once, clip.output_bytes), the shots one after the other: the windows
+                # of a shot never reach another's frames.
+                out = np.empty((count, out_height, out_width, 3), dtype=np.float32)
+                # The time said each second, Cancel the waits' check and the units named for them
+                # (progress.Progress.running), stopped however the run ends.
+                with moving.running():
+                    for number, each in enumerate(shot_list, 1):
+                        if len(shot_list) > 1:
+                            logger.info(
+                                "shot %d of %d, frames %d to %d",
+                                number,
+                                len(shot_list),
+                                each.start,
+                                each.end - 1,
+                            )
+                        cls._shot(
+                            *(run.models, clip_frames, each, target, settings, made, moving, out),
+                            *(quality, number),
                         )
-                    cls._shot(
-                        *(run.models, clip_frames, each, target, settings, made, moving, out),
-                        *(quality, number),
-                    )
-                moving.finish(f"{count} frame{'s' if count > 1 else ''}")
-        logger.info("%d frame(s) upscaled in %.1f s", count, time.monotonic() - started)
-        return io.NodeOutput(_output(out), text)
+                    moving.finish(_count(count, "frame"))
+            took = spoken(wall(time.monotonic() - started))
+            logger.info("%s upscaled in %s", _count(count, "frame"), took)
+            return io.NodeOutput(_output(out))
 
     @staticmethod
     def _shot(
@@ -990,8 +1017,9 @@ class Cuts(io.ComfyNode):
                 " (about 30 MB, downloaded from Hugging Face into its cache the first time), runs"
                 " on your graphics card while the node runs, and on the processor without one;"
                 " frames are shrunk to its small input in torch, with no ffmpeg. It gives the cut"
-                " list and a text of the cuts, and of the possible cuts: scenes it is less sure of,"
-                " to check by eye. A clip you know is one scene can skip the detector: one shot."
+                " list, and says the cuts, and the possible cuts (scenes it is less sure of, to"
+                " check by eye), in ComfyUI's console. A clip you know is one scene can skip the"
+                " detector: one shot."
             ),
             inputs=[
                 io.Image.Input(
@@ -1042,13 +1070,6 @@ class Cuts(io.ComfyNode):
                     display_name="cuts",
                     tooltip="The clip's shots, for seedvr2x Upscale Video's cuts input.",
                 ),
-                io.String.Output(
-                    "text",
-                    display_name="text",
-                    tooltip="The cuts found, with the frame each shot starts at (counted from 0)"
-                    " and the detector's probability, and the possible cuts. Preview as Text"
-                    " shows it.",
-                ),
             ],
             hidden=[io.Hidden.unique_id],
         )
@@ -1057,34 +1078,37 @@ class Cuts(io.ComfyNode):
     def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
         cls, images: torch.Tensor, mode: str, threshold: float, model_dir: str | None = None
     ) -> io.NodeOutput:
-        if images.ndim != 4 or images.shape[0] < 1:
-            raise words.frames_missing()
-        if images.shape[3] not in (3, 4):
-            raise words.channels(int(images.shape[3]))
-        count = int(images.shape[0])
-        if mode not in CUT_MODES:
-            raise words.Refused(f"mode {mode!r}: must be one of {', '.join(CUT_MODES)}")
-        if mode == "one shot":
-            text = plans.one_shot_text(count)
-            cut_list = (Shot(0, count),)
-        else:
-            if isinstance(threshold, bool) or not isinstance(threshold, int | float):  # pyright: ignore[reportUnnecessaryIsInstance]
-                raise words.Refused(f"threshold {threshold!r}: must be a number")
-            if not 0 < threshold <= 1:
-                raise words.Refused(f"threshold {threshold}: must be above 0 and at most 1")
-            found = cls._probabilities(
-                images, models_module.model_folder(model_dir, words.CUTS), _shower(_node_id(cls))
-            )
-            cuts = shotcuts.detected(found, float(threshold))
-            text = plans.cuts_text(
-                count, float(threshold), cuts, shotcuts.possible(found, float(threshold))
-            )
-            starts = [0, *(each.frame for each in cuts)]
-            cut_list = tuple(
-                Shot(start, end) for start, end in zip(starts, [*starts[1:], count], strict=True)
-            )
-        _say(text, _shower(_node_id(cls)))
-        return io.NodeOutput(cut_list, text)
+        show = _shower(_node_id(cls))
+        with _refusing(show):
+            if images.ndim != 4 or images.shape[0] < 1:
+                raise words.frames_missing()
+            if images.shape[3] not in (3, 4):
+                raise words.channels(int(images.shape[3]))
+            count = int(images.shape[0])
+            if mode not in CUT_MODES:
+                raise words.Refused(f"mode {mode!r}: must be one of {', '.join(CUT_MODES)}")
+            if mode == "one shot":
+                logger.info("%s", plans.one_shot_text(count))
+                show(plans.one_shot_line(count))
+                cut_list = (Shot(0, count),)
+            else:
+                if isinstance(threshold, bool) or not isinstance(threshold, int | float):  # pyright: ignore[reportUnnecessaryIsInstance]
+                    raise words.Refused(f"threshold {threshold!r}: must be a number")
+                if not 0 < threshold <= 1:
+                    raise words.Refused(f"threshold {threshold}: must be above 0 and at most 1")
+                found = cls._probabilities(
+                    images, models_module.model_folder(model_dir, words.CUTS), show
+                )
+                cuts = shotcuts.detected(found, float(threshold))
+                maybe = shotcuts.possible(found, float(threshold))
+                logger.info("%s", plans.cuts_text(count, float(threshold), cuts, maybe))
+                show(plans.cuts_line(len(cuts) + 1, len(maybe), float(threshold)))
+                starts = [0, *(each.frame for each in cuts)]
+                cut_list = tuple(
+                    Shot(start, end)
+                    for start, end in zip(starts, [*starts[1:], count], strict=True)
+                )
+            return io.NodeOutput(cut_list)
 
     @staticmethod
     def _probabilities(

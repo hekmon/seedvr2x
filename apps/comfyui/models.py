@@ -12,9 +12,9 @@ ComfyUI as it likes.
 
 One run is `session`, a context manager both upscale nodes use:
 0. whether the weights are kept (`decide_keeping`: auto keeps them where they fit under ComfyUI's
-   own cap on pinned memory, on keeps them whatever the cap, off does not), said on the node and
-   in the console; where they are not, the kept set of an earlier run is freed before this run
-   reads its own, and a kept set of another file before the new one is pinned;
+   own cap on pinned memory, on keeps them whatever the cap, off does not), said in the
+   console and in the plan; where they are not, the kept set of an earlier run is freed before
+   this run reads its own, and a kept set of another file before the new one is pinned;
 1. the files found and checked (pull.resolve, weights.check_models, pull.check_pinned: their
    header, then each pinned file's size, its SHA-256 left to the load, which proves it), and the
    environment probe (probe.check) for that DiT layout and attention kernel, once per process;
@@ -61,7 +61,15 @@ from seedvr2x.pull import ModelFiles
 from seedvr2x.weights import Architecture
 
 from . import plans, words
-from .progress import FAILED, FREEING, STOPPED, Downloading, Preparing, file_size
+from .progress import (
+    FAILED,
+    FREEING,
+    FREEING_SAID,
+    STOPPED,
+    STOPPED_SAID,
+    Preparing,
+    file_size,
+)
 
 logger = logging.getLogger("seedvr2x_comfyui.models")
 
@@ -503,7 +511,7 @@ type Planner[T] = Callable[[Reading, int | None, str, Architecture, bool], Plann
 class Run[T]:
     """What a node gets in a session: the models placed for its plan, the plan, the room it took,
     the attention kernel it runs, the handle, what keeping the weights came to (`keeping`) and the
-    notes to say on the node once (`notes`: ComfyUI having dropped the weights). The models are
+    notes to say in the plan once (`notes`: ComfyUI having dropped the weights). The models are
     the session's: over when it ends, they are no longer reachable from here, so that a node still
     holding its Run after the `with` keeps no weight alive. A plan only has none: `models` is
     refused, the files having been read for their headers alone."""
@@ -707,7 +715,7 @@ def provide(handle: Handle, show: Callable[[str], None]) -> None:
                 raise missing[0] if len(missing) == 1 else ModelsRefused(missing)
         else:
             absent = {name for name in names if pull.cached(name) is None}
-            downloading = Downloading(
+            downloading = Preparing(
                 show, plans.file_label, expected={name: pull.PINNED[name].size for name in absent}
             )
             pull.resolve(
@@ -826,7 +834,7 @@ def _load_kept(
 ) -> tuple[Entry, str]:
     """The models read once, every weight in its pinned host copy and none on the card
     (passes.HELD), the buffers and embeddings the load puts on the card sent back (Models.release),
-    and registered with ComfyUI; and the note to say on the node where ComfyUI had dropped the
+    and registered with ComfyUI; and the note to say in the plan where ComfyUI had dropped the
     weights and they are read again. Any other entry is dropped first, before this one is read:
     two DiTs pinned would take the host's memory twice."""
     for other in list(_entries.values()):
@@ -1062,6 +1070,7 @@ def _freeing(show: Callable[[str], None] | None) -> Generator[None]:
     last: str | None = getattr(show, "last", None)
     if show is not None:
         show(FREEING)
+        logger.info("%s", FREEING_SAID)
     try:
         with waiting.checking(management.throw_exception_if_processing_interrupted):
             yield
@@ -1071,6 +1080,8 @@ def _freeing(show: Callable[[str], None] | None) -> Generator[None]:
             # error says nothing of the card.
             stopped = waiting.ended_by(error) is not None
             show(STOPPED if stopped else "" if last is None else last)
+            if stopped:
+                logger.warning("%s", STOPPED_SAID)
         raise
     if show is not None:
         # The text before, or none where the run had said nothing yet (an error before its first
@@ -1129,6 +1140,7 @@ def session[T](
         _failures.append(error)
         refused = words.card_failed(failed)
         logger.error("%s", str(refused))
+        refused.logged = True
         if preparing is not None:
             preparing.show(FAILED)
         raise refused from error

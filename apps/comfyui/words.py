@@ -49,6 +49,7 @@ from seedvr2x.probe import ProbeRefusal
 from seedvr2x.weights import AGAIN
 
 from . import plans
+from .progress import FAILED, REFUSED, STOPPED
 
 MODELS = "seedvr2x Models"
 CUTS = "seedvr2x Cuts"
@@ -64,7 +65,18 @@ def folder_input(node: str = MODELS) -> str:
 
 class Refused(Exception):
     """A run seedvr2x's nodes refuse, or one that can't go on: the message says what and the way
-    out, in the nodes' terms. ComfyUI shows it on the node."""
+    out, in the nodes' terms, in ComfyUI's error dialog and, once, in its console at WARNING.
+    The node's text box says `line`, one short line (the user, 2026-11-08) pointing at the
+    error. `logged`: the console has the refusal already (models.session says a failed card at
+    ERROR)."""
+
+    line: str = REFUSED
+    logged: bool = False
+
+    def __init__(self, message: str = "", line: str | None = None) -> None:
+        super().__init__(message)
+        if line is not None:
+            self.line = line
 
 
 # ---- A setting, as the nodes call it -------------------------------------------------------------
@@ -561,7 +573,8 @@ def card_busy() -> Refused:
     return Refused(
         "the graphics card is still busy with the last work of an earlier seedvr2x run: wait for it"
         " to finish and run again, or restart ComfyUI if it does not. Nothing was read from the"
-        " card and nothing was run"
+        " card and nothing was run",
+        line=STOPPED,
     )
 
 
@@ -574,11 +587,13 @@ def card_failed(error: str, earlier: bool = False) -> Refused:
         return Refused(
             f"the graphics card failed during an earlier seedvr2x run ({error}), and nothing on it"
             " can be freed or run again inside this ComfyUI: restart ComfyUI, then run again."
-            " Nothing was read from the card and nothing was run"
+            " Nothing was read from the card and nothing was run",
+            line=FAILED,
         )
     return Refused(
         f"the graphics card failed: {error}. seedvr2x leaves everything on the card as it is,"
-        " since freeing memory there could end ComfyUI at once: restart ComfyUI, then run again"
+        " since freeing memory there could end ComfyUI at once: restart ComfyUI, then run again",
+        line=FAILED,
     )
 
 

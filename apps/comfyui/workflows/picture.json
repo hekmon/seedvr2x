@@ -1,8 +1,8 @@
 {
   "id": "451023ff-c2ed-58bf-b945-c5507777750d",
   "revision": 0,
-  "last_node_id": 6,
-  "last_link_id": 5,
+  "last_node_id": 5,
+  "last_link_id": 4,
   "nodes": [
     {
       "id": 1,
@@ -131,13 +131,6 @@
           "links": [
             4
           ]
-        },
-        {
-          "name": "plan",
-          "type": "STRING",
-          "links": [
-            5
-          ]
         }
       ],
       "properties": {
@@ -180,39 +173,6 @@
       "widgets_values": [
         "seedvr2x"
       ]
-    },
-    {
-      "id": 6,
-      "type": "PreviewAny",
-      "pos": [
-        830,
-        540
-      ],
-      "size": [
-        370,
-        200
-      ],
-      "flags": {},
-      "order": 4,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "source",
-          "type": "*",
-          "link": 5
-        }
-      ],
-      "outputs": [
-        {
-          "name": "STRING",
-          "type": "STRING",
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "PreviewAny"
-      },
-      "widgets_values": []
     }
   ],
   "links": [
@@ -239,14 +199,6 @@
       5,
       0,
       "IMAGE"
-    ],
-    [
-      5,
-      4,
-      1,
-      6,
-      0,
-      "STRING"
     ]
   ],
   "groups": [

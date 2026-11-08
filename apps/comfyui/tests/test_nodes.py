@@ -3,6 +3,7 @@ for bit to the library's still.upscale of it alone, a clip to clip.upscale, the 
 rule, the plan said three ways, the settings' choices reaching the plan and the pass."""
 
 import logging
+import re
 from typing import Any
 
 import numpy as np
@@ -19,6 +20,7 @@ from standins import (
     standin_models,
     upscale_image,
     upscale_video,
+    where,
 )
 
 from seedvr2x import clip, peaks, still
@@ -66,7 +68,7 @@ def test_each_picture_of_a_batch_is_the_libraries_picture_alone(machine: StandIn
         )
         assert out[index].numpy().tobytes() == expected.tobytes(), index
     assert out[0].numpy().tobytes() != out[1].numpy().tobytes()
-    assert plan.startswith("seedvr2x plan: 3 images")
+    assert plan.startswith("plan: 3 images")
 
 
 def test_a_clip_is_the_libraries_clip(machine: StandIn, tmp_path) -> None:
@@ -145,6 +147,52 @@ def test_an_alpha_channel_opaque_everywhere_is_dropped_and_any_other_refused(
     assert "--" not in str(small.value) and "resolution" in str(small.value)
 
 
+def test_a_refusal_shows_one_line_on_the_node_and_its_text_once_in_the_console(
+    machine: StandIn, tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every refusal path shows the node's line (a context manager around each execute's body),
+    the refusal's text staying in ComfyUI's error and, once, in the console at WARNING."""
+    rgb = pictures(1)
+    clear = torch.cat([rgb, torch.full((1, *PICTURE, 1), 0.5)], dim=3)
+    with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui"):
+        with pytest.raises(words.Refused, match="transparent pixels") as refused:
+            upscale_image(handle(tmp_path), plans.Settings(), clear, RESOLUTION, "5")
+        with pytest.raises(words.Refused, match="2 channels"):
+            upscale_video(handle(tmp_path), plans.Settings(), rgb[..., :2], RESOLUTION, "6")
+    instance = server.PromptServer.instance
+    assert instance is not None
+    assert [text for text, node in instance.texts if node == "5"] == [
+        "planning\u2026",
+        "refused: see the error",
+    ]
+    assert [text for text, node in instance.texts if node == "6"][-1] == progress.REFUSED
+    said = [
+        (r.levelno, r.getMessage().removeprefix(console.PREFIX))
+        for r in caplog.records
+        if "refused: " in r.getMessage()
+    ]
+    assert len(said) == 2, "once each"
+    assert said[0] == (logging.WARNING, f"refused: {refused.value}")
+    assert said[1][0] == logging.WARNING
+    assert said[1][1].startswith("refused: the image has 2 channels")
+
+
+def test_the_run_is_said_in_the_console_with_its_frames_and_time(
+    machine: StandIn, tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """What the node's line ends with ("33 frames in 0 s") is the console's too, in full, and the
+    shot lines of a clip of several shots are the console's alone."""
+    with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui.nodes"):
+        upscale_image(handle(tmp_path), plans.Settings(), pictures(3), RESOLUTION, "1")
+        run_shots(machine, tmp_path, pictures(21), (Shot(0, 9), Shot(9, 21)), window=5)
+        upscale_video(handle(tmp_path), plans.Settings(), pictures(1), RESOLUTION, "3")
+    lines = [each.removeprefix(console.PREFIX) for each in caplog.messages]
+    assert any(re.fullmatch(r"3 pictures upscaled in \d+ s", each) for each in lines)
+    assert any(re.fullmatch(r"21 frames upscaled in \d+ s", each) for each in lines)
+    assert any(re.fullmatch(r"1 frame upscaled in \d+ s", each) for each in lines)
+    assert "shot 1 of 2, frames 0 to 8" in lines and "shot 2 of 2, frames 9 to 20" in lines
+
+
 def test_a_resolution_whose_even_crop_is_too_small_is_refused_for_a_picture_alone(
     machine: StandIn, tmp_path
 ) -> None:
@@ -161,7 +209,7 @@ def test_a_resolution_whose_even_crop_is_too_small_is_refused_for_a_picture_alon
     )
     assert machine.loads == []
     out, plan = upscale_video(handle(tmp_path), plans.Settings(), pictures(5), 17, "1")
-    assert out.shape == (5, 16, 28, 3) and plan.startswith("seedvr2x plan: a clip of 5 frames")
+    assert out.shape == (5, 16, 28, 3) and plan.startswith("plan: a clip of 5 frames")
 
 
 def test_a_seed_some_shot_would_seed_past_the_range_is_refused_before_anything_loads(
@@ -202,15 +250,17 @@ def test_a_clip_with_an_opaque_alpha_is_the_clip_without_it(machine: StandIn, tm
     assert with_alpha.numpy().tobytes() == without.numpy().tobytes()
 
 
-def test_the_plan_is_said_on_the_node_in_the_console_and_given_as_text(
+def test_the_plan_is_said_whole_in_the_console_and_the_node_shows_one_short_line(
     machine: StandIn, tmp_path, caplog: pytest.LogCaptureFixture
 ) -> None:
     settings = plans.Settings(swap_blocks=0, decode_tile=None, attention="sdpa", seed=5)
     with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui.nodes"):
         _, text = upscale_image(handle(tmp_path), settings, pictures(1), RESOLUTION, "31")
     instance = server.PromptServer.instance
-    # The plan is the first text on the node; the run's progress replaces it as it goes.
-    assert instance is not None and instance.texts[0] == (text, "31")
+    # The node shows "planning…" and then the run's progress, never the plan; the plan whole is
+    # in the console, each of its lines prefixed.
+    assert instance is not None and instance.texts[0] == ("planning\u2026", "31")
+    assert all(text not in each for each, _ in instance.texts)
     assert console.prefixed(text) in caplog.messages
     # The plan's parts in the nodes' words: the pictures, the card and ComfyUI's models, what
     # ComfyUI was asked, the DiT's placement and kernel, the passes, the choices, the models' RAM.
@@ -477,14 +527,15 @@ def test_a_bar_with_several_runs_moves_forward_over_them_and_ends_full(
     (bar,) = ProgressBar.created
     assert bar.updates == sorted(bar.updates) and bar.updates[-1] == bar.total == progress.BAR
     # The bar's units are every run's own (tests/test_progress.py holds the arithmetic): each run
-    # of each shot is said by its label on the node, four runs a shot, each from its own first
-    # frame.
+    # of each shot is said on the node, four runs a shot.
     instance = server.PromptServer.instance
     assert instance is not None
-    said = {text.splitlines()[-2].split(":")[0] for text, _ in instance.texts[1:-1]}
-    assert said == {
-        *(f"Shot 1 of 2, run {n} of 4 (frames {n} to 9)" for n in (1, 2, 3, 4)),
-        *(f"Shot 2 of 2, run {n} of 4 (frames {9 + n} to 21)" for n in (1, 2, 3, 4)),
+    # Each run of each shot on the node, the word "shot" gone where the run and the time need its
+    # room (tests/test_lines.py holds the order).
+    said = {where(text) for text, _ in instance.texts[1:-1]}
+    runs = {re.match(r"(?:shot )?(\d)/2 \u00b7 run (\d)/4", each) for each in said}
+    assert {each.groups() for each in runs if each is not None} == {
+        (str(shot), str(n)) for shot in (1, 2) for n in (1, 2, 3, 4)
     }
 
 
@@ -550,11 +601,11 @@ def test_a_clips_bar_runs_over_all_its_shots_and_ends_full(machine: StandIn, tmp
     run_shots(machine, tmp_path, pictures(21), (Shot(0, 9), Shot(9, 21)), window=5)
     (bar,) = ProgressBar.created
     assert bar.updates == sorted(bar.updates) and bar.updates[-1] == bar.total == progress.BAR
-    # One bar over both shots, each said by its label on the node.
+    # One bar over both shots, each said on the node.
     instance = server.PromptServer.instance
     assert instance is not None
-    said = {text.splitlines()[-2].split(":")[0] for text, _ in instance.texts[1:-1]}
-    assert said == {"Shot 1 of 2 (frames 1 to 9)", "Shot 2 of 2 (frames 10 to 21)"}
+    said = {where(text).split(progress.SEPARATOR)[0] for text, _ in instance.texts[1:-1]}
+    assert said == {"shot 1/2", "shot 2/2"}
 
 
 def test_the_plan_says_each_shot(
@@ -565,7 +616,7 @@ def test_the_plan_says_each_shot(
         _, text = run_shots(machine, tmp_path, pictures(33), cuts, window=5)
     lines = text.splitlines()
     assert lines[0] == (
-        "seedvr2x plan: a clip of 33 frames 40x24 to 80x48 (resolution 48), in 3 shots, each"
+        "plan: a clip of 33 frames 40x24 to 80x48 (resolution 48), in 3 shots, each"
         " upscaled on its own"
     )
     assert lines[1].startswith("shot 1: frames 0 to 4 (5 frames): ")

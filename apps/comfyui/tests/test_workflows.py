@@ -14,7 +14,7 @@ links' target slots numbered in that list), the widgets' values in their order. 
 the inputs from the node's definition and takes each saved entry's link by name.
 
 The stock nodes' sockets and widgets are the table below, read from ComfyUI v0.44.0's schemas
-(LoadImage, SaveImage, PreviewAny, LoadVideo, GetVideoComponents, CreateVideo, SaveVideo) and
+(LoadImage, SaveImage, LoadVideo, GetVideoComponents, CreateVideo, SaveVideo) and
 loaded in it by hand on 2026-11-05: the tests hold the files to what they were written against."""
 
 import json
@@ -39,11 +39,6 @@ type Node = dict[str, Any]
 STOCK: dict[str, dict[str, Any]] = {
     "LoadImage": {"inputs": [], "outputs": [("IMAGE", "IMAGE"), ("MASK", "MASK")], "widgets": 2},
     "SaveImage": {"inputs": [("images", "IMAGE")], "outputs": [], "widgets": 1},
-    "PreviewAny": {
-        "inputs": [("source", "*")],
-        "outputs": [("STRING", "STRING")],
-        "widgets": 0,
-    },
     "LoadVideo": {"inputs": [], "outputs": [("VIDEO", "VIDEO")], "widgets": 2},
     "GetVideoComponents": {
         "inputs": [("video", "VIDEO")],
@@ -283,13 +278,19 @@ def test_models_is_wired_into_each_upscale_node_and_there_is_no_tuning_node(name
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_the_plan_is_shown_as_text(name: str) -> None:
+def test_no_node_shows_text_the_nodes_give_none(name: str) -> None:
+    """The plan and the cuts are said in ComfyUI's console and the upscale node shows where the
+    run is: there is no text output to display, so no workflow has a node for one or a link of
+    that type (the user, 2026-11-08)."""
     workflow = load(name)
-    (upscale,) = [node for node in workflow["nodes"] if node["type"] in UPSCALES]
-    (preview,) = of_type(workflow, "PreviewAny")
-    assert source(workflow, preview, "source") is upscale
-    link = next(each for each in workflow["links"] if each[3] == preview["id"])
-    assert upscale["outputs"][link[2]]["name"] == "plan"
+    assert not of_type(workflow, "PreviewAny")
+    assert not [link for link in workflow["links"] if link[5] == "STRING"]
+    for node in workflow["nodes"]:
+        if node["type"] in SCHEMAS:
+            assert not [each for each in node.get("outputs", []) if each["type"] == "STRING"]
+    # The links' ids and the counters agree.
+    assert workflow["last_link_id"] == max(link[0] for link in workflow["links"])
+    assert workflow["last_node_id"] == max(node["id"] for node in workflow["nodes"])
 
 
 def test_the_picture_workflow_is_a_picture_in_and_out() -> None:
@@ -298,7 +299,7 @@ def test_the_picture_workflow_is_a_picture_in_and_out() -> None:
     assert source(workflow, upscale, "images")["type"] == "LoadImage"
     (save,) = of_type(workflow, "SaveImage")
     assert source(workflow, save, "images") is upscale
-    assert len(workflow["nodes"]) == 5
+    assert len(workflow["nodes"]) == 4
 
 
 def test_the_clip_workflow_takes_the_frame_rate_and_audio_of_the_video_it_loads() -> None:

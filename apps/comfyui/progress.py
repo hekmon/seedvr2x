@@ -7,13 +7,19 @@ ComfyUI v0.44.0 (frontend 1.57.6) gives a node, read in its sources:
   last is throttled out (utils.py: a 0.5% step and 100 ms are needed), so a bar that starts again
   at 0 is a new ProgressBar.
 - One text box on the node: PromptServer.send_progress_text(text, node_id), replaced at each
-  message and kept until the job ends. The queue's overall bar counts nodes, which nothing here
-  drives.
+  message and kept until the job ends. The frontend squeezes it when the node also has a preview,
+  and a longer text must then be scrolled: it holds ONE short status line of at most LIMIT
+  characters (the node's default width, the user, 2026-11-08), a progress hint and never a log;
+  everything else goes to ComfyUI's console through the nodes' loggers. The queue's overall bar
+  counts nodes, which nothing here drives.
 - One preview a node, the newest: the third argument of update_absolute, a tuple (format, a PIL
   image, the largest side), as the sampler nodes send it (latent_preview.py), which the server
   shrinks to fit that side (server.py, send_image). The side is ComfyUI's --preview-size
   (comfy.cli_args, 512 by default): the limit is kept, never lifted.
 (Described, not copied: ComfyUI is GPL-3.0.)
+
+The status line (line, Progress): "shot 2/4 · window 2/3 · ~3 min left", its parts in priority
+order, the lowest dropped until it fits whatever the numbers (fitted).
 
 The bar is the upscale's expected time, not a count of steps (Progress): the units of the plan,
 every tile of the encode, every window of the DiT and every tile of the decode of every shot or
@@ -33,7 +39,7 @@ from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, override
+from typing import Any, Literal
 
 import comfy.model_management as management
 import numpy as np
@@ -42,7 +48,7 @@ from comfy.utils import ProgressBar
 
 from seedvr2x import frames as frame_sizes
 from seedvr2x import pull, waiting
-from seedvr2x.clock import spoken, taking, wall
+from seedvr2x.clock import spoken, wall
 from seedvr2x.passes import Tiles
 from seedvr2x.shotruns import shot_runs
 from seedvr2x.shots import Shot, shot_layout
@@ -65,10 +71,11 @@ WAY = (
     " next run go on)"
 )
 
-# What the node says while the models are given back to the card after a run an exception ended
-# (models._freeing): that wait ends by itself on a card that answers, and a second Cancel leaves it
-# (waiting.releasing) where it does not.
-FREEING = (
+# What the node says, as one short line, while the models are given back to the card after a run an
+# exception ended (models._freeing): that wait ends by itself on a card that answers, and a second
+# Cancel leaves it (waiting.releasing) where it does not. The sentence is the console's.
+FREEING = "freeing the GPU\u2026 Cancel again to leave"
+FREEING_SAID = (
     "freeing the card: waiting for the GPU to finish its last work; Cancel again to leave it,"
     " then run again once the card has finished, or restart ComfyUI"
 )
@@ -76,11 +83,48 @@ FREEING = (
 # What the node says once the release was left by a second Cancel or ended in an error: the card
 # is marked (waiting.abandoned): the next run asks the card, without waiting, whether it finished
 # (models._settle), and is refused (words.card_busy) while it has not.
-STOPPED = "the card has not finished its last work: run again once it has, or restart ComfyUI"
+STOPPED = "GPU busy: run again or restart ComfyUI"
+STOPPED_SAID = "the card has not finished its last work: run again once it has, or restart ComfyUI"
 
 # What the node says once a CUDA error other than out of memory failed the card (waiting.fail):
-# nothing on it is freed or run again in the process (models.session).
-FAILED = "the graphics card failed: restart ComfyUI"
+# nothing on it is freed or run again in the process (models.session), which says the sentence
+# (words.card_failed) in the console.
+FAILED = "GPU failed: restart ComfyUI"
+
+# What the node says before the plan is made, as it starts.
+PLANNING = "planning\u2026"
+
+# What a refused run's node says; the refusal's text is in ComfyUI's error and in the console.
+REFUSED = "refused: see the error"
+
+# The longest text a node shows: its default width in characters (the user, 2026-11-08), and the
+# separator of a line's parts (U+00B7).
+LIMIT = 40
+SEPARATOR = " \u00b7 "
+
+
+def fitted(*variants: Sequence[str | None]) -> str:
+    """The first of `variants` that fits LIMIT, each the parts of a line in order (None parts
+    left out), joined by SEPARATOR: a caller lists its line whole, then without its lowest
+    priority parts, down to the one it never drops. If even the last is too long it is cut to
+    LIMIT with an ellipsis, so that no line passes LIMIT whatever the numbers."""
+    text = ""
+    for parts in variants:
+        text = SEPARATOR.join(each for each in parts if each)
+        if len(text) <= LIMIT:
+            return text
+    return text[: LIMIT - 1] + "\u2026"
+
+
+def time_left(seconds: float) -> str:
+    """The time left as a rough line part: "~42 s left", "~12 min left" (whole minutes), and
+    past an hour clock.spoken's two units, "~1 h 7 min left"; at least 1 s."""
+    if seconds < 60:
+        return f"~{max(1, round(seconds))} s left"
+    if seconds < 3600:
+        return f"~{min(59, round(seconds / 60))} min left"
+    return f"~{spoken(seconds)} left"
+
 
 # How often the time on the node is said between two events, in seconds (the user, 2026-11-06).
 TICK = 1.0
@@ -153,6 +197,11 @@ class Pass:
     # the shot, both from 1 as a user counts, and what Progress.run looks it up by.
     shot: int = 1
     run: int = 1
+    # What the status line counts: the shots of the clip (or the pictures of the batch, "picture")
+    # and this shot's runs.
+    of: int = 1
+    runs: int = 1
+    noun: str = "shot"
 
     @property
     def units(self) -> list[Unit]:
@@ -221,7 +270,7 @@ def clip_passes(
             made = make_pass(
                 label, shot.frames - each.offset, target, window, encode_tiles, decode_tiles
             )
-            made.shot, made.run = number, index
+            made.shot, made.run, made.of, made.runs = number, index, len(shots), len(each_run)
             passes.append(made)
     return passes
 
@@ -231,8 +280,9 @@ def picture_passes(
 ) -> list[Pass]:
     """The passes of a batch of `count` pictures, each of one frame and one window:
     "Picture 3 of 8", or "Picture" for one."""
-    return [
-        make_pass(
+    passes: list[Pass] = []
+    for number in range(1, count + 1):
+        made = make_pass(
             f"Picture {number} of {count}" if count > 1 else "Picture",
             1,
             target,
@@ -240,8 +290,9 @@ def picture_passes(
             encode_tiles,
             decode_tiles,
         )
-        for number in range(1, count + 1)
-    ]
+        made.shot, made.of, made.noun = number, count, "picture"
+        passes.append(made)
+    return passes
 
 
 # ---- A preview -----------------------------------------------------------------------------------
@@ -294,10 +345,11 @@ class Progress:
     pass's tail (the sums divided, the slices written and corrected) belongs to it. An untiled
     decode moves the bar by the frames written, the others by their unit.
 
-    The text, replaced at each message: the plan's lines (`plan`), a status line saying which pass
-    and how far it has got, a time line (so far, and the time left once the first window has been
-    measured, which says the DiT's rate too). The preview: the newest frame decoded, once per
-    slice (`decoded`).
+    The text, replaced at each message: the one status line (`_line`) saying which shot (or
+    picture) and run and how far it has got, then the time (so far, and the time left once the
+    first window has been measured, which says the DiT's rate too), never longer than LIMIT
+    characters. The plan is in the console, not here. The preview: the newest frame decoded, once
+    per slice (`decoded`).
 
     Between events the time moves on: `running` starts a Ticker, a thread that says the text again
     each second (`tick`), so that a long window's text never stands still. The node's thread and
@@ -306,9 +358,9 @@ class Progress:
     The waits on the GPU. Each event names the unit that follows it for the library's waits
     (waiting.unit), with the estimate that unit should take once a unit of its kind is measured,
     and none before: a wait of a unit with no estimate says nothing. A wait past its bound is
-    said by the library on ComfyUI's console, and by the text here (`tick`) with the way out
-    (WAY). `running` also gives the waits ComfyUI's Cancel as their check, so that a wait is left
-    by Cancel.
+    said by the library on ComfyUI's console with the way out (WAY), and by the line here
+    (`tick`) as "GPU not answering for 3 min". `running` also gives the waits ComfyUI's Cancel as
+    their check, so that a wait is left by Cancel.
 
     `now` is the clock, injected for the tests; `show(text)` puts the text on the node."""
 
@@ -318,19 +370,20 @@ class Progress:
         costs: Costs,
         bar: ProgressBar,
         show: Callable[[str], None],
-        plan: str = "",
         now: Callable[[], float] = time.monotonic,
     ) -> None:
         self.passes = list(passes)
         self.costs = costs
         self.bar = bar
         self.show = show
-        self.plan = plan
         self.now = now
         self.started = self.mark = now()
         self.value = 0
         self.pass_ = 0
+        # Where the run is, in the console's words (the unit the library's waits are named for)
+        # and in the line's.
         self.what = ""
+        self.step = ""
         # The untiled decode's frames written, as a share of its unit.
         self.partial = 0.0
         self.units = [unit for each in self.passes for unit in each.units]
@@ -394,7 +447,7 @@ class Progress:
         with self._lock:
             self.pass_ = index
             self.partial = 0.0
-            self._say("encoding")
+            self._say("encoding", "encoding")
 
     def run(self, shot: int, run: int) -> None:
         """Run `run` (1-based) of shot `shot` (0-based) starts: its encode. A shot of one run
@@ -423,14 +476,17 @@ class Progress:
             )
         self._finish(units, min(done, len(units) - 1) if done < total else 0)
         word = "encoding" if pass_ == "encode" else "decoding"
-        self._say(f"{word}, tile {min(done + 1, total)} of {total}")
+        number = min(done + 1, total)
+        # "decode tile 2/4", not "decoding, tile 2/4": 3 characters fewer, so that the time left
+        # still fits 40 beside a shot's place ("shot 2/4 · decode tile 2/4 · ~3 min left").
+        self._say(f"{pass_} tile {number}/{total}", f"{word}, tile {number} of {total}")
 
     def encoded(self) -> None:
         """The pass's encode is made."""
         with self._lock:
             current = self.passes[self.pass_]
             self._finish(current.encode, len(current.encode))
-            self._say(self._window_text(0))
+            self._say(*self._window_text(0))
 
     def window(self, number: int) -> None:
         """Window `number` (1-based) of the pass is made."""
@@ -441,13 +497,13 @@ class Progress:
         current = self.passes[self.pass_]
         self._finish(current.windows, number)
         if number < len(current.windows):
-            self._say(self._window_text(number))
+            self._say(*self._window_text(number))
             return
         decode = current.decode
-        tiled = len(decode) > 1
-        self._say(
-            f"decoding, tile 1 of {len(decode)}" if tiled else self._decoding(0, current.frames)
-        )
+        if len(decode) > 1:
+            self._say(f"decode tile 1/{len(decode)}", f"decoding, tile 1 of {len(decode)}")
+        else:
+            self._say(*self._decoding(0, current.frames))
 
     def decoded(
         self, written: int, total: int, frame: npt.NDArray[np.float32] | None = None
@@ -464,32 +520,35 @@ class Progress:
         if written >= total:
             self.partial = 0.0
             self._finish(current.decode, len(current.decode))
-            self._say(self._decoding(total, total), frame)
+            self._say(*self._decoding(total, total), frame=frame)
             return
         if len(current.decode) == 1:
             self.partial = written / total
-        self._say(self._decoding(written, total), frame)
+        self._say(*self._decoding(written, total), frame=frame)
 
     @staticmethod
-    def _decoding(written: int, total: int) -> str:
-        """The decode's status: the frames written of the pass's, none said for a pass of one
-        frame (a picture)."""
-        return "decoding" if total == 1 else f"decoding, {written} of {total} frames"
+    def _decoding(written: int, total: int) -> tuple[str, str]:
+        """The decode's status, the line's and the console's: the frames written of the pass's,
+        none said for a pass of one frame (a picture)."""
+        if total == 1:
+            return "decoding", "decoding"
+        return f"decoding {written}/{total}", f"decoding, {written} of {total} frames"
 
     def finish(self, what: str) -> None:
-        """The run is over: the bar full, and the plan with `what` made and the time it took
-        ("480 frames in 4 min 32 s") on the node. No tick says anything after it."""
+        """The run is over: the bar full, and `what` made with the time it took ("480 frames in
+        4 min 32 s") on the node. No tick says anything after it."""
         with self._lock:
             self.finished = True
             self.bar.update_absolute(BAR, BAR)
-            summary = f"{what} in {spoken(wall(self.now() - self.started))}"
-            self.show(f"{self.plan}\n{summary}" if self.plan else summary)
+            self.show(fitted([f"{what} in {spoken(wall(self.now() - self.started))}"]))
 
     # -- Words -----------------------------------------------------------------------------------
 
-    def _window_text(self, made: int) -> str:
-        count = len(self.passes[self.pass_].windows)
-        return f"upscaling, window {made + 1} of {count}"
+    def _window_text(self, made: int) -> tuple[str, str]:
+        current = self.passes[self.pass_]
+        count = len(current.windows)
+        long = f"upscaling, window {made + 1} of {count}"
+        return ("upscaling" if current.noun == "picture" else f"window {made + 1}/{count}"), long
 
     def _finish(self, units: list[Unit], through: int) -> None:
         """The first `through` units of the list are made now, the unfinished ones among them
@@ -507,26 +566,42 @@ class Progress:
             made[1] += each.weight
         self.mark = moment
 
-    def _say(self, what: str, frame: npt.NDArray[np.float32] | None = None) -> None:
-        """The status, the bar and the preview: sent, then ComfyUI's Cancel honoured."""
-        self.what = what
+    def _say(self, step: str, what: str, frame: npt.NDArray[np.float32] | None = None) -> None:
+        """The status, the bar and the preview: sent, then ComfyUI's Cancel honoured. `step` is
+        where the run is in the line's words, `what` in the console's (the library's waits are
+        named for it)."""
+        self.step, self.what = step, what
         self.show(self._text())
         self.bar.update_absolute(self.position(), BAR, None if frame is None else preview_of(frame))
         self._name_unit()
         management.throw_exception_if_processing_interrupted()
 
     def _text(self) -> str:
-        """The node's text: the plan, the pass and where it is, the time, and a wait on the GPU
-        past its bound where there is one."""
-        label = self.passes[self.pass_].label
-        lines = [*([self.plan] if self.plan else []), f"{label}: {self.what}", self._time()]
+        """The node's one line: where the run is and the time, or, while a wait on the GPU is past
+        its bound, that the GPU is not answering and for how long (the console has the library's
+        own line and the way out)."""
         lasted = waiting.longest() if waiting.stalled() else None
         if lasted is not None:
-            lines.append(
-                f"A wait on the GPU has lasted {spoken(wall(lasted))}, much longer than this step"
-                f" should take: {WAY}."
-            )
-        return "\n".join(lines)
+            return fitted([f"GPU not answering for {max(1, int(wall(lasted) // 60))} min"])
+        current = self.passes[self.pass_]
+        place = f"{current.noun} {current.shot}/{current.of}" if current.of > 1 else None
+        bare = f"{current.shot}/{current.of}" if current.of > 1 else None
+        run = f"run {current.run}/{current.runs}" if current.runs > 1 else None
+        time_ = self._time()
+        # Each part kept as long as a line of 40 can hold it: the word of the place goes first
+        # ("2/4" for "shot 2/4": the node's kind says what it counts), then the run (the bar
+        # counts the runs), then the time (what a user waits on), the run coming back where the
+        # time can't fit anyway; the step is never dropped.
+        return fitted(
+            [place, run, self.step, time_],
+            [bare, run, self.step, time_],
+            [bare, self.step, time_],
+            [place, run, self.step],
+            [bare, run, self.step],
+            [place, self.step],
+            [bare, self.step],
+            [self.step],
+        )
 
     def tick(self) -> None:
         """The text again, the time moved on: said by the Ticker between two events. Nothing
@@ -572,11 +647,11 @@ class Progress:
             waiting.clear()
 
     def _time(self) -> str:
-        """The time line: the time so far, and the time left once a window has been measured."""
-        text = f"{spoken(wall(self.now() - self.started))} so far"
+        """The line's time part: the time so far, and once a window has been measured the time
+        left instead ("~3 min left")."""
         if self.made["window"][1] > 0:
-            text += f", {taking(wall(self.left()))} left"
-        return text
+            return time_left(wall(self.left()))
+        return spoken(wall(self.now() - self.started))
 
 
 def _wait(stopped: threading.Event, seconds: float) -> None:
@@ -638,15 +713,9 @@ class Ticker:
 # ---- Before the upscale: files downloaded and read ----------------------------------------------
 
 
-def amount(done: int, total: int) -> str:
-    """Bytes done of total, in the unit of the total: "4.2 of 16.5 GB", "12.1 of 30.5 MB"."""
-    if total >= 100_000_000:
-        return f"{done / 1e9:.1f} of {total / 1e9:.1f} GB"
-    return f"{done / 1e6:.1f} of {total / 1e6:.1f} MB"
-
-
 def amount_short(done: int, total: int) -> str:
-    """The same in the form the Models node's one short line takes: "3.1/8.3 GB", "12.1/30.5 MB"."""
+    """Bytes done of total in the form a short line takes, in the unit of the total: "3.1/8.3 GB",
+    "12.1/30.5 MB"."""
     if total >= 100_000_000:
         return f"{done / 1e9:.1f}/{total / 1e9:.1f} GB"
     return f"{done / 1e6:.1f}/{total / 1e6:.1f} MB"
@@ -654,14 +723,19 @@ def amount_short(done: int, total: int) -> str:
 
 @dataclass
 class Preparing:
-    """The download of seedvr2x's files and their reading into memory on one bar, in bytes, each
-    with its line ("downloading the sharp 7B (float16): 4.2 of 16.5 GB", "reading the VAE into
-    memory: 0.1 of 0.5 GB"). It is told by pull.fetch (download) and by the load (read). The bar's
-    total is the downloads' and the reading's together and does not change once the first byte
-    is told: will_read announces the reading's before the first download (the session does, from
-    the pins' sizes), and fetch tells every download's size before its first byte. It makes its
-    bar when the first byte is told, so that a run with nothing to download and models kept in
-    memory has none; the upscale's bar starts again at 0 and is another (Progress).
+    """The download of seedvr2x's files and their reading into memory on one bar, in bytes, and the
+    node's one short line for each ("downloading 3.1/8.3 GB": every download's bytes together, in
+    the total's unit; "reading 2.0/8.8 GB": the reading's), no time on it, which the line has no
+    room for (the user, 2026-11-08). Each file is named in the console, once, when its first byte
+    is told. It is told by pull.fetch (download) and by the load (read). The bar's total is the
+    downloads' and the reading's together and does not change once the first byte is told:
+    will_read announces the reading's before the first download (the session does, from the pins'
+    sizes), and fetch tells every download's size before its first byte. It makes its bar when
+    the first byte is told, so that a run with nothing to download and models kept in memory has
+    none; the upscale's bar starts again at 0 and is another (Progress).
+
+    `expected`: the sizes of the files about to be downloaded, by name (their pins'), so that the
+    line's total is whole from the first, before pull.fetch has told every size.
 
     Cancel. The hook ComfyUI installs on its bars checks the Cancel flag first, clears it and
     raises (main.py:467, model_management.py:2224-2230), so the bar's update raises on the node's
@@ -678,6 +752,7 @@ class Preparing:
     downloads: dict[str, tuple[int, int]] = field(default_factory=dict[str, tuple[int, int]])
     reads: dict[str, tuple[int, int]] = field(default_factory=dict[str, tuple[int, int]])
     announced: int = 0
+    expected: dict[str, int] = field(default_factory=dict[str, int])
     started: float = field(init=False)
     thread: int = field(init=False)
 
@@ -690,12 +765,23 @@ class Preparing:
         self.announced = total
 
     def download(self, name: str, done: int, total: int) -> None:
+        if name not in self.downloads:
+            logger.info("downloading %s", self.labels(name))
         self.downloads[name] = (done, total)
-        self._tell(f"downloading {self.labels(name)}: {amount(done, total)}")
+        sizes = {**self.expected, **{each: size for each, (_, size) in self.downloads.items()}}
+        self._tell(
+            "downloading "
+            + amount_short(sum(each[0] for each in self.downloads.values()), sum(sizes.values()))
+        )
 
     def read(self, name: str, done: int, total: int) -> None:
+        if name not in self.reads:
+            logger.info("reading %s into memory", self.labels(name))
         self.reads[name] = (done, total)
-        self._tell(f"reading {self.labels(name)} into memory: {amount(done, total)}")
+        read_total = max(self.announced, sum(each[1] for each in self.reads.values()))
+        self._tell(
+            "reading " + amount_short(sum(each[0] for each in self.reads.values()), read_total)
+        )
 
     def _tell(self, line: str) -> None:
         if threading.get_ident() == self.thread:
@@ -707,11 +793,8 @@ class Preparing:
                 self._send(line)
 
     def _send(self, line: str) -> None:
-        self.show(self._text(line))
+        self.show(fitted([line]))
         self._move()
-
-    def _text(self, line: str) -> str:
-        return f"{line}\n{spoken(wall(self.now() - self.started))} so far"
 
     def _move(self) -> None:
         total = sum(each[1] for each in self.downloads.values())
@@ -727,41 +810,13 @@ class Preparing:
         self.bar.update_absolute(done, total)
 
 
-@dataclass
-class Downloading(Preparing):
-    """The Models node's downloads: Preparing's bar and Cancel, in bytes, with the one short line
-    the node shows ("downloading 3.1/8.3 GB": every download together, in the total's unit) in
-    place of a line for each file and the time, which the node's line has no room for (about 40
-    characters, the user, 2026-11-08). Nothing is read into memory here. `expected`: the sizes of
-    the files about to be downloaded, by name (their pins'), so that the line's total is whole
-    from the first, before pull.fetch has told every size."""
-
-    expected: dict[str, int] = field(default_factory=dict[str, int])
-
-    @override
-    def download(self, name: str, done: int, total: int) -> None:
-        self.downloads[name] = (done, total)
-        sizes = {**self.expected, **{each: size for each, (_, size) in self.downloads.items()}}
-        self._tell(
-            "downloading "
-            + amount_short(sum(each[0] for each in self.downloads.values()), sum(sizes.values()))
-        )
-
-    @override
-    def _text(self, line: str) -> str:
-        return line
-
-
-def scanned(
-    bar: ProgressBar, show: Callable[[str], None], now: Callable[[], float] = time.monotonic
-) -> Callable[[int, int], None]:
+def scanned(bar: ProgressBar, show: Callable[[str], None]) -> Callable[[int, int], None]:
     """The Cuts node's progress, a callback (frames scanned, frames) moving `bar` by frame and
     saying it on the node, ComfyUI's Cancel honoured after each batch."""
-    started = now()
 
     def tell(done: int, total: int) -> None:
         bar.update_absolute(done, total)
-        show(f"looking for cuts: {done} of {total} frames\n{spoken(wall(now() - started))} so far")
+        show(fitted([f"scanning: {done}/{total} frames"]))
         management.throw_exception_if_processing_interrupted()
 
     return tell

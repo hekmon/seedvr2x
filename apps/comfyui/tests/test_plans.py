@@ -12,7 +12,7 @@ import pytest
 import torch
 from comfy_api.latest import io
 from comfyui import models, nodes, plans, words
-from standins import StandIn, execute, upscale_image
+from standins import StandIn, execute, nodes_console, plan_of, upscale_image
 
 from seedvr2x import peaks, pull, weights
 from seedvr2x.memory import Reading
@@ -306,10 +306,8 @@ def test_every_input_and_output_has_a_label_and_a_tooltip() -> None:
         assert names[:2] == (
             ["images", "cuts"] if node is nodes.UpscaleVideo else ["images", "models"]
         )
-        assert [(each.id, each.display_name) for each in schema.outputs] == [
-            ("images", "images"),
-            ("plan", "plan"),
-        ]
+        # The plan is said in ComfyUI's console: no text output.
+        assert [(each.id, each.display_name) for each in schema.outputs] == [("images", "images")]
 
 
 # What a ComfyUI user reads has none of the library's own terms (the user's Desktop test,
@@ -471,23 +469,24 @@ def test_a_value_off_the_grid_at_an_upscale_nodes_socket_is_refused_before_anyth
 def test_the_value_nodes_outputs_reach_the_plan_as_set(machine: StandIn, tmp_path) -> None:
     from standins import handle
 
-    out = execute(
-        nodes.UpscaleVideo,
-        "1",
-        images=torch.zeros(33, 24, 40, 3),
-        cuts=(Shot(0, 33),),
-        models=handle(tmp_path),
-        resolution=48,
-        quality="standard",
-        attention="auto",
-        color_correction=True,
-        seed=42,
-        plan_only=True,
-        window=value(nodes.WindowLength, frames=21),
-        decode_tile=value(nodes.Tile, tile_size=512, whole_image=True),
-        swap_blocks=value(nodes.BlocksSwapped, blocks=0),
-    )
-    text = out[1]
+    with nodes_console() as said:
+        execute(
+            nodes.UpscaleVideo,
+            "1",
+            images=torch.zeros(33, 24, 40, 3),
+            cuts=(Shot(0, 33),),
+            models=handle(tmp_path),
+            resolution=48,
+            quality="standard",
+            attention="auto",
+            color_correction=True,
+            seed=42,
+            plan_only=True,
+            window=value(nodes.WindowLength, frames=21),
+            decode_tile=value(nodes.Tile, tile_size=512, whole_image=True),
+            swap_blocks=value(nodes.BlocksSwapped, blocks=0),
+        )
+    text = plan_of(said)
     assert "window length: at most 21 frames, as you set it" in text
     assert "decode tile: the whole image at once, no tiles (needs up to " in text
     assert "blocks swapped: none, the whole model on the card while it works, as you set it" in (
@@ -499,21 +498,22 @@ def test_the_value_nodes_outputs_reach_the_plan_as_set(machine: StandIn, tmp_pat
 def test_the_optional_inputs_unwired_are_not_given_and_the_plan_chooses(
     machine: StandIn, tmp_path
 ) -> None:
-    from standins import execute, handle
+    from standins import handle
 
     # As ComfyUI's executor calls a node: an optional input left unwired is not given at all.
-    out = execute(
-        nodes.UpscaleImage,
-        "1",
-        images=torch.zeros(1, 24, 40, 3),
-        models=handle(tmp_path),
-        resolution=48,
-        attention="auto",
-        color_correction=True,
-        seed=42,
-        plan_only=True,
-    )
-    text = out[1]
+    with nodes_console() as said:
+        execute(
+            nodes.UpscaleImage,
+            "1",
+            images=torch.zeros(1, 24, 40, 3),
+            models=handle(tmp_path),
+            resolution=48,
+            attention="auto",
+            color_correction=True,
+            seed=42,
+            plan_only=True,
+        )
+    text = plan_of(said)
     assert "encode tile: auto -> " in text and "decode tile: auto -> " in text
     assert "blocks swapped: auto -> " in text
     with pytest.raises(TypeError, match="optionally"):
@@ -625,15 +625,9 @@ def test_the_registered_nodes() -> None:
     assert upscale.hidden == [io.Hidden.unique_id]
     assert nodes.UpscaleImage.INPUT_TYPES()["hidden"] == {"unique_id": ("UNIQUE_ID",)}
     assert schema_inputs(nodes.UpscaleImage)["resolution"].default == 1080
-    assert [(each.id, each.io_type) for each in upscale.outputs] == [
-        ("images", "IMAGE"),
-        ("plan", "STRING"),
-    ]
+    assert [(each.id, each.io_type) for each in upscale.outputs] == [("images", "IMAGE")]
     video = nodes.UpscaleVideo.GET_SCHEMA()
-    assert [(each.id, each.io_type) for each in video.outputs] == [
-        ("images", "IMAGE"),
-        ("plan", "STRING"),
-    ]
+    assert [(each.id, each.io_type) for each in video.outputs] == [("images", "IMAGE")]
     assert [(each.id, each.io_type) for each in nodes.Models.GET_SCHEMA().outputs] == [
         ("models", "SEEDVR2X_MODELS")
     ]

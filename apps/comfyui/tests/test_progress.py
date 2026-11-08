@@ -19,14 +19,14 @@ import pytest
 import server
 from comfy.cli_args import args
 from comfy.utils import ProgressBar
-from comfyui import models, nodes, plans, progress
-from standins import READ_PIECE, RESOLUTION, StandIn, handle, upscale_image
+from comfyui import console, models, nodes, plans, progress
+from standins import READ_PIECE, RESOLUTION, StandIn, handle, upscale_image, where
 from standins import upscale_video as run_video
 from test_nodes import TARGET, fresh, pictures
 from test_still import TILES
 
 from seedvr2x import clip, model, pull, still
-from seedvr2x.clock import taking, wall
+from seedvr2x.clock import wall
 from seedvr2x.passes import Tiles
 from seedvr2x.shots import Shot
 
@@ -48,11 +48,10 @@ def shots_of(count: int, frames: int = 120) -> list[Shot]:
 def make(
     passes: list[progress.Pass],
     costs: progress.Costs = progress.CLIP,
-    plan: str = "the plan",
 ) -> tuple[progress.Progress, Clock, list[str], ProgressBar]:
     clock, shown = Clock(), []
     bar = ProgressBar(progress.BAR)
-    return progress.Progress(passes, costs, bar, shown.append, plan, clock), clock, shown, bar
+    return progress.Progress(passes, costs, bar, shown.append, clock), clock, shown, bar
 
 
 def clip_passes(
@@ -184,34 +183,29 @@ def test_an_untiled_decode_moves_the_bar_by_its_frames_written() -> None:
 # ---- The text -----------------------------------------------------------------------------------
 
 
-def lines(text: str) -> list[str]:
-    return text.splitlines()
-
-
 def test_the_status_of_a_shot_of_a_clip() -> None:
     passes = clip_passes(shots_of(4), 5, TILES, None)
     p, _, shown, _ = make(passes)
     tiles, windows = len(passes[1].encode), len(passes[1].windows)
     assert tiles == 4
-    label = "Shot 2 of 4 (frames 121 to 240)"
     p.begin(1)
-    assert lines(shown[-1])[:2] == ["the plan", f"{label}: encoding"]
+    assert shown[-1] == "shot 2/4 \u00b7 encoding \u00b7 0 s"
     p.tile("encode", 0, tiles)
     p.tile("encode", 2, tiles)
-    assert lines(shown[-1])[1] == f"{label}: encoding, tile 3 of {tiles}"
+    assert where(shown[-1]) == f"shot 2/4 \u00b7 encode tile 3/{tiles}"
     p.tile("encode", tiles, tiles)
-    assert lines(shown[-1])[1] == f"{label}: encoding, tile {tiles} of {tiles}"
+    assert where(shown[-1]) == f"shot 2/4 \u00b7 encode tile {tiles}/{tiles}"
     p.encoded()
-    assert lines(shown[-1])[1] == f"{label}: upscaling, window 1 of {windows}"
+    assert where(shown[-1]) == f"shot 2/4 \u00b7 window 1/{windows}"
     p.window(1)
-    assert lines(shown[-1])[1] == f"{label}: upscaling, window 2 of {windows}"
+    assert where(shown[-1]) == f"shot 2/4 \u00b7 window 2/{windows}"
     for number in range(2, windows + 1):
         p.window(number)
-    assert lines(shown[-1])[1] == f"{label}: decoding, 0 of 120 frames"
+    assert where(shown[-1]) == "shot 2/4 \u00b7 decoding 0/120"
     p.decoded(60, 120)
-    assert lines(shown[-1])[1] == f"{label}: decoding, 60 of 120 frames"
-    # Every message carries the plan, and the box is replaced, not appended to.
-    assert all(lines(each)[0] == "the plan" and len(lines(each)) == 3 for each in shown)
+    assert where(shown[-1]) == "shot 2/4 \u00b7 decoding 60/120"
+    # The box is replaced, not appended to: every message is one line, with no name.
+    assert all("\n" not in each and "seedvr2x" not in each for each in shown)
 
 
 def test_the_status_of_a_tiled_decode_and_of_a_clip_of_one_shot() -> None:
@@ -221,37 +215,42 @@ def test_the_status_of_a_tiled_decode_and_of_a_clip_of_one_shot() -> None:
     p.begin(0)
     p.encoded()
     p.window(4)
-    assert lines(shown[-1])[1] == f"Frames 1 to 480: upscaling, window 5 of {windows}"
+    # A clip of one shot has no shot part.
+    assert where(shown[-1]) == f"window 5/{windows}"
     for number in range(5, windows + 1):
         p.window(number)
-    assert lines(shown[-1])[1] == f"Frames 1 to 480: decoding, tile 1 of {tiles}"
+    assert where(shown[-1]) == f"decode tile 1/{tiles}"
     p.tile("decode", 1, tiles)
-    assert lines(shown[-1])[1] == f"Frames 1 to 480: decoding, tile 2 of {tiles}"
+    assert where(shown[-1]) == f"decode tile 2/{tiles}"
 
 
 def test_the_status_of_a_picture_of_a_batch_and_of_one_picture() -> None:
     passes = progress.picture_passes(8, TARGET, TILES, TILES)
     p, _, shown, _ = make(passes, progress.PICTURE)
     p.begin(2)
+    assert where(shown[-1]) == "picture 3/8 \u00b7 encoding"
     p.tile("decode", 1, 4)
-    assert lines(shown[-1])[1] == "Picture 3 of 8: decoding, tile 2 of 4"
+    assert where(shown[-1]) == "picture 3/8 \u00b7 decode tile 2/4"
+    p.encoded()
+    assert where(shown[-1]) == "picture 3/8 \u00b7 upscaling"
     alone, _, shown, _ = make(progress.picture_passes(1, TARGET, None, None), progress.PICTURE)
     alone.begin(0)
     alone.encoded()
     alone.window(1)
-    assert lines(shown[-1])[1] == "Picture: decoding"
+    assert where(shown[-1]) == "decoding", "one picture has no picture part"
 
 
-def test_the_time_line_says_the_time_left_once_the_first_window_is_measured() -> None:
+def test_the_time_part_says_the_time_so_far_then_the_time_left_once_a_window_is_measured() -> None:
     p, clock, shown, _ = make(clip_passes(shots_of(2, 33)))
     p.begin(0)
     clock.t += 72.0
     p.encoded()
-    assert lines(shown[-1])[2] == "1 min 12 s so far", "no window measured yet: no time left"
+    assert shown[-1].rsplit(progress.SEPARATOR, 1)[1] == "1 min 12 s", "no window measured yet"
     clock.t += 10.0
     p.window(1)
-    assert lines(shown[-1])[2] == f"1 min 22 s so far, {taking(wall(p.left()))} left"
-    assert lines(shown[-1])[2].split(", ")[1].startswith("about ")
+    left = shown[-1].rsplit(progress.SEPARATOR, 1)[1]
+    assert left == progress.time_left(wall(p.left())) and left.startswith("~")
+    assert left.endswith(" left")
     # The time left is the units left at the rates: the window's own now, the others the card's.
     assert p.left() == pytest.approx(
         sum(u.weight for u in p.passes[0].windows[1:]) * p.rate("window")
@@ -261,13 +260,35 @@ def test_the_time_line_says_the_time_left_once_the_first_window_is_measured() ->
     )
 
 
-def test_the_end_says_the_plan_and_what_was_made_in_how_long() -> None:
-    p, clock, shown, bar = make(clip_passes(shots_of(1, 33)), plan="line one\nline two")
+@pytest.mark.parametrize(
+    ("seconds", "said"),
+    [
+        (0.2, "~1 s left"),
+        (42, "~42 s left"),
+        (59.4, "~59 s left"),
+        (60, "~1 min left"),
+        (11.6 * 60, "~12 min left"),
+        (3599, "~59 min left"),
+        (3600, "~1 h 0 min left"),
+        (4020, "~1 h 7 min left"),
+        (30 * 3600, "~1 d 6 h left"),
+    ],
+)
+def test_the_time_left_is_rough_seconds_then_whole_minutes_then_two_units(
+    seconds: float, said: str
+) -> None:
+    assert progress.time_left(seconds) == said
+
+
+def test_the_end_says_what_was_made_in_how_long_and_no_plan() -> None:
+    p, clock, shown, bar = make(clip_passes(shots_of(1, 33)))
     p.begin(0)
     clock.t += 272.0
     p.finish("480 frames")
-    assert shown[-1] == "line one\nline two\n480 frames in 4 min 32 s"
+    assert shown[-1] == "480 frames in 4 min 32 s"
     assert bar.updates[-1] == progress.BAR
+    p.finish("1 frame")
+    assert shown[-1] == "1 frame in 4 min 32 s"
 
 
 # ---- The runs of a shot (quality) ---------------------------------------------------------------
@@ -297,24 +318,22 @@ def test_the_status_of_a_run_of_a_shot_and_of_a_clip_of_one_shot() -> None:
     p, _, shown, _ = make(passes)
     windows = len(passes[1 * 4 + 2].windows)  # shot 2's third run: 120 - 2 frames
     p.run(1, 3)
-    # The run starts at its third frame of the shot, 121 + 2 of the clip: its own frames.
-    assert lines(shown[-1])[1] == "Shot 2 of 4, run 3 of 4 (frames 123 to 240): encoding"
+    assert where(shown[-1]) == "shot 2/4 \u00b7 run 3/4 \u00b7 encoding"
     p.encoded()
     p.window(1)
-    assert lines(shown[-1])[1] == (
-        f"Shot 2 of 4, run 3 of 4 (frames 123 to 240): upscaling, window 2 of {windows}"
-    )
+    # The word of the place goes before the run and the time (test_lines.py holds the order).
+    assert where(shown[-1]) == f"2/4 \u00b7 run 3/4 \u00b7 window 2/{windows}"
     alone = progress.clip_passes([Shot(0, 480)], TARGET, 5, None, None, runs=2)
     p, _, shown, _ = make(alone)
     p.run(0, 2)
     p.encoded()
     p.window(4)
     count = len(alone[1].windows)
-    assert lines(shown[-1])[1] == f"Frames 3 to 480, run 2 of 2: upscaling, window 5 of {count}"
-    # Standard has no run part.
+    assert where(shown[-1]) == f"run 2/2 \u00b7 window 5/{count}"
+    # Standard has no run part, and a clip of one shot no shot part.
     p, _, shown, _ = make(progress.clip_passes([Shot(0, 480)], TARGET, 5, None, None))
     p.run(0, 1)
-    assert lines(shown[-1])[1] == "Frames 1 to 480: encoding"
+    assert where(shown[-1]) == "encoding"
     with pytest.raises(ValueError, match="no run 3"):
         p.run(0, 3)
 
@@ -351,12 +370,11 @@ def test_a_later_run_names_its_own_frames_and_counts_its_decode_in_them() -> Non
     p.encoded()
     for number in range(1, len(passes[6].windows) + 1):
         p.window(number)
-    label = "Shot 2 of 4, run 3 of 4 (frames 123 to 240)"
-    assert lines(shown[-1])[1] == f"{label}: decoding, 0 of 118 frames"
+    assert where(shown[-1]) == "2/4 \u00b7 decoding 0/118"
     p.decoded(60, 118)
-    assert lines(shown[-1])[1] == f"{label}: decoding, 60 of 118 frames"
+    assert where(shown[-1]) == "2/4 \u00b7 decoding 60/118"
     p.decoded(118, 118)
-    assert lines(shown[-1])[1] == f"{label}: decoding, 118 of 118 frames"
+    assert where(shown[-1]) == "2/4 \u00b7 decoding 118/118"
     # A clip of one shot, the same: its second run begins at frame 3.
     alone = progress.clip_passes([Shot(0, 480)], TARGET, 5, None, None, runs=2)
     assert [each.label for each in alone] == [
@@ -377,12 +395,12 @@ def test_a_run_at_maximum_counts_its_decode_in_its_own_frames_on_the_node(
     run_video(
         handle(tmp_path), plans.Settings(window=5), pictures(33), RESOLUTION, "7", quality="maximum"
     )
-    said = [each.splitlines()[-2] for each in node_texts("7") if len(each.splitlines()) >= 3]
+    said = [where(each) for each in node_texts("7") if progress.SEPARATOR in each]
     # Run 3 of the clip of one shot begins at its third frame and has 31 frames.
-    assert "Frames 3 to 33, run 3 of 4: encoding" in said
-    assert "Frames 3 to 33, run 3 of 4: decoding, 31 of 31 frames" in said
-    assert "Frames 2 to 33, run 2 of 4: decoding, 32 of 32 frames" in said
-    assert not any("run 3 of 4" in each and "of 33 frames" in each for each in said)
+    assert "run 3/4 \u00b7 encoding" in said
+    assert "run 3/4 \u00b7 decoding 31/31" in said
+    assert "run 2/4 \u00b7 decoding 32/32" in said
+    assert not any("run 3/4" in each and "/33" in each for each in said)
 
 
 # ---- The time between events --------------------------------------------------------------------
@@ -432,21 +450,21 @@ def test_the_time_is_said_between_events_by_a_thread_that_leaves_the_bar_alone()
         p.begin(0)
         updates, count = list(bar.updates), len(shown)
         text = shown[-1]
-        assert lines(text)[2] == "0 s so far"
-        # The same text as the event's, the time moved on, once a second.
+        assert text == "shot 1/2 \u00b7 encoding \u00b7 0 s"
+        # The same line as the event's, the time moved on, once a second.
         clock.t += 5.0
         cue.fire()
         assert len(shown) == count + 1
-        assert lines(shown[-1])[:2] == lines(text)[:2]
-        assert lines(shown[-1])[2] == "5 s so far"
+        assert where(shown[-1]) == where(text)
+        assert shown[-1].endswith("5 s")
         clock.t += 1.0
         cue.fire()
-        assert lines(shown[-1])[2] == "6 s so far"
+        assert shown[-1].endswith("6 s")
         assert bar.updates == updates, "a tick never moves the bar"
         # The next event says the time as well, from the same clock.
         clock.t += 2.0
         p.encoded()
-        assert lines(shown[-1])[2] == "8 s so far"
+        assert shown[-1].endswith("8 s")
     assert ticker_threads() == []
 
 
@@ -462,11 +480,12 @@ def test_the_time_left_is_in_the_tick_once_a_window_is_measured() -> None:
         p.window(1)
         clock.t += 3.0
         cue.fire()
-        assert lines(shown[-1])[2] == f"33 s so far, {taking(wall(p.left()))} left"
+        assert shown[-1].startswith("shot 1/2 \u00b7 window 2/") and len(shown[-1]) <= 40
+        assert shown[-1].endswith(progress.time_left(wall(p.left())))
 
 
 def test_no_tick_after_the_end_and_no_thread_alive() -> None:
-    p, clock, shown, bar = make(clip_passes(shots_of(1, 33)), plan="the plan")
+    p, clock, shown, bar = make(clip_passes(shots_of(1, 33)))
     cue = Cue()
     with p.running(pause=cue.pause):
         cue.settle()
@@ -476,7 +495,7 @@ def test_no_tick_after_the_end_and_no_thread_alive() -> None:
         summary = shown[-1]
         clock.t += 9.0
         cue.fire()
-        assert shown[-1] == summary == "the plan\n33 frames in 4 s"
+        assert shown[-1] == summary == "33 frames in 4 s"
     assert ticker_threads() == [] and shown[-1] == summary
     assert bar.updates[-1] == progress.BAR
 
@@ -507,7 +526,7 @@ def test_a_text_that_cannot_be_sent_ends_the_ticker_not_the_run(
         if threading.current_thread().name == THREAD:
             raise OSError("the server went away")
 
-    p = progress.Progress(clip_passes(shots_of(1, 33)), progress.CLIP, bar, show, "", clock)
+    p = progress.Progress(clip_passes(shots_of(1, 33)), progress.CLIP, bar, show, clock)
     cue = Cue()
     with p.running(pause=cue.pause):
         cue.settle()
@@ -628,7 +647,10 @@ def preparing() -> tuple[progress.Preparing, Clock, list[str]]:
     return progress.Preparing(shown.append, plans.file_label, clock), clock, shown
 
 
-def test_the_download_and_the_reading_share_one_bar_of_one_total_each_with_its_line() -> None:
+def test_the_download_and_the_reading_share_one_bar_of_one_total_each_with_one_short_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", "seedvr2x_comfyui")
     p, clock, shown = preparing()
     dit, vae = plans.DEFAULT_DIT, plans.VAE_FILE
     # The reading's bytes are announced before the first download, and every download's size is
@@ -636,18 +658,27 @@ def test_the_download_and_the_reading_share_one_bar_of_one_total_each_with_its_l
     p.will_read(17_000_000_000)
     p.download(dit, 0, 16_500_000_000)
     p.download(vae, 0, 500_000_000)
-    assert ProgressBar.created == [] and shown[-1].startswith("downloading the VAE: 0.0 of 0.5 GB")
+    # All the downloads' bytes together, in the total's unit, and no time on the line.
+    assert ProgressBar.created == [] and shown[-1] == "downloading 0.0/17.0 GB"
     clock.t += 30.0
     p.download(dit, 4_200_000_000, 16_500_000_000)
-    assert shown[-1] == "downloading the sharp 7B (float16): 4.2 of 16.5 GB\n30 s so far"
+    assert shown[-1] == "downloading 4.2/17.0 GB"
     p.download(dit, 16_500_000_000, 16_500_000_000)
     p.download(vae, 500_000_000, 500_000_000)
     p.read(vae, 100_000_000, 500_000_000)
-    assert shown[-1].splitlines()[0] == "reading the VAE into memory: 0.1 of 0.5 GB"
+    assert shown[-1] == "reading 0.1/17.0 GB", "of the bytes the load announced"
     p.read(vae, 500_000_000, 500_000_000)
     p.read(dit, 9_000_000_000, 16_500_000_000)
-    assert shown[-1].splitlines()[0] == "reading the sharp 7B (float16) into memory: 9.0 of 16.5 GB"
+    assert shown[-1] == "reading 9.5/17.0 GB"
     p.read(dit, 16_500_000_000, 16_500_000_000)
+    assert all(len(each) <= progress.LIMIT and "\n" not in each for each in shown)
+    # The files are named in the console, once each when its first byte is told.
+    assert [each.removeprefix(console.PREFIX) for each in caplog.messages] == [
+        "downloading the sharp 7B (float16)",
+        "downloading the VAE",
+        "reading the VAE into memory",
+        "reading the sharp 7B (float16) into memory",
+    ]
     (bar,) = ProgressBar.created
     assert bar.updates == sorted(bar.updates) and bar.updates[0] == 4_200_000_000
     # One total throughout, the downloads' and the reading's: the fraction never falls, and the
@@ -659,7 +690,7 @@ def test_the_download_and_the_reading_share_one_bar_of_one_total_each_with_its_l
 def test_a_small_file_is_said_in_megabytes() -> None:
     p, _, shown = preparing()
     p.download("transnetv2.safetensors", 12_100_000, 30_500_000)
-    assert shown[-1].splitlines()[0] == "downloading the shot detector: 12.1 of 30.5 MB"
+    assert shown[-1] == "downloading 12.1/30.5 MB"
 
 
 def test_nothing_to_download_or_read_makes_no_bar() -> None:
@@ -748,12 +779,11 @@ def report_elsewhere_to(progress_: Any) -> list[BaseException]:
 
 
 def test_the_scan_of_the_cuts_node_moves_its_bar_by_frames_and_honours_cancel() -> None:
-    clock, shown = Clock(), []
+    shown: list[str] = []
     bar = ProgressBar(450)
-    tell = progress.scanned(bar, shown.append, clock)
-    clock.t += 5.0
+    tell = progress.scanned(bar, shown.append)
     tell(200, 450)
-    assert bar.updates == [200] and shown[-1] == "looking for cuts: 200 of 450 frames\n5 s so far"
+    assert bar.updates == [200] and shown[-1] == "scanning: 200/450 frames"
     management.interrupt_current_processing()
     with pytest.raises(management.InterruptProcessingException):
         tell(400, 450)
@@ -800,7 +830,9 @@ def node_texts(node: str) -> list[str]:
 
 
 def status(texts: list[str]) -> list[str]:
-    return [each.splitlines()[-2] for each in texts if len(each.splitlines()) >= 3]
+    """The status lines of a run's texts without their time: the node's texts less the first
+    ("planning\u2026") and the last (what was made, and in how long)."""
+    return [where(each) for each in texts[1:-1]]
 
 
 def test_a_tiled_clips_bar_text_and_previews_and_the_bits_of_the_library(
@@ -808,7 +840,7 @@ def test_a_tiled_clips_bar_text_and_previews_and_the_bits_of_the_library(
 ) -> None:
     tiled_plans(monkeypatch)
     frames = pictures(33)
-    out, plan = run_video(handle(tmp_path), plans.Settings(window=5), frames, RESOLUTION, "4")
+    out, _ = run_video(handle(tmp_path), plans.Settings(window=5), frames, RESOLUTION, "4")
     expected = clip.upscale(
         fresh(machine),
         frames.numpy(),
@@ -823,33 +855,29 @@ def test_a_tiled_clips_bar_text_and_previews_and_the_bits_of_the_library(
     (bar,) = ProgressBar.created
     assert bar.updates == sorted(bar.updates) and bar.updates[-1] == progress.BAR
     said = status(node_texts("4"))
-    encoding = [each for each in said if "encoding" in each]
-    assert encoding[0] == "Frames 1 to 33: encoding"
-    assert [each.rsplit(", ", 1)[-1] for each in encoding[1:]] == [
-        "tile 1 of 4",
-        "tile 2 of 4",
-        "tile 3 of 4",
-        "tile 4 of 4",
-        "tile 4 of 4",
+    encoding = [each for each in said if "encod" in each]
+    assert encoding[0] == "encoding"
+    assert encoding[1:] == [
+        "encode tile 1/4",
+        "encode tile 2/4",
+        "encode tile 3/4",
+        "encode tile 4/4",
+        "encode tile 4/4",
     ]
-    assert [each for each in said if "upscaling" in each] == [
-        f"Frames 1 to 33: upscaling, window {n} of 3" for n in (1, 2, 3)
-    ]
-    decoding = [each.split(": ")[1] for each in said if "decoding" in each]
+    assert [each for each in said if "window" in each] == [f"window {n}/3" for n in (1, 2, 3)]
+    decoding = [each for each in said if "decod" in each]
     # The last window says the decode is next (tile 1), and its first tile then tells 0 of 4.
-    assert decoding[:6] == ["decoding, tile 1 of 4"] + [
-        f"decoding, tile {n} of 4" for n in (1, 2, 3, 4, 4)
-    ]
-    written = [int(each.split(", ")[1].split(" ")[0]) for each in decoding[6:]]
+    assert decoding[:6] == ["decode tile 1/4"] + [f"decode tile {n}/4" for n in (1, 2, 3, 4, 4)]
+    written = [int(each.split(" ")[1].split("/")[0]) for each in decoding[6:]]
     assert written and written == sorted(written) and written[-1] == 33
     # One preview a decode slice, the newest frame, at ComfyUI's size.
     assert len(bar.previews) == len(written) and all(
         preview[2] == args.preview_size and preview[1].size == (80, 48)  # type: ignore[index]
         for _, preview in bar.previews
     )
-    # The last message: the plan and the result, no status line.
-    last = node_texts("4")[-1]
-    assert last.startswith(plan) and last.splitlines()[-1].startswith("33 frames in ")
+    # The first message is "planning\u2026", the last the result alone.
+    texts = node_texts("4")
+    assert texts[0] == "planning\u2026" and texts[-1].startswith("33 frames in ")
 
 
 def test_each_picture_of_a_tiled_batch_is_a_preview_and_the_bits_are_the_librarys(
@@ -874,9 +902,10 @@ def test_each_picture_of_a_tiled_batch_is_a_preview_and_the_bits_are_the_library
     assert bar.updates == sorted(bar.updates) and bar.updates[-1] == progress.BAR
     assert len(bar.previews) == 3
     said = status(node_texts("5"))
-    assert "Picture 2 of 3: encoding, tile 3 of 4" in said
-    assert "Picture 3 of 3: decoding, tile 2 of 4" in said
-    assert node_texts("5")[-1].splitlines()[-1].startswith("3 pictures in ")
+    # The later pictures have the time left, for which the word "picture" goes.
+    assert "2/3 \u00b7 encode tile 3/4" in said
+    assert "3/3 \u00b7 decode tile 2/4" in said
+    assert node_texts("5")[-1].startswith("3 pictures in ")
 
 
 def test_at_maximum_each_runs_previews_are_frames_the_output_then_holds(
@@ -951,8 +980,8 @@ def test_the_models_load_is_told_on_a_bar_of_its_own_before_the_upscales(
     assert first.totals[-1] >= 4 * READ_PIECE
     # The upscale's bar starts again at 0.
     assert second.updates[0] == 0 and second.updates[-1] == progress.BAR
-    reading = [each for each in node_texts("8") if "into memory" in each]
-    assert reading and reading[0].startswith("reading ")
+    reading = [each for each in node_texts("8") if each.startswith("reading ")]
+    assert reading and reading[0].endswith(" GB")
     # Kept in memory, the next run reads nothing and has no bar for it.
     ProgressBar.created.clear()
     upscale_image(h, plans.Settings(), pictures(1), RESOLUTION, "8")
@@ -978,4 +1007,4 @@ def test_a_download_is_told_to_the_session_through_pull(
     # The total is the download's and the reading announced before it: the VAE's pinned size (the
     # stand-in DiT's name is no pin's).
     assert first.updates == [100] and first.totals == [100 + pull.PINNED[plans.VAE_FILE].size]
-    assert any(text.startswith("downloading w.safetensors: ") for text in node_texts("9"))
+    assert node_texts("9")[:2] == ["planning\u2026", "downloading 0.0/0.0 MB"]

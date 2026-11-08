@@ -15,7 +15,7 @@ import comfy.model_management as management
 import pytest
 import server
 import torch
-from comfyui import models, plans, progress, words
+from comfyui import console, models, plans, progress, words
 from standins import RESOLUTION, StandIn, handle
 from standins import upscale_video as run_video
 from test_nodes import pictures
@@ -76,6 +76,9 @@ def test_a_cuda_error_holds_everything_and_says_restart_comfyui(
     instance = server.PromptServer.instance
     assert instance is not None and instance.texts[-1][0] == progress.FAILED
     assert any(r.levelno == logging.ERROR and ILLEGAL in r.getMessage() for r in caplog.records)
+    assert progress.FAILED == "GPU failed: restart ComfyUI"
+    # The error is in the console once, at ERROR: not again as a refusal at WARNING.
+    assert not any("refused" in r.getMessage() for r in caplog.records)
     # The run's generators are left open on a failed card, in the frames the error keeps: the
     # process is for restarting, so nothing here lets them go.
     monkeypatch.setattr(model, "sample", happened["sample"])
@@ -85,7 +88,11 @@ def test_a_cuda_error_holds_everything_and_says_restart_comfyui(
 
 @pytest.mark.parametrize("plan_only", [False, True])
 def test_every_later_run_is_refused_at_its_start_with_nothing_read(
-    machine: StandIn, tmp_path: Any, monkeypatch: pytest.MonkeyPatch, plan_only: bool
+    machine: StandIn,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    plan_only: bool,
 ) -> None:
     h = handle(tmp_path, keep=True)
     happened = failing_window(monkeypatch, RuntimeError(ILLEGAL))
@@ -100,6 +107,12 @@ def test_every_later_run_is_refused_at_its_start_with_nothing_read(
         run_video(h, plans.Settings(window=5), pictures(5), RESOLUTION, "9", plan_only=plan_only)
     assert ILLEGAL in str(refused.value) and "restart ComfyUI" in str(refused.value)
     assert reads == [] and len(machine.loads) == loads and len(management.empties) == emptied
+    # The node says the card failed in one line, and the refusal's text is in the console once.
+    instance = server.PromptServer.instance
+    assert instance is not None and instance.texts[-1][0] == progress.FAILED
+    said = [r for r in caplog.records if "failed during an earlier" in r.getMessage()]
+    assert len(said) == 1 and said[0].levelno == logging.WARNING
+    assert said[0].getMessage().removeprefix(console.PREFIX).startswith("refused: ")
     models.reset()
 
 

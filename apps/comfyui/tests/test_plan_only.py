@@ -44,7 +44,7 @@ def nothing_was_done(machine: StandIn) -> None:
 
 
 @pytest.mark.parametrize("keep", [True, False])
-def test_a_picture_plan_only_gives_the_text_and_blocks_what_follows_the_picture(
+def test_a_picture_plan_only_says_the_plan_and_blocks_what_follows_the_picture(
     machine: StandIn, tmp_path, caplog: pytest.LogCaptureFixture, keep: bool
 ) -> None:
     with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui.nodes"):
@@ -54,22 +54,31 @@ def test_a_picture_plan_only_gives_the_text_and_blocks_what_follows_the_picture(
     # An execution blocker with no message: the executor passes it to every node that takes the
     # picture, which then does not run, without reporting an error (a message would be one).
     assert isinstance(blocked, ExecutionBlocker) and blocked.message is None
-    assert text.startswith("seedvr2x plan (plan only): 2 images")
+    assert text.startswith("plan (plan only): 2 images")
     assert "plan only: nothing is loaded and ComfyUI's models stay as they are" in text
     instance = server.PromptServer.instance
-    assert instance is not None and instance.texts == [(text, "12")]
+    # The node says "planning…" and then the plan's main numbers in one short line; the plan is
+    # in the console.
+    assert instance is not None and instance.texts[0] == ("planning\u2026", "12")
+    assert [each for each, _ in instance.texts[1:]] == ["plan: encode whole \u00b7 decode whole"]
     assert console.prefixed(text) in caplog.messages
     nothing_was_done(machine)
     assert models.kept(handle(tmp_path)) is None
     assert len(machine.headers) == 1, "the DiT's header was read"
 
 
-def test_a_clip_plan_only_gives_the_text_and_blocks_the_frames(machine: StandIn, tmp_path) -> None:
+def test_a_clip_plan_only_says_the_plan_and_blocks_the_frames(machine: StandIn, tmp_path) -> None:
     blocked, text = upscale_video(
         handle(tmp_path), plans.Settings(window=5), pictures(33), RESOLUTION, "3", plan_only=True
     )
     assert isinstance(blocked, ExecutionBlocker) and blocked.message is None
     assert "(plan only): a clip of 33 frames" in text and "window length: " in text
+    instance = server.PromptServer.instance
+    assert instance is not None
+    assert [each for each, _ in instance.texts] == [
+        "planning\u2026",
+        "plan: window 17 frames \u00b7 decode whole",
+    ]
     nothing_was_done(machine)
 
 

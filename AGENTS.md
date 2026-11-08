@@ -90,21 +90,24 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          upscale nodes' widgets, the plan's numbers their optional sockets of
                          seedvr2x's own types, no Tuning node; the Models and Cuts nodes'
                          model folder an optional STRING input with no widget, `force_input`)
-                         and ComfyUI's calls (the bar and text it gets from progress.py, Cancel,
-                         the plan said on the node, plan only); the one
-                         module that imports `comfy_api` (unstable)
+                         and ComfyUI's calls (the bar and the one status line it gets from
+                         progress.py, Cancel, the plan said in the console, plan only, a
+                         refusal's line: `_refusing`); no text outputs (the plan and the cuts are
+                         the console's); the one module that imports `comfy_api` (unstable)
   models.py plans.py     the files, the models kept in pinned memory and the one registration
                          with ComfyUI's model manager, a run's room and placement, keep in RAM
                          auto/on/off against ComfyUI's cap; the inputs' values as pins and
                          the plan in the nodes' words
   progress.py            what the nodes show while they run: the upscale's bar as its expected
-                         time, the text on the node (the plan, where the run is, the time), the
+                         time, the text on the node (ONE status line of at most 40 characters,
+                         `LIMIT`: where the run is and the time, made by `fitted`), the
                          previews, the download and the reading of the files on one bar (the
                          Models node's downloads on a bar of their own, one short line), the Cuts
                          node's scan; on the library's callbacks, which only observe; a thread
                          for the text alone (the time each second between events); the units
                          named for the library's waits on the GPU, ComfyUI's Cancel their check
-  words.py               the nodes' words for each refusal, with the way out in ComfyUI's terms
+  words.py               the nodes' words for each refusal, with the way out in ComfyUI's terms,
+                         and the short line the node shows for it (`Refused.line`)
   console.py             "[seedvr2x] " before each of seedvr2x's lines in ComfyUI's console,
                          installed by `__init__.py` before anything else is imported
   workflows/ README.md   the two example workflows (picture.json, clip.json: ComfyUI's UI format,
@@ -1253,8 +1256,10 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   refusal raised from the library's error included), with what they keep on the device (the
   RoPE's cache, `model.forget`); `tests/test_nodes.py` each picture of a batch and a clip equal
   bit for bit to `still.upscale` and `clip.upscale`, the batch's output allocated once and
-  counted in the plan's `process`, the alpha rule, the plan said on the node, in the console and
-  as text with what each auto became and the host memory beside the host's, the attention,
+  counted in the plan's `process`, the alpha rule, the plan said whole in the console (never on
+  the node, which shows "planning…" and its progress) with what each auto became and the host
+  memory beside the host's, the attention, a refusal's one line on the node and its text once at
+  WARNING in the console, the run's frames and time in the console ("21 frames upscaled in 4 s"),
   colour correction and seed, the probe, a clip of 1, 2 and 3 shots equal bit for bit to
   `clip.upscale` of each shot one after the other (each seeded by its first frame, its frames
   written into the clip's one output array, no window across a cut, the plan made once and said
@@ -1274,13 +1279,12 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   size, a run being a pass over the shot from its first frame with its own windows and tiles; a
   kind's cost the card's figure until its first unit is made, then the run's own, the rest spread
   again over what remains, monotone, full at the last unit only, an untiled decode moving it by
-  its frames written), the text of each form ("Shot 2 of 4 (frames 121 to 240): encoding, tile 3
-  of 6", "Shot 2 of 4, run 3 of 4 (frames 123 to 240): upscaling, window 2 of 3" (a later run
-  names its own frames from its first and counts its decode in them, "decoding, 60 of 118
-  frames"), "Frames 3 to 480, run 2 of 2: ...", a clip of one shot, "Picture 3 of 8: decoding, tile
-  2 of 4", "Picture:
-  decoding", the time so far and "about ... left" only once a window is measured, the plan and
-  "480 frames in 4 min 32 s" at the end, the box replaced and not appended to), the previews (one
+  its frames written), the status line of each form, one line of at most 40 characters with no
+  name ("shot 2/4 · encode tile 3/6", "shot 2/4 · window 2/3 · ~3 min left", "run 3/4 ·
+  window 2/3" (a run part at enhanced and maximum only, a shot part for a clip of several shots
+  only), "shot 2/4 · decoding 60/118", "picture 3/8 · decode tile 2/4", "decoding" for one
+  picture; the time so far, and "~3 min left" only once a window is measured; "480 frames in 4 min
+  32 s" at the end with no plan before it; the box replaced and not appended to), the previews (one
   a decode slice or a picture, the newest frame, ComfyUI's preview size, a smaller frame at its
   own), the download and the reading on one bar of a constant total with their lines, Cancel as
   the real hook raises it (the stand-in bar clears the flag and raises) honoured on the node's
@@ -1300,15 +1304,18 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   that lasts, on the nodes (an event that never completes, `waiting.wait(lambda: False, ...)` on a
   fake wait clock):
   each event naming the next unit with its estimate once a unit of its kind is measured and none
-  before, the text and ComfyUI's console saying a wait past its bound with the way out (restart
-  ComfyUI) and the text normal again when it ends, Cancel leaving it at a poll, torch's cache not
+  before, the line "GPU not answering for 3 min" (whole minutes) and ComfyUI's console the
+  library's own line with the way out (restart ComfyUI), the line normal again when it ends, Cancel
+  leaving it at a poll, torch's cache not
   emptied and models not kept held rather than dropped after it (Unload models too), `running`
   giving the check and the unit back, and every later run refused at its start, nothing read or
   placed, in the words of a card still busy (`words.card_busy`) while the work the wait was for is
   pending, asked without waiting (`models._settle`); the release after a run an exception ended (Cancel or an error)
-  run inside ComfyUI's interrupt as the check, the node's text `progress.FREEING` meanwhile, a
+  run inside ComfyUI's interrupt as the check, the node's line `progress.FREEING` meanwhile (its
+  sentence, `FREEING_SAID`, at INFO in the console), a
   second Cancel leaving it with the card marked whatever the bound, torch's cache not emptied and
-  the next run refused while the work is pending, `progress.STOPPED` after it, and the next run's
+  the next run refused while the work is pending, `progress.STOPPED` after it (`STOPPED_SAID` at
+  WARNING, and the refused run's line the same), and the next run's
   start completing the release once the work has finished (the models held freed, the mark
   cleared, said at INFO, the run made, nothing read again; a pending side stream's work, the one
   a later wait of the release would have covered, counted; models not kept let go; a mark a CUDA
@@ -1319,8 +1326,10 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   poll first (`model.synchronize`) under the same text and second Cancel, a healthy release putting
   the text back (none said before: cleared) and marking nothing, and one after a normal end with no
   check and no text; `tests/test_cuts_node.py` seedvr2x Cuts over the untrained detector's
-  weights and scripted probabilities (the cut list and the text of the cuts and the
-  possible cuts, one shot mode running no detector, the threshold, the file found in a folder or
+  weights and scripted probabilities (the cut list, and the console's text of the cuts with their
+  probabilities and the possible cuts, without a lead; the node's line "scanning: 64/120 frames",
+  "2 shots · 1 possible cut below 0.30", "one shot: 120 frames"; no text output; one shot mode
+  running no detector, the threshold, the file found in a folder or
   fetched by its pin, the detector closed after, the alpha left out, its refusals, its list into
   Upscale Video, its file's refusals naming seedvr2x Cuts and its own "model folder" input
   (unwire it for Hugging Face's cache, or wire a folder), sizes with separators; the folder an
@@ -1336,7 +1345,8 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   nodes' words naming the "model folder" input), a value that is no folder refused, quotes, spaces
   and an empty value, the console lines of each file's place and size (`said_where`: in Hugging
   Face's cache with `HF_HOME` named, downloaded into it, or in the model folder; each line
-  `[seedvr2x]` once, no `seedvr2x:` of its own), a download refused when offline worded for this node, Cancel
+  `[seedvr2x]` once, no `seedvr2x:` of its own), a download refused when offline worded for this
+  node, Cancel
   on the node's thread and from the downloader's (left pending, honoured when the download
   returns, no end line), and the upscale node downloading again a file the cache lost since the
   Models node ran, saying so before it downloads (cache mode only: a folder never asks the cache);
@@ -1350,7 +1360,8 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   label and a tooltip, none in the library's terms; the colour correction a BOOLEAN, split or
   none, `quality` a combo (standard, enhanced, maximum) on Upscale Video alone, its tooltip's
   points and the plan's quality line (the level and its runs, a short shot's missing runs not
-  counted), the seed's fixed control; the Models node's model, folder (an optional input: no default, no widget) and RAM tooltips; a value the
+  counted), the seed's fixed control; the Models node's model, folder (an optional input: no
+  default, no widget) and RAM tooltips; a value the
   prompt holds or a link gives refused in the nodes' words at queue time and at the node's
   start, an unwired one not given), the settings' pins
   reaching the plan exactly, the text's lines, the V3 registration (the entrypoint, the seven
@@ -1359,7 +1370,18 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   or its rule), what is said, the first file's memory freed before the second is pinned,
   Unload models under a cached Models output said once, the Models node reading nothing;
   `tests/test_plan_only.py` the plan alone (the headers read and nothing loaded, registered or
-  freed, an execution blocker for the pictures); `tests/
+  freed, an execution blocker for the pictures and nothing else, the plan in the console and the
+  node's "plan: window 17 frames · decode whole"); `tests/test_lines.py` every line the nodes can
+  send (the table of states: each upscale node's steps, end, "planning…", the files, the scan, plan
+  only, the Cuts node, the card's states, a wait that lasts, a refusal's `Refused.line`) in its
+  exact form with ordinary numbers and within 40 characters on one line with shots 1234/5678,
+  run 4/4, window 123/456, decoding 12345/23456, hours left and byte counts of 16 digits, the
+  parts dropped in order (the word of the place, then the run, then the time, the run coming back
+  where the time can't fit anyway; never the step), "planning…" emptied by an error or a Cancel
+  that is no refusal (a refusal shows its own line), and a step over
+  the limit cut with an ellipsis; `conftest.py`'s autouse `texts_are_one_short_line` fails any
+  test whose node texts (the stand-in server's record) pass 40 characters, hold a "\n" or name
+  seedvr2x, so that no path is missed; `tests/
   test_words.py` every refusal class worded without "--", and the library's real refusals (a
   damaged or unpinned file in a cache and in a directory written there, the plan with tiny
   figures, the target check) worded with the way out; the four kinds of a plan (memory, host,
@@ -1374,7 +1396,8 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   or a stock one of a table read from v0.44.0, seedvr2x's sockets, outputs and widgets equal to
   their V3 schemas' in count, order and defaults, every optional input unwired, every link
   joining an output to an input of its type, Models wired into the upscale node and no Tuning
-  node, the plan shown as text, the clip's Cuts between Load Video and Upscale Video. Smoke in
+  node, no text display (no Preview as Text node, no STRING link, no text output, the counters
+  agreeing with the nodes and links), the clip's Cuts between Load Video and Upscale Video. Smoke in
   the real ComfyUI, CPU only, by hand: the folder linked into its `custom_nodes`, then
   `CUDA_VISIBLE_DEVICES= python main.py --cpu
   --quick-test-for-ci` in its environment with `PYTHONPATH` at `core/`, which lists the nodes

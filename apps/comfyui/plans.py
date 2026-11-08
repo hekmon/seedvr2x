@@ -20,6 +20,8 @@ from seedvr2x.shot_plan import Pins as ShotPins
 from seedvr2x.still_plan import PictureTiles, StillPlan
 from seedvr2x.still_plan import Pins as StillPins
 
+from .progress import SEPARATOR, fitted
+
 AUTO = "auto"
 
 # The DiT files of v0.1.0 the nodes run, by the name a user reads: the model, the file's format,
@@ -563,7 +565,7 @@ def picture_text(
     inputs = count * source[0] * source[1] * 3 * 4
     outputs = count * output[0] * output[1] * 3 * 4
     lines = [
-        f"seedvr2x plan{' (plan only)' if room.plan_only else ''}: {what} {source[0]}x{source[1]}"
+        f"plan{' (plan only)' if room.plan_only else ''}: {what} {source[0]}x{source[1]}"
         f" to {output[0]}x{output[1]} (resolution {resolution})",
         *notes,
         *_room(room, plan.reading, still_plan.reserve_taken(plan)),
@@ -651,7 +653,7 @@ def clip_text(
         f"the input's frames, {gib(inputs)}, are not in that: ComfyUI has them in memory already,"
         " so they are out of the RAM available",
     ]
-    first = f"seedvr2x plan{' (plan only)' if room.plan_only else ''}: a clip of {frames} frames"
+    first = f"plan{' (plan only)' if room.plan_only else ''}: a clip of {frames} frames"
     first += f" {source[0]}x{source[1]} to {output[0]}x{output[1]} (resolution {resolution})"
     if len(cuts) == 1:
         windows = len(shots.shot_layout(cuts[0].frames, plan.window))
@@ -722,8 +724,8 @@ def probability(value: float) -> str:
 
 
 def one_shot_text(frames: int) -> str:
-    """The Cuts node's text for "one shot": the clip taken whole, no detection run."""
-    return f"seedvr2x Cuts: one shot, the whole clip of {frames} frames; no detection was run"
+    """The Cuts node's console text for "one shot": the clip taken whole, no detection run."""
+    return f"one shot, the whole clip of {frames} frames; no detection was run"
 
 
 def cuts_text(
@@ -732,13 +734,13 @@ def cuts_text(
     found: Sequence[shotcuts.Cut],
     possible: Sequence[shotcuts.Cut],
 ) -> str:
-    """The Cuts node's text for "detect": the shots found at `threshold`, each cut by the first
-    frame of the shot it starts (frames counted from 0, as the command line's cut list counts
+    """The Cuts node's console text for "detect": the shots found at `threshold`, each cut by the
+    first frame of the shot it starts (frames counted from 0, as the command line's cut list counts
     them) with the probability of the detection, then the possible cuts, which the list does not
     hold: runs that peak from shotcuts.POSSIBLE up to the threshold, for the eyes to check."""
     shots_found = len(found) + 1
     lines = [
-        f"seedvr2x Cuts: {frames} frames, {len(found)} cut{'' if len(found) == 1 else 's'} found at"
+        f"{frames} frames, {len(found)} cut{'' if len(found) == 1 else 's'} found at"
         f" threshold {threshold:g}: {shots_found} shot{'' if shots_found == 1 else 's'}"
     ]
     lines += [
@@ -768,3 +770,58 @@ def cuts_text(
                 f"no possible cuts: nothing between {shotcuts.POSSIBLE:g} and {threshold:g}"
             )
     return "\n".join(lines)
+
+
+# ---- The one line each node shows ----------------------------------------------------------------
+#
+# A node's text box is one status line of at most progress.LIMIT characters, no name (the node's
+# title has it), a progress hint and never a log (the user, 2026-11-08): the plan, the cuts and
+# the rest are in ComfyUI's console, through the texts above. Each line is made by progress.fitted
+# from its parts in priority order, the lowest dropped until it fits.
+
+
+def _tile_part(name: str, tiles: Tiles | None) -> str:
+    return f"{name} whole" if tiles is None else f"{name} {tiles.size} px"
+
+
+def _plan_line(parts: Sequence[str]) -> str:
+    """ "plan: " and as many of `parts` as fit, the last dropped first."""
+    return fitted(*(["plan: " + SEPARATOR.join(parts[:n])] for n in range(len(parts), 0, -1)))
+
+
+def _blocks(swapped: int) -> list[str]:
+    return [f"{swapped} blocks swapped"] if swapped else []
+
+
+def picture_line(tiles: PictureTiles, swapped: int) -> str:
+    """What a picture node with plan only shows: "plan: encode 1024 px \u00b7 decode 1088 px"."""
+    return _plan_line(
+        [_tile_part("encode", tiles.encode), _tile_part("decode", tiles.decode), *_blocks(swapped)]
+    )
+
+
+def clip_line(plan: Plan) -> str:
+    """What a clip node with plan only shows: "plan: window 41 frames \u00b7 decode 1088 px"."""
+    window = "one window" if plan.window is None else f"window {_frames(plan.window)}"
+    return _plan_line(
+        [
+            window,
+            _tile_part("decode", plan.decode_tiles),
+            _tile_part("encode", plan.encode_tiles),
+            *_blocks(plan.swapped),
+        ]
+    )
+
+
+def cuts_line(shots_found: int, possible: int, threshold: float) -> str:
+    """What the Cuts node shows once it has looked: "2 shots \u00b7 1 possible cut below 0.30"."""
+    shot = f"{shots_found} shot{'' if shots_found == 1 else 's'}"
+    if not possible:
+        return fitted([shot, "no possible cut"], [shot])
+    cuts = f"{possible} possible cut{'' if possible == 1 else 's'}"
+    return fitted([shot, f"{cuts} below {threshold:.2f}"], [shot, cuts], [shot])
+
+
+def one_shot_line(frames: int) -> str:
+    """What the Cuts node shows for "one shot": "one shot: 120 frames"."""
+    return fitted([f"one shot: {frames} frames"])

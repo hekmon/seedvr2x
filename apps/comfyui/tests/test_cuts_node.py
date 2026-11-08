@@ -14,7 +14,15 @@ import pytest
 import server
 import torch
 from comfyui import console, models, nodes, plans, words
-from standins import PICTURE, RESOLUTION, StandIn, execute, handle, upscale_video
+from standins import (
+    PICTURE,
+    RESOLUTION,
+    StandIn,
+    execute,
+    handle,
+    nodes_console,
+    upscale_video,
+)
 from test_detector import untrained_weights
 
 from seedvr2x import detector as shot_detector
@@ -42,15 +50,17 @@ def run_cuts(
     model_dir: str = "",
     unique_id: str | None = "7",
 ) -> tuple[tuple[Shot, ...], str]:
-    out = execute(
-        nodes.Cuts,
-        unique_id,
-        images=images,
-        mode=mode,
-        threshold=threshold,
-        model_dir=model_dir,
-    )
-    return out[0], out[1]
+    with nodes_console() as said:
+        out = execute(
+            nodes.Cuts,
+            unique_id,
+            images=images,
+            mode=mode,
+            threshold=threshold,
+            model_dir=model_dir,
+        )
+    # The one text the node says whole: the cuts, or the clip taken as one shot.
+    return out[0], said.messages[0] if said.messages else ""
 
 
 @pytest.fixture
@@ -97,7 +107,7 @@ def test_one_shot_is_the_whole_clip_and_runs_no_detector(
     monkeypatch.setattr(pull, "fetch", refuse)
     cuts, text = run_cuts(clip_images(21), mode="one shot")
     assert cuts == (Shot(0, 21),)
-    assert text == "seedvr2x Cuts: one shot, the whole clip of 21 frames; no detection was run"
+    assert text == "one shot, the whole clip of 21 frames; no detection was run"
 
 
 def test_the_cuts_are_the_shots_between_the_detections_and_the_text_says_them(
@@ -109,7 +119,7 @@ def test_the_cuts_are_the_shots_between_the_detections_and_the_text_says_them(
     # The cut is the frame after the peak; a peak on the last frame gives none.
     assert cuts == (Shot(0, 30), Shot(30, 60), Shot(60, 100))
     assert text.splitlines() == [
-        "seedvr2x Cuts: 100 frames, 2 cuts found at threshold 0.3: 3 shots",
+        "100 frames, 2 cuts found at threshold 0.3: 3 shots",
         "cut at frame 30 (probability 0.899)",
         "cut at frame 60 (probability 0.300)",
         "1 possible cut, not in the list: scenes the detector found less sure than 0.3 (from 0.1),"
@@ -127,7 +137,7 @@ def test_a_clip_with_no_cut_is_one_shot_and_says_no_possible_cuts(
     cuts, text = run_cuts(clip_images(40), model_dir=str(weights_dir))
     assert cuts == (Shot(0, 40),)
     assert text.splitlines() == [
-        "seedvr2x Cuts: 40 frames, 0 cuts found at threshold 0.3: 1 shot",
+        "40 frames, 0 cuts found at threshold 0.3: 1 shot",
         "no possible cuts: nothing between 0.1 and 0.3",
     ]
 
@@ -176,7 +186,7 @@ def test_the_untrained_detector_runs_on_the_frames_and_its_cuts_are_the_librarys
         assert sum(each.frames for each in cuts) == 137
 
 
-def test_the_text_is_said_on_the_node_and_the_alpha_is_left_out(
+def test_the_node_shows_one_line_and_the_alpha_is_left_out(
     monkeypatch: pytest.MonkeyPatch, weights_dir: Path
 ) -> None:
     seen: list[tuple[int, ...]] = []
@@ -190,7 +200,12 @@ def test_the_text_is_said_on_the_node_and_the_alpha_is_left_out(
     monkeypatch.setattr(shot_detector, "probabilities", probabilities)
     _, text = run_cuts(clip_images(12, channels=4), model_dir=str(weights_dir), unique_id="9")
     instance = server.PromptServer.instance
-    assert instance is not None and instance.texts == [(text, "9")]
+    # The one short line (the cuts themselves are in the console): shots and possible cuts.
+    assert instance is not None and instance.texts == [("1 shot \u00b7 no possible cut", "9")]
+    assert text == (
+        "12 frames, 0 cuts found at threshold 0.3: 1 shot\n"
+        "no possible cuts: nothing between 0.1 and 0.3"
+    )
     assert seen == [(12, *PICTURE, 3)]
 
 
@@ -270,6 +285,51 @@ def test_a_file_that_cannot_be_had_or_is_damaged_names_the_cuts_node_and_its_own
     assert "seedvr2x Models" not in text and "--" not in text
 
 
+def shown_on(node: str) -> list[str]:
+    instance = server.PromptServer.instance
+    assert instance is not None
+    return [text for text, each in instance.texts if each == node]
+
+
+def test_the_node_shows_the_scan_then_the_shots_and_the_possible_cuts_in_one_line(
+    monkeypatch: pytest.MonkeyPatch, weights_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    probabilities = np.zeros(100, np.float32)
+    probabilities[[29, 59, 79, 80, 99]] = [0.9, 0.3, 0.2, 0.15, 0.99]
+
+    def scan(found: object, images: torch.Tensor, progress: Any = None) -> npt.NDArray[np.float32]:
+        for done in (50, 100):
+            progress(done, 100)
+        return probabilities
+
+    monkeypatch.setattr(shot_detector, "probabilities", scan)
+    with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui"):
+        run_cuts(clip_images(100), model_dir=str(weights_dir), unique_id="3")
+    assert shown_on("3") == [
+        "scanning: 50/100 frames",
+        "scanning: 100/100 frames",
+        "3 shots \u00b7 1 possible cut below 0.30",
+    ]
+    # The console has the cuts with their probabilities and the possible cut, without a lead.
+    lines = [each.removeprefix(console.PREFIX) for m in caplog.messages for each in m.splitlines()]
+    assert "cut at frame 30 (probability 0.899)" in lines
+    assert "possible cut at frame 80 (probability 0.200)" in lines
+    assert "100 frames, 2 cuts found at threshold 0.3: 3 shots" in lines
+
+
+def test_one_shot_shows_its_frames_and_a_refusal_shows_its_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    run_cuts(clip_images(21), mode="one shot", unique_id="4")
+    assert shown_on("4") == ["one shot: 21 frames"]
+    with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui"):
+        with pytest.raises(words.Refused):
+            run_cuts(clip_images(6), model_dir=str(tmp_path), unique_id="5")
+    assert shown_on("5") == ["refused: see the error"]
+    refused = [line for line in unprefixed(caplog) if line.startswith("refused: ")]
+    assert len(refused) == 1 and "is not in the folder wired to the" in refused[0]
+
+
 def test_images_that_are_no_clip_are_refused(weights_dir: Path) -> None:
     with pytest.raises(words.Refused, match="empty"):
         run_cuts(torch.zeros(0, *PICTURE, 3), model_dir=str(weights_dir))
@@ -297,12 +357,10 @@ def test_the_cut_list_it_gives_goes_into_upscale_video(
     assert "shot 2: frames 9 to 20 (12 frames): " in plan
 
 
-def test_the_node_has_the_cuts_and_text_outputs_and_a_hidden_id() -> None:
+def test_the_node_has_the_cuts_output_and_a_hidden_id() -> None:
     schema = nodes.Cuts.GET_SCHEMA()
-    assert [(each.id, each.io_type) for each in schema.outputs] == [
-        ("cuts", "SEEDVR2X_CUTS"),
-        ("text", "STRING"),
-    ]
+    # The cuts and the possible cuts are said in the console: no text output.
+    assert [(each.id, each.io_type) for each in schema.outputs] == [("cuts", "SEEDVR2X_CUTS")]
     inputs: dict[str, Any] = {each.id: each for each in schema.inputs}
     assert list(inputs) == ["images", "mode", "threshold", "model_dir"]
     assert inputs["mode"].options == ["detect", "one shot"] and inputs["mode"].default == "detect"
