@@ -15,7 +15,7 @@ memory after it, synchronously (research/bugs/17). Weights never change, so here
 - between phases, what the plan sends away goes back to its host copy (Placement.enter), and
   comes back from it in one copy per part.
 
-Only parameters move. Buffers stay on the GPU: RoPE's tables (3 per block of the 7B, 0.7 MiB)
+Only parameters move. Buffers stay on the GPU: the rotary buffers (3 per block of the 7B, 0.7 MiB)
 and the angle tables each block caches from them, so numz's device-aware RoPE wrapper, and its
 late-binding bug (research/bugs/24), have no place here.
 

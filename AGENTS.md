@@ -471,8 +471,10 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   hold the plan the card alone gives where the host is short, no pinned copy counted, a job the
   host refused planned, `held=False` changing no plan (the plan matrix's 5,120 cases too), and
   `_vae_kept` and `_dit_kept` returning nothing for weights held.
-- The vendored RoPE's tables where the DiT's work on a shot starts and where it ends
-  (`model.forget_rope_tables`; DESIGN.md, Allocator, "The vendored RoPE's tables"):
+- The vendored RoPE's tables where the DiT's work on a shot starts and where it ends (the
+  class's `lru_cache`; the rotary modules' own buffers, `cached_freqs` and `dummy`, are the rotary
+  buffers, which release moves to the host) (`model.forget_rope_tables`; DESIGN.md, Allocator,
+  "The vendored RoPE's tables"):
   `NaRotaryEmbedding3d.get_axial_freqs` (rope.py:44) memoises the tables of each window shape for
   the class, so a long run of many shot lengths grew them without end, and they stayed into the
   VAE's phases (a 16 GB card's clip decode 1.1 MiB over its prediction, 2026-11-06).

@@ -138,7 +138,7 @@ class Models:
         wait) leaves the models as they were, to be released again.
 
         Nothing of the models is left on the device: the buffers of the DiT and of the VAE (the
-        7B's RoPE tables, 108 of them, 24,774,336 B) and the text embeddings (1,249,280 B) are
+        7B's rotary buffers, 108 of them, 24,774,336 B) and the text embeddings (1,249,280 B) are
         copied to system memory, pageable, and place copies them back, exactly: a copy changes no
         bit.
 

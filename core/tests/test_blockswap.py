@@ -219,7 +219,7 @@ def overlap(a: Tensor, b: Tensor) -> bool:
 
 class Block(torch.nn.Module):
     """A toy block: a matrix, a bias and a scalar gain, parameters, and a table, a buffer, as a
-    DiT block's RoPE tables are. Its forward queues one kernel and returns where its result will
+    DiT block's rotary buffers are. Its forward queues one kernel and returns where its result will
     be."""
 
     def __init__(self, name: str, sim: Sim) -> None:
