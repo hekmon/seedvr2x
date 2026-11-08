@@ -324,9 +324,16 @@ seedvr2x/                the repository
     - seedvr2x Models: the DiT file by a name a user reads ("Sharp 7B, int8"), with its size
       and the model card's typical error (0.86% for int8), from Hugging Face's cache or a
       folder wired into its optional input (the model files, below); the RAM choice above.
-    - seedvr2x Cuts: seedvr2x's shot detector on the clip's frames, detecting with a threshold
-      or taking the clip as one shot; its cut list is wired to Upscale Video (a clip's fact, not
-      a setting), and it says the cuts and the possible cuts (the user, 2026-11-05: a short
+      Since 2026-11-08 the one node of the models (the user: one node, one action, and one
+      node for every download): it gives seedvr2x Cuts the shot detector's file too, and the
+      card, once GPU selection chooses one, will be chosen on it alone and carried to Cuts and
+      the upscale nodes. A change on it makes Cuts scan again, ComfyUI keying a node's cache by
+      its ancestors' inputs: a few seconds, accepted.
+    - seedvr2x Cuts: seedvr2x's shot detector on the clip's frames, detecting with a threshold,
+      its file from seedvr2x Models' output (no mode and no folder of its own since 2026-11-08:
+      a clip taken as one shot is Upscale Video's with no cut list wired); its cut list is
+      wired to Upscale Video (a clip's fact, not a setting), and it says the cuts and the
+      possible cuts (the user, 2026-11-05: a short
       clip of 3 or 4 shots is handled as the CLI handles a film), each with its probability in
       ComfyUI's console and their count on the node ("2 shots · 1 possible cut below 0.30"),
       its text output gone since 2026-11-08 (Progress, below). The frames are
@@ -339,8 +346,12 @@ seedvr2x/                the repository
       cuts from the probabilities moved from the CLI's `cuts.py` to the library
       (`shotcuts.py`).
     - seedvr2x Upscale Image, a batch of pictures each upscaled on its own, and seedvr2x
-      Upscale Video, a clip's frames shot by shot, each in sliding windows, its cut list a
-      required input, one plan for the shots, each shot seeded by the seed and its first frame
+      Upscale Video, a clip's frames shot by shot, each in sliding windows, its cut list the
+      first of its optional inputs since 2026-11-08 (unwired, the clip is one shot, said once
+      in the console; its tooltip recommends seedvr2x Cuts, a clip with cuts upscaled as one
+      shot having frames mixed across them; the user: no node to add for a one-shot clip, and
+      no detection folded into the upscale), one plan for the shots, each shot seeded by the
+      seed and its first frame
       as the CLI seeds it. Upscale Video's quality (standard, enhanced, maximum) is the CLI's
       `--quality` (the user, 2026-11-06: quality isn't the CLI's alone): the model runs once,
       twice or 4 times over each shot, each frame kept from the run that rebuilds it best, at 2
@@ -378,24 +389,32 @@ seedvr2x/                the repository
       says its plan in ComfyUI's console, whole: what each "auto" became and the host memory it
       counts (the input's frames, the output's, the weights kept) beside the card's. On the
       node, since 2026-11-08, a line of it under "plan only" ("plan: window 41 frames · decode
-      1088 px"), and none otherwise.
+      1088 px · encode 1024 px" over "whole plan in the console"), and none otherwise.
     - Progress (the user, 2026-11-06): ComfyUI gives a node one bar, one text box replaced at
       each message, and one preview. The bar is the upscale's expected time, never a count by
       phase: its units are the plan's (each encode tile, DiT window and decode tile of every run
       and shot), weighted by their size, each kind's rate the card's measured figure until a
       unit of that kind is measured in the run, then the run's own, the rest spread again and
-      the bar never going back. The text is one status line, a progress hint and never a log
-      (the user, 2026-11-08: ComfyUI squeezes the text box, a preview below it for one, and a
-      longer text must then be scrolled), of 40 characters at most, the node's default width:
-      where the run is in a user's units ("shot 2/4 · window 2/3 · ~3 min left", "run 3/4"
-      added at enhanced and maximum), the time spent and, once measured, the time left; at the
-      end, the frames made in their time ("480 frames in 4 min 32 s"). A line that would pass
-      40 drops, in order, the place's word (a bare "2/4"), the run (back where the time can't
-      fit anyway) and the time, never the step. Everything else goes to ComfyUI's console,
-      each line beginning "[seedvr2x]" (the library's too, set in the nodes' process alone):
-      the plan whole, the cuts, each refusal, each run's frames. Built so on 2026-11-08
-      (impl-nodes-5), a test holding every line the nodes can send to the length; a refusal
-      keeps ComfyUI's error dialog, the node saying "refused: see the error". The read into
+      the bar never going back. The text is a progress hint and never a log (the user,
+      2026-11-08: ComfyUI squeezes the text box, a preview below it for one, and a longer text
+      must then be scrolled): two lines at most, which ComfyUI's box always holds (it keeps 58
+      px, frontend 1.57.6; two lines take 48). Line 1 is where the run is and what it does,
+      never trimmed, a user wanting it whole widening the node (the user, the same day): the
+      shot (several only), the run (several only), the unit and its count, then the action in
+      it ("shot 2/4 · run 3/4 · window 2/3 · upscaling", "tile 2/4 · decoding", "frames 60/118
+      · decoding"; a phase in one piece the action alone). Line 2 is the global progress, the
+      time, within 40 characters: "6 s elapsed · estimating time left" until a unit is
+      measured, then "~38 min left"; a wait on the GPU past its bound keeps line 1 and puts
+      "GPU not answering for 3 min" on line 2. The end, a refusal and the card's states are one
+      line ("480 frames in 4 min 32 s"). Everything else goes to ComfyUI's console, one record
+      a line, each beginning "[seedvr2x]" (the library's too, set in the nodes' process
+      alone): the plan whole, the cuts, each refusal, each run's frames; the library's checks
+      of the model files there at DEBUG, the Models node saying one line a file, and the
+      command line's warning of a driver that lends left out for the nodes' own line (WSL2's
+      other one with the next pass that touches the nodes). Built so on 2026-11-08
+      (impl-nodes-5, then impl-nodes-6 after the user's test), tests holding every form; a
+      refusal keeps ComfyUI's error dialog, the node saying "refused: see the error". The
+      read into
       RAM goes on the same bar first, by bytes (the download on the Models node's own since
       2026-11-08), and
       the Cuts node's by the frames scanned, Cancel honoured between its batches. The preview
@@ -478,11 +497,19 @@ seedvr2x/                the repository
     that conditioning in its code, and the nodes read the files with its own loader. Kept so
     on 2026-11-08 (the user, a move to ComfyUI's `models/` folder proposed and withdrawn:
     seedvr2x's files are none ComfyUI's loaders take, and one copy serves every app), and
-    built that day (impl-nodes-5): the folder is an optional string input on seedvr2x Models
-    and Cuts, a socket with no widget that any string node gives (the user: an empty widget
-    reads as something to fill in, where ComfyUI draws an optional input apart, as the plan's
-    numbers' sockets), a value that is no folder refused; seedvr2x Models fetches what the
-    cache lacks when it runs, on its own bar, and its console line names each file, its
+    built that day (impl-nodes-5): the folder is an optional string input, a socket with no
+    widget that any string node gives (the user: an empty widget reads as something to fill
+    in, where ComfyUI draws an optional input apart, as the plan's numbers' sockets), a value
+    that is no folder refused, a "~" at its start the home folder; on seedvr2x Models alone
+    since impl-nodes-6, which gives seedvr2x Cuts its file too. A folder given is the user's
+    choice of no cache and no download (the user, 2026-11-08: how the folder got its files
+    is not seedvr2x's concern): every file from it alone, one it lacks refused where it is
+    needed, the DiT's and the VAE's at seedvr2x Models, the detector's at seedvr2x Cuts, with
+    the way to fetch it (impl-nodes-6 took the detector from the cache there, fetched when
+    missing: decided against the same day, to be built with the next pass). With no folder,
+    a detector that can't be had is said at WARNING without refusing the models (Cuts tries
+    again, or refuses in Models' words), and seedvr2x Models fetches what the cache lacks
+    when it runs, on its own bar, and its console line names each file, its
     size, where it is, and that `HF_HOME` moves the cache; the README says where the cache is
     on Windows and Linux and how to set `HF_HOME` for ComfyUI. No widget of the nodes is
     empty by default (the user's rule, 2026-11-08): an option with a meaningful default stays
@@ -3167,7 +3194,10 @@ first pass, whose shots are its input, and before the models load:
   allowance. The plan counts them against the host's available memory: a job they don't fit,
   or whose copies the host won't pin, is refused before the run, naming the RAM it needs.
   The plan reads the host's available memory as the load does, a container's memory limit
-  included, and the load checks again.
+  included, and the load checks again; on Windows, GlobalMemoryStatusEx's available physical
+  memory, Task Manager's "Available" (2026-11-08, impl-nodes-6: within 0.11 GB of Windows'
+  own counter in three readings on the user's desktop; unread there before, so that a clip's
+  12.51 GiB output beside 8.23 GiB of weights kept went unchecked).
   - The planner sets the scratch's allowance per job: half of what the host has available
     once the pinned copies and the longest shot are counted, and no more than the longest
     tiled shot needs
