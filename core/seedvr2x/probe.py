@@ -83,12 +83,10 @@ KIND = "probe"
 # The NVML libraries a platform loads, for the driver's version. torch reads the device count
 # through the first of them on Linux (torch/cuda/__init__.py, _raw_device_count_nvml); memory.NVML
 # is that name, the tests' to replace. On Windows the driver installs nvml.dll in System32, and
-# older ones in NVSMI's directory under Program Files. Unmeasured on Windows: the nodes' first
-# Windows run reads it, and a library not found is "unknown", logged.
-NVML_WINDOWS = (
-    "nvml.dll",
-    r"C:\Program Files\NVIDIA Corporation\NVSMI\nvml.dll",
-)
+# older ones in NVSMI's directory under Program Files (memory.NVML_WINDOWS, which reads the card
+# through them too): read so by the nodes' first Windows runs (driver 621.01, 2026-11-07). A library
+# not found is "unknown", logged.
+NVML_WINDOWS = memory.NVML_WINDOWS
 
 # --- the tolerances, and where they come from ---------------------------------------------------
 # PROVISIONAL (impl-nodes lane 05, 2026-11-05; DESIGN.md gives none, no test sets one for these

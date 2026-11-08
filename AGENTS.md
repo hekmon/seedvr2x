@@ -809,6 +809,14 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   a run's end poll holding models not kept, out of memory freeing as before; the Cuts node
   refused on a failed card and marking one (`tests/test_cuts_node.py`). The CLI's and the
   server's CUDA errors still end their process (`main.py`, `service.py`).
+- The card read on Windows itself (`seedvr2x/memory.py`: `NVML_WINDOWS`, `CUDA_WINDOWS`,
+  `_libraries`, `_unread`): NVML through `nvml.dll` (System32, or NVSMI's directory) and the
+  driver through `nvcuda.dll`, the probe's too; a reading NVML can't make said at INFO the first
+  time a process meets its reason, at debug after. There NVML counts what a process has made
+  resident, not what it allocated (the comment at `NVML_WINDOWS`), and a reading takes the smaller
+  figure. `core/tests/test_memory.py` holds the names asked in order, the probe's library and the
+  INFO line once; `probe.NVML_WINDOWS` is the same tuple. `library_fixtures.no_card_failed` clears
+  the reasons said before each test, so that each test's first is at INFO.
 - The one clock (`seedvr2x/clock.py`): `tests/test_clock.py` holds it on fake monotonic and wall
   readers, nothing sleeping (`Readers`, `Pace`): the ratio of the wall to the run's clock before and
   after its minimum span, steps of the wall told from drift (a few seconds either way, an hour set,

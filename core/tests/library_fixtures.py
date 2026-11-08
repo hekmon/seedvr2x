@@ -68,9 +68,11 @@ def one_to_one_clock(monkeypatch: pytest.MonkeyPatch) -> None:
 def no_card_failed(monkeypatch: pytest.MonkeyPatch) -> None:
     """No card marked failed or abandoned before a test (waiting.fail, waiting.abandoned): the
     marks are the process's, and a test that raises a CUDA error on purpose marks card 0, which
-    the stand-ins' CPU device is (model.card_index), for every test after it."""
+    the stand-ins' CPU device is (model.card_index), for every test after it. Nor any reason for
+    an unread card said yet (memory._unread), said once a process at INFO."""
     monkeypatch.setattr(waiting, "_failed", {})
     monkeypatch.setattr(waiting, "_abandoned", set())
+    monkeypatch.setattr(memory, "_unread_said", set())
 
 
 @pytest.fixture

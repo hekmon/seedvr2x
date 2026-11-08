@@ -285,6 +285,53 @@ def libraries(monkeypatch: pytest.MonkeyPatch, card: Card | None, nvml: Any = No
     return asked
 
 
+@pytest.fixture(autouse=True)
+def reasons_unsaid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No reason for an unread card said yet (memory._unread): each test's first is at INFO."""
+    monkeypatch.setattr(memory, "_unread_said", set())
+
+
+@pytest.mark.parametrize("found", ["System32", "NVSMI"])
+def test_windows_reads_the_card_through_its_own_libraries(
+    monkeypatch: pytest.MonkeyPatch, found: str
+) -> None:
+    # On Windows nvml.dll is found in System32, or with older drivers in NVSMI's directory, and
+    # CUDA's driver is nvcuda.dll (memory.NVML_WINDOWS, CUDA_WINDOWS); the reading is Linux's.
+    monkeypatch.setattr(memory.sys, "platform", "win32")
+    card, nvml = Card(30 * GIB, spills=True), Nvml({NAMED: 28 * GIB})
+    there = memory.NVML_WINDOWS[0 if found == "System32" else 1]
+    asked: list[str] = []
+
+    def load(name: str) -> Any:
+        asked.append(name)
+        given = {there: nvml, memory.CUDA_WINDOWS: card}.get(name)
+        if given is None:
+            raise OSError(f"Could not find module '{name}'")
+        return given
+
+    monkeypatch.setattr(memory.ctypes, "CDLL", load)
+    assert memory.card_free() == 28 * GIB
+    assert asked == [*memory.NVML_WINDOWS[: memory.NVML_WINDOWS.index(there) + 1], "nvcuda.dll"]
+    # The probe asks Windows' CUDA too.
+    asked.clear()
+    assert memory.probe() is not None and asked[0] == "nvcuda.dll"
+
+
+def test_windows_without_nvml_says_why_once_at_info(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(memory.sys, "platform", "win32")
+
+    def load(name: str) -> Any:
+        raise OSError(f"Could not find module '{name}'")
+
+    monkeypatch.setattr(memory.ctypes, "CDLL", load)
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    assert memory.card_free() is None and memory.card_state() is None
+    assert [record.levelname for record in caplog.records] == ["INFO", "DEBUG"]
+    assert memory.NVML_WINDOWS[-1] in caplog.messages[0]
+
+
 def probe(monkeypatch: pytest.MonkeyPatch, card: Card) -> Driver | None:
     libraries(monkeypatch, card)
     return memory.probe()
@@ -411,21 +458,23 @@ def test_a_card_nvml_does_not_list_gives_no_figure(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # NVML answers, but for other cards than CUDA's: no figure, rather than another card's. The
-    # reason is said at debug level: what a run does without the figure is its readings' to say
-    # (reading, hold, check), each after asking again.
+    # reason is said at INFO the first time (no silent fallback), at debug after: what a run does
+    # without the figure is its readings' to say (reading, hold, check), each after asking again.
     caplog.set_level(logging.DEBUG, logger="seedvr2x")
     nvml = Nvml({OTHER: 10 * GIB})
     libraries(monkeypatch, Card(30 * GIB, spills=True), nvml)
-    assert memory.card_free() is None
-    assert [record.levelname for record in caplog.records] == ["DEBUG"]
+    assert memory.card_free() is None and memory.card_free() is None
+    assert [record.levelname for record in caplog.records] == ["INFO", "DEBUG"]
+    reason = f"nvmlDeviceGetHandleByUUID, {NAMED.decode()}: 6"
     assert caplog.messages == [
-        "the whole card's free memory can't be read through NVML (nvmlDeviceGetHandleByUUID,"
-        f" {NAMED.decode()}: 6)"
+        f"the whole card's free memory can't be read through NVML ({reason}): the driver's figure"
+        " for this process is taken alone",
+        f"the whole card's free memory can't be read through NVML ({reason})",
     ]
-    assert nvml.calls == ["nvmlInit", "nvmlDeviceGetHandleByUUID", "nvmlShutdown"]
+    assert nvml.calls == ["nvmlInit", "nvmlDeviceGetHandleByUUID", "nvmlShutdown"] * 2
     assert nvml.open == 0
     # CUDA's device 1, which the stand-in's CUDA doesn't have: NVML isn't even initialised.
-    assert memory.card_free(1) is None and len(nvml.calls) == 3
+    assert memory.card_free(1) is None and len(nvml.calls) == 6
 
 
 CUDA_S = ["cuInit", "cuDeviceGet", "cuDeviceGetUuid"]
@@ -448,9 +497,9 @@ def test_a_call_that_fails_gives_no_figure(
         assert memory.card_free() == 28 * GIB and not caplog.messages
         return
     assert memory.card_free() is None
-    assert [record.levelname for record in caplog.records] == ["DEBUG"]
+    assert [record.levelname for record in caplog.records] == ["INFO"]
     assert f"can't be read through NVML ({failing}" in caplog.text and caplog.text.endswith(
-        ": 999)\n"
+        ": 999): the driver's figure for this process is taken alone\n"
     )
     initialised = failing in NVML_S[1:]
     assert nvml.calls.count("nvmlShutdown") == initialised and nvml.open == 0

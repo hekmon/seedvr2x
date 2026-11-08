@@ -111,6 +111,7 @@ library fixes it when it loads.
 import ctypes
 import logging
 import os
+import sys
 import uuid
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
@@ -131,6 +132,16 @@ OVER = 256 << 20
 # The driver's two libraries, as the dynamic loader finds them: CUDA's, which the probe asks and
 # which names the run's device, and NVML's, which reads the whole card (card_free).
 CUDA, NVML = "libcuda.so.1", "libnvidia-ml.so.1"
+# Their names on Windows (_libraries): the driver installs nvcuda.dll and nvml.dll in System32,
+# older drivers nvml.dll in NVSMI's directory under Program Files (probe.py reads the driver's
+# version through the same). Read on native Windows (an RTX 5090, driver 621.01, WDDM, the desktop
+# on the card, 2026-11-08): nvml.dll from System32 named the card by CUDA's identifier and read it.
+# There NVML counts the memory a process has made resident, not what it has allocated: with 24 GiB
+# allocated by torch and untouched, NVML had 2.63 to 19.28 GiB used and 12.15 to 28.80 free where
+# the driver had 4.69 free, and the two met once the card was full; the smaller of the two, which a
+# reading takes, was the driver's at every step.
+CUDA_WINDOWS = "nvcuda.dll"
+NVML_WINDOWS = ("nvml.dll", r"C:\Program Files\NVIDIA Corporation\NVSMI\nvml.dll")
 # CUDA's result codes (cuda.h): CUDA_SUCCESS, CUDA_ERROR_OUT_OF_MEMORY. NVML's success is 0 too
 # (nvml.h: NVML_SUCCESS).
 SUCCESS, OUT_OF_MEMORY = 0, 2
@@ -1434,7 +1445,8 @@ def _index(device: Any) -> int:
 def card_free(index: int = 0) -> int | None:
     """The memory free on the whole card behind CUDA's device `index`, in bytes, whichever
     programs hold the rest: NVML's figure, the one nvidia-smi prints. None when NVML doesn't
-    say: no library, a call that fails, a card it doesn't know; the reason at debug level.
+    say: no library, a call that fails, a card it doesn't know; the reason said at INFO the first
+    time the process meets it (_unread). Linux's libraries, or Windows' (_libraries).
     Never raises. One reading, nothing remembered (research/scripts/hold_probe.py reads the card
     so): a held run reads it through _twice, which asks again where NVML fails, and says what
     the run does without the card's figure (reading, hold, check).
@@ -1457,7 +1469,7 @@ def card_free(index: int = 0) -> int | None:
     found = _read(index)
     if isinstance(found, int):
         return found
-    logger.debug("the whole card's free memory can't be read through NVML (%s)", found)
+    _unread(found)
     return None
 
 
@@ -1465,12 +1477,50 @@ def card_state(index: int = 0) -> tuple[int, int] | None:
     """What card_free reads, with what programs hold of the card by NVML (`used`, the driver's
     own share, `reserved`, not counted): (free, used) in bytes, for the early reading of a
     resume, which has no seedvr2x CUDA context on the card yet (early). None when NVML doesn't
-    say, the reason at debug level. Never raises; one reading, nothing remembered."""
+    say, the reason said as card_free says it (_unread). Never raises; one reading, nothing
+    remembered."""
     found = _read_all(index)
     if isinstance(found, tuple):
         return found[0], found[1]
-    logger.debug("the whole card's free memory can't be read through NVML (%s)", found)
+    _unread(found)
     return None
+
+
+# The reasons NVML gave no reading for, said at INFO once each (_unread).
+_unread_said: set[str] = set()
+
+
+def _unread(reason: str) -> None:
+    """Why NVML gave no reading of the card, at INFO the first time a process meets that reason
+    and at debug after, so that a run that goes on without it says so once (AGENTS.md: no silent
+    fallback) and a held run's check, which reads the card before every unit, doesn't repeat it."""
+    if reason in _unread_said:
+        logger.debug("the whole card's free memory can't be read through NVML (%s)", reason)
+        return
+    _unread_said.add(reason)
+    logger.info(
+        "the whole card's free memory can't be read through NVML (%s): the driver's figure for"
+        " this process is taken alone",
+        reason,
+    )
+
+
+def _libraries() -> tuple[ctypes.CDLL, ctypes.CDLL]:
+    """NVML's library and CUDA's driver library, loaded, NVML's first: Linux's names (NVML, CUDA),
+    or on Windows nvml.dll where it is found first (NVML_WINDOWS) and nvcuda.dll (CUDA_WINDOWS).
+    OSError where one can't be loaded, the last name tried's."""
+    if sys.platform != "win32":
+        return ctypes.CDLL(NVML), ctypes.CDLL(CUDA)
+    problem: OSError | None = None
+    for name in NVML_WINDOWS:
+        try:
+            nvml = ctypes.CDLL(name)
+        except OSError as error:
+            problem = error
+            continue
+        return nvml, ctypes.CDLL(CUDA_WINDOWS)
+    assert problem is not None
+    raise problem
 
 
 def _read(index: int) -> int | str:
@@ -1487,7 +1537,7 @@ def _read_all(index: int, busy: bool = False) -> tuple[int, ...] | str:
     why NVML gave none, in words. NVML is loaded first, so that a machine without it asks CUDA
     nothing; initialised only once CUDA has named the card, and shut down whatever follows."""
     try:
-        nvml, cuda = ctypes.CDLL(NVML), ctypes.CDLL(CUDA)
+        nvml, cuda = _libraries()
         device, identifier = ctypes.c_int(), (ctypes.c_ubyte * 16)()
         handle = ctypes.c_void_p()
         memory = _Memory(version=ctypes.sizeof(_Memory) | 2 << 24)
@@ -1531,7 +1581,7 @@ def paravirtual() -> bool:
     return os.path.exists(PARAVIRTUAL)
 
 
-def probe(index: int = 0, library: str = CUDA) -> Driver | None:
+def probe(index: int = 0, library: str | None = None) -> Driver | None:
     """Ask the driver of GPU `index` for OVER more than it has free, in a context of the
     probe's own, and free it at once: Driver says whether it was given. None, with a warning,
     when the driver can't be asked (no CUDA library, no such device) or answers neither yes
@@ -1556,6 +1606,8 @@ def probe(index: int = 0, library: str = CUDA) -> Driver | None:
     other program's and the desktop's memory left the card and came back over the next minute,
     0.30 GiB of it after the run had set its limit, and the run was stopped at its first unit
     (check; the same RTX 5090, 2026-10-12)."""
+    if library is None:
+        library = CUDA_WINDOWS if sys.platform == "win32" else CUDA
     try:
         cuda = ctypes.CDLL(library)
     except OSError as error:
