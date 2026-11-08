@@ -679,7 +679,10 @@ def model_folder(value: str | None, node: str = words.MODELS) -> str:
     Hugging Face's cache. Whitespace and one pair of double quotes around the value are taken off
     (Windows' "Copy as path" adds the quotes); a value empty after that is the same as an unwired
     input, said at INFO (an empty string from a primitive node would otherwise read as a folder
-    named ""); one that is no existing folder is refused (words.not_a_folder), naming `node`."""
+    named ""); a "~" that begins it is the user's home folder (os.path.expanduser's rule: "~" or
+    "~user" before the first separator; the home of USERPROFILE on Windows, HOME elsewhere), as
+    a shell would have it; one that is no existing folder is refused (words.not_a_folder), naming
+    `node`."""
     if value is None:
         return ""
     text = value.strip()
@@ -688,6 +691,7 @@ def model_folder(value: str | None, node: str = words.MODELS) -> str:
     if not text:
         logger.info("the model folder given is empty: Hugging Face's cache is used")
         return ""
+    text = os.path.expanduser(text)
     if not Path(text).is_dir():
         raise words.not_a_folder(text, node)
     return text

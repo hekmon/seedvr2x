@@ -310,6 +310,26 @@ def test_quotes_and_spaces_around_the_folder_are_taken_off(tmp_path: Path) -> No
         models.model_folder(f'"{folder}')
 
 
+def test_a_tilde_that_begins_the_folder_is_the_home_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # As a shell has it (review L7 of impl-nodes-5: a "~" was refused as no folder).
+    home = tmp_path / "home"
+    (home / "my models").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    for given in ("~/my models", '"~/my models"', " ~/my models ", "~"):
+        expected = home / "my models" if given.strip(' "') != "~" else home
+        assert models.model_folder(given) == str(expected), given
+    # Only where it begins the value: elsewhere it is part of a name, refused as no folder.
+    with pytest.raises(words.Refused, match="is not a folder"):
+        models.model_folder(str(tmp_path / "~"))
+    # One that names no folder is refused by the folder it named.
+    with pytest.raises(words.Refused) as refused:
+        models.model_folder("~/nowhere")
+    assert str(refused.value).startswith(f'"{home / "nowhere"}" is not a folder')
+
+
 @pytest.mark.parametrize("given", [None, "", "   ", '""', ' "" ', '" "'])
 def test_nothing_given_or_an_empty_value_is_the_cache_and_an_empty_one_is_said(
     given: str | None, caplog: pytest.LogCaptureFixture

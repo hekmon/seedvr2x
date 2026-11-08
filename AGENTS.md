@@ -1393,7 +1393,8 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   line a file, in the nodes' words naming the "model folder" input; the detector's no part of it),
   a folder with the detector's file using it and one without taking the cache's, fetched there
   when missing, the folder left as it was, a value that is no folder refused, quotes, spaces
-  and an empty value, the console lines of each file's place and size (`said_where`: in Hugging
+  and an empty value, a "~" that begins it the home folder (`os.path.expanduser`, HOME and
+  USERPROFILE set), the console lines of each file's place and size (`said_where`: in Hugging
   Face's cache with `HF_HOME` named, downloaded into it, or in the model folder; in the order DiT,
   VAE, shot detector; each line
   `[seedvr2x]` once, no `seedvr2x:` of its own), a download refused when offline worded for this

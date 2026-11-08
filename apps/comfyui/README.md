@@ -238,14 +238,15 @@ README](../seedvr2x/README.md#model-files)).
   again.
 - **Using a folder instead.** Connect a string node (ComfyUI's String node, for one) holding the
   folder's path to seedvr2x Models' `model folder` input; quotes around the path (Windows' "Copy as
-  path" adds them) and spaces at its ends are taken off, and an empty value is the same as
-  nothing connected. The files are read there by name, the DiT's and the VAE's never downloaded:
-  the VAE, `seedvr2x_ema_vae_fp16.safetensors`, and the model file chosen, under its name in the
-  repository (`seedvr2x_ema_7b_sharp_fp16.safetensors` for the default), the same files and names
-  the command line reads from a folder. A path that is no folder, or a folder lacking the DiT's or
-  the VAE's file, is refused by the node, saying which. The shot detector's file,
-  `transnetv2.safetensors`, is the folder's where it has one; a folder without it takes it from
-  Hugging Face's cache, fetched there when missing, and nothing is written into the folder.
+  path" adds them) and spaces at its ends are taken off, a `~` that begins it is your home folder
+  (`~/models`), and an empty value is the same as nothing connected. The files are read there by
+  name, the DiT's and the VAE's never downloaded: the VAE, `seedvr2x_ema_vae_fp16.safetensors`, and
+  the model file chosen, under its name in the repository (`seedvr2x_ema_7b_sharp_fp16.safetensors`
+  for the default), the same files and names the command line reads from a folder. A path that is no
+  folder, or a folder lacking the DiT's or the VAE's file, is refused by the node, saying which. The
+  shot detector's file, `transnetv2.safetensors`, is the folder's where it has one; a folder without
+  it takes it from Hugging Face's cache, fetched there when missing, and nothing is written into the
+  folder.
 
 **On Windows.** Without Windows' Developer Mode, huggingface_hub can't make the links its cache is
 built of: it copies the files instead, and says so once in ComfyUI's console, in a warning that
