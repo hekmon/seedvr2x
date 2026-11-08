@@ -236,6 +236,9 @@ def test_the_librarys_command_line_warnings_are_not_shown_in_comfyuis_process(
             " free less %.1f GiB",
             1.0,
         )
+        # The driver that lends, as memory.startup logs it (through "%s"): the nodes' own INFO
+        # line says it (test_the_lending_driver_is_told_in_the_nodes_words_once).
+        memory.logger.warning("%s", memory.LENDS)
         memory.logger.warning("another warning of the library's")
         return ""
 

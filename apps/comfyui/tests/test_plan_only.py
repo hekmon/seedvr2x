@@ -11,7 +11,7 @@ import server
 import torch
 from comfy.utils import ProgressBar
 from comfy_execution.graph_utils import ExecutionBlocker
-from comfyui import console, models, nodes, plans, progress, words
+from comfyui import models, nodes, plans, progress, words
 from standins import (
     GIB,
     PICTURE,
@@ -19,6 +19,7 @@ from standins import (
     StandIn,
     comfy_model,
     handle,
+    in_console,
     upscale_image,
     upscale_video,
 )
@@ -64,7 +65,7 @@ def test_a_picture_plan_only_says_the_plan_and_blocks_what_follows_the_picture(
         f"plan: encode whole \u00b7 decode whole\n{progress.IN_THE_CONSOLE}"
     ]
     assert progress.IN_THE_CONSOLE == "whole plan in the console"
-    assert console.prefixed(text) in caplog.messages
+    assert in_console(text, caplog.messages)
     nothing_was_done(machine)
     assert models.kept(handle(tmp_path)) is None
     assert len(machine.headers) == 1, "the DiT's header was read"

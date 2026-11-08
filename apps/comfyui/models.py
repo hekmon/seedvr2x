@@ -60,7 +60,7 @@ from seedvr2x.passes import HELD, ModelPlan
 from seedvr2x.pull import ModelFiles
 from seedvr2x.weights import Architecture
 
-from . import plans, words
+from . import console, plans, words
 from .progress import (
     FAILED,
     FREEING,
@@ -270,21 +270,25 @@ class CudaMachine:
 
 # The start of the library's warnings that are the command line's words (memory.startup): about an
 # allocator "of the environment's", worded for a user who set it, which in ComfyUI's process is the
-# allocator ComfyUI chose (the backend torch reports is what _startup gives startup to read); and
-# that seedvr2x holds itself to the card by a limit on torch, which the nodes never set (the
-# limit cannot be taken back in a process shared with other nodes). The nodes say their own words,
+# allocator ComfyUI chose (the backend torch reports is what _startup gives startup to read); that
+# seedvr2x holds itself to the card by a limit on torch, which the nodes never set (the limit
+# cannot be taken back in a process shared with other nodes); and the driver that lends system
+# memory (memory.LENDS), worded for a run that passes the card, which the nodes' plan keeps from
+# (the user, 2026-11-08: the nodes' own INFO line alone says it). The nodes say their own words,
 # once (_allocator_note).
 _COMMAND_LINE_WORDS = (
     "the allocator is the environment's",
     "seedvr2x holds itself to the card's own memory there",
+    memory.LENDS,
 )
 
 
 class _CommandLineWords(logging.Filter):
-    """Drops the library's warnings that describe a limit or a setting the nodes don't make."""
+    """Drops the library's warnings that describe a limit, a setting or a risk the nodes don't
+    have, by the message made (LENDS is logged through "%s")."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return not str(record.msg).startswith(_COMMAND_LINE_WORDS)
+        return not record.getMessage().startswith(_COMMAND_LINE_WORDS)
 
 
 def _startup() -> None:
@@ -339,6 +343,11 @@ class _Stub:
     and the weak reference ComfyUI's manager takes of it (a plain class is weak-referenceable)."""
 
     device: Any = None
+
+
+# ComfyUI's console names a model by its class's name (v0.44.0, model_management.py's
+# load_models_gpu: "Requested to load %s"): "Requested to load seedvr2x", not "_Stub".
+_Stub.__name__ = _Stub.__qualname__ = "seedvr2x"
 
 
 class Registration(ModelPatcher):
@@ -765,10 +774,11 @@ def provide(handle: Handle, show: Callable[[str], None]) -> None:
             absent.add(detector)
         except Refusal as error:
             there.remove(detector)
-            logger.warning(
+            console.say(
+                logger,
+                logging.WARNING,
                 "the shot detector's file, which seedvr2x Cuts reads, was not downloaded, and Cuts"
-                " downloads it when it runs: %s",
-                words.refusal(error, model_dir=folder is not None),
+                f" downloads it when it runs: {words.refusal(error, model_dir=folder is not None)}",
             )
     said_where(folder, tuple(there), absent)
 
@@ -1182,7 +1192,7 @@ def session[T](
         # console and ComfyUI's error say what failed and the way out.
         _failures.append(error)
         refused = words.card_failed(failed)
-        logger.error("%s", str(refused))
+        console.say(logger, logging.ERROR, str(refused))
         refused.logged = True
         if preparing is not None:
             preparing.show(FAILED)

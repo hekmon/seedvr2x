@@ -114,7 +114,9 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
   words.py               the nodes' words for each refusal, with the way out in ComfyUI's terms,
                          and the short line the node shows for it (`Refused.line`)
   console.py             "[seedvr2x] " before each of seedvr2x's lines in ComfyUI's console,
-                         installed by `__init__.py` before anything else is imported
+                         installed by `__init__.py` before anything else is imported; a text
+                         of several lines said a line a record (`say`); the library's checks of
+                         the model files (`QUIET`: pull, weights) at DEBUG there
   workflows/ README.md   the two example workflows (picture.json, clip.json: ComfyUI's UI format,
                          Models wired in), and the nodes' README, for users
   ruff.toml pyrightconfig.json pytest.ini     the checks' settings, the CLI's
@@ -154,7 +156,12 @@ folder package; the CLI by setuptools, which lists each top-level module (`py-mo
   above, as bare messages). In ComfyUI's process alone, each line of the library's and the nodes'
   loggers begins with `[seedvr2x] ` (`apps/comfyui/console.py`: one handler on `seedvr2x` and on
   `seedvr2x_comfyui` that prefixes the record on its way to the root's handlers, every other
-  node's line untouched); the nodes' own messages carry no `seedvr2x: ` of their own.
+  node's line untouched); the nodes' own messages carry no `seedvr2x: ` of their own. There a
+  record is one line (ComfyUI's formatter puts the level before a record's first line alone): a
+  text of several lines, the plan, the cuts, a refusal and its way out, is said a line a record
+  (`console.say`), and the INFO records of `seedvr2x.pull` and `seedvr2x.weights` (the cache,
+  each file's path in it, its pin checks, its header) are made DEBUG on their way, the Models
+  node's line a file saying where each is; the CLI's and the server's output keep them.
 - The ComfyUI nodes, `apps/comfyui/`, are checked and tested in the CLI's environment, from
   `apps/comfyui/` with `uv run --project ../seedvr2x` before each command ([Checks](#checks)):
   they have no lock of their own. ComfyUI imports the folder as a package, its folder not on
@@ -1247,11 +1254,20 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   ComfyUI's, each line of a message of several, a traceback after its line, the root handlers' and
   the loggers' levels kept, other loggers' lines untouched, the handler installed once and the
   loggers still propagating (pytest 9 captures the records of a logger that propagates no more on
-  that logger too, which a copy re-sent to the root would have doubled), and, in a process of its
-  own started as ComfyUI starts, the nodes' import line prefixed. `core/tests/test_model.py` holds
+  that logger too, which a copy re-sent to the root would have doubled), `console.say`'s text a
+  line a record, each with its level under a formatter of ComfyUI's form ("[INFO] " then the
+  message), each holding the whole text (`seedvr2x_text`, which `standins.Said` and `texts`
+  read it whole by) and naming its caller, the library's checks of the model files out of a
+  console at INFO and at DEBUG under a handler at DEBUG, its warnings and other loggers' INFO
+  kept, and, in a process of its own started as ComfyUI starts, the nodes' import line prefixed
+  and a check of a model file not shown; `conftest.py`'s autouse `records_are_one_line` fails any test of the
+  nodes' in which a record of `seedvr2x` or `seedvr2x_comfyui` at INFO or above holds a newline
+  (the loggers held to INFO for it; a traceback, the record's exc_info, aside).
+  `core/tests/test_model.py` holds
   the load's attention line (`model.say_attention`): SDPA at INFO in its neutral words, nothing for
   FlashAttention 2.
-  `tests/test_registration.py` holds the one patcher (its sizes, strong
+  `tests/test_registration.py` holds the one patcher (its model's class named `seedvr2x` for
+  ComfyUI's "Requested to load seedvr2x", its sizes, strong
   references, Unload models and POST /free dropping the weights, the next run loading again,
   keep in RAM off, `--disable-smart-memory`); `tests/test_room.py` the room (the plan made for the
   card without ComfyUI's models and less the room left to the rest of the card: the larger of
@@ -1269,8 +1285,9 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   `free_memory` asked for the plan's largest phase plus
   `ASK_MARGIN` (a partial unload's buffer) and only when the card has less than the phase alone,
   never more, seedvr2x's registration kept, a card still short of the phase refused, the
-  library's command-line allocator and limit warnings left out of ComfyUI's console for the
-  nodes' own lines, once); `tests/test_release.py`
+  library's command-line allocator and limit warnings and its driver that lends (`memory.LENDS`)
+  left out of ComfyUI's console for the nodes' own lines, once: `tests/test_machine.py`);
+  `tests/test_release.py`
   the card freed at the end, on Cancel between steps and on an error, and `strays` finding
   nothing on the real `Models.place` and `release` over test_held's toy models, and the models
   of a run not kept gone while the exception that ended it is held (the frames cleared, a

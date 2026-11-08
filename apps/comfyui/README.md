@@ -144,7 +144,10 @@ The node shows how far it has got, in what ComfyUI gives a node:
   the plan whole before a run (with `plan only`, the same), the cuts with their probabilities and
   the possible cuts, each shot's frames, the time a run took ("480 frames upscaled in 4 min
   32 s"), where each model file is, and the full sentence of everything the node's line only
-  points at.
+  points at. Each line is a record of its own, so each carries ComfyUI's `[INFO]` or `[WARNING]`.
+  The model files' checks (the cache, each file's path in it, its size and SHA-256 against the
+  pin) are at DEBUG there, the Models node saying one line a file; ComfyUI's `--verbose DEBUG`
+  shows them.
 - **A refusal** shows `refused: see the error` on the node. Its text is in ComfyUI's error and,
   once, in the console, with the way out in the nodes' terms.
 - **A wait that lasts.** Once the node has made one unit of a kind, it knows how long the next

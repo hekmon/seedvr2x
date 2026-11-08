@@ -17,7 +17,7 @@ import pytest
 import torch
 from comfy.model_patcher import ModelPatcher
 from comfy_api.latest import io
-from comfyui import models, plans, progress
+from comfyui import console, models, plans, progress
 from test_still import pipeline_models, stand_in_dit
 
 from seedvr2x import memory, model, peaks, pull, waiting, weights
@@ -254,14 +254,55 @@ def execute(node: type[io.ComfyNode], unique_id: str | None = "1", **inputs: Any
 
 class Said(logging.Handler):
     """What the nodes' logger says, the messages as the nodes make them (before the console's
-    prefix, which a parent logger's handler puts on)."""
+    prefix, which a parent logger's handler puts on): a text said a line a record (console.say)
+    is one message again, whole."""
 
     def __init__(self) -> None:
         super().__init__(logging.INFO)
         self.messages: list[str] = []
+        self._last: object = None
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.messages.append(record.getMessage())
+        whole = getattr(record, "seedvr2x_text", None)
+        if whole is None:
+            self.messages.append(record.getMessage())
+        elif whole is not self._last:
+            self.messages.append(whole)
+        self._last = whole
+
+
+class Lines(logging.Handler):
+    """The records that would show in ComfyUI's console on several lines: their messages."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.INFO)
+        self.found: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if "\n" in record.getMessage():
+            self.found.append(record.getMessage())
+
+
+def in_console(text: str, messages: list[str]) -> bool:
+    """Whether `text` is in the console's `messages` (caplog's) a line a record, in order, each
+    line with the console's prefix (console.say)."""
+    lines = [console.PREFIX + line for line in text.split("\n")]
+    return any(messages[start : start + len(lines)] == lines for start in range(len(messages)))
+
+
+def texts(records: list[logging.LogRecord]) -> list[str]:
+    """The messages of `records` (caplog's), a text said a line a record (console.say) whole
+    again, without the console's prefix."""
+    found: list[str] = []
+    last: object = None
+    for record in records:
+        whole = getattr(record, "seedvr2x_text", None)
+        if whole is None:
+            found.append(record.getMessage().removeprefix(console.PREFIX))
+        elif whole is not last:
+            found.append(whole)
+        last = whole
+    return found
 
 
 @contextmanager

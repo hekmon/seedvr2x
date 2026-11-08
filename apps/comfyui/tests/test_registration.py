@@ -22,6 +22,17 @@ def run(h: models.Handle, seed: int = 0, count: int = 1) -> tuple[torch.Tensor, 
     return upscale_image(h, plans.Settings(), batch, RESOLUTION, "5")
 
 
+def test_comfyuis_console_names_the_registration_seedvr2x(machine: StandIn, tmp_path) -> None:
+    # ComfyUI names a model by its class's name (v0.44.0, model_management.py's load_models_gpu:
+    # "Requested to load %s" of the patcher's model): seedvr2x, not the stub's own name.
+    h = handle(tmp_path)
+    run(h)
+    entry = models.kept(h)
+    assert entry is not None and entry.patcher is not None
+    assert type(entry.patcher.model).__name__ == "seedvr2x"
+    assert type(entry.patcher.model).__qualname__ == "seedvr2x"
+
+
 def test_a_kept_run_registers_one_patcher_that_holds_nothing_of_the_card(
     machine: StandIn, tmp_path
 ) -> None:

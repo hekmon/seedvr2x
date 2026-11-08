@@ -2,6 +2,7 @@
 pythonpath), the stand-in models (core/tests/stand_ins.py), and the stand-in for ComfyUI's few
 modules (tests/comfy_stand_in), reset for every test with the nodes' own state."""
 
+import logging
 import threading
 from collections.abc import Iterator
 
@@ -9,10 +10,10 @@ import comfy.model_management as management
 import pytest
 import server
 from comfy.utils import ProgressBar
-from comfyui import models, progress
+from comfyui import console, models, progress
 from library_fixtures import no_card_failed, no_driver_asked, one_to_one_clock  # noqa: F401
 from stand_ins import cpu_models  # noqa: F401
-from standins import machine, not_a_status  # noqa: F401
+from standins import Lines, machine, not_a_status  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +46,31 @@ def texts_are_a_status(comfy_as_new: server.PromptServer) -> Iterator[None]:
         return
     bad = not_a_status([text for text, _ in instance.texts])
     assert not bad, f"node texts of over two lines, a second over {progress.LIMIT}, or named: {bad}"
+
+
+@pytest.fixture(autouse=True)
+def records_are_one_line() -> Iterator[Lines]:
+    """Every record of seedvr2x's loggers that ComfyUI's console shows (INFO and up) is one line
+    (the user, 2026-11-08: ComfyUI's formatter puts the level before a record's first line alone,
+    so the plan's and the cuts' later lines showed none), a traceback aside (the record's
+    exc_info, which the formatter writes after it): the check is on every record of every test,
+    the loggers held to INFO for it, so that no path is missed. tests/test_console.py holds
+    console.say, which says a text a line a record; a test that makes such a record on purpose
+    takes the fixture and clears what it found."""
+    lines = Lines()
+    loggers = [logging.getLogger(name) for name in console.LOGGERS]
+    levels = [each.level for each in loggers]
+    for each in loggers:
+        each.addHandler(lines)
+        if each.getEffectiveLevel() > logging.INFO:
+            each.setLevel(logging.INFO)
+    try:
+        yield lines
+    finally:
+        for each, level in zip(loggers, levels, strict=True):
+            each.removeHandler(lines)
+            each.setLevel(level)
+    assert not lines.found, f"records of several lines in ComfyUI's console: {lines.found}"
 
 
 @pytest.fixture(autouse=True)

@@ -17,7 +17,9 @@ from standins import (
     RESOLUTION,
     StandIn,
     handle,
+    in_console,
     standin_models,
+    texts,
     upscale_image,
     upscale_video,
     where,
@@ -261,7 +263,7 @@ def test_the_plan_is_said_whole_in_the_console_and_the_node_shows_one_short_line
     # in the console, each of its lines prefixed.
     assert instance is not None and instance.texts[0] == ("planning\u2026", "31")
     assert all(text not in each for each, _ in instance.texts)
-    assert console.prefixed(text) in caplog.messages
+    assert in_console(text, caplog.messages)
     # The plan's parts in the nodes' words: the pictures, the card and ComfyUI's models, what
     # ComfyUI was asked, the DiT's placement and kernel, the passes, the choices, the models' RAM.
     for part in (
@@ -624,10 +626,12 @@ def test_the_plan_says_each_shot(
     assert "windows of the model, the longest" in lines[2]
     assert lines[3].startswith("shot 3: frames 29 to 32 (4 frames): the whole shot in one window")
     assert "window length: at most 17 frames, as you set it" in text
-    assert [m for m in caplog.messages if m.startswith("[seedvr2x] shot ")] == [
-        "[seedvr2x] shot 1 of 3, frames 0 to 4",
-        "[seedvr2x] shot 2 of 3, frames 5 to 28",
-        "[seedvr2x] shot 3 of 3, frames 29 to 32",
+    # Each shot said as it starts, a line of its own (the plan's lines are records of their own
+    # too, one text: texts rebuilds it).
+    assert [m for m in texts(caplog.records) if m.startswith("shot ")] == [
+        "shot 1 of 3, frames 0 to 4",
+        "shot 2 of 3, frames 5 to 28",
+        "shot 3 of 3, frames 29 to 32",
     ]
     # One shot: the clip's first line as before, no line for the shot.
     _, one = run_shots(machine, tmp_path, pictures(5), (Shot(0, 5),))

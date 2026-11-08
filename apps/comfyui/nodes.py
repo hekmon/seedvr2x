@@ -72,8 +72,8 @@ from seedvr2x.shotruns import QUALITY, shot_runs, taken_from
 from seedvr2x.shots import Shot
 from seedvr2x.weights import Architecture
 
+from . import console, plans, progress, words
 from . import models as models_module
-from . import plans, progress, words
 
 logger = logging.getLogger("seedvr2x_comfyui.nodes")
 
@@ -266,7 +266,7 @@ def _refusing(show: Callable[[str], None]) -> Generator[None]:
         yield
     except words.Refused as error:
         if not error.logged:
-            logger.warning("refused: %s", error)
+            console.say(logger, logging.WARNING, f"refused: {error}")
             error.logged = True
         show(error.line)
         raise
@@ -612,8 +612,9 @@ class UpscaleImage(io.ComfyNode):
                 preparing=progress.Preparing(show, plans.file_label),
             ) as run:
                 made, tiles = run.planned.plan
-                logger.info(
-                    "%s",
+                console.say(
+                    logger,
+                    logging.INFO,
                     plans.picture_text(
                         count=count,
                         source=(width, height),
@@ -886,8 +887,9 @@ class UpscaleVideo(io.ComfyNode):
                 preparing=progress.Preparing(show, plans.file_label),
             ) as run:
                 made, expected = run.planned.plan
-                logger.info(
-                    "%s",
+                console.say(
+                    logger,
+                    logging.INFO,
                     plans.clip_text(
                         cuts=shot_list,
                         source=(width, height),
@@ -1090,7 +1092,7 @@ class Cuts(io.ComfyNode):
             found = cls._probabilities(images, models, show)
             cuts = shotcuts.detected(found, float(threshold))
             maybe = shotcuts.possible(found, float(threshold))
-            logger.info("%s", plans.cuts_text(count, float(threshold), cuts, maybe))
+            console.say(logger, logging.INFO, plans.cuts_text(count, float(threshold), cuts, maybe))
             show(plans.cuts_line(len(cuts) + 1, len(maybe), float(threshold)))
             starts = [0, *(each.frame for each in cuts)]
             cut_list = tuple(

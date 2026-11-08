@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import server
 import torch
-from comfyui import console, models, plans
+from comfyui import models, plans
 from standins import (
     GIB,
     PICTURE,
@@ -20,6 +20,7 @@ from standins import (
     StandIn,
     execute,
     handle,
+    in_console,
     upscale_image,
 )
 
@@ -133,7 +134,7 @@ def test_the_run_says_the_decision_on_the_node_and_in_the_console(
     # The node shows one line ("planning…", then the run's progress); the plan whole is in the
     # console, every line prefixed.
     assert instance is not None and instance.texts[0] == ("planning\u2026", "6")
-    assert console.prefixed(text) in caplog.messages
+    assert in_console(text, caplog.messages)
     said = "[seedvr2x] keep in RAM between runs: auto -> not kept: 15."
     assert any(line.startswith(said) for line in caplog.messages), "the console says it too"
     # Not kept: read for the run alone, nothing pinned in the registry, nothing registered.
@@ -217,7 +218,7 @@ def test_unload_models_under_a_cached_models_output_reads_the_files_again_and_sa
     assert note in again and "read from the files again" in again
     instance = server.PromptServer.instance
     assert instance is not None and ("planning\u2026", "2") in instance.texts
-    assert console.prefixed(again) in caplog.messages, "said in the console"
+    assert in_console(again, caplog.messages), "said in the console"
     assert any("ComfyUI having dropped them" in line for line in caplog.messages)
     assert machine.loads == [HELD, HELD]
     _, third = upscale_image(h, SETTINGS, pictures(), RESOLUTION, "3")
