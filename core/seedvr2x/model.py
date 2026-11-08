@@ -35,6 +35,7 @@ from seedvr2x.blockswap import Part, Placement
 from seedvr2x.frames import BLACK, padding
 from seedvr2x.passes import HELD, Compilation, ModelPlan, Phase
 from seedvr2x.pull import Hashes
+from seedvr2x.vendor.common import cache as vendor_cache
 from seedvr2x.vendor.common.config import create_object, load_config
 from seedvr2x.vendor.common.seed import set_seed as vendor_set_seed
 from seedvr2x.vendor.core.infer import VideoDiffusionInfer
@@ -948,17 +949,95 @@ def condition(models: Models, noise: Tensor, latent: Tensor) -> Tensor:
     return models.runner.get_condition(noise, task="sr", latent_blur=latent)
 
 
+# How many blocks of a DiT forward the host queues ahead of the card: before a block is queued,
+# the work of the one PACED before it is waited for in the poll (_paced), so that the card
+# always has a block queued and the host never more than PACED: a forward that never waits on
+# the host fills CUDA's launch queue, whose launch then blocks in C.
+PACED = 2
+
+
 def sample(models: Models, noise: Tensor, cond: Tensor) -> Tensor:
     """One Euler step of the DiT from noise, under bfloat16 autocast when its weights are another
-    dtype, as numz runs it (generation_phases.py:704-724)."""
+    dtype, as numz runs it (generation_phases.py:704-724). The forward waits on the card only in
+    the poll (_paced)."""
     autocast = next(models.runner.dit.parameters()).dtype != COMPUTE_DTYPE
-    with torch.no_grad(), torch.autocast(models.device.type, COMPUTE_DTYPE, enabled=autocast):
+    with (
+        torch.no_grad(),
+        torch.autocast(models.device.type, COMPUTE_DTYPE, enabled=autocast),
+        _paced(models.runner.dit, models.device),
+    ):
         return models.runner.inference(
             noises=[noise],
             conditions=[cond],
             texts_pos=[models.text_pos],
             texts_neg=[models.text_neg],
         )[0]
+
+
+@contextmanager
+def _paced(dit: Any, device: torch.device) -> Generator[None]:
+    """A DiT forward that waits on the card only in the poll (DESIGN.md, Allocator, "Out of the
+    stop's reach"): the vendored blocks' shapes, lengths and sizes made once a forward on the
+    host (vendor/common/cache.py's held values), each first making after a poll of the device
+    (synchronize: the making copies them from the device, then waiting only for its own index
+    kernels), and an event recorded after each block, the one PACED blocks before waited for in
+    the poll (every 1 ms, as blockswap's waits) before each is queued. The card is polled too as
+    the forward begins, before its output's patching (vid_out, whose rearrange reads the shape
+    on the host) and once it has ended, so that the shapes copied there and back (patch.py's
+    na.rearrange, vendor/core/infer.py's na.flatten and na.unflatten) wait for their own
+    kernels alone, not for a window's work. On the stalled card of
+    impl-stop's run R3 (2026-11-06) the main thread sat in C in a block's repeat_interleave, where
+    SIGTERM went unanswered. Nothing on another device: the tests' stand-ins on the CPU."""
+    if device.type != "cuda":
+        yield
+        return
+    index = _index(device)
+    queued: dict[int, Any] = {}
+
+    def made() -> None:
+        # A finer poll than synchronize's 10 ms: a forward makes about 20 values, most of them
+        # behind nothing but the index kernels of the one before.
+        with marking(device):
+            done = torch.cuda.Event()
+            done.record()
+            waiting.wait(done.query, 0.0002, index)
+
+    def before(number: int) -> Callable[..., None]:
+        def hook(module: Any, args: Any) -> None:
+            event = queued.pop(number - PACED, None)
+            if event is not None:
+                with marking(device):
+                    waiting.wait(event.query, 0.001, index)
+
+        return hook
+
+    def after(number: int) -> Callable[..., None]:
+        def hook(module: Any, args: Any, output: Any) -> None:
+            event = torch.cuda.Event()
+            event.record()
+            queued[number] = event
+
+        return hook
+
+    handles = [
+        handle
+        for number, block in enumerate(dit.blocks)
+        for handle in (
+            block.register_forward_pre_hook(before(number)),
+            block.register_forward_hook(after(number)),
+        )
+    ]
+    handles.append(dit.vid_out.register_forward_pre_hook(lambda module, args: made()))
+    handles.append(dit.register_forward_hook(lambda module, args, output: made()))
+    previous = getattr(vendor_cache.hooks, "missed", None)
+    vendor_cache.hooks.missed = made
+    try:
+        made()
+        yield
+    finally:
+        vendor_cache.hooks.missed = previous
+        for handle in handles:
+            handle.remove()
 
 
 def decode(models: Models, latent: Tensor) -> Tensor:

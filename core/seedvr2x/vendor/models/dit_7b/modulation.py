@@ -11,7 +11,7 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
-# Modified for seedvr2x: no sequence parallelism.
+# Modified for seedvr2x: no sequence parallelism; the repeat's size given from the host.
 
 from typing import Callable, List, Optional
 import torch
@@ -72,11 +72,15 @@ class AdaSingle(nn.Module):
         emb = expand_dims(emb, 1, hid.ndim + 1)
 
         if hid_len is not None:
+            # seedvr2x: the repeat's size given from the host, made once a forward (Cache.held):
+            # without it repeat_interleave copies the lengths' sum from the device, a wait in C
+            # in every block (DESIGN.md, Allocator, "Out of the stop's reach"). The same values.
+            total = cache.held(f"hid_len_total_{branch_tag}", lambda: int(hid_len.sum()))
             emb = cache(
                 f"emb_repeat_{idx}_{branch_tag}",
                 # seedvr2x: no sequence parallelism (DESIGN.md, Vendored model code): slice_inputs
                 # returned the repeated emb unchanged, as no sequence-parallel group is ever set up.
-                lambda: torch.repeat_interleave(emb, hid_len, dim=0),
+                lambda: torch.repeat_interleave(emb, hid_len, dim=0, output_size=total),
             )
 
         shiftA, scaleA, gateA = emb.unbind(-1)

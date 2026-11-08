@@ -11,6 +11,7 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
+# Modified for seedvr2x: the coalescing's sizes read on the host once, where its indices are made.
 
 """
 Native Resolution Transformer (NaDiT) tensor manipulation utilities.
@@ -392,6 +393,12 @@ def repeat_concat_idx(
     
     # Pre-compute split lengths for coalescing using tensor operations
     repeat_txt_len = txt_len * num_repeats_tensor.squeeze()
+    # seedvr2x: the coalescing's sizes read on the host once, here, where the indices are made
+    # (once a forward: mmsr_block.py holds them), not in every call of unconcat_coalesce, whose
+    # split and unflatten copied them from the device, a wait in C in every block (DESIGN.md,
+    # Allocator, "Out of the stop's reach"). The same sizes.
+    repeat_txt_len = repeat_txt_len.cpu()
+    num_repeats = int(num_repeats_tensor.squeeze())
 
     def unconcat_coalesce(all):
         """
@@ -411,7 +418,8 @@ def repeat_concat_idx(
         for txt in txt_splits:
             # txt has shape (base_len * num_repeats, *other_dims)
             # unflatten to (base_len, num_repeats, *other_dims) then average dim 1
-            txt = txt.unflatten(0, (-1, num_repeats_tensor.squeeze())).mean(1)
+            # seedvr2x: the repeat count read on the host where the indices were made, above.
+            txt = txt.unflatten(0, (-1, num_repeats)).mean(1)
             txt_out_coalesced.append(txt)
         
         return vid_out, torch.cat(txt_out_coalesced)

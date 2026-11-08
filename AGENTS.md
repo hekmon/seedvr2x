@@ -176,6 +176,31 @@ is and what numz changed in it.
   path, the branch without a compute dtype and both under autocast are held.
   `models/video_vae_v3/modules/attn_video_vae.py` is modified the same way for the decoder's
   tail a frame at a time (below).
+- **The DiT's waits on the host** (DESIGN.md, Allocator, "Out of the stop's reach"): with the
+  forward's cache disabled, as the pipeline runs it, every block made its windows' indices,
+  lengths and sizes again, copying them from the device, a wait in C out of a stop's reach: 5,050
+  host syncs in a 1080p window of 21 latents (torch's sync debug mode, 2026-11-08).
+  `common/cache.py`'s `Cache.held` keeps those small values for the forward whatever `disable`,
+  the first making after the thread's `cache.hooks.missed` (model.py's poll);
+  `nablocks/mmsr_block.py`, `modulation.py` (the repeat's `output_size` from the host) and `na.py`
+  (the coalescing's sizes read once) take them, each change marked; RoPE's frequencies and the
+  modulation's repeated embedding, a token's size each, are made in each block as before.
+  `model._paced`, around `model.sample`'s forward, polls the card as the forward begins, before
+  `vid_out` and once it has ended, and holds the host to `PACED` (2) blocks ahead of the card,
+  each wait in `waiting.wait`: 260 syncs left a window, all behind a poll. The same bits
+  (milestone 1's regression, hold_probe.py's digests), a window faster by 3 to 4% at 21 latents,
+  11% at 5 and 22% at 1, under SDPA and FlashAttention 2 alike (RTX 5090, 2026-11-08), its peak
+  6.7 MiB higher at 21 latents and 0.35 MB at 1, the fit's tightest point (0.0012 GiB,
+  tests/test_peaks.py). `core/tests/test_dit_waits.py` holds `held` and `_paced` on the CPU with
+  stand-in events and waits (the order of the waits, the hooks and `missed` gone after a forward,
+  a raise included, nothing paced off the card); test_lean_attention.py the bits. The 3B's blocks
+  (`models/dit_3b/`) keep their syncs; the poll at the forward's ends and the pacing apply to
+  them. What the pacing can't bound: a block's own launches. On a stall queued at block 10 of a
+  shot's first window (`research/scripts/stall_hook.py`, 2026-11-08) the main thread sat in C in a
+  kernel's launch in `rotary_embedding_torch`'s `get_axial_freqs`, each block's rotary module
+  making its tables that first window, most likely with CUDA's launch queue full behind the
+  stalled stream (inferred); the stop then comes from the watcher's thread (`stop.Watch`, below),
+  which ended it 1.5 s after a second SIGTERM.
 - **Nothing in it imports numz's runtime** (`src/optimization`, `src/utils`, the rest of
   `src/core`). DESIGN.md (Vendored model code) lists what goes.
 - The StableSR-derived colour code is not vendored: its licence is non-commercial (DESIGN.md,

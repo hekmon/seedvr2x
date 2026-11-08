@@ -11,7 +11,8 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
-# Modified for seedvr2x: no sequence parallelism; the attention keeps less live at its peak.
+# Modified for seedvr2x: no sequence parallelism; the attention keeps less live at its peak; the
+# windows' shapes, lengths and sizes made once a forward, read on the host.
 
 from typing import Tuple, Union
 import torch
@@ -99,7 +100,11 @@ class NaSwinAttention(MMWindowAttention):
             window_slices = self.window_op((t, h, w), self.window)
             return [x[st, sh, sw] for (st, sh, sw) in window_slices]
 
-        window_partition, window_reverse, window_shape, window_count = cache_win(
+        # seedvr2x: the windows' indices, lengths and sizes held for the forward (Cache.held), where
+        # every block made them again, each making copying shapes and lengths from the device, a
+        # wait in C (DESIGN.md, Allocator, "Out of the stop's reach"). Small: a few int64 values a
+        # token. The same values, so the same bits.
+        window_partition, window_reverse, window_shape, window_count = cache_win.held(
             "win_transform",
             lambda: na.window_idx(vid_shape, make_window),
         )
@@ -116,12 +121,12 @@ class NaSwinAttention(MMWindowAttention):
         vid_q, vid_k, vid_v = vid_qkv_win.unbind(1)
         txt_q, txt_k, txt_v = txt_qkv.unbind(1)
 
-        txt_len = cache("txt_len", lambda: txt_shape.prod(-1))
+        txt_len = cache.held("txt_len", lambda: txt_shape.prod(-1))
 
-        vid_len_win = cache_win("vid_len", lambda: window_shape.prod(-1))
-        txt_len_win = cache_win("txt_len", lambda: txt_len.repeat_interleave(window_count))
-        all_len_win = cache_win("all_len", lambda: vid_len_win + txt_len_win)
-        concat_win, unconcat_win = cache_win(
+        vid_len_win = cache_win.held("vid_len", lambda: window_shape.prod(-1))
+        txt_len_win = cache_win.held("txt_len", lambda: txt_len.repeat_interleave(window_count))
+        all_len_win = cache_win.held("all_len", lambda: vid_len_win + txt_len_win)
+        concat_win, unconcat_win = cache_win.held(
             "mm_pnp", lambda: na.repeat_concat_idx(vid_len_win, txt_len, window_count)
         )
 
@@ -136,7 +141,10 @@ class NaSwinAttention(MMWindowAttention):
             # own cast is then nothing and the bits are numz's.
             txt_q, txt_k = self.norm_q.txt_or_all(txt_q), self.norm_k.txt_or_all(txt_k)
             out_dtype = txt_q.dtype
-            freqs = cache_win("rope_freqs_3d", lambda: self.rope.get_freqs(window_shape))
+            # seedvr2x: the windows' shape read on the host (get_freqs lists it), held; the
+            # frequencies, a token's size, made in each block as before.
+            shape = cache_win.held("window_shape_host", lambda: window_shape.cpu())
+            freqs = cache_win("rope_freqs_3d", lambda: self.rope.get_freqs(shape))
             freqs = freqs.to(device=vid_q.device, dtype=out_dtype)
 
             def norm_and_rope(raw: torch.Tensor, norm: torch.nn.Module) -> torch.Tensor:
@@ -182,19 +190,25 @@ class NaSwinAttention(MMWindowAttention):
                 v = concat_win(vid_v, txt_v)
         del vid_v, vid_qkv_win, txt_q, txt_k, txt_v, txt_qkv
 
+        # seedvr2x: the attention's lengths held, and given where its kernel reads them: on the
+        # device for FlashAttention 2, on the host for SDPA's split (attention.py copied them
+        # there in every block), the longest as an int (FlashAttention 2's wrapper read it with
+        # .item() in every block).
+        seqlens = cache_win.held(
+            "vid_seqlens", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
+        )
+        if self.attn.attention_mode != "flash_attn_2":
+            seqlens = cache_win.held("vid_seqlens_host", lambda: seqlens.cpu())
+        longest = cache_win.held("vid_max_seqlen", lambda: int(all_len_win.max()))
         # Attention handles dtype conversion internally using pipeline compute_dtype
         out = self.attn(
             q=q,
             k=k,
             v=v,
-            cu_seqlens_q=cache_win(
-                "vid_seqlens_q", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
-            ),
-            cu_seqlens_k=cache_win(
-                "vid_seqlens_k", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
-            ),
-            max_seqlen_q=cache_win("vid_max_seqlen_q", lambda: all_len_win.max()),
-            max_seqlen_k=cache_win("vid_max_seqlen_k", lambda: all_len_win.max()),
+            cu_seqlens_q=seqlens,
+            cu_seqlens_k=seqlens,
+            max_seqlen_q=longest,
+            max_seqlen_k=longest,
         )
         # seedvr2x: q, k and v freed before the output is cast, and the cast to the dtype of q
         # after the norm and RoPE (numz's `.type_as(vid_q)`, vid_q being gone by then).
@@ -283,9 +297,10 @@ class NaMMSRTransformerBlock(MMWindowTransformerBlock):
         torch.LongTensor,
         torch.LongTensor,
     ]:
+        # seedvr2x: held for the forward, as the attention's lengths are (NaSwinAttention).
         hid_len = MMArg(
-            cache("vid_len", lambda: vid_shape.prod(-1)),
-            cache("txt_len", lambda: txt_shape.prod(-1)),
+            cache.held("vid_len", lambda: vid_shape.prod(-1)),
+            cache.held("txt_len", lambda: txt_shape.prod(-1)),
         )
         ada_kwargs = {
             "emb": emb,
