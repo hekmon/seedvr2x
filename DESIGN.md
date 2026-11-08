@@ -305,9 +305,10 @@ seedvr2x/                the repository
       ComfyUI's models gone (its free memory and what ComfyUI says its own models hold), less
       the room it leaves the rest of the card: since 2026-11-08 ComfyUI's own reserve for the
       system too (its `--reserve-vram`, by default 0.68 GiB on a 32 GB card under Windows),
-      decided that day as the larger of it and a held run's 0.5 GiB ([Allocator](#allocator)),
-      not their sum, the two being one need, so that a small card gives up no more than one
-      of them (built as their sum until the nodes' next pass); and
+      decided that day as the larger of it and what a held run leaves the rest of the card
+      (0.5 GiB, 3 where NVML can't read the card: [Allocator](#allocator)), not their sum, the
+      two being one need, so that a small card gives up no more than one of them (built so the
+      same day, impl-nodes-5: the card line names the room once, by what set it); and
       ComfyUI is asked to free only the room that plan needs (`free_memory`) and 0.25 GiB: its
       partial unload stops at the free memory asked and keeps a buffer of its own, and an exact
       ask left the card 0.04 to 0.11 GiB short (impl-nodes, 2026-11-05). Its models stay where
@@ -322,11 +323,13 @@ seedvr2x/                the repository
   - **Four nodes, and three that give the plan's settings** (the user, 2026-11-05):
     - seedvr2x Models: the DiT file by a name a user reads ("Sharp 7B, int8"), with its size
       and the model card's typical error (0.86% for int8), from Hugging Face's cache or a
-      directory; the RAM choice above.
+      folder wired into its optional input (the model files, below); the RAM choice above.
     - seedvr2x Cuts: seedvr2x's shot detector on the clip's frames, detecting with a threshold
       or taking the clip as one shot; its cut list is wired to Upscale Video (a clip's fact, not
-      a setting), and it says the cuts and the possible cuts as text (the user, 2026-11-05: a
-      short clip of 3 or 4 shots is handled as the CLI handles a film). The frames are
+      a setting), and it says the cuts and the possible cuts (the user, 2026-11-05: a short
+      clip of 3 or 4 shots is handled as the CLI handles a film), each with its probability in
+      ComfyUI's console and their count on the node ("2 shots · 1 possible cut below 0.30"),
+      its text output gone since 2026-11-08 (Progress, below). The frames are
       ComfyUI's, already decoded, shrunk to the detector's 48×27 in torch (antialiased
       bicubic), with no ffmpeg. Checked before the node relied on them (impl-nodes,
       2026-11-06): on nine films of 240 frames, the study's own sources not at hand, the cuts
@@ -364,35 +367,49 @@ seedvr2x/                the repository
       first value, and every plan says it.
     - Every label, tooltip and line a node shows is in a ComfyUI user's words, with no word of
       the library's (pinned, latent, phase): the upscale nodes take `images`, then `models`,
-      and give `images` and `plan`, named in lowercase as ComfyUI's V3 nodes name theirs; the
+      and give `images` (their `plan` output gone on 2026-11-08: it repeated the console),
+      named in lowercase as ComfyUI's V3 nodes name theirs; the
       model file's tooltip says what its error per weight measures, and that it measures the
       file, not the picture.
     - The plan is made in the upscale node, at run time, where the input's size, the shots and
       the card are known. "Plan only", off by default, has the node make it and say it, loading
       nothing and reading no weight, and stops what follows it, as the CLI's `--plan` does: a
       button could not know the input's size before the nodes ahead of it have run. Each node
-      says its plan on the node and in ComfyUI's console, what each "auto" became and the host
-      memory it counts (the input's frames, the output's, the weights kept) beside the card's,
-      and gives it as text.
+      says its plan in ComfyUI's console, whole: what each "auto" became and the host memory it
+      counts (the input's frames, the output's, the weights kept) beside the card's. On the
+      node, since 2026-11-08, a line of it under "plan only" ("plan: window 41 frames · decode
+      1088 px"), and none otherwise.
     - Progress (the user, 2026-11-06): ComfyUI gives a node one bar, one text box replaced at
       each message, and one preview. The bar is the upscale's expected time, never a count by
       phase: its units are the plan's (each encode tile, DiT window and decode tile of every run
       and shot), weighted by their size, each kind's rate the card's measured figure until a
       unit of that kind is measured in the run, then the run's own, the rest spread again and
-      the bar never going back. The text says the plan, then where the run is in a user's
-      units ("Shot 2 of 4, run 3 of 4 (frames 121 to 240): upscaling, window 2 of 3"), the time
-      spent and, once measured, the time left; at the end, the plan and the frames made in
-      their time. The download and the read into RAM go on the same bar first, by bytes, and
+      the bar never going back. The text is one status line, a progress hint and never a log
+      (the user, 2026-11-08: ComfyUI squeezes the text box, a preview below it for one, and a
+      longer text must then be scrolled), of 40 characters at most, the node's default width:
+      where the run is in a user's units ("shot 2/4 · window 2/3 · ~3 min left", "run 3/4"
+      added at enhanced and maximum), the time spent and, once measured, the time left; at the
+      end, the frames made in their time ("480 frames in 4 min 32 s"). A line that would pass
+      40 drops, in order, the place's word (a bare "2/4"), the run (back where the time can't
+      fit anyway) and the time, never the step. Everything else goes to ComfyUI's console,
+      each line beginning "[seedvr2x]" (the library's too, set in the nodes' process alone):
+      the plan whole, the cuts, each refusal, each run's frames. Built so on 2026-11-08
+      (impl-nodes-5), a test holding every line the nodes can send to the length; a refusal
+      keeps ComfyUI's error dialog, the node saying "refused: see the error". The read into
+      RAM goes on the same bar first, by bytes (the download on the Models node's own since
+      2026-11-08), and
       the Cuts node's by the frames scanned, Cancel honoured between its batches. The preview
       is the newest frame the run keeps, at ComfyUI's preview size. Decided the same day and
       built on 2026-11-07 (impl-nodes' third pass): a later run names its own frames (run 3
-      from the shot's third frame, "frames 123 to 240"); the time is said each second between
-      events too, so that a long window's text never stands still (a thread for the text
+      from the shot's third frame, "frames 123 to 240", in the console since 2026-11-08); the
+      time is said each second between events too, so that a long window's text never stands
+      still (a thread for the text
       alone, waiting on the event its stop sets, its sends queued by ComfyUI and never
       blocking, so that its join needs no time cap); and, once a unit's time is measured, the
       nodes name their units for the waits on the GPU ([Allocator](#allocator), the hang): a
-      wait past its bound is said on the node with the way out, and Cancel leaves such a
-      wait. The release after a run that a Cancel or an error ended waits for the card's last
+      wait past its bound is said on the node ("GPU not answering for 3 min"), the way out in
+      the console, and Cancel leaves such a wait. The release after a run that a Cancel or an
+      error ended waits for the card's last
       work in the same poll, ComfyUI's Cancel its check (decided 2026-11-06: not a stream's
       query, which can't tell a slow card from a dead one), the node saying that it is
       freeing the card, waiting for the GPU's last work, and that Cancel again leaves the
@@ -417,9 +434,9 @@ seedvr2x/                the repository
       is marked, runs are refused on every card, until GPU selection places runs on other
       cards: then by card. Settling is the nodes' alone: the CLI's and the server's processes
       end on a repeated stop, and a new process starts with no mark. README's Limits say so.
-      The nodes' texts for all this, written in that baton, are long: they are the nodes'
-      next pass's to reword with the rest, into the one line of status the user asked of a
-      node (2026-11-07).
+      The nodes' texts for all this became one line each on 2026-11-08 (impl-nodes-5):
+      "freeing the GPU… Cancel again to leave", "GPU busy: run again or restart ComfyUI",
+      "GPU failed: restart ComfyUI", their sentences in the console and ComfyUI's error.
     - A clip is whole in RAM, as ComfyUI's Load Video gives it: the nodes stream nothing, keep
       nothing on disk and resume nothing. The plan counts the clip's frames in host memory and
       refuses past it, saying what the CLI does instead: a film streamed shot by shot, never
@@ -458,7 +475,18 @@ seedvr2x/                the repository
     already. The README says where the cache is and how to move it (`HF_HOME`), for users who
     keep their models on another disk. seedvr2x's files stay without the two text-conditioning
     tensors ComfyUI's own SeedVR2 wants in a DiT file (the user, 2026-11-05): seedvr2x holds
-    that conditioning in its code, and the nodes read the files with its own loader.
+    that conditioning in its code, and the nodes read the files with its own loader. Kept so
+    on 2026-11-08 (the user, a move to ComfyUI's `models/` folder proposed and withdrawn:
+    seedvr2x's files are none ComfyUI's loaders take, and one copy serves every app), and
+    built that day (impl-nodes-5): the folder is an optional string input on seedvr2x Models
+    and Cuts, a socket with no widget that any string node gives (the user: an empty widget
+    reads as something to fill in, where ComfyUI draws an optional input apart, as the plan's
+    numbers' sockets), a value that is no folder refused; seedvr2x Models fetches what the
+    cache lacks when it runs, on its own bar, and its console line names each file, its
+    size, where it is, and that `HF_HOME` moves the cache; the README says where the cache is
+    on Windows and Linux and how to set `HF_HOME` for ComfyUI. No widget of the nodes is
+    empty by default (the user's rule, 2026-11-08): an option with a meaningful default stays
+    a widget.
   - **What stays the CLI's is a film's length, not its quality** (the user, 2026-11-06): the
     nodes have the shots (seedvr2x Cuts, with no ffmpeg), the several runs of a shot and every
     plan the CLI makes; ComfyUI's video nodes load and save, and a clip and its output are held
@@ -823,7 +851,9 @@ connect through files.
   - **Logging:** `VideoDiffusionInfer` logs through numz's `Debug` object, which seedvr2x's
     runtime supplies as a logging adapter.
   - **Attention:** FlashAttention 2 when installed, else SDPA; any other mode is an error
-    ([why](research/docs/attention.md)).
+    ([why](research/docs/attention.md)). SDPA's run is said at INFO, neutrally (since
+    2026-11-08: a warning read as a problem, where since the lean attention the two take the
+    same memory and about the same time); FlashAttention 2's by the plan's and the load's lines.
   - **Conv3d:** numz's workaround is removed. It called `torch.cudnn_convolution` directly,
     because plain Conv3d takes ≈ 3× the memory with torch ≥ 2.9 and cuDNN ≥ 9.10.2
     ([environment.md](research/docs/environment.md)).
@@ -4137,8 +4167,10 @@ run in one line, before the models load as after.
   - The CLI and the server on Windows itself are v0.2.0's: `cudaMallocAsync` their default
     there, a resume's early reading NVML's alone (what is resident: optimistic there,
     provisional), untested natively.
-  - The detector's close waits on the card outside the poll (`torch.cuda.synchronize`), and
-    nothing tests its close on a failed card: both to mend with the nodes' next pass.
+  - The detector's close waited on the card outside the poll (`torch.cuda.synchronize`), and
+    nothing tested its close on a failed card: mended on 2026-11-08 (impl-nodes-5), its wait
+    through the poll, the Cuts node's Cancel its check; a wait an exception ends, or a failed
+    card, keeps its model (its weights, about 30 MB) for the process's life.
 - **The vendored RoPE's tables** (`vendor/models/dit_7b/rope.py:44`, an `lru_cache` of 128
   keyed by each block's rotary module and the window's shape, float16, 60 values a
   position), live since numz's wrapper went
