@@ -195,7 +195,8 @@ is and what numz changed in it.
   that commit whatever the vendored files become, and a later change to these files is held to
   it or moves the reference with a measured reason. The sizes are stand-ins chosen so that the
   windows are several and of unequal lengths and the chunks end partial; the pipeline's chunked
-  path, the branch without a compute dtype and both under autocast are held.
+  path, the branch without a compute dtype and both under autocast are held, under SDPA on both
+  sides, and a mode other than 'sdpa' is refused by the 7B's and the 3B's module.
   `models/video_vae_v3/modules/attn_video_vae.py` is modified the same way for the decoder's
   tail a frame at a time (below).
 - **The DiT's waits on the host** (DESIGN.md, Allocator, "Out of the stop's reach"): with the
@@ -296,14 +297,11 @@ beside it; the `__init__.py` is seedvr2x's.
   (libzimg), idet and ffv1: seedvr2x checks the build at startup and refuses to run without
   them, or without any other filter, encoder, decoder or muxer it uses (`media/ffmpeg.py`;
   DESIGN.md, Input).
-- **FlashAttention 2 is not a dependency.** PyPI only has its source, a long CUDA build, and
-  seedvr2x runs without it: it uses FA2 when installed, else PyTorch's SDPA, and logs which one
-  runs (the load says SDPA at INFO, neutrally, `model.say_attention`; the CLI's plan says either);
-  the two peak at the same memory since the lean attention (below), so a plan is one for
-  both. To use it, build a wheel for your GPU ([setup_env.sh](research/scripts/setup_env.sh),
-  [environment.md](research/docs/environment.md)) and install it into `apps/seedvr2x/.venv` with `uv
-  pip install --no-deps <wheel>` (from `apps/seedvr2x/`). `uv run` keeps it, but `uv sync` removes
-  what the lock doesn't list: install it again after a sync, or sync with `--inexact`.
+- Attention is PyTorch's SDPA, the one kernel, nothing to build: at SeedVR2's window lengths it is
+  4 to 9% of the DiT's time, and SDPA, FlashAttention 2 and SageAttention 2 and 3 ran the DiT
+  within 1.5% of one another (research/docs/attention.md); FlashAttention 2, the last one kept,
+  went on 2026-11-08, peaking at SDPA's memory to the MiB on the lean attention
+  (research/docs/small-cards.md). The vendored attention refuses any other mode.
 
 ## Checks
 
@@ -622,7 +620,9 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   1080p, at 720p and on a crop whose width isn't a multiple of 16 (the padding cases), and under
   three pairs of VAE tiles. The references are per card, in `seedvr2x/<card>/` of
   `SEEDVR2X_REFERENCE_DIR` with a `cases.json` giving each case's size on that card, the inputs
-  in `m1/`; a card with no directory skips every case, naming it, and one with a directory fails
+  in `m1/`; they are SDPA's, made on 2026-11-08 on the RTX 5090 on main 666a6cb (the FlashAttention
+  2 ones moved aside, kept); a card with no directory skips every case, naming it, and one with a
+  directory fails
   a case whose reference is missing, unless the card can't run it. A change that moves the
   output's bits is allowed with a measured reason, and remakes the references, said in its
   commit (DESIGN.md). Its runs detect their shots, as a user's does without `--cuts`, the shot
@@ -729,6 +729,12 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   (packets dropped by the noise bitstream filter, the others' timestamps kept) held to the
   frames of the file they were made from; `tests/test_cli_run.py` runs such a source through
   a run, its resumes and a finished job run again.
+- `tests/test_cli_run.py`'s `test_a_job_begun_with_flash_attention_2_is_an_environment_change`: a
+  manifest of this code whose environment says `flash_attn_2` and a `flash_attn` version, resumed,
+  is refused naming the change and `--accept-env-change`, and taken with the flag, its segments'
+  record saying `sdpa` (the record's attention field, the image server's info and the job
+  environment's entry are the constant `record.ATTENTION`, kept as provenance). A job begun on a
+  seedvr2x before the change is refused first as another job, by its settings' code hash.
 - A job run again once finished (`tests/test_cli_run.py`) makes nothing: said finished, exit 0,
   with no first pass, detector, plan, memory read, model or unit, its manifest and index
   untouched (whether the index is there, missing, damaged or cut short), still held to its
@@ -1052,7 +1058,9 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   ignored and written again, the write atomic, the margin's field kept), each check on the CPU
   device for the three layouts, and a kernel made wrong on purpose per check, refused with its
   facts, the refusal cached and refusing at once on the next run, a kernel that raises a failed
-  check and an out-of-memory error uncached; importing the module imports no torch. The
+  check and an out-of-memory error uncached; one attention check, "attention sdpa", and no
+  flash_attn part in the fingerprint;
+  importing the module imports no torch. The
   matrix product's and the attention's tolerances are PROVISIONAL (probe.py); `pytest -m gpu`
   prints every error against its tolerance on CUDA for each layout. The allocator's margin is not
   measured: the cache has the field, null; its reading side is built (`Probed.allocator_margin`,
@@ -1124,7 +1132,8 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   test_still_plan.py` holds `seedvr2x/still_plan.py`, importing no torch: every picture within
   8K and 6000x4000 bounds on cards of 16 to 48 GB given tiles that fit, by `peaks.py` alone; the
   attention windows counted as the DiT's window functions count them, and their most within a
-  bound; the floor proved, and what of the DiT a pinned VAE phase keeps lowered for it; the DiT's order, int8, SDPA (the fit of FlashAttention 2's),
+  bound; the floor proved, and what of the DiT a pinned VAE phase keeps lowered for it; the DiT's
+  order, int8, SDPA,
   pins, the host's trades and refusal, held readings and each phase's reserve (below); the picture's own
   copies and resize on the GPU (`input_pixels`, a 100 MP input's 1.2 GB in float32 and 0.6 in
   bfloat16, the transform's tensors counted from their sizes, unmeasured): the residents lowered
@@ -1153,7 +1162,8 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   back from each file, PNG and WebP, upright or turned (the app and version, the mark, the source's
   size as stored and the output's as written, the resolution asked and the sample aspect, 48 and
   49 giving the same size, the model files by name and SHA-256, hashed by their load
-  alone, no file read whole before it, the seed, the colour correction, the tiles of the pass, the attention kernel), written out
+  alone, no file read whole before it, the seed, the colour correction, the tiles of the pass, the
+  attention kernel: the constant "sdpa"), written out
   in the test; runs on the stand-ins whose file is `png.write` of `still.upscale` with its record
   byte for byte, at 16 and 8 bits (`--format png8`), grey, the
   profile kept, an opaque alpha dropped and its line reaching the user; every picture written
@@ -1271,9 +1281,6 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   and a check of a model file not shown; `conftest.py`'s autouse `records_are_one_line` fails any test of the
   nodes' in which a record of `seedvr2x` or `seedvr2x_comfyui` at INFO or above holds a newline
   (the loggers held to INFO for it; a traceback, the record's exc_info, aside).
-  `core/tests/test_model.py` holds
-  the load's attention line (`model.say_attention`): SDPA at INFO in its neutral words, nothing for
-  FlashAttention 2.
   `tests/test_registration.py` holds the one patcher (its model's class named `seedvr2x` for
   ComfyUI's "Requested to load seedvr2x", its sizes, strong
   references, Unload models and POST /free dropping the weights, the next run loading again,
@@ -1305,7 +1312,7 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   bit for bit to `still.upscale` and `clip.upscale`, the batch's output allocated once and
   counted in the plan's `process`, the alpha rule, the plan said whole in the console (never on
   the node, which shows "planning…" and its progress) with what each auto became and the host
-  memory beside the host's, the attention, a refusal's one line on the node and its text once at
+  memory beside the host's, a refusal's one line on the node and its text once at
   WARNING in the console, the run's frames and time in the console ("21 frames upscaled in 4 s"),
   colour correction and seed, the probe, a clip of 1, 2 and 3 shots equal bit for bit to
   `clip.upscale` of each shot one after the other (each seeded by its first frame, its frames
@@ -1498,8 +1505,8 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   `core/tests/test_peaks.py` holds the prediction at or over the allocated peak of every window
   of `library_fixtures.LEAN_WINDOWS` (one sampling step at 1080p and 4K padding, blocks swapped
   or not, in bytes, from `research/scripts/hold_probe.py`; `research/scripts/lean_fit.py` refits
-  from its files) and near it, the two kernels sharing one fit (FlashAttention 2 and SDPA peaked
-  at the same figure, so the plan is one), int8 needing less and SDPA the same. A refit moves
+  from its files) and near it, SDPA's one fit (one constant, no `attention=`), int8 needing less. A
+  refit moves
   the tests that held plans or peaks measured on the plain code. Those that hold a run measured
   there (numz's recipes, the first matrices, the windowed shots in `test_shot_plan.py`,
   `test_peaks.py`, `test_shot_pass.py` and the CLI's `test_planner.py`) take the
@@ -1585,14 +1592,16 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   sides measured are PROVISIONAL (peaks.py).
 - The plan matrix, in two tools ([Checks](#checks)). Core's `tools/plan_matrix.py`, the
   library's alone: `shot_plan.plan` over a fixed matrix, 4,760 cases today (cards, targets, shots,
-  system memory, pins, kernels, readings, plans recorded on a larger card planned again on smaller
+  system memory, pins, readings, plans recorded on a larger card planned again on smaller
   ones, as many as the larger card plans) and the peaks' bricks, as text, for each DiT format
   (`--dit`), and `diff` of two such texts. The CLI's `tools/plan_lines.py` (`apps/seedvr2x/`),
   on core's `Matrix` and its hooks: the same text with what the command line does with each plan,
   which core can't import: `planner.said`'s lines (with the smaller DiT files' line, as a new
   job's plan says it; `--without-smaller` leaves it out), `card_detail`, `beyond_measured`,
   `check_recorded` on each recorded case and 360 checks of a record (5,120 cases), `plan_again`
-  after a recorded plan refused, `compile_shapes` and `on_windows_drive`. `--without-smaller`'s
+  after a recorded plan refused, `compile_shapes` and `on_windows_drive`. The matrix has no kernel
+  dimension; its stride keeps the retired kernel's digit unread so that its cases keep their
+  numbers, and some sampled cases are now planned twice. `--without-smaller`'s
   text is the private copies' of before (impl-shotpass's, 2026-11-05) for the four formats, their
   messages on several lines written on one and one path renamed. `tests/test_plan_matrix.py`
   (`core/tests/`) keeps core's running: its `--quick` part for each format, in a process of its

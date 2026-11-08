@@ -52,8 +52,7 @@ py-modules = [
 ]
 
 [tool.uv]
-# Linux first (DESIGN.md), as the CLI. FlashAttention 2 is not a dependency (DESIGN.md, The image
-# server, The Docker image).
+# Linux first (DESIGN.md), as the CLI.
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 # The CLI's constraints, so that the two locks resolve torch's CUDA support packages alike.
 constraint-dependencies = [

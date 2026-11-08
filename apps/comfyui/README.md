@@ -44,10 +44,17 @@ each at its default:
 | --- | --- | --- |
 | resolution | `1080` | The output's short side, in pixels. |
 | quality (Upscale Video only) | `standard` | How many times the model runs over each shot: `standard` once, `enhanced` twice, `maximum` four times, each run starting a frame or two further into the shot, each frame kept from the run that rebuilds it best. Sharper lines and less flicker where there is motion, little change on a still shot; 2 or 4 times as long as `standard`, and no more memory. A picture is one frame, so Upscale Image has no quality. |
-| attention | `auto` | FlashAttention 2 where ComfyUI's environment has it, else PyTorch's SDPA. |
 | colour correction | on (`split`) | On, `split`, keeps the input's overall colours and brightness with the model's fine detail; off, `none`, leaves the model's own colours, which can drift. |
 | seed | `42` | ComfyUI's seed with its control after generate, `fixed`. |
 | plan only | off | Make the plan, say it in the console, and stop: the model's weights are not read into memory (seedvr2x Models finds the files; the upscale node reads them when it runs, after its plan), ComfyUI's loaded models stay, and the nodes after the images output do not run. |
+
+There is no attention widget. seedvr2x runs PyTorch's own SDPA, which ComfyUI's PyTorch has, with
+nothing to install. At SeedVR2's window lengths attention is 4 to 9% of the DiT's time, so no
+kernel can make the DiT faster than that share: measured, SDPA, FlashAttention 2, SageAttention 2
+and SageAttention 3 ran it in the same time within 1.5%, and SageAttention took up to 3 GiB more
+([attention.md](../../research/docs/attention.md)). On seedvr2x's lean attention FlashAttention 2
+took the same memory as SDPA to the MiB, and no less time
+([small-cards.md](../../research/docs/small-cards.md#flashattention-2-against-the-lean-sdpa)).
 
 The numbers the plan makes are optional inputs: [Setting a value yourself](#setting-a-value-yourself).
 
@@ -293,7 +300,7 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   video to 16 bits a channel first. The two outputs differ by a fraction of a level: 0.26 of one
   level (of 255) at most on the clip measured. From an RGB source (a lossless RGB
   video) the nodes give the command line's frames bit for bit where both run the same torch,
-  its CUDA build and the same attention kernel. Across versions and platforms the frames
+  its CUDA build (the attention kernel is PyTorch's SDPA). Across versions and platforms the frames
   differ, as any two environments' do: ComfyUI's torch 2.12.1 under Windows against the
   command line's 2.14.1 under WSL2, both on SDPA, gave 38.7 and 43.7 dB of PSNR on a clip's
   two shots, each side repeating its own frames bit for bit.

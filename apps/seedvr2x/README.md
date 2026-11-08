@@ -72,10 +72,10 @@ Both start from the source, one video file, and differ only at the end.
   Windows driver), which PyTorch's CUDA 13.0 build needs, and a card that CUDA 13 supports:
   NVIDIA's release notes list them.
 - **A CUDA GPU**: one NVIDIA card per job. What counts is the memory free at the start: at
-  least 8.3 GiB for a 1080p output and 22.4 GiB for 4K (23.5 without FlashAttention 2) on
+  least 8.3 GiB for a 1080p output and 23.5 GiB for 4K on
   Linux, more for longer windows and fewer swapped blocks ([GPU memory](MANUAL.md#gpu-memory)).
-  [Under WSL2](MANUAL.md#under-wsl2), 10.7 and 24.8 GiB (25.9) to run, up to 1.5 times as
-  long, and 12.7 and 26.8 GiB (27.9) to run at full speed.
+  [Under WSL2](MANUAL.md#under-wsl2), 10.7 and 25.9 GiB to run, up to 1.5 times as
+  long, and 12.7 and 27.9 GiB to run at full speed.
 - **System memory**: the plans shown in the manual took 19 to 28 GiB: up to 15.8 GiB pinned for
   what leaves the card, 2.3–2.5 GiB for the process, and a tiled shot's scratch up to an
   allowance ([small cards](MANUAL.md#small-cards)). A host short of it gets a plan that fits,
@@ -88,20 +88,14 @@ Both start from the source, one video file, and differ only at the end.
   manual](MANUAL.md#why-zscale-is-required).
 - **[uv](https://docs.astral.sh/uv/)**, which installs Python 3.13 and the locked dependencies,
   PyTorch's CUDA 13.0 build among them.
+- **Nothing to build.** The attention is PyTorch's own SDPA, installed with PyTorch. At SeedVR2's
+  window lengths attention is 4 to 9% of the DiT's time, so no kernel can make the DiT faster
+  than that: measured, SDPA, FlashAttention 2 and SageAttention 2 and 3 ran it in the same time
+  within 1.5% ([the manual](MANUAL.md#attention)).
 - **Disk space**: 17 GB for the model files, downloaded once, and room for the output. A
   lossless master takes about 100–135 GiB per hour of 1080p, and four times that at 4K; a
   finished file needs about twice that while it is assembled, beside it. `--plan` and every run
   say how much the job will take against the disk's free space ([disk use](MANUAL.md#disk-use)).
-- **FlashAttention 2 is optional.** seedvr2x uses it when it is installed, else PyTorch's own
-  attention (SDPA), and logs which one runs. It buys no speed: on numz's CLI the backends gave
-  the same DiT time within 1.5% ([attention.md](../../research/docs/attention.md)). Their outputs
-  differ slightly (55–56 dB apart), so a job is resumed with the backend it started with.
-  PyPI only has FlashAttention's source, a long CUDA build:
-  [setup_env.sh](../../research/scripts/setup_env.sh) builds a wheel for your GPU, for Blackwell
-  cards unless its `ARCH` says otherwise
-  ([environment.md](../../research/docs/environment.md)), installed with
-  `uv pip install --no-deps <wheel>`. `uv sync` removes what its lock doesn't list: install the
-  wheel again after a sync, or sync with `--inexact`.
 
 ## Install
 

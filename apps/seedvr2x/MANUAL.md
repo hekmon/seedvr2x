@@ -321,7 +321,7 @@ memory allows.
 | `--vae_encode_tiled`, `--vae_decode_tiled`, `--vae_encode_tile_overlap`, `--vae_decode_tile_overlap` | no switch: each pass is tiled when its untiled run doesn't fit the card, in the largest tiles that do, with an overlap fixed at 64 px (numz's default is 128); `--encode-tile 0` and `--decode-tile 0` pin an untiled pass ([GPU memory](#fixing-a-choice-yourself)) |
 | `--blocks_to_swap`, the tile sizes, the offload devices | chosen by the planner; `--swap-blocks`, `--encode-tile` and `--decode-tile` fix them, exactly or refused; no offload device to name |
 | `--compile_dit`, `--compile_vae` | `--compile`, the VAE alone, opt-in ([compiling the VAE](#compiling-the-vae---compile)): numz's compiled VAE takes twice its memory, its exclusion of the causal convolutions never taking effect, and the DiT isn't compiled in version 0.1.0, which would compile again at every new window length |
-| `--attention_mode` | gone: FlashAttention 2 when installed, else PyTorch's SDPA, logged |
+| `--attention_mode` | gone: PyTorch's SDPA, the one kernel ([attention](#attention)) |
 | `--color_correction` | `--color-correction`: `split` by default, or `none`; numz's `lab`, `wavelet`, `wavelet_adaptive`, `hsv` and `adain` are gone |
 | `--input_noise_scale` | gone: numz's own addition, which only degrades |
 | `--latent_noise_scale` | gone from version 1: ByteDance uses 0 |
@@ -591,6 +591,26 @@ closest 4 GB file to float16 ([VALIDATION.md](../../models/VALIDATION.md)).
 ```
 plan: DiT: its weights in seedvr2x's dynamic GGUF, 4.43 GiB, under a third of fp16's; a window's memory counted as fp16's plus 0.07 GiB for the dequantisation's buffers; --dit-model names the file
 ```
+
+### Attention
+
+The DiT's attention runs on PyTorch's own SDPA, the one kernel: nothing to build or install, and
+nothing lost.
+
+- **Attention is a small share of the DiT's work** at SeedVR2's window lengths: 4 to 9% of the
+  DiT's time measured (2 to 13.5% by its FLOP count, from short windows to the longest). No
+  attention kernel can make the DiT faster than that share.
+- **The kernels measured run the DiT in the same time.** On an RTX PRO 6000, at 1080p and 4K, on
+  numz's code: SDPA, FlashAttention 2, SageAttention 2 and SageAttention 3 within 1.5% of one
+  another, under the drift between back-to-back runs (up to 9%). SageAttention 3 never ran in
+  SeedVR2's calls: windows of unequal lengths fall back to SageAttention 2. SageAttention took up
+  to 3 GiB more of the card. Each kernel's output differs from another's by 55 to 56 dB PSNR,
+  which VMAF doesn't see ([attention.md](../../research/docs/attention.md)).
+- **On seedvr2x's lean attention**, measured on an RTX 5090: FlashAttention 2 peaked at the same
+  memory as SDPA to the MiB, and SDPA ran a 4K picture's DiT step in 2.80 s against 2.87, and a
+  1080p window of 11 latents in 7.37 s against 8.16
+  ([small-cards.md](../../research/docs/small-cards.md#flashattention-2-against-the-lean-sdpa)).
+  So FlashAttention 2 went, and with it a long CUDA build per GPU generation.
 
 ## What the model does to a picture
 
@@ -993,7 +1013,9 @@ uv run seedvr2x photo.jpg --resolution 2160 -o photo.2160p.png
 Every master, finished file and picture carries seedvr2x's record of what made it, which holds
 nothing of the source's but its size: the app and its version, the source's size and the
 output's, the short side asked and the sample aspect used, the DiT's and the VAE's files by name
-with their SHA-256, the seed, the colour correction, the tiles and the attention kernel, and for
+with their SHA-256, the seed, the colour correction, the tiles and the attention kernel (always
+"sdpa", kept so that an output made before
+says what made it), and for
 a video its window cap, `--quality`, `--compile` and its cuts (the threshold they were detected
 at, or, for a list given with `--cuts`, the SHA-256 of its cuts written one frame number a line,
 not of the file). That is what changes the output's bits, so an output can be made again from
@@ -1166,8 +1188,8 @@ of 22 at 4K with all 36 swapped; a card held to 24 GB ran 4K's windows of 5.
   window in the middle of a shot shares 2 with each neighbour and keeps at least one of its own.
   When the smallest window doesn't fit with every block swapped, or the smallest tiles don't,
   the job is refused before the models load. The message gives the free memory that size
-  takes, what is free, and the largest output size that fits: 4K takes 22.40 GiB free
-  (23.47 without FlashAttention 2), so a 16 GB card never runs it, and 1080p takes 8.27 GiB, so
+  takes, what is free, and the largest output size that fits: 4K takes 23.47 GiB free, so a 16 GB
+  card never runs it, and 1080p takes 8.27 GiB, so
   an 8 GB card doesn't run that either. A shot's length doesn't count on the card: a very long
   shot is bounded by the host's memory alone, its refusal naming the shot.
 
@@ -1316,8 +1338,8 @@ its start:
   longer fits with 4.5 takes 2.5 too, before it stops. This holds under PyTorch's own allocator
   with expandable segments, seedvr2x's default there; under an allocator of your own the job is
   refused with 4.5, the refusal saying so. With 2.5, an RTX 5090 ran 4K's smallest window
-  beside a desktop holding 3.2 GiB. Its plan of the Sol Levante example at 4K, without
-  FlashAttention 2, said it so, run by a build before 0.1.0: here its figures in 0.1.0's two
+  beside a desktop holding 3.2 GiB. Its plan of the Sol Levante example at 4K
+  said it so, run by a build before 0.1.0: here its figures in 0.1.0's two
   lines, where that build gave them in one:
 
   ```
@@ -1328,15 +1350,14 @@ its start:
 
   Windows of 5 latents, the least a job runs: 4K fits that card, just, and the job was
   estimated at about 7 hours. Its 22.87 GiB is the smallest window's peak under SDPA alone: on
-  Linux the 0.6 GiB margin comes on top (23.47, or 22.40 with FlashAttention 2,
+  Linux the 0.6 GiB margin comes on top (23.47,
   [GPU memory](#the-plan)), where under WSL2 the reserve holds it.
 - **What a job needs free,** by the planner's own rules, on the whole card (NVML's figure):
 
   | Output | On Linux | Under WSL2, to run (reserve 2.5 GiB, slower) | Under WSL2, at full speed (reserve 4.5 GiB) |
   |---|---|---|---|
   | 1080p | 8.27 GiB | 10.67 GiB | 12.67 GiB |
-  | 4K, FlashAttention 2 | 22.40 GiB | 24.80 GiB | 26.80 GiB |
-  | 4K, SDPA | 23.47 GiB | 25.87 GiB | 27.87 GiB |
+  | 4K | 23.47 GiB | 25.87 GiB | 27.87 GiB |
 
   Under WSL2, the Linux floor's 0.6 GiB margin goes, and the 0.5 GiB left to the card and the
   reserve come on top. The RTX 5090 above had 27.19 GiB free: 0.68 short of full speed at 4K
@@ -1604,8 +1625,8 @@ What is compared:
   `git checkout` it, then `uv sync`, to finish one).
 - **the source,** by its content: its size and SHA-256. A source that was moved or re-dated is
   the same source.
-- **the environment:** the GPU, PyTorch, CUDA and cuDNN, the attention backend and
-  FlashAttention, ffmpeg and a fingerprint of its conversions, Python and its packages'
+- **the environment:** the GPU, PyTorch, CUDA and cuDNN, the attention kernel, ffmpeg
+  and a fingerprint of its conversions, Python and its packages'
   versions. The NVIDIA driver is recorded but not compared.
 
 It is that strict because a resume promises the uninterrupted run's output, bit for bit, and
@@ -1704,8 +1725,8 @@ refused by default. `--accept-env-change` gives that promise up for the job, to 
 hours through an upgrade, onto another card, or on a card that no longer has the memory its
 plan took. Its two uses:
 
-- **Another environment:** the GPU, PyTorch, CUDA and cuDNN, the attention backend and
-  FlashAttention, ffmpeg and its conversions' fingerprint, Python and its packages. Where they
+- **Another environment:** the GPU, PyTorch, CUDA and cuDNN, the attention kernel, ffmpeg
+  and its conversions' fingerprint, Python and its packages. Where they
   are all that differs, the refusal lists them and ends `Only its environment differs:
   --accept-env-change resumes it anyway, though its output then differs from an uninterrupted
   run's`. With the flag the job goes on; where ffmpeg or its conversions changed, its first pass
@@ -2012,7 +2033,7 @@ copies](#the-input-copies)).
 - **A picture** draws its noise from the seed itself, and its encode from the seed plus
   1,000,000: its seed goes from 0 to 4,293,967,295.
 - **What changes the output's bits:** another seed, another plan, another environment (the
-  GPU, PyTorch, ffmpeg, the attention backend). **What doesn't:** stopping and resuming, and
+  GPU, PyTorch, ffmpeg). **What doesn't:** stopping and resuming, and
   how many blocks are swapped.
 
 How much is a seed? Two seeds of the same model give outputs 37–44 dB apart
@@ -2024,8 +2045,8 @@ it.
 
 Most of seedvr2x is learnt by watching it run: each run says what it checks, what it plans and
 why, and how long it has left. This section reads a real one, from a build of seedvr2x shortly
-before 0.1.0, on an RTX 5090, a 32 GB card driving a Windows desktop, under WSL2, with
-FlashAttention 2. Another program held 13 GiB of the card, which left the plan little room. The
+before 0.1.0, on an RTX 5090, a 32 GB card driving a Windows desktop, under WSL2.
+Another program held 13 GiB of the card, which left the plan little room. The
 source is a short clip, 45 frames of 960×540 at 24000/1001 frames per second with a FLAC audio
 track and a cover picture, upscaled to a finished file at 1080p; then the same command is run
 again:
@@ -2117,7 +2138,6 @@ the blocks swapped, where one would swap fewer: [small cards](#small-cards)):
 03:35:43 plan: card: NVIDIA GeForce RTX 5090, 14.91 GiB free on the whole card by NVML: the run is held to the card's own memory, its driver giving more than the card has
 03:35:43 plan: budget: 9.91 GiB, the 14.91 GiB free less torch's limit, 0.50 GiB under it, and the reserve of 4.50 GiB left to torch's allocator beyond a step's peak; the margin of 0.60 GiB is in the reserve
 03:35:43 plan: frames: 1920x1080 padded to 1920x1104 for the model, 8,280 tokens a latent
-03:35:43 plan: attention: FlashAttention 2, which is installed
 03:35:43 plan: shots: 3, the longest of 42 frames (12 latents)
 03:35:43 plan: windows: 7 latents at most (25 frames), the longest the budget holds: 2 of 3 shots in one window, 1 join; a longer window, fewer joins; --window N caps them
 03:35:43 plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs 2 or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU time
@@ -2147,8 +2167,6 @@ why it was taken, what it costs, and the option that changes it ([GPU memory](#g
   run isn't held to.
 - **frames:** the model works on frames padded to multiples of 16 (the padding is trimmed);
   a latent of this size is 8,280 tokens, what a window's memory and time go by.
-- **attention:** FlashAttention 2; without it, PyTorch's own SDPA, which takes a little more
-  memory a window.
 - **shots:** the longest decides the windows: here 42 frames, 12 latents.
 - **windows:** the longest window the budget holds, 7 latents: the biggest lever on quality.
   The two short shots fit whole; the long one runs in two windows, 1 join.
@@ -2175,7 +2193,7 @@ why it was taken, what it costs, and the option that changes it ([GPU memory](#g
 - **torch held to:** under WSL2, the limit PyTorch is held to, past which a step is refused
   rather than lent the system's memory.
 
-A longer job on the 96 GB card, FlashAttention 2 installed, under Linux, plans otherwise: the
+A longer job on the 96 GB card, under Linux, plans otherwise: the
 960×540 copy of Sol Levante (the short of [the example](#an-example-sol-levante), 6,314 frames
 in 62 shots) to 1080p, planned by a build before 0.1.0, these lines worded as 0.1.0 words them:
 
@@ -2197,7 +2215,7 @@ give the longest shot windows of 91 latents.
 
 ```
 03:37:03 15.81 GiB of host memory pinned for the weights that leave the GPU: 36 of the DiT's blocks, the DiT's other parameters, the VAE; the DiT's last 33 blocks swapped
-03:37:03 models loaded in 80.3 s, attention: flash_attn_2
+03:37:03 models loaded in 80.3 s
 03:37:50 time estimates: the job's own steps timed once, in 44.9 s, for the time left and --until
 03:37:50 time: about 57 s on this GPU as it runs now: 14 s for 3 encodes, 14 s for 4 windows, 29 s for the decode and write of 1 segment
 03:37:50 time: then about 6 s to join the segments into the finished file
@@ -2212,7 +2230,7 @@ give the longest shot windows of 91 latents.
 
 `--plan` says more, before a job has made a unit: each `--quality` level's time, and with
 `--until` whether the job ends by then. The Sol Levante short, 4.4 minutes, planned to 1080p on
-that RTX 5090 by a build before 0.1.0, beside its desktop, without FlashAttention 2,
+that RTX 5090 by a build before 0.1.0, beside its desktop,
 `--until 07:30`, its assembly line left out (0.1.0 words it otherwise):
 
 ```

@@ -64,7 +64,7 @@ py-modules = [
 packages = ["media"]
 
 [tool.uv]
-# Linux first (DESIGN.md). FlashAttention 2 is not a dependency: see AGENTS.md, Environment.
+# Linux first (DESIGN.md).
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 # torch's CUDA support packages, at the versions numz's environment got from PyTorch's index:
 # resolved from PyPI, they came out newer (cuda-bindings 13.4.3, cuda-pathfinder 1.8.3,

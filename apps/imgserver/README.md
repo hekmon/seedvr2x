@@ -42,8 +42,7 @@ size and, if it wants, a seed. Everything else is fixed when the server starts.
   locked dependencies.
 - No ffmpeg: the server reads pictures with Pillow (a 16-bit colour PNG with TorchCodec's
   decoder, which needs no FFmpeg) and writes them with seedvr2x's own writers.
-- FlashAttention 2 is optional and not in the image: the server uses it when installed, else
-  PyTorch's SDPA, and its log says which runs.
+- The attention is PyTorch's SDPA, the one kernel; FlashAttention 2 is gone.
 
 ## Running it
 
@@ -212,8 +211,8 @@ until the warm-up has passed. Its log then says, in order:
    dynamic GGUF N blocks; --dit-model names them` (blocks alone: a picture is one latent, with
    no window). The server never changes the file it was given;
 4. the models loaded, each of seedvr2x's files read once, its SHA-256 proved at the end of its
-   load (a file of other bytes is a refused start), and the attention that runs (`flash_attn_2`
-   or `sdpa`); then the reservation, what it holds (the models, the pictures at once and each
+   load (a file of other bytes is a refused start), and the attention kernel (`sdpa`, constant);
+   then the reservation, what it holds (the models, the pictures at once and each
    one's share), the CUDA context beside it, and what fits in it: the pictures within
    `--max-size` at once;
 5. the warm-up, `--max-concurrent` pictures at `--max-size` at once, which proves the plan on the
@@ -387,7 +386,8 @@ others wait between the models.
 Each picture carries seedvr2x's record as one XMP packet (PNG's `iTXt` chunk, WebP's XMP chunk):
 the app and its version in `xmp:CreatorTool`, the source's and the output's sizes, the short side
 asked, the model files' names with their SHA-256, the seed, the colour correction, the tiles and
-the attention that ran. It holds nothing of the source's but its size, and no date, so the bytes
+the attention kernel (`sdpa`, constant). It holds nothing of the source's but its size, and no date,
+so the bytes
 are the same every time for the same picture and settings.
 
 It also marks the picture as made with a generative model, in IPTC's field for it

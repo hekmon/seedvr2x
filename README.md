@@ -65,8 +65,10 @@ uv sync
 uv run seedvr2x film.mkv -o film.1080p.mkv
 ```
 
-The first run downloads the model files (17 GB). Each run prints its plan, then the time left. A
-still picture goes through the same command:
+The first run downloads the model files (17 GB). Nothing else to build or install: the attention
+is PyTorch's own SDPA, which runs the DiT as fast as the other kernels measured, attention being 4
+to 9% of the DiT's time at SeedVR2's window lengths ([attention.md](research/docs/attention.md)).
+Each run prints its plan, then the time left. A still picture goes through the same command:
 
 ```
 uv run seedvr2x photo.jpg --resolution 2160 -o photo.2160p.png
