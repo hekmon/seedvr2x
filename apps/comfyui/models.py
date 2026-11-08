@@ -544,18 +544,24 @@ def _taken(reading: Reading) -> int:
     return reading.reported if reading.card is None else min(reading.reported, reading.card)
 
 
-def with_comfy_gone(reading: Reading, held: int) -> Reading:
-    """`reading` with the `held` bytes ComfyUI's own models have on the card counted free: the
-    reading the plan is made in, for the card as it would be without them. Each figure of the
-    reading moves by `held`, and a held run's counted memory is taken again from them
-    (memory.reading): the driver's and the card's figures less what torch is held back by and
-    the reserve."""
-    if held <= 0:
+def with_comfy_gone(reading: Reading, held: int, reserve: int = 0) -> Reading:
+    """`reading` with the `held` bytes ComfyUI's own models have on the card counted free and the
+    `reserve` ComfyUI keeps for the system counted gone: the reading the plan is made in, for the
+    card as it would be without those models and with that room left. Each figure of the reading
+    moves by `held` less `reserve` (never below 0), and a held run's counted memory is taken again
+    from them (memory.reading): the driver's and the card's figures less what torch is held back
+    by and the reserve."""
+    delta = held - reserve
+    if delta == 0:
         return reading
     if not reading.held:
-        return replace(reading, reported=reading.reported + held, counted=reading.counted + held)
-    reported = reading.reported + held
-    card = None if reading.card is None else reading.card + held
+        return replace(
+            reading,
+            reported=max(reading.reported + delta, 0),
+            counted=max(reading.counted + delta, 0),
+        )
+    reported = max(reading.reported + delta, 0)
+    card = None if reading.card is None else max(reading.card + delta, 0)
     taken = reported if card is None else min(reported, card)
     return replace(
         reading,
@@ -563,6 +569,13 @@ def with_comfy_gone(reading: Reading, held: int) -> Reading:
         card=card,
         counted=memory.counted(taken, reading),
     )
+
+
+def system_reserve() -> int:
+    """The bytes ComfyUI keeps of the card for the system and other programs, read at each run
+    (ComfyUI's startup option `--reserve-vram` replaces its default): its own loads leave them
+    free, and the plan does too."""
+    return max(int(management.extra_reserved_memory()), 0)
 
 
 def comfy_holds(device: Any, ours: Registration | None) -> int:
@@ -579,17 +592,20 @@ def comfy_holds(device: Any, ours: Registration | None) -> int:
 
 def _read(
     machine: Machine, ours: Registration | None, margin: float | None = None
-) -> tuple[Reading, Reading, int]:
+) -> tuple[Reading, Reading, int, int]:
     """The card as the plan counts it: ComfyUI's cache of freed blocks given back first (what
     torch keeps cached and unused is free by definition, and the driver's figure leaves it out),
-    then the driver's free memory read as the CLI reads it, and ComfyUI's models added to it.
+    then the driver's free memory read as the CLI reads it, ComfyUI's models added to it and the
+    room ComfyUI keeps for the system taken off (`system_reserve`).
     `margin`: the allocator's margin the probe found, which the plan's reading carries
     (Reading.margin) so that its reserves count the larger of it and the rule's share.
-    Returns (the reading for the plan, the card's own reading, what ComfyUI's models hold)."""
+    Returns (the reading for the plan, the card's own reading, what ComfyUI's models hold, the
+    room kept for the system)."""
     management.soft_empty_cache()
     own = machine.reading(machine.free())
     held = comfy_holds(machine.device, ours)
-    return with_comfy_gone(replace(own, margin=margin), held), own, held
+    reserve = system_reserve()
+    return with_comfy_gone(replace(own, margin=margin), held, reserve), own, held, reserve
 
 
 def _prepare(
@@ -1016,7 +1032,9 @@ def _session[T](
     if plan_only:
         ours = None if entry is None else entry.patcher
         # No probe runs for a plan only; the margin an earlier run of this process found counts.
-        reading, own, held = _read(machine_, ours, _probed.get((architecture.name, chosen)))
+        reading, own, held, reserve = _read(
+            machine_, ours, _probed.get((architecture.name, chosen))
+        )
         host = machine_.host()
         # Weights to be pinned by the run come out of the memory the host has available.
         counted = (
@@ -1027,6 +1045,7 @@ def _session[T](
             card=machine_.name(),
             free=own.reported,
             comfy=held,
+            reserve=reserve,
             needed=needed_free(planned.needs),
             asked=False,
             after=own.reported,
@@ -1041,7 +1060,7 @@ def _session[T](
     if keep and entry is None:
         # A refusal comes before the read of the files: the plan for the card alone, the pinned
         # copies not counted (the host is checked by the plan that follows).
-        early, _, _ = _read(machine_, None, margin)
+        early, _, _, _ = _read(machine_, None, margin)
         _plan(planner, early, None, chosen, architecture, True, handle, clip)
         entry, note = _load_kept(handle, machine_, files, architecture, preparing)
         if note:
@@ -1051,15 +1070,17 @@ def _session[T](
         logger.info("seedvr2x's models are not listed with ComfyUI any more: registering again")
         _register(entry)
 
-    reading, own, held = _read(machine_, ours, margin)
+    reading, own, held, reserve = _read(machine_, ours, margin)
     host = machine_.host()
     planned = _plan(planner, reading, host, chosen, architecture, keep, handle, clip)
     needed = needed_free(planned.needs)
-    asked = _taken(own) < needed
+    # ComfyUI's own free memory counts the room it keeps for the system: the run needs that much
+    # free beyond its plan, and is asked for it.
+    asked = max(_taken(own) - reserve, 0) < needed
     if asked:
         # The free amount wanted, in the figure ComfyUI reads (the driver's), which is above the
         # card's where NVML reports less.
-        wanted = needed + ASK_MARGIN + max(own.reported - _taken(own), 0)
+        wanted = needed + reserve + ASK_MARGIN + max(own.reported - _taken(own), 0)
         logger.info(
             "asking ComfyUI for %.2f GiB free on the card for this run (%.2f GiB free, %.2f GiB"
             " used by its models; %.2f GiB of that over what the run needs, for what its unloading"
@@ -1077,16 +1098,18 @@ def _session[T](
         # out, though this process can use it (readings, as _read).
         management.soft_empty_cache()
         after = machine_.reading(machine_.free())
-        if after.counted < planned.needs.peak + planned.needs.margin:
+        there = max(after.counted - reserve, 0)
+        if there < planned.needs.peak + planned.needs.margin:
             raise words.not_freed(
                 need=planned.needs.peak + planned.needs.margin,
-                there=after.counted,
+                there=there,
                 comfy=comfy_holds(machine_.device, ours),
             )
     room = plans.Room(
         card=machine_.name(),
         free=own.reported,
         comfy=held,
+        reserve=reserve,
         needed=needed,
         asked=asked,
         after=after.reported,

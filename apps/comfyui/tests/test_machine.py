@@ -32,6 +32,15 @@ def test_comfys_models_are_counted_free_for_a_driver_that_refuses() -> None:
     assert models.with_comfy_gone(reading, 0) is reading
 
 
+def test_the_room_kept_for_the_system_is_counted_gone_and_never_below_nothing() -> None:
+    reading = Reading(10 * GIB, None, 10 * GIB, False)
+    assert models.with_comfy_gone(reading, 5 * GIB, 2 * GIB) == Reading(
+        13 * GIB, None, 13 * GIB, False
+    )
+    assert models.with_comfy_gone(reading, 0, 2 * GIB) == Reading(8 * GIB, None, 8 * GIB, False)
+    assert models.with_comfy_gone(reading, 0, 12 * GIB) == Reading(0, None, 0, False)
+
+
 def test_comfys_models_are_counted_free_for_a_held_run_as_the_library_counts_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

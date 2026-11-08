@@ -238,3 +238,85 @@ def test_the_margin_is_asked_only_where_comfy_is_asked(machine: StandIn, tmp_pat
     assert need <= machine.free() < need + models.ASK_MARGIN
     upscale(handle(tmp_path))
     assert asks(machine) == [] and resident.loaded_size() == 12 * GIB
+
+
+def test_the_plan_counts_the_card_less_the_room_comfy_keeps_for_the_system(
+    machine: StandIn, tmp_path
+) -> None:
+    # ComfyUI's own loads leave `extra_reserved_memory` free for the desktop; so does the plan.
+    management.EXTRA_RESERVED = 2 * GIB
+    seen: list[Reading] = []
+    real = nodes.picture_planner(SETTINGS, (48, 80), PICTURE)
+
+    def planner(reading: Reading, *args: object) -> object:
+        seen.append(reading)
+        return real(reading, *args)  # type: ignore[arg-type]
+
+    with models.session(handle(tmp_path), None, planner):  # type: ignore[arg-type]
+        pass
+    assert [each.reported for each in seen] == [30 * GIB, 30 * GIB]
+    assert all(each.counted == 30 * GIB for each in seen)
+
+
+def test_the_room_kept_for_the_system_is_asked_of_comfy_and_nothing_twice(
+    machine: StandIn, tmp_path
+) -> None:
+    resident = comfy_model(12 * GIB)
+    need, _ = needed(30 * GIB, machine)
+    reserve = 2 * GIB
+    management.EXTRA_RESERVED = reserve
+    # Free beyond the reserve: exactly the plan's need, so nothing is asked; a byte less, and it is.
+    management.card.outside = 32 * GIB - 12 * GIB - need - reserve
+    assert machine.free() == need + reserve
+    upscale(handle(tmp_path))
+    assert asks(machine) == [] and resident.loaded_size() == 12 * GIB
+    management.card.outside += 1
+    upscale(handle(tmp_path))
+    ((wanted, _device, _kept),) = asks(machine)
+    assert wanted == need + reserve + models.ASK_MARGIN
+    assert machine.free() == wanted
+
+
+def test_a_card_short_of_the_plan_once_the_reserve_is_kept_is_refused_in_the_nodes_words(
+    machine: StandIn, tmp_path
+) -> None:
+    stuck = comfy_model(12 * GIB, stuck=True)
+    need, _ = needed(32 * GIB, machine)
+    # Room for the plan without the reserve, not with it, and nothing ComfyUI can free.
+    management.card.outside = 32 * GIB - 12 * GIB - need
+    management.EXTRA_RESERVED = 1 * GIB
+    with pytest.raises(words.Refused) as refused:
+        upscale(handle(tmp_path))
+    assert "--" not in str(refused.value)
+    assert stuck.loaded_size() == 0
+
+
+def test_a_reserve_over_the_free_memory_leaves_nothing_and_never_less(
+    machine: StandIn, tmp_path
+) -> None:
+    management.card.outside = 30 * GIB
+    management.EXTRA_RESERVED = 5 * GIB
+    seen: list[Reading] = []
+
+    def planner(reading: Reading, *args: object) -> object:
+        seen.append(reading)
+        raise words.Refused("stop here")
+
+    with pytest.raises(words.Refused):
+        with models.session(handle(tmp_path), None, planner):  # type: ignore[arg-type]
+            pass
+    assert seen and all(each.reported == 0 and each.counted == 0 for each in seen)
+
+
+def test_the_card_line_says_the_room_kept_for_the_system_only_where_there_is_one(
+    machine: StandIn, tmp_path
+) -> None:
+    management.EXTRA_RESERVED = 700 * 1024**2
+    text = upscale(handle(tmp_path))
+    assert "32.00 GiB free; ComfyUI keeps 0.68 GiB of it for the system, its own models use" in text
+    assert "and seedvr2x counts on 31.32 GiB" in text
+    management.reset()
+    models.reset()
+    models.use(machine)
+    text = upscale(handle(tmp_path))
+    assert "for the system" not in text and "ComfyUI's own models use 0.00 GiB" in text

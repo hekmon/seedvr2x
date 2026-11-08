@@ -1126,7 +1126,11 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   stand-in card. `tests/test_registration.py` holds the one patcher (its sizes, strong
   references, Unload models and POST /free dropping the weights, the next run loading again,
   keep in RAM off, `--disable-smart-memory`); `tests/test_room.py` the room (the plan made for the
-  card without ComfyUI's models, `free_memory` asked for the plan's largest phase plus
+  card without ComfyUI's models and less the room ComfyUI keeps for the system
+  (`extra_reserved_memory`, read at each run; the stand-in's `EXTRA_RESERVED` is 0 unless a test
+  sets it, so that the other tests' figures stay theirs; asked of ComfyUI beside the plan's need,
+  not twice; a card short once it is kept refused; a reserve over the free memory counting 0; the
+  card line saying it only where there is one), `free_memory` asked for the plan's largest phase plus
   `ASK_MARGIN` (a partial unload's buffer) and only when the card has less than the phase alone,
   never more, seedvr2x's registration kept, a card still short of the phase refused, the
   library's command-line allocator and limit warnings left out of ComfyUI's console for the

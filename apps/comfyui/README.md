@@ -227,7 +227,8 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   the room: the next run then reads the files again, and says so on the node. Choosing another
   file frees the first one's memory before the second is pinned.
 - **On the card, only while a node runs.** The plan counts on the card as it would be without
-  ComfyUI's models, and ComfyUI is asked to free only the room the plan needs, with 0.25 GiB over
+  ComfyUI's models and less the room ComfyUI keeps for the system (its `--reserve-vram`, 0.4 to
+  0.7 GiB by default), and ComfyUI is asked to free only the room the plan needs, with 0.25 GiB over
   it for the buffer its partial unloads keep: its models stay where both fit. The card is freed
   when the node ends, on Cancel and on an error too.
 - **A driver that lends system memory** (Windows, WSL2) borrows your computer's RAM where the card

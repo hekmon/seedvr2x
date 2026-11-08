@@ -374,7 +374,8 @@ class Room:
     free memory once it had (`after`; `free` where nothing was asked), the system memory the host
     had available when the plan was made (`host`, None: unread), whether the run is a plan
     only, which asks ComfyUI for nothing and loads nothing, and the bytes asked of ComfyUI over
-    `needed` where it was asked (`margin`, models.ASK_MARGIN)."""
+    `needed` where it was asked (`margin`, models.ASK_MARGIN), and the room ComfyUI keeps of the
+    card for the system, which the plan leaves free (`reserve`, models.system_reserve)."""
 
     card: str
     free: int
@@ -385,6 +386,7 @@ class Room:
     host: int | None = None
     plan_only: bool = False
     margin: int = 0
+    reserve: int = 0
 
 
 def gib(count: float) -> str:
@@ -418,8 +420,13 @@ def _spare(reading: Reading, reserves: Mapping[str, int] | None) -> list[str]:
 
 
 def _room(room: Room, reading: Reading, reserves: Mapping[str, int] | None = None) -> list[str]:
+    kept = (
+        f"ComfyUI keeps {gib(room.reserve)} of it for the system, its own models use"
+        if room.reserve
+        else "ComfyUI's own models use"
+    )
     lines = [
-        f"graphics card: {room.card}, {gib(room.free)} free; ComfyUI's own models use"
+        f"graphics card: {room.card}, {gib(room.free)} free; {kept}"
         f" {gib(room.comfy)} of it, and seedvr2x counts on {gib(reading.counted)}",
         *_spare(reading, reserves),
     ]

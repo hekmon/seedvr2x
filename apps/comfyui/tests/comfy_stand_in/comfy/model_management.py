@@ -54,6 +54,10 @@ interrupt_processing = False
 # a buffer (93.84 MB in the log of the proof run) and frees to the figure less it. 0 unless a test
 # sets it.
 PARTIAL_BUFFER = 0
+# The room ComfyUI v0.44.2 keeps of the card for the system (extra_reserved_memory: 400 MB, 600 MB
+# on Windows and 100 MB more on a card over 15 GB, replaced by `--reserve-vram`). 0 unless a test
+# sets it, so that the figures of the tests that do not concern it stay their own.
+EXTRA_RESERVED = 0
 # What the tests read back.
 free_calls: "list[tuple[float, Any, list[LoadedModel]]]" = []
 loads: list[int] = []  # the size of each batch load_models_gpu was asked for
@@ -64,7 +68,13 @@ device = torch.device("cuda", 0)
 
 def reset() -> None:
     """The stand-in as new, between tests."""
-    global DISABLE_SMART_MEMORY, MAX_PINNED_MEMORY, PARTIAL_BUFFER, interrupt_processing, device
+    global \
+        DISABLE_SMART_MEMORY, \
+        EXTRA_RESERVED, \
+        MAX_PINNED_MEMORY, \
+        PARTIAL_BUFFER, \
+        interrupt_processing, \
+        device
     current_loaded_models.clear()
     free_calls.clear()
     loads.clear()
@@ -73,6 +83,7 @@ def reset() -> None:
     DISABLE_SMART_MEMORY = False
     MAX_PINNED_MEMORY = 64 * GIB
     PARTIAL_BUFFER = 0
+    EXTRA_RESERVED = 0
     interrupt_processing = False
     device = torch.device("cuda", 0)
     card.reset()
@@ -104,6 +115,10 @@ def throw_exception_if_processing_interrupted() -> None:
         if interrupt_processing:
             interrupt_processing = False
             raise InterruptProcessingException()
+
+
+def extra_reserved_memory() -> int:
+    return EXTRA_RESERVED
 
 
 def get_torch_device() -> Any:
