@@ -214,7 +214,11 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   upscale what ComfyUI's own decode gives, 8 bits a channel, where the command line converts the
   video to 16 bits a channel first. The two outputs differ by a fraction of a level: 0.26 of one
   level (of 255) at most on the clip measured. From an RGB source (a lossless RGB
-  video) the nodes give the command line's frames bit for bit.
+  video) the nodes give the command line's frames bit for bit where both run the same torch,
+  its CUDA build and the same attention kernel. Across versions and platforms the frames
+  differ, as any two environments' do: ComfyUI's torch 2.12.1 under Windows against the
+  command line's 2.14.1 under WSL2, both on SDPA, gave 38.7 and 43.7 dB of PSNR on a clip's
+  two shots, each side repeating its own frames bit for bit.
 
 ## Memory
 
