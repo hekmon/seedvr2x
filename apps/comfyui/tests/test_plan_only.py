@@ -99,7 +99,7 @@ def test_the_plan_only_text_is_the_text_of_the_run(machine: StandIn, tmp_path) -
         return [
             line
             for line in text.splitlines()
-            if line.split(":")[0] in {"attention", "blocks swapped", "encode tile", "decode tile"}
+            if line.split(":")[0] in {"blocks swapped", "encode tile", "decode tile"}
         ]
 
     assert settings_lines(only) == settings_lines(ran) and settings_lines(ran)
@@ -141,7 +141,7 @@ def test_weights_a_run_would_pin_come_out_of_the_memory_the_host_has_for_the_pla
 ) -> None:
     seen: list[int | None] = []
 
-    def planner(reading, host, attention, architecture, held):  # type: ignore[no-untyped-def]
+    def planner(reading, host, architecture, held):  # type: ignore[no-untyped-def]
         seen.append(host)
         raise Seen
 
@@ -150,12 +150,12 @@ def test_weights_a_run_would_pin_come_out_of_the_memory_the_host_has_for_the_pla
         (kept, 64 * GIB - models.pinned_size(kept)),
         (handle(tmp_path, keep="off"), 64 * GIB),
     ):
-        with pytest.raises(Seen), models.session(h, None, planner, plan_only=True):
+        with pytest.raises(Seen), models.session(h, planner, plan_only=True):
             pass
         assert seen[-1] == expected
     # Weights already pinned are not in the available figure: nothing taken off it.
     upscale_image(kept, SETTINGS, pictures(), RESOLUTION, "1")
-    with pytest.raises(Seen), models.session(kept, None, planner, plan_only=True):
+    with pytest.raises(Seen), models.session(kept, planner, plan_only=True):
         pass
     assert seen[-1] == 64 * GIB
 
@@ -172,7 +172,7 @@ def test_a_kept_models_plan_only_does_not_load_register_or_place_the_weights(
 
 
 def test_the_models_of_a_plan_only_run_are_refused() -> None:
-    run = models.Run(None, None, None, "sdpa", models.Handle("a"), None, ())  # type: ignore[arg-type]
+    run = models.Run(None, None, None, models.Handle("a"), None, ())  # type: ignore[arg-type]
     with pytest.raises(RuntimeError, match="plan only"):
         run.models  # noqa: B018
 

@@ -57,7 +57,7 @@ class Gauges:
 
 class Metrics:
     """The counters the server keeps, thread-safe, and their text. `info` labels the info metric:
-    the version, the model files by name, the attention kernel."""
+    the version, the model files by name, the attention kernel (constant: "sdpa", provenance)."""
 
     def __init__(self, info: dict[str, str] | None = None) -> None:
         self._lock = threading.Lock()

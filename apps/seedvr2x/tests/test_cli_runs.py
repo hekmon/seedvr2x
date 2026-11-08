@@ -428,7 +428,8 @@ def test_plan_says_the_runs(
         options = [] if runs is None else ["--quality", LEVEL[runs]]
         assert upscale(tmp_path, source_path, "out", *JOB, *options, "--plan", "more.txt") == 0
         lines = without_disk(plan_lines(caplog))
-    assert len(base) == 16 and quality_line(base) == STANDARD_SAID
+    # 15 lines since the attention line went with FlashAttention 2 (2026-11-08).
+    assert len(base) == 15 and quality_line(base) == STANDARD_SAID
     if runs is None:
         assert lines == base
         return

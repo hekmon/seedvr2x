@@ -43,7 +43,6 @@ class StandIn:
 
     vae_models: model.Models
     dit_format: Architecture = peaks.FP16
-    attention_name: str = peaks.FLASH_ATTN_2
     host_bytes: int | None = 64 * GIB
     lends: bool = False
     allocator_name: str = "cudaMallocAsync"
@@ -56,7 +55,7 @@ class StandIn:
     held_card: int | None = None
     loads: list[ModelPlan] = field(default_factory=list[ModelPlan])
     made: list[model.Models] = field(default_factory=list[model.Models])
-    probes: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    probes: list[str] = field(default_factory=list[str])
     headers: list[Path] = field(default_factory=list[Path])
     events: list[Any] = field(default_factory=list[Any])
     refuse_load: BaseException | None = None
@@ -103,15 +102,12 @@ class StandIn:
     def host(self) -> int | None:
         return self.host_bytes
 
-    def attention(self) -> str:
-        return self.attention_name
-
     def dit_model(self, path: Path) -> Architecture:
         self.headers.append(path)
         return self.dit_format
 
-    def probe(self, architecture: Architecture, attention: str) -> float | None:
-        self.probes.append((architecture.name, attention))
+    def probe(self, architecture: Architecture) -> float | None:
+        self.probes.append(architecture.name)
         return self.allocator_margin
 
     def load(
@@ -129,7 +125,6 @@ class StandIn:
                 progress(each.name, READ_PIECE, 2 * READ_PIECE)
                 progress(each.name, 2 * READ_PIECE, 2 * READ_PIECE)
         loaded = standin_models(self.vae_models, self.events, held=plan == passes_held())
-        loaded.attention = self.attention_name  # pyright: ignore[reportAttributeAccessIssue]
         self.made.append(loaded)
         return loaded
 
@@ -154,7 +149,6 @@ def standin_models(vae_models: model.Models, events: list[Any], *, held: bool) -
     made.__dict__.update(vars(pipeline_models(vae_models, events)))
     made.runner.dit = torch.nn.ModuleList()
     made.text_pos = made.text_neg = torch.zeros(2)
-    made.attention = peaks.FLASH_ATTN_2
     made.parts = {"block": SimpleNamespace(size=1024)} if held else None
     made.vae = None
     made.on_card = False
@@ -356,7 +350,6 @@ def inputs(settings: plans.Settings, *, video: bool = False) -> dict[str, Any]:
     socket gives it, in the library's units (an unconnected optional input is not given); the
     colour correction a BOOLEAN."""
     found: dict[str, Any] = {
-        "attention": plans.AUTO if settings.attention is None else settings.attention,
         "color_correction": settings.split,
         "seed": settings.seed,
     }

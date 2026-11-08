@@ -23,8 +23,8 @@ What is covered, all of it the library's (core imports nothing of the CLI):
 - shot_plan.plan over a grid of 11 cards (the free memory seedvr2x finds on each,
   tests/test_shot_plan.py's our_free) x 10 targets (540p to 4K from 1920x1080 and from a
   1916x1080 crop, as frames.target_size gives them) x 5 sets of shots x 4 figures of system
-  memory, then a stride through the product of every dimension: these, and pins, split, attention
-  kernel, compiled VAE and the kind of free figure (a plain int, memory.reading's, a held
+  memory, then a stride through the product of every dimension: these, and pins, split,
+  compiled VAE and the kind of free figure (a plain int, memory.reading's, a held
   Reading, a held Reading on a card with less free than the driver says, the card's whole size
   or what seedvr2x finds of it); each case its Plan and its Peaks, or the refusal with its
   instead, phase and shortfall;
@@ -139,7 +139,7 @@ QUALITIES = ("standard", "enhanced", "maximum")
 @dataclass(frozen=True)
 class Case:
     """A case's job as plan takes it, for the hooks: its number, the free memory, the target,
-    shots and pins, the system memory, split, the attention kernel, the compiled VAE and the
+    shots and pins, the system memory, split, the compiled VAE and the
     quality (a recorded case's is the default's)."""
 
     index: int
@@ -149,7 +149,6 @@ class Case:
     pins: Pins
     host: int | None
     split: bool
-    attention: str
     compile_vae: bool
     quality: str = QUALITIES[0]
 
@@ -276,25 +275,21 @@ class Matrix:
         pins_label: str,
         host: int | None,
         split: bool,
-        attention: str,
         compile_vae: bool,
         quality: str,
     ) -> None:
         free, free_label = self.free_figure(free_kind, card, exact)
         shots, pins = self.shots(shots_label), PIN_SETS[pins_label]
-        case = Case(
-            *(index, free, target[1], shots, pins, host, split, attention, compile_vae, quality)
-        )
+        case = Case(*(index, free, target[1], shots, pins, host, split, compile_vae, quality))
         self.emit(
             f"## case {index}: card={card} free={free_label} target={target[0]}={target[1]}"
             f" shots={shots_label} pins={pins_label} host={host} split={split}"
-            f" attention={attention} compile={compile_vae}{self.described(case)}"
+            f" compile={compile_vae}{self.described(case)}"
         )
         ok, result = self.attempt(
             lambda: plan(
                 *(free, target[1], shots, pins, host),
                 split=split,
-                attention=attention,
                 compile_vae=compile_vae,
                 dit_model=self.dit,
             )
@@ -317,13 +312,16 @@ class Matrix:
                         index += 1
                         self.plan_case(
                             *(index, 0, card, False, target, shots_label, "none", host),
-                            *(False, peaks.FLASH_ATTN_2, False, QUALITIES[0]),
+                            *(False, False, QUALITIES[0]),
                         )
         self.emit(f"## main grid: {index} cases")
-        attentions = (peaks.FLASH_ATTN_2, peaks.SDPA)
-        # Mixed radix, the last digit varying fastest. Two digits change no plan: numz's padding
+        # Mixed radix, the last digit varying fastest. Three digits change no plan: numz's padding
         # (retired on 2026-11-04), whose cases are skipped, kept so that the stride samples the
-        # cases it sampled before; and the quality, which only the CLI's lines say.
+        # cases it sampled before; the attention kernel (retired on 2026-11-08, FlashAttention 2
+        # gone), whose digit is ignored and not skipped, so that the stride samples exactly the
+        # cases it sampled before and every case keeps its number (the two values give the same
+        # plan: the cases it made twice are made twice); and the quality, which only the CLI's
+        # lines say.
         radices = [len(grid.cards), 2, len(self.targets), len(grid.shot_sets), len(PIN_SETS)]
         radices += [len(grid.hosts), 2, 2, 2, 2, 4, len(QUALITIES)]
         total = 1
@@ -337,14 +335,14 @@ class Matrix:
             for radix in reversed(radices):
                 number, digit = divmod(number, radix)
                 digits.append(digit)
-            c, e, t, s, p, h, sp, at, co, retired, k, q = reversed(digits)
+            c, e, t, s, p, h, sp, _attention, co, retired, k, q = reversed(digits)
             if retired:
                 continue
             sampled += 1
             index += 1
             self.plan_case(
                 *(index, k, grid.cards[c], bool(e), self.targets[t], list(grid.shot_sets)[s]),
-                *(list(PIN_SETS)[p], grid.hosts[h], bool(sp), attentions[at], bool(co)),
+                *(list(PIN_SETS)[p], grid.hosts[h], bool(sp), bool(co)),
                 QUALITIES[q],
             )
         self.emit(f"## sampled: {grid.sampled} cases of {total}")
@@ -379,7 +377,6 @@ class Matrix:
     ) -> int:
         shots = self.shots(shots_label)
         options: dict[str, Any] = {"split": split, "dit_model": self.dit}
-        options["attention"] = peaks.FLASH_ATTN_2
         ok, first = self.attempt(
             lambda: plan(
                 *(our_free(source), target[1], shots, Pins(), host),
@@ -401,7 +398,7 @@ class Matrix:
             )
             case = Case(
                 *(index, our_free(card), target[1], shots, Pins(), host, split),
-                *(options["attention"], kept.compile_vae),
+                kept.compile_vae,
             )
             self.recording(kept, case)
             try:
@@ -438,25 +435,18 @@ class Matrix:
         def tokens(padded: tuple[int, int]) -> list[int]:
             return [peaks.tokens(padded, latents) for latents in (1, 2, 13, 41)]
 
-        attentions = (peaks.FLASH_ATTN_2, peaks.SDPA)
         phases: tuple[Phase, ...] = ("encode", "dit", "decode")
         for padded in paddeds:
             line(f"tokens{padded}", tokens, padded)
-            for latents, swapped, vae_in_dit, attention in product(
-                (1, 2, 3, 6, 12, 20, 41, 80), (0, 3, 12, 36), (True, False), attentions
+            for latents, swapped, vae_in_dit in product(
+                (1, 2, 3, 6, 12, 20, 41, 80), (0, 3, 12, 36), (True, False)
             ):
                 line(
-                    f"dit_peak{padded, latents, swapped, vae_in_dit, attention}",
+                    f"dit_peak{padded, latents, swapped, vae_in_dit}",
                     peaks.dit_peak,
-                    *(padded, latents, swapped, vae_in_dit, attention),
+                    *(padded, latents, swapped, vae_in_dit),
                     dit_model=dit,
                 )
-            line(
-                f"dit_peak{padded, 5, 0, True, 'bogus'}",
-                peaks.dit_peak,
-                *(padded, 5, 0, True, "bogus"),
-                dit_model=dit,
-            )
             for name, function in (
                 ("attention_layouts", peaks.attention_layouts),
                 ("attention_windows", peaks.attention_windows),

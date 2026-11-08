@@ -153,7 +153,6 @@ ASKED: list[object] = []
 # The stand-in's models: the CPU, and the VAE's slicing, which the encode and split's reference
 # follow (model.encode_slices).
 STAND_IN_MODELS = SimpleNamespace(
-    attention="none",
     device=torch.device("cpu"),
     runner=SimpleNamespace(vae=SimpleNamespace(use_slicing=True, slicing_sample_min_size=4)),
     enter=ENTERED.append,
@@ -261,8 +260,7 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     # The planner's budget: the free memory's reading as the command line takes it
     # (cli._free_memory), its first tensor and its warm-up on the stand-in's device, the driver's
     # figures the stand-in's; the system memory available a figure of its own, not this
-    # machine's; the attention backend FlashAttention 2, whose fit the plans here are counted
-    # by, on a machine without it too (cli._attention); and the DiT's file's format fp16, the
+    # machine's; and the DiT's file's format fp16, the
     # stand-in's file empty (cli._dit_model; test_int8_cli.py runs an int8 one).
     free_memory = cli._free_memory  # pyright: ignore[reportPrivateUsage]
     ASKED.clear()
@@ -280,7 +278,6 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     patch(torch.cuda, "mem_get_info", lambda device: (FREE, TOTAL))
     patch(cli, "_free_memory", read_free)
     patch(cli, "_host_available", lambda: HOST)
-    patch(cli, "_attention", lambda: "flash_attn_2")
     patch(cli, "_dit_model", lambda path: peaks.FP16)
     patch(model, "load_models", load)
     patch(model, "nvidia_driver", lambda: "a stand-in")
@@ -1038,12 +1035,11 @@ def test_plan_recorded_and_phases_entered(
         "scratch_allowance": 0,
         "free": FREE,
         # A driver that refuses: what it reports is what the plan counts on; the whole card's
-        # free memory isn't read. And the attention backend the DiT's peak is predicted for.
+        # free memory isn't read.
         "driver_free": FREE,
         "card_free": None,
         # No reserve on a driver that refuses.
         "reserve": None,
-        "attention": "flash_attn_2",
         "dit_format": "fp16",
         "budget": FREE - planner.MARGIN,
         "encode_peak": peaks.encode_peak(PADDED),
@@ -1902,7 +1898,6 @@ def test_plan_said(
         " left to the desktop and other programs; no reserve, the driver refusing memory the card"
         " doesn't have",
         "plan: frames: 128x96 padded to 128x128 for the model, 64 tokens a latent",
-        "plan: attention: FlashAttention 2, which is installed",
         "plan: shots: 3, the longest of 21 frames (6 latents)",
         "plan: windows: 5 latents at most (17 frames), the longest run 4 latents, pinned by"
         " --window: 2 of 3 shots in one window, 1 join; a longer window, fewer joins; --window N"
@@ -2060,7 +2055,6 @@ def test_one_file_plans_as_a_directory(
     # plan alike, --plan's as its run's, the planner told nothing of which output it is. JOB's
     # last shot, 6 latents in two windows of 4: the DiT's phase takes a window's peak.
     asked: list[set[str]] = []
-    backends: list[str] = []
     predicted: list[int] = []
     plan = planner.plan
 
@@ -2070,7 +2064,6 @@ def test_one_file_plans_as_a_directory(
         # plans the same job again in theirs (planner.smaller_swaps), not counted here.
         if options["dit_model"] is peaks.FP16:
             asked.append(set(options))
-            backends.append(options["attention"])
             predicted.append(made[1].dit)
         return made
 
@@ -2082,10 +2075,7 @@ def test_one_file_plans_as_a_directory(
     assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", listed) == 0
     # --compile's setting is asked of the planner for every job (shot_plan.plan's compile_vae),
     # which is no output's own: the three alike.
-    assert asked == [{"split", "recorded", "attention", "compile_vae", "dit_model"}] * 3
-    # Each is planned for the attention backend its run takes (cli._attention, the stand-in's
-    # here).
-    assert backends == ["flash_attn_2"] * 3
+    assert asked == [{"split", "recorded", "compile_vae", "dit_model"}] * 3
     assert predicted == [peaks.dit_peak(PADDED, 4)] * 3
 
 
@@ -2343,56 +2333,6 @@ def test_resumed_with_other_memory(
     }
     assert content["plan"]["memory"]["free"] == less != started["plan"]["memory"]["free"]
     assert [shot["windows"] for shot in content["shots"]] == [[[0, 2]], [[0, 1]], [[0, 6]]]
-    assert indexes(tmp_path / "out" / "seg_000000.mkv") == list(range(25))
-
-
-def test_resumed_on_another_attention_backend(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    steps: Steps,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # The plan's memory is planned again at each start for the attention backend of that
-    # day's run (cli._attention), as for the memory free that day: a job begun with
-    # FlashAttention 2 and taken up without it keeps its shape, and where its weights are is
-    # counted by SDPA's fit, recorded with the next unit made. Since the lean attention
-    # (2026-11-06) FlashAttention 2 and SDPA give the same peaks to the MiB (peaks.py), so the
-    # memory that holds the 6-latent window with every weight on the GPU by one holds it by the
-    # other: the shape stays, and the record says the backend of that day.
-    levels(caplog, logging.INFO)
-    source_path = job(tmp_path, monkeypatch)
-    options = JOB[:2]
-    exact = peaks.dit_peak(PADDED, 6) + planner.MARGIN
-    free_memory(monkeypatch, exact)
-    steps.stop = "encode 4"
-    stopped(tmp_path, source_path, "out", *options)
-    manifest = tmp_path / "out" / "manifest.json"
-    started = json.loads(manifest.read_text())
-    assert untimed(started["plan"]) == plan_record(
-        *planner.plan(exact, TARGET, JOB_SHOTS, Pins(), HOST)
-    )
-    memory = started["plan"]["memory"]
-    assert (memory["attention"], memory["swapped_blocks"], memory["vae_in_dit"]) == (
-        "flash_attn_2",
-        0,
-        True,
-    )
-    monkeypatch.setattr(cli, "_attention", lambda: "sdpa")
-    steps.stop = None
-    caplog.clear()
-    assert upscale(tmp_path, source_path, "out", *options) == 0
-    content = json.loads(manifest.read_text())
-    again = planner.plan(exact, TARGET, JOB_SHOTS, Pins(), HOST, recorded=Plan(6), attention="sdpa")
-    assert (again[0].window, again[0].swapped, again[0].vae_in_dit) == (6, 0, True)
-    assert untimed(content["plan"]) == plan_record(*again)
-    assert content["plan"]["memory"]["attention"] == "sdpa"
-    shape = {
-        key: value for key, value in content["plan"].items() if key not in ("memory", "timings")
-    }
-    assert shape == {
-        key: value for key, value in started["plan"].items() if key not in ("memory", "timings")
-    }
-    assert "plan: attention: PyTorch's SDPA, FlashAttention 2 not being installed" in caplog.text
     assert indexes(tmp_path / "out" / "seg_000000.mkv") == list(range(25))
 
 
@@ -3494,7 +3434,7 @@ def test_tile_pin_beyond_the_measured_sizes_warned_of(
 
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LARGER, *TILE_PINS) == 0
     assert (
-        warned() == [] and len(plan_lines(caplog)) == 18
+        warned() == [] and len(plan_lines(caplog)) == 17
     )  # a line a choice (planner.said), the disk's too
     monkeypatch.setattr(peaks, "TILE_MAX", 576)
     said = (
@@ -4672,6 +4612,54 @@ def test_another_job_refused(
     steps.stop = None
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert steps.calls == ["window 4:1", "decode 4"]
+
+
+def test_a_job_begun_with_flash_attention_2_is_an_environment_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # seedvr2x dropped FlashAttention 2 (2026-11-08): the environment keeps its "attention"
+    # entry, constant ("sdpa"), so that a job's record of the kernel is compared as every other
+    # part of its environment is. A job begun before the change is refused first as another job,
+    # its settings' code hash being another (settings.code); this holds the comparison itself,
+    # on a job of this code whose environment says what one begun with FlashAttention 2
+    # recorded (the kernel "flash_attn_2" and the version of flash_attn). The job
+    # stopped with units left and its manifest made to say what such a job recorded, then
+    # resumed without the flag: refused as another job whose environment alone differs, the
+    # difference named (environment.attention, and the flash_attn entry this code no longer
+    # records) and --accept-env-change offered, nothing made and the manifest as it was; with
+    # the flag taken up and finished, its manifest recording the change and its segments'
+    # record (the stream tags) saying attention "sdpa".
+    levels(caplog, logging.INFO)
+    source_path = job(tmp_path, monkeypatch)
+    options = (*JOB, "--format", "yuv420p10le")
+    steps.stop = "decode 4"
+    stopped(tmp_path, source_path, "out", *options)
+    out = tmp_path / "out"
+    manifest = out / "manifest.json"
+    content = json.loads(manifest.read_text())
+    assert (
+        content["environment"]["attention"] == "sdpa" and "flash_attn" not in content["environment"]
+    )
+    content["environment"]["attention"] = "flash_attn_2"
+    content["environment"]["flash_attn"] = "2.8.3"
+    manifest.write_text(json.dumps(content))
+    kept = written_as(manifest)
+    steps.calls.clear()
+    text = refused(tmp_path, source_path, caplog, *options)
+    assert 'environment.attention: "flash_attn_2" -> "sdpa"' in text
+    assert 'environment.flash_attn: "2.8.3" -> null' in text
+    assert "Only its environment differs: --accept-env-change resumes it anyway" in text
+    assert steps.calls == [] and written_as(manifest) == kept
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *options, "--accept-env-change") == 0
+    changes = json.loads(manifest.read_text())["environment_changes"]
+    assert [change["before"]["attention"] for change in changes] == ["flash_attn_2"]
+    assert changes[0]["after"]["attention"] == "sdpa"
+    for name in ("seg_000000.mkv", "seg_000001.mkv"):
+        assert stream_tags_of(out / name).get("SEEDVR2X_ATTENTION") == "sdpa", name
 
 
 @pytest.mark.parametrize("mode", ["numz_padding", "numz_draw", "numz_tail"])
@@ -6232,7 +6220,6 @@ def test_a_job_with_only_its_assembly_left_in_another_environment(
     # 2026-10-12). Under another stack or another ffmpeg it is refused without the flag as any
     # resume, nothing made; with it, the difference is said and the file assembled, the first
     # pass run again under another ffmpeg.
-    from seedvr2x import model
 
     levels(caplog, logging.INFO)
     source_path = job(tmp_path, monkeypatch)
@@ -6250,12 +6237,10 @@ def test_a_job_with_only_its_assembly_left_in_another_environment(
         monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another card")
         nothing_asked_of_the_gpu(monkeypatch)
     elif change == "stack":
-        # The other of the two kernels: the record (DESIGN.md, The record in each output) holds
-        # the manifest's attention once a job is accepted in the new environment, and refuses a
-        # name that is neither.
-        other = peaks.SDPA if recorded["attention"] == peaks.FLASH_ATTN_2 else peaks.FLASH_ATTN_2
-        monkeypatch.setattr(model, "attention_backend", lambda: other)
-        differs = f'environment.attention: "{recorded["attention"]}" -> "{other}"'
+        # Another torch: the stack (the one attention kernel is a constant of the record, and
+        # an environment begun with FlashAttention 2 is test_a_job_begun_with_flash_attention_2's).
+        monkeypatch.setattr(torch, "__version__", "0.0-another")
+        differs = f'environment.torch: "{recorded["torch"]}" -> "0.0-another"'
     else:
         monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
         differs = f'environment.ffmpeg: "{recorded["ffmpeg"]}" -> "n0.0-another"'
@@ -6697,12 +6682,10 @@ def test_finished_job_in_another_environment(
         monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: pytest.fail("asked"))
         monkeypatch.setattr(model, "nvidia_driver", lambda: pytest.fail("asked"))
     elif change == "stack":
-        # The other of the two kernels: the record (DESIGN.md, The record in each output) holds
-        # the manifest's attention once a job is accepted in the new environment, and refuses a
-        # name that is neither.
-        other = peaks.SDPA if recorded["attention"] == peaks.FLASH_ATTN_2 else peaks.FLASH_ATTN_2
-        monkeypatch.setattr(model, "attention_backend", lambda: other)
-        differs = f'environment.attention: "{recorded["attention"]}" -> "{other}"'
+        # Another torch: the stack (the one attention kernel is a constant of the record, and
+        # an environment begun with FlashAttention 2 is test_a_job_begun_with_flash_attention_2's).
+        monkeypatch.setattr(torch, "__version__", "0.0-another")
+        differs = f'environment.torch: "{recorded["torch"]}" -> "0.0-another"'
     else:
         monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
         differs = f'environment.ffmpeg: "{recorded["ffmpeg"]}" -> "n0.0-another"'
@@ -9107,7 +9090,7 @@ def recorded_tags(
         "SEEDVR2X_COLOR_CORRECTION": settings["color_correction"],
         "SEEDVR2X_ENCODE_TILE": side(plan["encode_tiles"]),
         "SEEDVR2X_DECODE_TILE": side(plan["decode_tiles"]),
-        "SEEDVR2X_ATTENTION": content["environment"]["attention"],
+        "SEEDVR2X_ATTENTION": "sdpa",
         "SEEDVR2X_WINDOW": str(plan["window"] or 0),
         "SEEDVR2X_QUALITY": settings["quality"],
         "SEEDVR2X_COMPILE": "true" if plan["compile_vae"] else "false",

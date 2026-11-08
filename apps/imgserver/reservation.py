@@ -172,7 +172,7 @@ class ReservationRefused(Refusal):
 class Asked:
     """What the start asks of the plan: the bound (long, short) of --max-size, the largest input
     in pixels, the pictures at once and waiting, the reading of the card and the host's memory
-    available (None: unread), the attention kernel and the DiT's format, and the pins (one
+    available (None: unread) and the DiT's format, and the pins (one
     picture at a time only); `dit_file`, the DiT file's name ("" says unknown), whose smaller
     files a refused start names where they would fit (make); `model_dir`, whether the server was
     given --model-dir, which that way out then says (smaller_way)."""
@@ -183,7 +183,6 @@ class Asked:
     queue: int
     reading: Reading
     host_available: int | None
-    attention: str
     dit_model: Architecture
     pins: Pins = still_plan.NO_PINS
     dit_file: str = ""
@@ -226,7 +225,6 @@ def _plan(asked: Asked, bound: Bound, count: int, reading: Reading, pins: Pins) 
         asked.host_available,
         process=host_process(count, asked.queue, asked.input_pixels, bound),
         input_pixels=asked.input_pixels,
-        attention=asked.attention,
         dit_model=asked.dit_model,
         split=True,
         pins=pins,

@@ -88,19 +88,15 @@ LEAN_PADDED = {1104: OURS_1080, 2192: OURS_4K}
     LEAN_WINDOWS,
     ids=[f"{r}-{n}-{s}" for r, n, s, _, _ in LEAN_WINDOWS],
 )
-@pytest.mark.parametrize("attention", [peaks.FLASH_ATTN_2, peaks.SDPA])
-def test_dit_fit(
-    rows: int, latents: int, swapped: int, vae_on_gpu: bool, peak: int, attention: str
-) -> None:
+def test_dit_fit(rows: int, latents: int, swapped: int, vae_on_gpu: bool, peak: int) -> None:
     # The lean attention's 19 measured windows (hold_probe.py, 2026-11-06; the fixture's table):
     # the prediction is at or over each measure, and near it. The margin is the constant of
     # DIT_ATTENTION that bounds every point, 0.081 GiB, less each point's own distance from the
     # line: 0.0012 GiB at the 1-latent 1080p window (whose peak is elsewhere in the step) and
-    # 0.0738 to 0.0746 at the others. FlashAttention 2 and SDPA gave the same peaks, and one fit
-    # serves both (the plain attention's SDPA fit was 4.69% higher a token and 0.141 GiB).
-    predicted = peaks.dit_peak(
-        LEAN_PADDED[rows], latents, swapped, vae_in_dit=vae_on_gpu, attention=attention
-    )
+    # 0.0738 to 0.0746 at the others. FlashAttention 2 and SDPA gave the same peaks, so one fit
+    # served both and SDPA, the one kernel left, keeps it (the plain attention's SDPA fit was
+    # 4.69% higher a token and 0.141 GiB).
+    predicted = peaks.dit_peak(LEAN_PADDED[rows], latents, swapped, vae_in_dit=vae_on_gpu)
     margin = gib(predicted - peak)
     assert margin >= 0
     if (rows, latents) == (1104, 1):
@@ -118,14 +114,14 @@ def test_dit_fit_furthest() -> None:
     assert max(margins) == pytest.approx(0.0745, abs=5e-5)
 
 
-def test_the_two_kernels_share_one_fit() -> None:
+def test_the_fit_is_one_constant_and_the_attention_is_not_a_choice() -> None:
     # Before the lean attention SDPA's DiT peaked higher (4.69% a token and 0.141 GiB); the
-    # measured peaks are equal, and the fit is.
-    assert peaks.DIT_ATTENTION[peaks.SDPA] == peaks.DIT_ATTENTION[peaks.FLASH_ATTN_2]
-    for padded, latents, swapped in ((OURS_1080, 12, 0), (OURS_4K, 4, 36), (OURS_1080, 70, 20)):
-        assert peaks.dit_peak(padded, latents, swapped, attention=peaks.SDPA) == peaks.dit_peak(
-            padded, latents, swapped, attention=peaks.FLASH_ATTN_2
-        )
+    # measured peaks of FlashAttention 2 and SDPA were equal, and SDPA, the one kernel, has the
+    # fit: one constant, in bytes.
+    assert peaks.DIT_ATTENTION == round(0.081 * GIB)
+    assert not hasattr(peaks, "FLASH_ATTN_2") and not hasattr(peaks, "SDPA")
+    with pytest.raises(TypeError):
+        peaks.dit_peak(OURS_1080, 12, 0, attention="sdpa")  # pyright: ignore[reportCallIssue]
 
 
 @pytest.mark.parametrize(
@@ -278,12 +274,11 @@ def test_the_int8_dit_s_figures() -> None:
     assert peaks.loaded(int8) == peaks.DIT_LOADED - saved
     assert f"{gib(peaks.loaded(int8)):.3f}" == "8.285" and f"{gib(saved):.3f}" == "7.586"
     # Its window's peak: fp16's with those weights, and the W8A8 path's buffers (provisional,
-    # peaks.INT8_*): the same tokens and windows, on either attention backend.
+    # peaks.INT8_*): the same tokens and windows.
     for padded, latents in ((OURS_1080, 1), (OURS_1080, 20), (OURS_4K, 7)):
-        for attention in (peaks.FLASH_ATTN_2, peaks.SDPA):
-            plain = peaks.dit_peak(padded, latents, attention=attention)
-            quantised = peaks.dit_peak(padded, latents, attention=attention, dit_model=int8)
-            assert quantised == plain - saved + peaks.INT8_BUFFERS
+        plain = peaks.dit_peak(padded, latents)
+        quantised = peaks.dit_peak(padded, latents, dit_model=int8)
+        assert quantised == plain - saved + peaks.INT8_BUFFERS
     # A swapped block takes its own bytes off, but for the two in the slots; the VAE away its.
     whole = peaks.dit_peak(OURS_1080, 12, dit_model=int8)
     assert peaks.dit_peak(OURS_1080, 12, 2, dit_model=int8) == whole
@@ -291,7 +286,7 @@ def test_the_int8_dit_s_figures() -> None:
     assert whole - peaks.dit_peak(OURS_1080, 12, vae_in_dit=False, dit_model=int8) == (
         peaks.VAE_WEIGHTS
     )
-    least = peaks.dit_least(OURS_1080, 12, 5, True, peaks.FLASH_ATTN_2, int8)
+    least = peaks.dit_least(OURS_1080, 12, 5, True, int8)
     assert least <= peaks.dit_peak(OURS_1080, 12, 5, dit_model=int8)
     # What of it a VAE phase finds on the GPU, by its blocks' bytes; and the passes over it.
     never, other, block = peaks.DIT_BUFFERS, peaks.DIT_OTHER, 226_862_080
@@ -322,7 +317,7 @@ def test_the_gguf_dit_s_figures() -> None:
     # and the sharp one), a type per matrix, so a block's bytes its own (113,689,600 to
     # 129,909,760 in the regular 7B's), its other parameters fp16's; loaded, the fp16 fit's
     # constant with its weights' bytes exchanged for these, 4.95 GiB for 15.871. Its window's
-    # peak: fp16's with those weights and GGUF_BUFFERS (measured), on either attention backend.
+    # peak: fp16's with those weights and GGUF_BUFFERS (measured).
     fp16 = peaks.FP16
     assert peaks.DITS == (fp16, peaks.INT8, peaks.GGUF_7B, peaks.GGUF_7B_SHARP)
     for gguf, blocks_gib, weights_gib in (
@@ -339,10 +334,9 @@ def test_the_gguf_dit_s_figures() -> None:
         assert peaks.loaded(gguf) == peaks.DIT_LOADED - saved
         assert f"{gib(peaks.loaded(gguf)):.2f}" == "4.95"
         for padded, latents in ((OURS_1080, 1), (OURS_1080, 20), (OURS_4K, 7)):
-            for attention in (peaks.FLASH_ATTN_2, peaks.SDPA):
-                plain = peaks.dit_peak(padded, latents, attention=attention)
-                held = peaks.dit_peak(padded, latents, attention=attention, dit_model=gguf)
-                assert held == plain - saved + peaks.GGUF_BUFFERS
+            plain = peaks.dit_peak(padded, latents)
+            held = peaks.dit_peak(padded, latents, dit_model=gguf)
+            assert held == plain - saved + peaks.GGUF_BUFFERS
         assert peaks.GGUF_MATRIX == 3072 * 12288 * 2
         assert peaks.GGUF_BUFFERS == peaks.GGUF_MATRIX + 24_576 == 75_522_048
         # The VAE away takes its weights off, as in every format.
@@ -350,7 +344,7 @@ def test_the_gguf_dit_s_figures() -> None:
         assert whole - peaks.dit_peak(OURS_1080, 12, vae_in_dit=False, dit_model=gguf) == (
             peaks.VAE_WEIGHTS
         )
-        least = peaks.dit_least(OURS_1080, 12, 5, True, peaks.FLASH_ATTN_2, gguf)
+        least = peaks.dit_least(OURS_1080, 12, 5, True, gguf)
         assert least <= peaks.dit_peak(OURS_1080, 12, 5, dit_model=gguf)
         # Swapped blocks are the last ones, the slots each the largest of them (the placement's
         # block_bytes): the peak falls by their own bytes less the slots'.
@@ -1134,13 +1128,11 @@ def test_the_video_figures_are_unmoved_by_the_pictures() -> None:
 
 
 @pytest.mark.parametrize("dit_model", peaks.DITS, ids=lambda found: found.name)
-@pytest.mark.parametrize("attention", [peaks.FLASH_ATTN_2, peaks.SDPA])
 @pytest.mark.parametrize("swapped", [0, 12, 36])
 @pytest.mark.parametrize("vae_in_dit", [True, False])
 @pytest.mark.parametrize(("padded", "latents"), [(OURS_1080, 1), (OURS_1080, 5), (OURS_4K, 3)])
 def test_the_dits_peak_is_what_is_resident_plus_its_working_set(
     dit_model: weights.Architecture,
-    attention: str,
     swapped: int,
     vae_in_dit: bool,
     padded: tuple[int, int],
@@ -1149,8 +1141,8 @@ def test_the_dits_peak_is_what_is_resident_plus_its_working_set(
     resident = peaks.loaded(dit_model) - peaks.swapped_saving(dit_model, swapped)
     if not vae_in_dit:
         resident -= peaks.VAE_WEIGHTS
-    working = peaks.dit_working(padded, latents, attention, dit_model)
-    peak = peaks.dit_peak(padded, latents, swapped, vae_in_dit, attention, dit_model)
+    working = peaks.dit_working(padded, latents, dit_model)
+    peak = peaks.dit_peak(padded, latents, swapped, vae_in_dit, dit_model)
     # dit_peak rounds the whole sum, dit_working its own part: within the byte.
     assert abs(peak - (resident + working)) <= 1
 
@@ -1161,7 +1153,7 @@ def test_the_working_set_follows_the_tokens_the_windows_and_the_formats_buffers(
 ) -> None:
     # The same window in each format: the fp16 fit's terms, plus the scratch of int8's or the
     # GGUF's linear, and no weight in it (the fp16 file's 15 GiB are not in 4 GiB of window).
-    working = peaks.dit_working(OURS_1080, 5, peaks.FLASH_ATTN_2, dit_model)
+    working = peaks.dit_working(OURS_1080, 5, dit_model)
     windows = peaks.attention_windows(OURS_1080, 5)
     buffers = (
         peaks.INT8_BUFFERS
@@ -1171,7 +1163,7 @@ def test_the_working_set_follows_the_tokens_the_windows_and_the_formats_buffers(
         else 0
     )
     expected = (
-        peaks.DIT_ATTENTION[peaks.FLASH_ATTN_2][0]
+        peaks.DIT_ATTENTION
         + buffers
         + peaks.PER_TOKEN * peaks.tokens(OURS_1080, 5)
         + peaks.PER_WINDOW * windows
@@ -1181,10 +1173,8 @@ def test_the_working_set_follows_the_tokens_the_windows_and_the_formats_buffers(
 
 
 def test_the_working_set_refuses_what_the_peak_refuses() -> None:
-    with pytest.raises(ValueError, match="attention"):
-        peaks.dit_working(OURS_1080, 1, "other")
     with pytest.raises(ValueError, match="DiT"):
-        peaks.dit_working(OURS_1080, 1, peaks.FLASH_ATTN_2, weights.VAE)  # pyright: ignore[reportArgumentType]
+        peaks.dit_working(OURS_1080, 1, weights.VAE)  # pyright: ignore[reportArgumentType]
 
 
 @pytest.mark.parametrize("dit_model", peaks.DITS, ids=lambda found: found.name)

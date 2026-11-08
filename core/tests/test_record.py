@@ -26,7 +26,7 @@ DIT = Model("seedvr2x_ema_7b_sharp_fp16.safetensors", "1" * 64)
 VAE = Model("ema_vae_fp16.safetensors", "2" * 64)
 PICTURE = Record(
     "seedvr2x", "0.1.0", (4032, 3024), (1440, 1080), 1080, Fraction(1), DIT, VAE, 42, "split", 0,
-    1024, "sdpa",
+    1024,
 )  # fmt: skip
 MOVIE = dataclasses.replace(PICTURE, video=Video(20, "maximum", True, True, cut_threshold="0.3"))
 
@@ -184,7 +184,6 @@ def test_a_path_given_for_a_model_is_written_as_its_file_name() -> None:
         {"vae": Model("x", "1" * 63)},
         {"seed": -1},
         {"encode_tile": -1},
-        {"attention": "flash"},
         {"app": "SeedVR2X"},
         {"app": ""},
         {"resolution": 0},

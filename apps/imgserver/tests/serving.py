@@ -50,7 +50,6 @@ class StandIn:
     vae_models: model.Models
     free_bytes: int = FREE
     host_bytes: int | None = HOST
-    attention_name: str = peaks.FLASH_ATTN_2
     # The format of the DiT file the server is started on (the stand-in's file is empty).
     dit_format: Architecture = peaks.FP16
     # The allocator of a held run (memory.SEGMENTS, PLAIN or POOL); None: a driver that refuses.
@@ -92,9 +91,6 @@ class StandIn:
     def host(self) -> int | None:
         return self.host_bytes
 
-    def attention(self) -> str:
-        return self.attention_name
-
     def dit_model(self, path: Path) -> Architecture:
         return self.dit_format
 
@@ -109,7 +105,6 @@ class StandIn:
             digest = hashlib.sha256(each.read_bytes()).hexdigest()
             files.hashes.proved(each, digest, each.stat())
         loaded: Any = pipeline_models(self.vae_models)
-        loaded.attention = self.attention_name
         return loaded
 
     def reserve(self, size: int) -> None:
@@ -392,7 +387,6 @@ def library_file(
         color_correction="split",
         encode_tile=0 if tiles.encode is None else tiles.encode.size,
         decode_tile=0 if tiles.decode is None else tiles.decode.size,
-        attention=made.plan.attention,
     )
     if as_webp:
         return webp.write(

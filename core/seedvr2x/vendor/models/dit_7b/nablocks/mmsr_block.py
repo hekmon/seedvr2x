@@ -190,15 +190,12 @@ class NaSwinAttention(MMWindowAttention):
                 v = concat_win(vid_v, txt_v)
         del vid_v, vid_qkv_win, txt_q, txt_k, txt_v, txt_qkv
 
-        # seedvr2x: the attention's lengths held, and given where its kernel reads them: on the
-        # device for FlashAttention 2, on the host for SDPA's split (attention.py copied them
-        # there in every block), the longest as an int (FlashAttention 2's wrapper read it with
-        # .item() in every block).
+        # seedvr2x: the attention's lengths held, and given on the host, where SDPA's split reads
+        # them (attention.py copied them there in every block), the longest as an int.
         seqlens = cache_win.held(
             "vid_seqlens", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
         )
-        if self.attn.attention_mode != "flash_attn_2":
-            seqlens = cache_win.held("vid_seqlens_host", lambda: seqlens.cpu())
+        seqlens = cache_win.held("vid_seqlens_host", lambda: seqlens.cpu())
         longest = cache_win.held("vid_max_seqlen", lambda: int(all_len_win.max()))
         # Attention handles dtype conversion internally using pipeline compute_dtype
         out = self.attn(

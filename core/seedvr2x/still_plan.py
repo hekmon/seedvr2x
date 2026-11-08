@@ -106,7 +106,6 @@ class StillPlan:
     input_pixels: int  # the largest input, H x W as stored: its copies on the GPU are counted
     models: ModelPlan  # swapped, resident_encode, resident_decode, vae_in_dit; compile_vae False
     reading: Reading  # as made
-    attention: str  # peaks.DIT_ATTENTION's
     dit_model: Architecture  # peaks.DITS'
     split: bool  # whether the decode corrects colours: its term is counted in the decode's phase
     pins: Pins
@@ -151,7 +150,6 @@ class _Job:
     picture: tuple[int, int] | None
     input_pixels: int
     reading: Reading
-    attention: str
     dit_model: Architecture
     split: bool
     pins: Pins
@@ -182,7 +180,6 @@ def plan(
     *,
     process: int,
     input_pixels: int,
-    attention: str = peaks.FLASH_ATTN_2,
     dit_model: Architecture = peaks.FP16,
     split: bool = True,
     pins: Pins = NO_PINS,
@@ -247,10 +244,6 @@ def plan(
             )
     if input_pixels < 1:
         raise ValueError(f"an input of {input_pixels} pixels")
-    if attention not in peaks.DIT_ATTENTION:
-        raise ValueError(
-            f"attention {attention!r}: the DiT's fit is {peaks.FLASH_ATTN_2}'s or {peaks.SDPA}'s"
-        )
     if dit_model not in peaks.DITS:
         raise ValueError(
             f"{dit_model.name}: the DiT's figures are for its fp16, int8 and dynamic GGUF files"
@@ -261,7 +254,6 @@ def plan(
         picture,
         input_pixels,
         reading,
-        attention,
         dit_model,
         split,
         pins,
@@ -376,7 +368,6 @@ def _job_of(plan: StillPlan) -> _Job:
         plan.picture,
         plan.input_pixels,
         plan.reading,
-        plan.attention,
         plan.dit_model,
         plan.split,
         plan.pins,
@@ -574,7 +565,7 @@ def _dit_peak(job: _Job, swapped: int, vae_in_dit: bool) -> int:
     the tokens of the largest padded frame (_most) and the most windows any picture takes
     (windows_most), the larger of each, which no one picture need take together."""
     most = _most(job.bound, job.picture)
-    least = peaks.dit_least(most, 1, swapped, vae_in_dit, job.attention, job.dit_model)
+    least = peaks.dit_least(most, 1, swapped, vae_in_dit, job.dit_model)
     return round(least + _per_window(job) * windows_most(job.bound, job.picture))
 
 
@@ -585,7 +576,6 @@ def _dit_reserve(job: _Job) -> int:
     working = peaks.dit_working(
         _most(job.bound, job.picture),
         1,
-        job.attention,
         job.dit_model,
         windows_most(job.bound, job.picture),
     )
@@ -1474,10 +1464,8 @@ def picture_peaks(
     found_tiles = tiles(plan, target, budget)
     job, models = _job_of(plan), plan.models
     padded = padded_size(target)
-    dit = peaks.dit_peak(
-        padded, 1, models.swapped, models.vae_in_dit, plan.attention, plan.dit_model
-    )
-    working = peaks.dit_working(padded, 1, plan.attention, plan.dit_model)
+    dit = peaks.dit_peak(padded, 1, models.swapped, models.vae_in_dit, plan.dit_model)
+    working = peaks.dit_working(padded, 1, plan.dit_model)
     dit_room = peaks.reserve(peaks.DIT_PHASE, working, plan.reading.allocator, plan.reading.margin)
     over = reserved_share(plan.reading.allocator)
     found: dict[Phase, Peak] = {"dit": Peak(dit, _dit_models(plan), dit_room, over)}
@@ -1543,7 +1531,6 @@ def _account(job: _Job, models: ModelPlan) -> StillPlan:
         job.input_pixels,
         models,
         job.reading,
-        job.attention,
         job.dit_model,
         job.split,
         job.pins,
@@ -1687,9 +1674,6 @@ def _planned(job: _Job) -> StillPlan:
 
 # ---- The plan said -----------------------------------------------------------------------------
 
-# The attention backends as the plan's lines name them (model.load_models' own words for SDPA).
-_ATTENTION_SAID = {peaks.FLASH_ATTN_2: "FlashAttention 2", peaks.SDPA: "PyTorch's SDPA"}
-
 
 def _the(say: Say, setting: Setting) -> str:
     """`say`'s words for a setting after "pinned by": an application's as they are, the library's
@@ -1706,7 +1690,7 @@ def said(
     """The plan as --plan prints it and a run logs it, a line per choice in plain words, each
     opening with what it says, "plan: memory: ...", as the planner's lines do (planner.said):
     the memory (what was read, the margin or the reserve held, the budget), the picture's size, the
-    attention backend and the DiT's format, the blocks swapped and where the VAE is in the DiT's
+    DiT's format, the blocks swapped and where the VAE is in the DiT's
     phase with the DiT's peak, what of the DiT stays on the GPU in each VAE phase, the system
     memory; and with `target` (frames.target_size's), the picture's encode and decode, untiled or
     in tiles with the grid and the predicted peaks. `smaller`: the line of the smaller DiT files
@@ -1728,13 +1712,6 @@ def said(
         lines.append(
             f"bound: the picture alone, {_oriented(plan.bound, plan.picture)} as stored, padded to"
             f" {width}x{height} for the model, {tokens}"
-        )
-    if plan.attention == peaks.FLASH_ATTN_2:
-        lines.append(f"attention: {_ATTENTION_SAID[plan.attention]}, which is installed")
-    else:
-        # The lean attention peaks alike under both kernels (peaks.DIT_ATTENTION).
-        lines.append(
-            f"attention: {_ATTENTION_SAID[plan.attention]}, FlashAttention 2 not being installed"
         )
     if plan.dit_model == peaks.INT8:
         lines.append(

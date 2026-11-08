@@ -47,7 +47,7 @@ def planned_clip(machine: StandIn, settings: plans.Settings, cuts: tuple[Shot, .
     reading = Reading(32 * GIB, None, 32 * GIB, False)
     shot_list = [Shot(0, cuts)] if isinstance(cuts, int) else cuts
     made = nodes.clip_planner(settings, TARGET, shot_list)(
-        reading, machine.host_bytes, peaks.FLASH_ATTN_2, machine.dit_format, True
+        reading, machine.host_bytes, machine.dit_format, True
     )
     return made.plan[0]
 
@@ -255,7 +255,7 @@ def test_a_clip_with_an_opaque_alpha_is_the_clip_without_it(machine: StandIn, tm
 def test_the_plan_is_said_whole_in_the_console_and_the_node_shows_one_short_line(
     machine: StandIn, tmp_path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    settings = plans.Settings(swap_blocks=0, decode_tile=None, attention="sdpa", seed=5)
+    settings = plans.Settings(swap_blocks=0, decode_tile=None, seed=5)
     with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui.nodes"):
         _, text = upscale_image(handle(tmp_path), settings, pictures(1), RESOLUTION, "31")
     instance = server.PromptServer.instance
@@ -265,13 +265,12 @@ def test_the_plan_is_said_whole_in_the_console_and_the_node_shows_one_short_line
     assert all(text not in each for each, _ in instance.texts)
     assert in_console(text, caplog.messages)
     # The plan's parts in the nodes' words: the pictures, the card and ComfyUI's models, what
-    # ComfyUI was asked, the DiT's placement and kernel, the passes, the choices, the models' RAM.
+    # ComfyUI was asked, the DiT's placement, the passes, the choices, the models' RAM.
     for part in (
         "1 image 40x24 to 80x48 (resolution 48)",
         "graphics card: a stand-in card, 32.00 GiB free; ComfyUI's own models use 0.00 GiB",
         "no need to unload ComfyUI's models",
         # Each setting and what it came to: a value given as set, the rest as the plan chose.
-        "attention: PyTorch's SDPA, as you set it",
         "blocks swapped: none, the whole model on the card while it works, as you set it",
         "encode tile: auto -> the whole image at once, no tiles (needs up to ",
         "decode tile: auto -> the whole image at once, no tiles (needs up to ",
@@ -302,23 +301,7 @@ def test_a_run_without_a_node_id_says_nothing_on_a_node(machine: StandIn, tmp_pa
     assert instance is not None and instance.texts == []
 
 
-def test_the_attention_chosen_in_tuning_reaches_the_models(machine: StandIn, tmp_path) -> None:
-    h = handle(tmp_path)
-    upscale_image(h, plans.Settings(attention="sdpa"), pictures(1), RESOLUTION, "1")
-    assert machine.made[0].attention == "sdpa"
-    assert machine.probes == [(peaks.FP16.name, "sdpa")]
-    upscale_image(h, plans.Settings(), pictures(1), RESOLUTION, "1")
-    assert machine.made[0].attention == peaks.FLASH_ATTN_2
-    assert len(machine.probes) == 2
-    machine.attention_name = peaks.SDPA
-    with pytest.raises(words.Refused, match="FlashAttention 2 isn't installed") as refused:
-        upscale_image(h, plans.Settings(attention="flash_attn_2"), pictures(1), RESOLUTION, "1")
-    assert "--" not in str(refused.value)
-
-
-def test_the_probe_runs_once_a_layout_and_kernel_and_its_refusal_is_worded(
-    machine: StandIn, tmp_path
-) -> None:
+def test_the_probe_runs_once_a_layout_and_its_refusal_is_worded(machine: StandIn, tmp_path) -> None:
     from pathlib import Path
 
     from seedvr2x.probe import ProbeRefusal, Result
@@ -326,7 +309,7 @@ def test_the_probe_runs_once_a_layout_and_kernel_and_its_refusal_is_worded(
     h = handle(tmp_path)
     upscale_image(h, plans.Settings(), pictures(1), RESOLUTION, "1")
     upscale_image(h, plans.Settings(), pictures(1), RESOLUTION, "1")
-    assert machine.probes == [(peaks.FP16.name, peaks.FLASH_ATTN_2)]
+    assert machine.probes == [peaks.FP16.name]
     models.reset()
     result = Result("matmul bfloat16", 3.0, 0.1, "spacings", False, "2026-11-05T10:00:00")
     failure = ProbeRefusal(

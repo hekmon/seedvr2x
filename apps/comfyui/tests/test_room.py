@@ -17,7 +17,7 @@ from standins import (
     upscale_image,
 )
 
-from seedvr2x import memory, peaks, still_plan
+from seedvr2x import memory, still_plan
 from seedvr2x.memory import Reading
 
 SETTINGS = plans.Settings()
@@ -38,7 +38,7 @@ def needed(card: int, machine: StandIn, tuning: plans.Settings = SETTINGS) -> tu
     target = (48, 80)
     reading = Reading(card, None, card, False)
     planned = nodes.picture_planner(tuning, target, PICTURE)(
-        reading, machine.host_bytes, peaks.FLASH_ATTN_2, machine.dit_format, True
+        reading, machine.host_bytes, machine.dit_format, True
     )
     made = planned.plan[0]
     phases = still_plan.picture_peaks(made, target, PICTURE[0] * PICTURE[1])
@@ -101,7 +101,7 @@ def test_the_plan_is_made_for_the_card_without_comfys_models(machine: StandIn, t
         seen.append(reading)
         return real(reading, *args)  # type: ignore[arg-type]
 
-    with models.session(handle(tmp_path), None, planner):  # type: ignore[arg-type]
+    with models.session(handle(tmp_path), planner):  # type: ignore[arg-type]
         pass
     assert resident.loaded_size() < 20 * GIB  # freed by what the plan needed
     # Early (the files not read yet), then for the run: both counted in the whole card.
@@ -252,7 +252,7 @@ def test_the_plan_counts_the_card_less_the_room_comfy_keeps_for_the_system(
         seen.append(reading)
         return real(reading, *args)  # type: ignore[arg-type]
 
-    with models.session(handle(tmp_path), None, planner):  # type: ignore[arg-type]
+    with models.session(handle(tmp_path), planner):  # type: ignore[arg-type]
         pass
     assert [each.reported for each in seen] == [30 * GIB, 30 * GIB]
     assert all(each.counted == 30 * GIB for each in seen)
@@ -303,7 +303,7 @@ def test_a_reserve_over_the_free_memory_leaves_nothing_and_never_less(
         raise words.Refused("stop here")
 
     with pytest.raises(words.Refused):
-        with models.session(handle(tmp_path), None, planner):  # type: ignore[arg-type]
+        with models.session(handle(tmp_path), planner):  # type: ignore[arg-type]
             pass
     assert seen and all(each.reported == 0 and each.counted == 0 for each in seen)
 
@@ -356,7 +356,7 @@ def held_need(machine: StandIn, tmp_path) -> int:
         seen.append(planned.needs)
         return planned
 
-    with models.session(handle(tmp_path), None, planner):  # type: ignore[arg-type]
+    with models.session(handle(tmp_path), planner):  # type: ignore[arg-type]
         pass
     return models.needed_free(seen[-1])
 
@@ -405,7 +405,7 @@ def test_the_plan_of_a_held_run_counts_the_card_less_the_larger_room(
             raise words.Refused("stop here")
 
         with pytest.raises(words.Refused):
-            with models.session(handle(tmp_path), None, planner):  # type: ignore[arg-type]
+            with models.session(handle(tmp_path), planner):  # type: ignore[arg-type]
                 pass
         # The card is 32 GiB with ComfyUI's 5 GiB on it: free 27, 32 counted without them, and the
         # room off once.

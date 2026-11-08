@@ -155,7 +155,6 @@ def test_the_pictures_come_first_then_the_models_then_the_widgets_then_the_plans
         "images",
         "models",
         "resolution",
-        "attention",
         "color_correction",
         "seed",
         "plan_only",
@@ -172,10 +171,10 @@ def test_the_pictures_come_first_then_the_models_then_the_widgets_then_the_plans
         "models",
         "resolution",
         "quality",
-        *list(image)[3:7],
+        *list(image)[3:6],
         "cuts",
         "window",
-        *list(image)[7:],
+        *list(image)[6:],
     ]
     assert video["cuts"].io_type == "SEEDVR2X_CUTS" and video["cuts"].optional
     assert video["cuts"].tooltip == (
@@ -193,7 +192,6 @@ def test_the_pictures_come_first_then_the_models_then_the_widgets_then_the_plans
         for name, kind in TYPES.items():
             if name in spec:
                 assert spec[name].io_type == kind, name
-        assert spec["attention"].io_type == "COMBO"
         assert spec["color_correction"].io_type == spec["plan_only"].io_type == "BOOLEAN"
         # The required ones first, as INPUT_TYPES lists them and the frontend builds them.
         optional = [each.optional for each in node.GET_SCHEMA().inputs]
@@ -353,15 +351,9 @@ def test_the_seed_is_comfys_with_its_control_fixed_at_the_command_lines_seed() -
     assert seed.as_dict()["control_after_generate"] == "fixed"
 
 
-def test_attention_is_a_combo_and_the_colour_correction_a_boolean_split_or_none() -> None:
+def test_the_colour_correction_a_boolean_split_or_none() -> None:
     spec = schema_inputs(nodes.UpscaleImage)
-    assert spec["attention"].options == ["auto", "sdpa", "flash_attn_2"]
-    assert spec["attention"].default == "auto"
-    # What helps a user choose, measured on the lean attention (research/docs/small-cards.md,
-    # FlashAttention 2 against the lean SDPA): the same peak and about the same time, so no
-    # speed claim.
-    assert "the same memory and about the same time" in spec["attention"].tooltip
-    assert "faster" not in spec["attention"].tooltip
+    assert "attention" not in spec
     correction = spec["color_correction"]
     assert correction.default is True and correction.display_name == "colour correction"
     assert (correction.label_on, correction.label_off) == ("split", "none")
@@ -410,17 +402,16 @@ def test_the_inputs_values_are_the_settings_as_pins() -> None:
         swap_blocks=30,
         encode_tile=0,
         decode_tile=1024,
-        attention="sdpa",
         color_correction=False,
         seed=7,
     )
-    assert settings == plans.Settings(9, 30, 0, 1024, "sdpa", "none", 7)
+    assert settings == plans.Settings(9, 30, 0, 1024, "none", 7)
     assert settings.clip_pins().window == 9 and settings.clip_pins().encode_tile == 0
     assert settings.picture_pins().swap_blocks == 30 and settings.picture_pins().decode_tile == 1024
     # Unconnected: nothing given, the plan's choice.
     auto = settings_of()
     assert auto == plans.Settings()
-    assert auto.clip_pins().window is None and auto.attention is None and auto.split
+    assert auto.clip_pins().window is None and auto.split
     assert auto.clip_pins().swap_blocks is None and auto.clip_pins().encode_tile is None
     assert not settings.split
     # 0 is a plain value for the blocks: swap none.
@@ -440,7 +431,6 @@ def test_the_inputs_values_are_the_settings_as_pins() -> None:
         ({"decode_tile": 1000}, "decode tile 1000"),
         ({"encode_tile": 1024.0}, "encode tile 1024.0"),
         ({"swap_blocks": True}, "blocks swapped True"),
-        ({"attention": "flash"}, "attention 'flash'"),
         ({"color_correction": "split"}, "colour correction 'split': must be on or off"),
         ({"seed": -1}, "seed -1"),
         ({"seed": 2**32}, "seed 4294967296"),
@@ -464,7 +454,6 @@ def test_a_value_off_the_grid_at_an_upscale_nodes_socket_is_refused_before_anyth
             images=torch.zeros(1, 24, 40, 3),
             models=handle(tmp_path),
             resolution=48,
-            attention="auto",
             color_correction=True,
             seed=42,
             plan_only=False,
@@ -486,7 +475,6 @@ def test_the_value_nodes_outputs_reach_the_plan_as_set(machine: StandIn, tmp_pat
             models=handle(tmp_path),
             resolution=48,
             quality="standard",
-            attention="auto",
             color_correction=True,
             seed=42,
             plan_only=True,
@@ -516,7 +504,6 @@ def test_the_optional_inputs_unwired_are_not_given_and_the_plan_chooses(
             images=torch.zeros(1, 24, 40, 3),
             models=handle(tmp_path),
             resolution=48,
-            attention="auto",
             color_correction=True,
             seed=42,
             plan_only=True,
@@ -534,7 +521,6 @@ def test_the_optional_inputs_unwired_are_not_given_and_the_plan_chooses(
 @pytest.mark.parametrize(
     ("bad", "widget"),
     [
-        ({"attention": "flash"}, "attention"),
         ({"color_correction": "lab"}, "colour correction"),
     ],
 )
@@ -547,14 +533,14 @@ def test_a_combo_value_no_option_offers_is_refused_naming_the_widget(
 
 def picture_plan(settings: plans.Settings):  # type: ignore[no-untyped-def]
     planned = nodes.picture_planner(settings, FULL_HD, FULL_HD)(
-        BIG, 64 * GIB, peaks.FLASH_ATTN_2, weights.DIT_7B, False
+        BIG, 64 * GIB, weights.DIT_7B, False
     )
     return planned.plan
 
 
 def clip_plan(settings: plans.Settings, frames: int = 100):  # type: ignore[no-untyped-def]
     planned = nodes.clip_planner(settings, FULL_HD, [Shot(0, frames)])(
-        BIG, 64 * GIB, peaks.FLASH_ATTN_2, weights.DIT_7B, False
+        BIG, 64 * GIB, weights.DIT_7B, False
     )
     return planned.plan
 
@@ -673,7 +659,6 @@ def picture_text(settings: plans.Settings, keeping: plans.Keeping = KEPT, **kwar
         output=(1920, 1080),
         resolution=1080,
         dit="seedvr2x_ema_7b_sharp_fp16.safetensors",
-        attention=peaks.SDPA,
         plan=made,
         tiles=tiles,
         room=ROOM,
@@ -691,7 +676,6 @@ def clip_text(settings: plans.Settings, **kwargs: Any) -> str:
         output=(1920, 1080),
         resolution=1080,
         dit="seedvr2x_ema_7b_sharp_fp16.safetensors",
-        attention=peaks.SDPA,
         plan=made,
         expected=expected,
         room=ROOM,
@@ -716,7 +700,6 @@ def test_a_clip_that_fits_this_card_only_with_the_last_rungs_says_so_in_a_users_
             output=(1920, 1080),
             resolution=1080,
             dit="seedvr2x_ema_7b_sharp_fp16.safetensors",
-            attention=peaks.SDPA,
             plan=plan,
             expected=expected,
             room=ROOM,
@@ -743,7 +726,6 @@ def test_a_clip_that_fits_this_card_only_with_the_last_rungs_says_so_in_a_users_
 def test_the_text_says_what_each_auto_became_and_what_a_value_wired_in_was_taken_as() -> None:
     text = picture_text(plans.Settings(decode_tile=1024, swap_blocks=0))
     lines = text.splitlines()
-    assert "attention: auto -> PyTorch's SDPA" in lines
     encode = next(each for each in lines if each.startswith("encode tile: "))
     # "encode tile: auto -> 1024 px (up to ...)", or one pass where it fits.
     assert re.fullmatch(
@@ -796,7 +778,6 @@ def test_a_clips_plan_says_the_quality_level_and_its_runs() -> None:
         output=(1920, 1080),
         resolution=1080,
         dit="seedvr2x_ema_7b_sharp_fp16.safetensors",
-        attention=peaks.SDPA,
         plan=made,
         expected=expected,
         room=ROOM,

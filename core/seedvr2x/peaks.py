@@ -59,16 +59,11 @@ PER_WINDOW = 0.996 * 1024**2
 # function for, the blocks alternating the two layouts (vendor/configs_7b/main.yaml, window and
 # window_method).
 NUM_WINDOWS = (4, 3, 3)
-# The attention backends, as the run names the one it takes (model.attention_backend), and the
-# DiT's fit under each: what it adds to DIT_LOADED, in bytes, and the factor on PER_TOKEN. On the
-# lean attention both are the fit above, measured equal (the constant is the one that bounds every
-# point, 0.081 GiB, the 1-latent 1080p window's). The table stays per backend, for the day a
-# backend's peak differs again.
-FLASH_ATTN_2, SDPA = "flash_attn_2", "sdpa"
-DIT_ATTENTION = {
-    FLASH_ATTN_2: (round(0.081 * GIB), 1.0),
-    SDPA: (round(0.081 * GIB), 1.0),
-}
+# What the DiT's fit adds to DIT_LOADED beside its per-token and per-window terms, in bytes: the
+# constant that bounds every point, 0.081 GiB, the 1-latent 1080p window's. PyTorch's SDPA is the
+# one attention kernel (DESIGN.md, Vendored model code); FlashAttention 2, gone on 2026-11-08,
+# peaked at the same figures on the lean attention.
+DIT_ATTENTION = round(0.081 * GIB)
 
 # The VAE's weights, on the GPU in the VAE's phases, and in the DiT's unless the plan sends them
 # away for it, in bytes: 0.4669 GiB, its parameters by the model's shapes in the pipeline's
@@ -125,8 +120,8 @@ DIT_BUFFERS = 59_643_736
 # these terms, PROVISIONAL (impl-int8, 2026-11-02): nothing of the int8 DiT is measured yet, and
 # DESIGN.md's release gate has the 96 GB card measure them before v0.1.0 is tagged, the planner
 # keeping no blind spot. All of them are here:
-# - INT8_PER_TOKEN and INT8_PER_WINDOW: the fp16 fit's PER_TOKEN and PER_WINDOW, the attention
-#   backend's terms on them as on fp16's (DIT_ATTENTION). Between the linears the activations are
+# - INT8_PER_TOKEN and INT8_PER_WINDOW: the fp16 fit's PER_TOKEN and PER_WINDOW, the attention's
+#   constant beside them as beside fp16's (DIT_ATTENTION). Between the linears the activations are
 #   the same tensors, in the pipeline's bfloat16, and a linear's output is the same size; a
 #   linear's input is rounded to bfloat16 W8A8_ROWS rows at a time, where autocast rounds an fp16
 #   linear's input whole. Measured, they would replace these;
@@ -539,13 +534,11 @@ def dit_peak(
     latents: int,
     swapped: int = 0,
     vae_in_dit: bool = True,
-    attention: str = FLASH_ATTN_2,
     dit_model: weights.Architecture = FP16,
 ) -> int:
     """The predicted peak of the DiT's phase, in bytes: one window of `latents` latents of padded
     frames, `swapped` of the DiT's blocks swapped, the VAE's weights on the GPU meanwhile unless
-    vae_in_dit is False, by the fit of the attention backend the run takes (DIT_ATTENTION;
-    ValueError for another name), the DiT in the format of its file (dit_model, one of DITS;
+    vae_in_dit is False, the DiT in the format of its file (dit_model, one of DITS;
     ValueError for another): in int8, its weights' bytes and the INT8_* terms (provisional); in a
     dynamic GGUF file, its weights' bytes and GGUF_BUFFERS (measured).
 
@@ -559,7 +552,7 @@ def dit_peak(
     swap, one block there at a time, saved 0.4227 GiB x (S - 1)."""
     per_window = INT8_PER_WINDOW if _format(dit_model) == INT8 else PER_WINDOW
     windows = per_window * attention_windows(padded, latents)
-    least = dit_least(padded, latents, swapped, vae_in_dit, attention, dit_model)
+    least = dit_least(padded, latents, swapped, vae_in_dit, dit_model)
     return round(least + windows)
 
 
@@ -568,52 +561,45 @@ def dit_least(
     latents: int,
     swapped: int,
     vae_in_dit: bool,
-    attention: str,
     dit_model: weights.Architecture = FP16,
 ) -> float:
     """dit_peak less its attention windows' part, in bytes: never above the peak, and counted
     without the window functions, which lay out every window of each length they are asked."""
     if not 0 <= swapped <= BLOCKS:
         raise ValueError(f"{swapped} blocks swapped of the DiT's {BLOCKS}")
-    if attention not in DIT_ATTENTION:
-        raise ValueError(f"attention {attention!r}: the DiT's fit is {FLASH_ATTN_2}'s or {SDPA}'s")
-    constant, factor = DIT_ATTENTION[attention]
     int8 = _format(dit_model) == INT8
-    per_token = (INT8_PER_TOKEN if int8 else PER_TOKEN) * factor * tokens(padded, latents)
+    per_token = (INT8_PER_TOKEN if int8 else PER_TOKEN) * tokens(padded, latents)
     buffers = INT8_BUFFERS if int8 else GGUF_BUFFERS if dit_model.layout == weights.GGUF else 0
-    least = loaded(dit_model) + constant + buffers + per_token - swapped_saving(dit_model, swapped)
+    least = (
+        loaded(dit_model) + DIT_ATTENTION + buffers + per_token - swapped_saving(dit_model, swapped)
+    )
     return least if vae_in_dit else least - VAE_WEIGHTS
 
 
 def dit_working(
     padded: tuple[int, int],
     latents: int,
-    attention: str = FLASH_ATTN_2,
     dit_model: weights.Architecture = FP16,
     windows: int | None = None,
 ) -> int:
-    """P of a DiT step, in bytes: what one window of `latents` latents of padded frames takes of
-    the GPU over the weights the DiT keeps resident, by the fit of `attention` (DIT_ATTENTION;
-    ValueError for another name) in the format of `dit_model` (one of DITS; ValueError for
-    another): the attention constant, the per-token term, the per-window term and the format's
-    scratch buffers (INT8_BUFFERS, GGUF_BUFFERS: scratch, no weights). Never the DiT's weights,
-    the swapped blocks' slots or the VAE's weights, which dit_peak counts besides (loaded,
-    swapped_saving, VAE_WEIGHTS): so it depends on neither the blocks swapped nor the VAE's
-    place, and dit_peak(...) equals what is resident (loaded(dit_model) less swapped_saving,
-    less VAE_WEIGHTS where the VAE is away) plus this, to a byte (dit_peak rounds the sum, this
-    its own part). The P of the DiT's reserve (reserve; DESIGN.md, Allocator, Small cards).
-    `windows`: the attention windows the per-window term counts, where the caller bounds a set
-    of pictures by the most any takes (still_plan.windows_most); None counts the window's own
-    (attention_windows)."""
-    if attention not in DIT_ATTENTION:
-        raise ValueError(f"attention {attention!r}: the DiT's fit is {FLASH_ATTN_2}'s or {SDPA}'s")
-    constant, factor = DIT_ATTENTION[attention]
+    """P of a DiT step, in bytes: what one window of `latents` latents of padded frames takes of the
+    GPU over the weights the DiT keeps resident, in the format of `dit_model` (one of DITS;
+    ValueError for another): the attention constant (DIT_ATTENTION), the per-token term, the
+    per-window term and the format's scratch buffers (INT8_BUFFERS, GGUF_BUFFERS: scratch, no
+    weights). Never the DiT's weights, the swapped blocks' slots or the VAE's weights, which
+    dit_peak counts besides (loaded, swapped_saving, VAE_WEIGHTS): so it depends on neither the
+    blocks swapped nor the VAE's place, and dit_peak(...) equals what is resident (loaded(dit_model)
+    less swapped_saving, less VAE_WEIGHTS where the VAE is away) plus this, to a byte (dit_peak
+    rounds the sum, this its own part). The P of the DiT's reserve (reserve; DESIGN.md, Allocator,
+    Small cards). `windows`: the attention windows the per-window term counts, where the caller
+    bounds a set of pictures by the most any takes (still_plan.windows_most); None counts the
+    window's own (attention_windows)."""
     int8 = _format(dit_model) == INT8
-    per_token = (INT8_PER_TOKEN if int8 else PER_TOKEN) * factor * tokens(padded, latents)
+    per_token = (INT8_PER_TOKEN if int8 else PER_TOKEN) * tokens(padded, latents)
     buffers = INT8_BUFFERS if int8 else GGUF_BUFFERS if dit_model.layout == weights.GGUF else 0
     per_window = INT8_PER_WINDOW if int8 else PER_WINDOW
     counted = attention_windows(padded, latents) if windows is None else windows
-    return round(constant + buffers + per_token + per_window * counted)
+    return round(DIT_ATTENTION + buffers + per_token + per_window * counted)
 
 
 def vae_working(

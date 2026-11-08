@@ -43,14 +43,14 @@ def test_the_nodes_and_the_librarys_lines_are_prefixed_and_others_are_not(
 ) -> None:
     # The package's import installed it (comfyui/__init__.py); the tests import it as ComfyUI does.
     logging.getLogger("seedvr2x_comfyui.models").info("keep in RAM between runs: auto -> kept")
-    logging.getLogger("seedvr2x.model").info("attention: PyTorch's SDPA")
+    logging.getLogger("seedvr2x.model").info("models loaded in 1.0 s")
     logging.getLogger("seedvr2x.vendor.models.dit_7b.nadit").warning("a vendored line")
     logging.getLogger("another_node").info("another node's line")
     logging.getLogger("seedvr2xfoo").info("no child of seedvr2x's")
     logging.getLogger().info("the root's own")
     assert comfy_console.getvalue().splitlines() == [
         "[seedvr2x] keep in RAM between runs: auto -> kept",
-        "[seedvr2x] attention: PyTorch's SDPA",
+        "[seedvr2x] models loaded in 1.0 s",
         "[seedvr2x] a vendored line",
         "another node's line",
         "no child of seedvr2x's",
@@ -134,14 +134,14 @@ def test_the_librarys_checks_of_the_model_files_are_debug_in_comfyuis_console(
         pull.info("seedvr2x_ema_vae_fp16.safetensors: its size as seedvr2x pins it, 0.5 GB")
         logging.getLogger("seedvr2x.weights").info("VAE seedvr2x_ema_vae_fp16.safetensors: VAE")
         pull.warning("a warning of the pull's")
-        logging.getLogger("seedvr2x.model").info("attention: PyTorch's SDPA")
+        logging.getLogger("seedvr2x.model").info("models loaded in 1.0 s")
         logging.getLogger("seedvr2x_comfyui.models").info("VAE, 0.5 GB, in Hugging Face's cache")
     finally:
         logging.getLogger().removeHandler(handler)
     # ComfyUI's console, at INFO: the checks left out, the rest as it was.
     assert leveled_console.getvalue().splitlines() == [
         "[WARNING] [seedvr2x] a warning of the pull's",
-        "[INFO] [seedvr2x] attention: PyTorch's SDPA",
+        "[INFO] [seedvr2x] models loaded in 1.0 s",
         "[INFO] [seedvr2x] VAE, 0.5 GB, in Hugging Face's cache",
     ]
     # A handler at DEBUG (ComfyUI's `--verbose DEBUG`, or a file log at DEBUG) has them, at DEBUG.

@@ -6,9 +6,8 @@ wrong. No list of figures made ahead holds: ComfyUI's Desktop app offers torch 2
 on CUDA 12.6, 12.8 or 13.0.
 
 What is checked (`kernels`), by what the file needs:
-- always, a bfloat16 matrix product (model.COMPUTE_DTYPE) and the attention kernel the run takes
-  (model.attention_backend(): FlashAttention 2 or PyTorch's SDPA, through the vendored
-  FlashAttentionVarlen as the DiT calls it);
+- always, a bfloat16 matrix product (model.COMPUTE_DTYPE) and the attention, PyTorch's SDPA, the
+  one kernel, through the vendored FlashAttentionVarlen as the DiT calls it;
 - an int8 file (weights.INT8): int8.py's W8A8 linear, in three steps, the integer product, the
   codes and the output;
 - a GGUF file (weights.GGUF): kquant.py's dequantisation of each type the file holds (Q3_K,
@@ -22,10 +21,10 @@ of the kernel and is not cached.
 The cache (`cache_path`): one small JSON file in the platform's user cache directory, holding for
 each environment seen, by the digest of its fingerprint, the fingerprint's parts and each check's
 result, and the place for the allocator's margin. A fingerprint is the parts of `fingerprint`:
-seedvr2x's version and the library's code, torch and its CUDA, the NVIDIA driver, the GPU, the
-allocator's setting and FlashAttention's version. When a part changes the digest is another and
+seedvr2x's version and the library's code, torch and its CUDA, the NVIDIA driver, the GPU and the
+allocator's setting. When a part changes the digest is another and
 the checks are run again; a part that can't be read is recorded as "unknown" and logged, never
-guessed. A check the file lacks (another DiT layout, another attention kernel) is run and added;
+guessed. A check the file lacks (another DiT layout) is run and added;
 a failure is cached too, so that a second run refuses at once, saying it was measured before and
 when. A file unreadable or of another format is ignored, logged, and written again.
 
@@ -256,8 +255,9 @@ def fingerprint(device: "torch.device") -> dict[str, str]:
       capability: its compute capability "major.minor", "none" for another device;
     - allocator: torch.cuda.get_allocator_backend() ("native" or "cudaMallocAsync"), "none"
       without CUDA; alloc_conf: PYTORCH_CUDA_ALLOC_CONF and PYTORCH_ALLOC_CONF as set
-      (memory.VARIABLES, the two torch reads the allocator's setting from), "unset" for neither;
-    - flash_attn: FlashAttention 2's installed version, "none" without."""
+      (memory.VARIABLES, the two torch reads the allocator's setting from), "unset" for neither.
+    No part names an attention kernel: PyTorch's SDPA is the one (FlashAttention 2's version was a
+    part until it went, 2026-11-08), which torch's version says."""
     import torch
 
     parts: dict[str, str] = {}
@@ -279,7 +279,6 @@ def fingerprint(device: "torch.device") -> dict[str, str]:
         parts["gpu"] = device.type
     set_up = [f"{name}={os.environ[name]}" for name in memory.VARIABLES if name in os.environ]
     parts["alloc_conf"] = ";".join(set_up) or "unset"
-    parts["flash_attn"] = _version("flash-attn") or "none"
     for name, value in parts.items():
         if value == UNKNOWN:
             logger.warning("the environment's %s is unknown: recorded as such", name)
@@ -450,19 +449,19 @@ MATMUL = "matmul bfloat16"
 INT8_PRODUCT, INT8_CODES, INT8_LINEAR = "int8 product", "int8 codes", "int8 linear"
 
 
-def attention_kernel(attention: str) -> str:
-    return f"attention {attention}"
+# The attention's check, by the name its results are cached under: PyTorch's SDPA, the one kernel.
+ATTENTION = "attention sdpa"
 
 
 def dequantisation(qtype: str) -> str:
     return f"dequantise {qtype}"
 
 
-def kernels(architecture: weights.Architecture, attention: str) -> tuple[str, ...]:
+def kernels(architecture: weights.Architecture) -> tuple[str, ...]:
     """The kernels the DiT file of this architecture needs, by name, in the order they are
-    checked: the matrix product and the attention kernel always; an int8 file's linear in three
+    checked: the matrix product and the attention always; an int8 file's linear in three
     steps; a GGUF file's dequantisation of each type it holds."""
-    names = [MATMUL, attention_kernel(attention)]
+    names = [MATMUL, ATTENTION]
     if architecture.layout == weights.INT8:
         names += [INT8_PRODUCT, INT8_CODES, INT8_LINEAR]
     elif architecture.layout == weights.GGUF:
@@ -506,8 +505,8 @@ def _matmul(device: "torch.device") -> list[Result]:
     return [_made(MATMUL, ratio, 1.0, "times the bound allowed")]
 
 
-def _attention(device: "torch.device", attention: str) -> list[Result]:
-    """The vendored FlashAttentionVarlen in the mode the run takes, as the DiT calls it
+def _attention(device: "torch.device") -> list[Result]:
+    """The vendored FlashAttentionVarlen, PyTorch's SDPA, as the DiT calls it
     (vendor/models/dit_7b/attention.py: q, k, v (tokens, heads, head_dim) bfloat16, the cumulative
     lengths int32 on the device), two sequences of 96 and 64 tokens, 4 heads of 128 (the 7B's
     head_dim, vendor/configs_7b/main.yaml), against a float64 softmax attention of each sequence
@@ -527,7 +526,7 @@ def _attention(device: "torch.device", attention: str) -> list[Result]:
     )
     starts = [0, lengths[0], tokens]
     cumulative = torch.tensor(starts, dtype=torch.int32, device=device)
-    module = FlashAttentionVarlen(attention_mode=attention, compute_dtype=COMPUTE_DTYPE)
+    module = FlashAttentionVarlen(compute_dtype=COMPUTE_DTYPE)
     with torch.no_grad():
         out = module(
             q.to(device),
@@ -545,7 +544,7 @@ def _attention(device: "torch.device", attention: str) -> list[Result]:
         weights_ = torch.softmax(sq @ sk.transpose(1, 2) / head_dim**0.5, dim=-1)
         expected[begin:end] = (weights_ @ sv).permute(1, 0, 2)
     error = float((out.double() - expected).abs().max() / expected.abs().max())
-    return [_made(attention_kernel(attention), error, ATTENTION_RELATIVE, "of the largest value")]
+    return [_made(ATTENTION, error, ATTENTION_RELATIVE, "of the largest value")]
 
 
 def _int8_activations(rows: int, inputs: int, outputs: int, seed: int) -> tuple["Tensor", ...]:
@@ -660,13 +659,13 @@ def _dequantise(device: "torch.device", qtype: str) -> list[Result]:
 
 
 def _runners(
-    device: "torch.device", architecture: weights.Architecture, attention: str
+    device: "torch.device", architecture: weights.Architecture
 ) -> list[tuple[tuple[str, ...], Callable[[], list[Result]]]]:
     """The checks the file needs, each as the kernel names it makes results for and the call that
     makes them, in the order of `kernels`."""
     runners: list[tuple[tuple[str, ...], Callable[[], list[Result]]]] = [
         ((MATMUL,), lambda: _matmul(device)),
-        ((attention_kernel(attention),), lambda: _attention(device, attention)),
+        ((ATTENTION,), lambda: _attention(device)),
     ]
     if architecture.layout == weights.INT8:
         runners.append(((INT8_PRODUCT, INT8_CODES, INT8_LINEAR), lambda: _int8(device)))
@@ -702,12 +701,10 @@ def _run(names: tuple[str, ...], run: Callable[[], list[Result]]) -> list[Result
 def check(
     device: "torch.device",
     architecture: weights.Architecture,
-    attention: str,
     *,
     path: Path | None = None,
 ) -> Probed:
-    """Make sure that each kernel the DiT file of `architecture` needs (`kernels`, with the
-    attention kernel `attention` names: "flash_attn_2" or "sdpa", model.attention_backend()) gives
+    """Make sure that each kernel the DiT file of `architecture` needs (`kernels`) gives
     the right numbers on `device` in this environment, and say so. The cache (`path`, by default
     cache_path()) vouches where its record of this environment's fingerprint has every needed
     check passed; a check it lacks is run and added; a failure, cached or just measured, raises a
@@ -717,7 +714,7 @@ def check(
     path = cache_path() if path is None else path
     parts = fingerprint(device)
     key = digest(parts)
-    needed = kernels(architecture, attention)
+    needed = kernels(architecture)
     environments = _environments(path)
     entry = environments.get(key)
     known: dict[str, Result] = {} if entry is None else entry["checks"]
@@ -737,7 +734,7 @@ def check(
         margin: float | None = entry["allocator_margin"] if entry is not None else None
         return Probed(tuple(known[name] for name in needed), parts, key, True, path, margin)
     fresh: dict[str, Result] = {}
-    for names, run in _runners(device, architecture, attention):
+    for names, run in _runners(device, architecture):
         if any(name in missing for name in names):
             fresh.update((result.kernel, result) for result in _run(names, run))
     # The environment goes last in the file's order: the oldest are the ones dropped.

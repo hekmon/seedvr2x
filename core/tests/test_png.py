@@ -65,7 +65,6 @@ RECORD = Record(
     "split",
     0,
     512,
-    "sdpa",
 )
 
 

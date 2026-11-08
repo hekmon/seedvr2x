@@ -90,7 +90,6 @@ class Models:
     runner: Any  # VideoDiffusionInfer, untyped, its dit and vae set by load_models
     text_pos: Tensor  # (58, 5120) bfloat16: the positive text embedding, the one used at cfg 1
     text_neg: Tensor  # (64, 5120) bfloat16
-    attention: str  # flash_attn_2 or sdpa
     device: torch.device
     model_plan: ModelPlan | None = None  # what the weights' places follow; None: all on the device
     placement: Placement | None = None  # the DiT's, when the plan swaps blocks or sends it away
@@ -277,27 +276,6 @@ class Models:
         logger.debug("phase %s entered in %.3f s", phase, time.monotonic() - started)
 
 
-def say_attention(attention: str) -> None:
-    """The load's line for the attention kernel the environment gives, at INFO: PyTorch's SDPA said
-    with why it is no problem, FlashAttention 2 left to each app's own words (the command line's
-    plan and the nodes' say which runs). Said, not warned of: on the lean attention the two
-    kernels peak at the same memory and take about the same time (research/docs/small-cards.md,
-    FlashAttention 2 against the lean SDPA, RTX 5090, 2026-11-06: a 1080p window of 11 latents
-    16.66 GiB under both, 8.16 s and 7.37 s; the 4K picture's step 2.87 and 2.80 s), and the user
-    read the warning as a problem (2026-11-08)."""
-    if attention == "sdpa":
-        logger.info(
-            "attention: PyTorch's SDPA (FlashAttention 2 is not installed; the two take the same"
-            " memory and about the same time)"
-        )
-
-
-def attention_backend() -> str:
-    """flash_attn_2 when FlashAttention 2 imports, else sdpa (DESIGN.md, Vendored model code)."""
-    available = attention_7b.FLASH_ATTN_2_AVAILABLE and attention_3b.FLASH_ATTN_2_AVAILABLE
-    return "flash_attn_2" if available else "sdpa"
-
-
 def nvidia_driver() -> str | None:
     """The NVIDIA driver's version, as nvidia-smi says it, read from NVML, the driver's own
     library, as torch reads the device count from it (torch/cuda/__init__.py,
@@ -420,7 +398,7 @@ def load_models(
     # for it, the DiT's place in them filled below.
     text_pos = torch.load(VENDOR / "pos_emb.pt", weights_only=True).to(device, COMPUTE_DTYPE)
     text_neg = torch.load(VENDOR / "neg_emb.pt", weights_only=True).to(device, COMPUTE_DTYPE)
-    models = Models(runner, text_pos, text_neg, attention_backend(), device, model_plan)
+    models = Models(runner, text_pos, text_neg, device, model_plan)
     models.vae = vae_parts.get(VAE_PART)
     if model_plan is not None and model_plan.compile_vae:
         if compilation is None:
@@ -456,14 +434,12 @@ def load_models(
     )
     unchanged(dit_file)
     dit.requires_grad_(False).eval()
-    attention = attention_backend()
-    say_attention(attention)
-    # Set on every attention module, as numz does (model_configuration.py:1204-1210).
+    # The compute dtype set on every attention module, as numz does (model_configuration.py:
+    # 1204-1210); their mode stays SDPA, the one the vendored attention runs.
     for module in dit.modules():
         if isinstance(
             module, attention_7b.FlashAttentionVarlen | attention_3b.FlashAttentionVarlen
         ):
-            module.attention_mode = attention
             module.compute_dtype = COMPUTE_DTYPE
     runner.dit = dit
 

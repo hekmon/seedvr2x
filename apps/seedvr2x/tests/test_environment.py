@@ -174,21 +174,16 @@ def site(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
     environment._declared.cache_clear()  # pyright: ignore[reportPrivateUsage]
 
 
-def test_flash_attention_recorded(site: Path) -> None:
-    # Not declared, since PyPI only has its source, yet the run's when installed: recorded. A
-    # profiler, imported as well, isn't.
-    try:
-        metadata.version("flash-attn")
-    except metadata.PackageNotFoundError:
-        stand_in_distribution(site, "flash-attn", "flash_attn", "torch", "einops")
+def test_an_undeclared_distribution_is_not_recorded(site: Path) -> None:
+    # Only the CLI's declared requirements and theirs are the run's (environment.UNDECLARED is
+    # empty since FlashAttention 2 was dropped, 2026-11-08: nothing imports it): a profiler,
+    # imported as well, isn't recorded, and no flash-attn entry is looked for.
     stand_in_distribution(site, "a-profiler", "a_profiler")
     environment._providers.cache_clear()  # pyright: ignore[reportPrivateUsage]
     environment._declared.cache_clear()  # pyright: ignore[reportPrivateUsage]
-    for module in ("flash_attn", "a_profiler"):
-        importlib.import_module(module)
+    importlib.import_module("a_profiler")
     found = environment.versions()
-    assert "flash-attn" in found
-    assert "a-profiler" not in found
+    assert "a-profiler" not in found and environment.UNDECLARED == ()
 
 
 def test_stray_files_left_alone(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

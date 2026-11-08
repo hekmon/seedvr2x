@@ -86,13 +86,12 @@ def plan(
     host_available: int | None,
     *,
     correct: bool,
-    attention: str = peaks.FLASH_ATTN_2,
     dit_model: Architecture = peaks.FP16,
     held: bool = False,
 ) -> tuple[Plan, Peaks]:
     """The plan for one clip in memory, resized to `target`: shot_plan.plan of its shots, with
     `free` (bytes, or the reading the run made), `pins`, `host_available` (bytes of system memory;
-    None: unchecked), `correct` (the colour correction, split), the attention backend, the DiT's
+    None: unchecked), `correct` (the colour correction, split), the DiT's
     format and `held` (the weights' pinned copies exist already, Models.place) as it takes them.
     `shots` is the clip's cut into shots, each a pass of upscale (the longest shot's windows decide
     the plan, shot_plan.plan), or a number of frames: one shot, Shot(0, frames). PlanError as it
@@ -133,7 +132,6 @@ def plan(
             pins,
             available,
             split=correct,
-            attention=attention,
             dit_model=dit_model,
             held=held,
             in_memory=True,

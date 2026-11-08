@@ -307,3 +307,18 @@ def test_the_swiglu_mlp_is_the_plain_one(plain_mlp: ModuleType) -> None:
     x = torch.randn(20, 32, generator=torch.Generator().manual_seed(6))
     with torch.no_grad():
         assert torch.equal(ours(x), theirs(x))
+
+
+@pytest.mark.parametrize("size", ["7b", "3b"])
+@pytest.mark.parametrize("mode", ["flash_attn_2", "flash", ""])
+def test_a_mode_other_than_sdpa_is_refused(size: str, mode: str) -> None:
+    # SDPA is the one attention kernel (FlashAttention 2 went on 2026-11-08): a module made for
+    # another mode raises at its forward, never runs SDPA in its place unannounced.
+    import importlib
+
+    module = importlib.import_module(f"seedvr2x.vendor.models.dit_{size}.attention")
+    layer = module.FlashAttentionVarlen(attention_mode=mode)
+    q = torch.zeros(4, HEADS, HEAD_DIM)
+    cu = torch.tensor([0, 4], dtype=torch.int32)
+    with pytest.raises(ValueError, match="attention_mode"):
+        layer(q, q, q, cu, cu, 4, 4)

@@ -126,7 +126,6 @@ class Machine(Protocol):
     def free(self) -> int: ...
     def reading(self, free: int) -> Reading: ...
     def host(self) -> int | None: ...
-    def attention(self) -> str: ...
     def dit_model(self, path: Path) -> Architecture: ...
     def load(
         self, files: ModelFiles, plan: ModelPlan, reserve: Mapping[str, int] | int | None
@@ -180,11 +179,6 @@ class Card:
         if found is None:
             logger.warning("the system memory available is unread: the plan doesn't check it")
         return found
-
-    def attention(self) -> str:
-        from seedvr2x import model
-
-        return model.attention_backend()
 
     def dit_model(self, path: Path) -> Architecture:
         from seedvr2x import weights
@@ -338,7 +332,6 @@ class Service:
             options.queue,
             reading,
             machine.host(),
-            machine.attention(),
             machine.dit_model(self.files.dit.path),
             options.pins,
             PurePath(options.dit).name,
@@ -367,9 +360,8 @@ class Service:
             records.Model(self.options.vae, files.hashes.sha256(files.vae.path)),
         )
         logger.info(
-            "models loaded in %.1f s, attention: %s",
+            "models loaded in %.1f s",
             time.monotonic() - started,
-            self.models.attention,
         )
         try:
             self.card.reserve(made.reservation)
@@ -826,7 +818,6 @@ class Service:
             color_correction="split",
             encode_tile=0 if tiles.encode is None else tiles.encode.size,
             decode_tile=0 if tiles.decode is None else tiles.decode.size,
-            attention=self.made.plan.attention,
         )
         if prepared.format == answers.WEBP:
             data = webp.write(

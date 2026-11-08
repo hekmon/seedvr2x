@@ -440,6 +440,7 @@ def bring_up(running: Running, machine: "Callable[[], Machine] | None" = None) -
     the server was launched without them), the card read, the plan and the reservation made, the
     models loaded, the warm-up run. Refusal or service.Failed where it is refused."""
     import service as services
+    from seedvr2x import record
 
     service = running.service
     files = service.check_files()
@@ -451,8 +452,8 @@ def bring_up(running: Running, machine: "Callable[[], Machine] | None" = None) -
         dit_model=files.dit.name,
         vae_model=files.vae.name,
     )
-    made = service.plan()
-    service.metrics.info["attention"] = made.plan.attention
+    service.plan()
+    service.metrics.info["attention"] = record.ATTENTION
     service.load()
     service.warm_up()
 

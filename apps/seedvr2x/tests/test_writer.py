@@ -731,7 +731,6 @@ RECORD = Record(
     "split",
     0,
     512,
-    "sdpa",
     Video(20, "maximum", False, False, cut_threshold="0.3"),
 ).tags()
 

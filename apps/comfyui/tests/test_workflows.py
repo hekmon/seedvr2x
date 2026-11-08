@@ -186,7 +186,6 @@ def test_seedvr2x_widgets_are_those_of_the_schema_at_their_defaults(name: str) -
             by_id_ = {widget.id: value for widget, value in saved if widget is not None}
             assert set(by_id_) == {
                 "resolution",
-                "attention",
                 "color_correction",
                 "seed",
                 "plan_only",
@@ -194,7 +193,7 @@ def test_seedvr2x_widgets_are_those_of_the_schema_at_their_defaults(name: str) -
             }
             if node["type"] == "seedvr2xUpscaleVideo":
                 assert by_id_["quality"] == "standard"
-            assert by_id_["attention"] == "auto" and by_id_["color_correction"] is True
+            assert by_id_["color_correction"] is True
             assert by_id_["plan_only"] is False and by_id_["resolution"] == 1080
         else:
             assert values[-1] == "auto", "keep in RAM between runs is auto"

@@ -809,7 +809,6 @@ def wide_service(server: Any) -> services.Service:
             8,
             memory.reading(96 * GIB),
             HOST,
-            peaks.FLASH_ATTN_2,
             peaks.FP16,
         )
     )
@@ -1027,9 +1026,7 @@ def test_the_reservations_line_says_the_tiles_pictures_at_once_take(
     for count in (2, 1):
         if dit == peaks.FP16 and count == 2:
             continue  # refused (tests/test_reservation.py)
-        asked = reservation.Asked(
-            (1920, 1080), 1024 * 576, count, 8, held, 64 * GIB, peaks.SDPA, dit
-        )
+        asked = reservation.Asked((1920, 1080), 1024 * 576, count, 8, held, 64 * GIB, dit)
         server = services.Service(
             options(tmp_path, bound=(1920, 1080), input_pixels=1024 * 576, count=count), None
         )
@@ -1137,7 +1134,6 @@ def plan_lines(
     from 0.6 MP unless `given` says otherwise; with the service."""
     dit_format = given.pop("dit_format", peaks.FP16)
     machine = StandIn(cpu_models, free_bytes=round(free_gib * GIB), dit_format=dit_format)
-    machine.attention_name = peaks.SDPA
     settings: dict[str, Any] = {"bound": FULL_HD, "input_pixels": NIGHT_INPUT, "count": 1}
     settings.update(given)
     with live(

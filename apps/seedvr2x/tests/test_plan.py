@@ -59,10 +59,9 @@ def test_record() -> None:
     assert resume.differences(one, other) == []
     # Nor what the plan was made in, recorded there with its predicted peaks (cli._run;
     # shot_plan.Peaks.record): the memory it counted on, what the driver reported free and what
-    # the whole card had, read or not, and the attention backend of that day's run.
-    read = {"free": 22 * GIB, "driver_free": 30 * GIB, "card_free": 28 * GIB, "attention": "sdpa"}
+    # the whole card had, read or not.
+    read = {"free": 22 * GIB, "driver_free": 30 * GIB, "card_free": 28 * GIB}
     unread = {"free": 30 * GIB, "driver_free": 30 * GIB, "card_free": None}
-    unread["attention"] = "flash_attn_2"
     for memory in (read, unread):
         made = {"plan": plan.record()}
         made["plan"]["memory"].update(memory)
@@ -215,17 +214,6 @@ def test_host_available(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> Non
     assert available(tmp_path / "none", tmp_path / "none") is None
     [said] = caplog.records
     assert said.levelno == logging.WARNING
-
-
-def test_attention_is_the_loader_s() -> None:
-    # The backend a plan is made for is the one the loader sets on every attention module of
-    # the DiT (model.attention_backend, model.load_models): FlashAttention 2 where it imports,
-    # else SDPA, by this machine's own.
-    from seedvr2x import model
-
-    attention = cli._attention  # pyright: ignore[reportPrivateUsage]
-    assert attention() == model.attention_backend()
-    assert attention() in ("flash_attn_2", "sdpa")
 
 
 @pytest.mark.parametrize("text", ["0", "512", "576", "1024", "4096"])

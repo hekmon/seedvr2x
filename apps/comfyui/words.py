@@ -540,14 +540,6 @@ def no_cuda(reason: str) -> Refused:
     )
 
 
-def attention_missing() -> Refused:
-    return Refused(
-        "attention is set to flash_attn_2 on this node, and FlashAttention 2 isn't installed in"
-        " ComfyUI's Python: choose auto (FlashAttention 2 where it is installed, else PyTorch's"
-        " SDPA) or sdpa"
-    )
-
-
 def not_freed(*, need: int, there: int, comfy: int) -> Refused:
     """The card still short after ComfyUI was asked to free its models: what the plan counts on,
     what is there, and what ComfyUI's models that stay still hold."""

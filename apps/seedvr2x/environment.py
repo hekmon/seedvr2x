@@ -34,8 +34,9 @@ EXTRA = re.compile(r"""\bextra\s*==\s*["']([^"']+)["']""")
 # `.so`, as triton's `libtriton.so`, passes for a library: that only errs toward recording.
 SHARED_LIBRARY = re.compile(r"\.so(\.\d+)*$")
 EXTENSION_MODULE = re.compile(r"\.(cpython-[^.]+|abi3)\.so$")
-# Used when installed, though not declared: PyPI only has its source (AGENTS.md, Environment).
-UNDECLARED = ("flash-attn",)
+# Used when installed, though not declared: none now. FlashAttention 2 was one until seedvr2x
+# dropped it (2026-11-08): nothing imports flash_attn any more, so it can't shape an output.
+UNDECLARED: tuple[str, ...] = ()
 # setuptools' hook, which site imports at every start from distutils-precedence.pth, unless
 # SETUPTOOLS_USE_DISTUTILS=stdlib, whatever the process runs: the run imports no setuptools, and
 # a resume mustn't depend on that variable.
@@ -68,8 +69,8 @@ def current(
     *,
     compiling: bool = False,
 ) -> dict[str, object]:
-    """The environment of a run on device: torch, CUDA, cuDNN, the GPU, the attention backend and
-    FlashAttention, ffmpeg and its conversions' fingerprint (media/fingerprint.py), Python and
+    """The environment of a run on device: torch, CUDA, cuDNN, the GPU, the attention kernel
+    (record.ATTENTION), ffmpeg and its conversions' fingerprint (media/fingerprint.py), Python and
     the versions of the distributions (versions); and the NVIDIA driver, for information only,
     since the math kernels ship with torch.
 
@@ -105,14 +106,10 @@ def current(
     What they add (jinja2, markupsafe, networkx, setuptools: resume.INDUCTOR_PACKAGES) counts in
     a resume's comparison only between two jobs that both compile (DESIGN.md, decided on
     2026-10-29), so a plan switched to or from --compile needs no --accept-env-change."""
-    from seedvr2x import model
+    from seedvr2x import model, record
 
     if compiling:
         import_inductor()
-    try:
-        flash_attn = metadata.version("flash_attn")
-    except metadata.PackageNotFoundError:
-        flash_attn = None
     if device is None:
         made = made_in or {}
         gpu, driver, cudnn = made.get("gpu"), made.get("driver"), made.get("cudnn")
@@ -125,8 +122,10 @@ def current(
         "cudnn": cudnn,
         "gpu": gpu,
         "driver": driver,
-        "attention": model.attention_backend(),
-        "flash_attn": flash_attn,
+        # Constant since FlashAttention 2 was dropped (2026-11-08), kept so that a job begun
+        # with it ("flash_attn_2" recorded) and resumed after is an environment change under the
+        # rule that compares this record.
+        "attention": record.ATTENTION,
         "ffmpeg": ffmpeg_version,
         "conversions": conversions,
         "python": f"{platform.python_implementation()} {platform.python_version()}",
@@ -191,7 +190,7 @@ def _own_modules() -> list[str]:
 
 def imported() -> set[str]:
     """The run's distributions this process has imported, by their normalised names: those within
-    the closure of the CLI's declared requirements, and flash-attn. What else a process imports
+    the closure of the CLI's declared requirements. What else a process imports
     is no part of the run, and a resume mustn't depend on it: pytest, pygments when a dev install
     has it (httpx 0.28.1 imports it for its command line, httpx/__init__.py:15), a profiler, and
     what a model file's download alone imports (DOWNLOAD_ONLY)."""
@@ -211,7 +210,7 @@ def _providers() -> Mapping[str, list[str]]:
 
 @functools.cache
 def _declared() -> frozenset[str]:
-    """The distributions the CLI's distribution requires and flash-attn, and their requirements,
+    """The distributions the CLI's distribution requires, and their requirements,
     through the extras each asks: read once, as _providers. The library's among them, seedvr2x-core,
     and so its own requirements; seedvr2x's own two distributions (OWN) are left out, their files
     being hashed by settings.code."""

@@ -9,17 +9,18 @@ The tries (`reservation._made` makes a plan, finds the reservation over the budg
 again on less, up to TRIES = 8; the next reading is lowered under what the binding phase takes:
 the picture budget, or the DiT's peak at one picture when it binds), counted at 3840x2160 from
 50 MP with 64 GiB of system memory, queue 8, by the plans `still_plan.plan` is asked for, over
-2.0 to 100 GiB free in steps of 0.3 GiB, both attention kernels, at 1, 2 and 4 pictures:
+2.0 to 100 GiB free in steps of 0.3 GiB, at 1, 2 and 4 pictures:
 - one picture: 1 plan where the first fits (48 GiB and up) or the plan itself refuses at once,
-  2 to 5 where the first comes out short and is lowered (2 at 8 and 12 GiB with FlashAttention 2,
-  3 at 16, 4 at 24 and 32); of the 654 cases, 414 take 1, 88 take 2, 64 take 3, 82 take 4 and 6
-  take 5;
+  2 to 5 where the first comes out short and is lowered (2 at 8 and 12 GiB, 3 at 16,
+  4 at 24 and 32);
+  of the 327 cases, 207 take 1, 42 take 2, 33 take 3, 42 take 4 and 3 take 5 (half the 654 of
+  the two kernels, which planned alike);
 - two or four pictures: the same figures at both, the reservation not growing with the count
   (the server runs one picture in each model at a time), each pin tried (reservation._several:
   the plan's own tiles, then both VAE passes pinned to each of the 25 sides from 2048 to 512 px)
-  taking 3 plans at the most: 1 plan where the first fits (366 cases), 2 where it is lowered and
-  fits (64); 14 to 33 where the plan's own tiles move the models or reserve too much and smaller
-  tiles are tried, 86 of them fitting so and 138 refused once every side was tried.
+  taking 3 plans at the most: 1 plan where the first fits (183 cases), 2 where it is lowered and
+  fits (32); 14 to 33 where the plan's own tiles move the models or reserve too much and smaller
+  tiles are tried, 43 of them fitting so and 69 refused once every side was tried.
 No case takes more than 5 at one picture, nor more than 3 for each pin at two or more: the tests
 hold them.
 
@@ -59,14 +60,12 @@ def asked(
     free_gib: float,
     count: int = 1,
     *,
-    attention: str = peaks.FLASH_ATTN_2,
     bound: Bound = FOUR_K,
     queue: int = 8,
 ) -> Asked:
-    return Asked(bound, INPUT, count, queue, reading(free_gib), SYSTEM, attention, peaks.FP16)
+    return Asked(bound, INPUT, count, queue, reading(free_gib), SYSTEM, peaks.FP16)
 
 
-ATTENTIONS = [peaks.FLASH_ATTN_2, peaks.SDPA]
 VAE: tuple[Phase, Phase] = ("encode", "decode")
 
 
@@ -155,7 +154,6 @@ def test_the_reservation_of_a_real_bound_follows_its_peaks() -> None:
         SYSTEM,
         process=reservation.host_process(1, 8, INPUT, FOUR_K),
         input_pixels=INPUT,
-        attention=peaks.SDPA,
         dit_model=peaks.FP16,
         split=True,
     )
@@ -204,7 +202,6 @@ def four_k_plan(free_gib: float, *, count: int = 1) -> still_plan.StillPlan:
         SYSTEM,
         process=reservation.host_process(count, 8, INPUT, FOUR_K),
         input_pixels=INPUT,
-        attention=peaks.FLASH_ATTN_2,
         dit_model=peaks.FP16,
         split=True,
     )
@@ -268,7 +265,7 @@ def pictures(bound: Bound) -> list[tuple[int, int]]:
 def test_the_picture_budget_is_what_the_bounds_own_pictures_take_with_their_room(
     free: float,
 ) -> None:
-    plan = made_plan(free, peaks.FLASH_ATTN_2)
+    plan = made_plan(free)
     budget = reservation.picture_budget(plan, INPUT)
     floor = still_plan.bound_peaks(plan)
     long, short = plan.bound
@@ -324,28 +321,25 @@ def test_a_4k_bound_from_50_mp_on_96_gib_reserves_a_part_of_the_card() -> None:
     assert reservation.make(asked(64)).reservation == made.reservation
 
 
-@pytest.mark.parametrize("attention", ATTENTIONS)
-def test_whole_where_every_model_stays_on_the_card(attention: str) -> None:
-    assert reservation.whole(made_plan(96, attention)) is True
+def test_whole_where_every_model_stays_on_the_card() -> None:
+    assert reservation.whole(made_plan(96)) is True
     # 24 GiB free: the DiT's blocks swap or the DiT leaves for the VAE's passes.
-    assert reservation.whole(made_plan(24, attention)) is False
+    assert reservation.whole(made_plan(24)) is False
 
 
-def made_plan(free_gib: float, attention: str) -> still_plan.StillPlan:
-    return reservation.make(asked(free_gib, attention=attention)).plan
+def made_plan(free_gib: float) -> still_plan.StillPlan:
+    return reservation.make(asked(free_gib)).plan
 
 
 # ---- A reservation on a card ---------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("attention", ATTENTIONS)
-def test_one_4k_picture_from_50_mp_fits_in_24_gib(attention: str) -> None:
-    wanted = asked(24, attention=attention)
+def test_one_4k_picture_from_50_mp_fits_in_24_gib() -> None:
+    wanted = asked(24)
     made = reservation.make(wanted)
     assert made.count == 1
     assert made.plan.bound == FOUR_K
     assert made.plan.input_pixels == INPUT
-    assert made.plan.attention == attention
     # The reservation is held within the budget the original reading gives the plan.
     budget = wanted.reading.counted - made.plan.margin
     assert 0 < made.reservation <= budget
@@ -357,12 +351,11 @@ def test_one_4k_picture_from_50_mp_fits_in_24_gib(attention: str) -> None:
     assert made.models == still_plan.bound_peaks(made.plan)["dit"].models
 
 
-@pytest.mark.parametrize("attention", ATTENTIONS)
-def test_two_4k_pictures_do_not_fit_in_22_gib(attention: str) -> None:
+def test_two_4k_pictures_do_not_fit_in_22_gib() -> None:
     # The 7B whole at 4K and two pictures: more than 22 GiB (a first fit between 22.5 and 22.75
     # on the lean attention; 24 GiB held two before it).
     with pytest.raises(ReservationRefused) as error:
-        reservation.make(asked(22, 2, attention=attention))
+        reservation.make(asked(22, 2))
     assert error.value.most == 1
     assert isinstance(error.value, Refusal)
     assert "--max-concurrent" in str(error.value)
@@ -372,9 +365,8 @@ def test_two_4k_pictures_do_not_fit_in_22_gib(attention: str) -> None:
     assert "--max-size" in str(error.value)
 
 
-@pytest.mark.parametrize("attention", ATTENTIONS)
-def test_two_4k_pictures_fit_in_96_gib(attention: str) -> None:
-    made = reservation.make(asked(96, 2, attention=attention))
+def test_two_4k_pictures_fit_in_96_gib() -> None:
+    made = reservation.make(asked(96, 2))
     assert made.count == 2
     assert reservation.whole(made.plan)
     assert made.reservation <= asked(96, 2).reading.counted - made.plan.margin
@@ -553,31 +545,30 @@ def test_the_tries_stay_under_the_limit(
 def test_the_tries_stay_under_the_limit_on_cards_between(
     count: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 2.0 to 100 GiB free in steps of 0.3, both kernels: the file's docstring counts them.
+    # 2.0 to 100 GiB free in steps of 0.3: the file's docstring counts them.
     counter = Counted(monkeypatch)
     tried = Tried(monkeypatch, counter)
     seen: dict[int, int] = {}
     outcomes: dict[str, int] = {}
     for tenths in range(20, 1001, 3):
-        for attention in ATTENTIONS:
-            tried.each = []
-            wanted = asked(tenths / 10, count, attention=attention)
-            plans, outcome = counter.tries(wanted, FOUR_K, count)
-            assert max(tried.each) <= most_tries(count), (tenths, attention)
-            seen[plans] = seen.get(plans, 0) + 1
-            if outcome == "fits" and count > 1:
-                pinned = reservation._made(wanted, FOUR_K, count).plan.pins.encode_tile
-                outcome = "fits" if pinned is None else "fits pinned"
-            outcomes[outcome] = outcomes.get(outcome, 0) + 1
-    assert sum(seen.values()) == 654
+        tried.each = []
+        wanted = asked(tenths / 10, count)
+        plans, outcome = counter.tries(wanted, FOUR_K, count)
+        assert max(tried.each) <= most_tries(count), tenths
+        seen[plans] = seen.get(plans, 0) + 1
+        if outcome == "fits" and count > 1:
+            pinned = reservation._made(wanted, FOUR_K, count).plan.pins.encode_tile
+            outcome = "fits" if pinned is None else "fits pinned"
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+    assert sum(seen.values()) == 327
     if count == 1:
         # {2: 88, 3: 64, 4: 82} before the 4K decode's ratio at 832 px was its measure's, then
         # {2: 86, 4: 84} before the DiT's buffers lost the RoPE tables (2026-11-07).
-        assert seen == {1: 414, 2: 84, 3: 66, 4: 84, 5: 6}
+        assert seen == {1: 207, 2: 42, 3: 33, 4: 42, 5: 3}
     else:
-        assert seen[1] == 366 and seen[2] == 64
+        assert seen[1] == 183 and seen[2] == 32
         assert min(plans for plans in seen if plans > 2) == 14 and max(seen) == 33
-        assert outcomes == {"fits": 430, "fits pinned": 86, "reservation refused": 138}
+        assert outcomes == {"fits": 215, "fits pinned": 43, "reservation refused": 69}
 
 
 def test_the_tries_of_a_fit_follow_how_far_the_first_plan_is_over(
@@ -647,8 +638,8 @@ def night(
 ) -> Asked:
     """The RTX 5090 under WSL2 (2026-11-04, the n2 runs' logs): the run held to the card, "the
     plan counts on 18.45 GiB of the GPU's memory, of the 23.45 GiB free on the whole card by NVML
-    (its driver reports 30.03 GiB free to this process)", 0.5 left outside torch's limit; SDPA,
-    FlashAttention 2 not installed; two pictures within 1920x1080 from 0.6 MP. The 18.45 GiB is
+    (its driver reports 30.03 GiB free to this process)", 0.5 left outside torch's limit;
+    two pictures within 1920x1080 from 0.6 MP. The 18.45 GiB is
     the card's 23.45 less the 0.5 and the flat 4.5 GiB reserve: the figure of torch's own
     allocator without the segments (memory.PLAIN), which is what these tests hold (the plans of
     that night, unchanged). Under the segments the same card counts 22.95 GiB (memory.counted),
@@ -661,7 +652,7 @@ def night(
         memory.HELD_BACK,
         allocator,
     )
-    return Asked(FULL_HD, NIGHT_INPUT, count, 8, held, SYSTEM, peaks.SDPA, dit)
+    return Asked(FULL_HD, NIGHT_INPUT, count, 8, held, SYSTEM, dit)
 
 
 @pytest.mark.parametrize("bound", [FULL_HD, FOUR_K, (1280, 720), (1918, 1078), (2048, 1152)])
@@ -862,9 +853,9 @@ SHARP_GGUF = "the dynamic GGUF (--dit-model seedvr2x_ema_7b_sharp_dyn.gguf, 4.8 
 
 def two_in_full_hd(free_gib: float, dit: Architecture, name: str) -> Asked:
     """Two pictures within 1920x1080 from 0.6 MP on `free_gib` GiB, the DiT file `name` in the
-    format dit (SDPA): they need the whole DiT on the card, which fp16 never gets in 18 GiB or
+    format dit : they need the whole DiT on the card, which fp16 never gets in 18 GiB or
     less, int8 from 14 and the GGUF from 10 (measured by the plan, the tests below)."""
-    held = asked(free_gib, 2, bound=FULL_HD, attention=peaks.SDPA)
+    held = asked(free_gib, 2, bound=FULL_HD)
     return replace(held, dit_model=dit, input_pixels=NIGHT_INPUT, dit_file=name)
 
 
@@ -928,7 +919,7 @@ def test_a_refused_start_names_the_smaller_files_that_fit() -> None:
 
 def one_in_full_hd(free_gib: float, dit: Architecture, name: str) -> Asked:
     """One picture within 1920x1080 from 0.6 MP on `free_gib` GiB, the DiT file `name` in the
-    format dit (SDPA). The plan swaps blocks of fp16's 7B below about 20 GiB (21 at 10, 17 at 12,
+    format dit . The plan swaps blocks of fp16's 7B below about 20 GiB (21 at 10, 17 at 12,
     3 at 18), of int8's 5 at 10 and none from 11, and none of the GGUF's from 7 (the plan, the
     probe behind these tests)."""
     return replace(two_in_full_hd(free_gib, dit, name), count=1)

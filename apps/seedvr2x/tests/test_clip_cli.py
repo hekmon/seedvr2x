@@ -409,7 +409,6 @@ def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(
         Pins(window=GPU_WINDOW),
         host,
         correct=True,
-        attention=cli._attention(),  # pyright: ignore[reportPrivateUsage]
         dit_model=peaks.FP16,
     )
     print(

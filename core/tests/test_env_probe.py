@@ -34,7 +34,6 @@ PARTS = {
     "allocator": "cudaMallocAsync",
     "gpu": "A Stand-in GPU",
     "alloc_conf": "unset",
-    "flash_attn": "none",
 }
 
 
@@ -71,7 +70,7 @@ class Ran:
 
 
 def sdpa(architecture: weights.Architecture = weights.DIT_7B, path: Path | None = None) -> Any:
-    return probe.check(CPU, architecture, "sdpa", path=path)
+    return probe.check(CPU, architecture, path=path)
 
 
 def test_importing_the_probe_imports_no_torch() -> None:
@@ -104,12 +103,13 @@ def test_the_fingerprint_s_parts_on_a_card(monkeypatch: pytest.MonkeyPatch) -> N
     assert probe.fingerprint(torch.device("cuda:0")) == PARTS
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "backend:native")
     monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:True")
-    monkeypatch.setattr(probe, "_version", lambda name: "2.8.0" if name == "flash-attn" else None)
+    # FlashAttention 2 is no part of the fingerprint (it went on 2026-11-08).
+    monkeypatch.setattr(probe, "_version", lambda name: None)
     parts = probe.fingerprint(torch.device("cuda:0"))
     assert parts["alloc_conf"] == (
         "PYTORCH_CUDA_ALLOC_CONF=backend:native;PYTORCH_ALLOC_CONF=expandable_segments:True"
     )
-    assert parts["flash_attn"] == "2.8.0" and parts["seedvr2x"] == probe.UNKNOWN
+    assert "flash_attn" not in parts and parts["seedvr2x"] == probe.UNKNOWN
 
 
 def test_a_part_that_cannot_be_read_is_unknown_and_logged(
@@ -264,7 +264,7 @@ def test_the_cache_directory_of_each_platform(
 def test_each_layout_s_checks_run_and_pass_on_the_cpu(
     architecture: weights.Architecture, names: tuple[str, ...], cache: Path
 ) -> None:
-    assert probe.kernels(architecture, "sdpa") == names
+    assert probe.kernels(architecture) == names
     probed = sdpa(architecture, cache)
     assert [result.kernel for result in probed.results] == list(names)
     assert not probed.cached and probed.path == cache
@@ -279,19 +279,9 @@ def test_a_dynamic_file_that_holds_one_type_checks_that_type_alone() -> None:
     only = weights.Architecture(
         "a stand-in", 1, "x", None, layout=weights.GGUF, types=("33333333", "33333333")
     )
-    assert probe.kernels(only, "sdpa")[2:] == ("dequantise Q3_K",)
-    assert probe.kernels(weights.DIT_3B, "flash_attn_2") == (
-        "matmul bfloat16",
-        "attention flash_attn_2",
-    )
-
-
-def test_an_attention_mode_that_does_not_exist_fails_the_check_and_is_cached(cache: Path) -> None:
-    # The vendored attention raises a ValueError for another mode: a failed check, not a crash.
-    with pytest.raises(ProbeRefusal) as refusal:
-        probe.check(CPU, weights.DIT_7B, "sage", path=cache)
-    assert refusal.value.kernel == "attention sage" and refusal.value.error is None
-    assert "does not run" in str(refusal.value) and "attention_mode" in str(refusal.value)
+    assert probe.kernels(only)[2:] == ("dequantise Q3_K",)
+    assert probe.kernels(weights.DIT_3B) == ("matmul bfloat16", probe.ATTENTION)
+    assert probe.ATTENTION == "attention sdpa"
 
 
 # --- the cache ---
@@ -363,8 +353,6 @@ def test_a_check_the_cache_lacks_is_run_and_added(
     # The first layout is vouched for still, and so is the second now.
     ran.names.clear()
     assert sdpa(path=cache).cached and sdpa(weights.DIT_7B_INT8, cache).cached
-    # Another attention kernel is another check.
-    probe.check(CPU, weights.DIT_7B, "sdpa", path=cache)
     assert ran.names == []
 
 
@@ -718,19 +706,13 @@ def test_the_checks_on_cuda_pass_for_each_layout(
 ) -> None:
     # The real kernels, each error against its tolerance, printed: the PROVISIONAL bounds of the
     # matrix product and the attention (probe.py) are refined from these figures on each card.
-    from seedvr2x import model
-
     if not torch.cuda.is_available():
         pytest.skip("needs CUDA")
     device = torch.device("cuda:0")
     path = tmp_path / "probe.json"
-    probed = probe.check(device, architecture, model.attention_backend(), path=path)
+    probed = probe.check(device, architecture, path=path)
     for result in probed.results:
         print(result.said())
         assert result.passed
     print(json.dumps(probed.fingerprint, indent=2))
-    assert probe.check(device, architecture, model.attention_backend(), path=path).cached
-    if model.attention_backend() == "sdpa":
-        return
-    # FlashAttention 2 installed: PyTorch's SDPA is checked too, the other kernel of the pair.
-    assert all(r.passed for r in probe.check(device, architecture, "sdpa", path=path).results)
+    assert probe.check(device, architecture, path=path).cached

@@ -445,7 +445,6 @@ def test_every_class_of_errors_py_is_worded_without_an_option() -> None:
 def test_what_the_nodes_refuse_themselves() -> None:
     for refused in (
         words.no_cuda("ComfyUI is running on the CPU"),
-        words.attention_missing(),
         words.not_freed(need=20 * GIB, there=7 * GIB, comfy=2 * GIB),
         words.not_freed(need=20 * GIB, there=7 * GIB, comfy=0),
         words.transparent(),

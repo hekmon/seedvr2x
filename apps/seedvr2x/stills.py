@@ -7,7 +7,7 @@ its build check.
 The module imports no torch at its top (main imports it for the parser's constants, and the
 refusals that need no GPU come before anything loads): the picture's run imports it, after
 memory.startup chose the allocator, as main._run does. What main reads of the machine
-(the memory free, the host's, the attention backend, the DiT's format, the load) is main's, handed
+(the memory free, the host's, the DiT's format, the load) is main's, handed
 in as `Reads`, so that one function replaces each for a test as it does for a video's run."""
 
 import logging
@@ -112,7 +112,6 @@ class Reads:
 
     free: Callable[["torch.device"], int]  # main._free_memory: the GPU's free memory, in bytes
     host: Callable[[], int | None]  # main._host_available: the system memory available, in bytes
-    attention: Callable[[], str]  # main._attention: the DiT's attention backend (peaks')
     dit_model: Callable[[Path], "Architecture"]  # main._dit_model: the DiT file's format
     # main._load(model_files, device, model plan, reserve, kept): the models, loaded, with the
     # seconds that took; None once a refusal is logged.
@@ -228,7 +227,6 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     assert dit is not None, "a plan made loads its models"
     pins = still_plan.Pins(args.encode_tile, args.decode_tile, args.swap_blocks)
     split = args.color_correction == "split"
-    attention = reads.attention()
 
     # The plan for this picture alone, as stored, the way the model sees it (still_plan.plan's
     # `picture`; DESIGN.md, Still images, decided on 2026-11-04): a bound of its output in either
@@ -247,7 +245,6 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
             # The picture goes to the GPU at its stored size and is resized there: its copies
             # are counted (still_plan.COPIES).
             input_pixels=height * width,
-            attention=attention,
             dit_model=dit_model,
             split=split,
             pins=pins,
@@ -271,7 +268,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     # The record the file carries (DESIGN.md, The record in each output), made once the models
     # are loaded: each model file's SHA-256 that of the very bytes its load read, a pinned
     # file's or one seedvr2x doesn't pin, numz's (pull.Hashes.proved).
-    made = _record(pic, written, resolution, sample_aspect, model_files, args, tiles, attention)
+    made = _record(pic, written, resolution, sample_aspect, model_files, args, tiles)
     started = time.monotonic()
     out = _upscaled(models, pic, target, args.seed, tiles, split, reads)
     if out is None:
@@ -369,13 +366,12 @@ def _record(
     model_files: "ModelFiles",
     args: "argparse.Namespace",
     tiles: "PictureTiles",
-    attention: str,
 ) -> "Record":
     """The picture's record (record.Record): this command's name and version, the source's size as
     its file stores it and the output's as written (written, width and height, turned upright),
     the short side asked (resolution, given or the default) and the sample aspect used (--input-sar
     or square pixels), the model files by the names given and their SHA-256, the seed, the colour
-    correction, the passes' tiles (0 untiled) and the attention kernel."""
+    correction, the passes' tiles (0 untiled)."""
     from importlib.metadata import version
 
     from seedvr2x.record import Model, Record
@@ -398,7 +394,6 @@ def _record(
         color_correction=args.color_correction,
         encode_tile=0 if tiles.encode is None else tiles.encode.size,
         decode_tile=0 if tiles.decode is None else tiles.decode.size,
-        attention=attention,
     )
 
 

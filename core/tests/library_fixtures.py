@@ -79,21 +79,18 @@ def no_card_failed(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def plain_fit(monkeypatch: pytest.MonkeyPatch) -> None:
     """The DiT's fit of the plain attention, before seedvr2x's lean one (patch of 2026-11-06):
-    127.16 KiB a token and 2.726 MiB a window, SDPA 4.69% more a token and 0.141 GiB, as
-    peaks.py's comment records it. For the tests that hold plans or peaks a run measured on the
+    127.16 KiB a token and 2.726 MiB a window, FlashAttention 2's fit, which these runs
+    measured (SDPA's plain fit was 4.69% more a token and 0.141 GiB; FlashAttention 2 went on
+    2026-11-08 and the tests keep the figures of the run they held, SDPA's lean fit being the
+    shipped one). For the tests that hold plans or peaks a run measured on the
     plain code (numz's recipes, the first matrices, the windowed shots): the planner's arithmetic
     is held to those runs at the fit of the code they ran, the lean fit to its own measures
     (LEAN_WINDOWS)."""
-    gib = 1024**3
     for name in ("PER_TOKEN", "INT8_PER_TOKEN", "GGUF_PER_TOKEN"):
         monkeypatch.setattr(peaks, name, 127.16 * 1024)
     for name in ("PER_WINDOW", "INT8_PER_WINDOW", "GGUF_PER_WINDOW"):
         monkeypatch.setattr(peaks, name, 2.726 * 1024**2)
-    monkeypatch.setattr(
-        peaks,
-        "DIT_ATTENTION",
-        {peaks.FLASH_ATTN_2: (0, 1.0), peaks.SDPA: (round(0.141 * gib), 1.0469)},
-    )
+    monkeypatch.setattr(peaks, "DIT_ATTENTION", 0)
 
 
 # The DiT's windows on the lean attention, each the allocated peak of one forward in bytes (the

@@ -907,13 +907,12 @@ def _picture(path: Path) -> str | None:
 
 def _reads() -> "stills.Reads":
     """What the picture's run reads of the machine, as main reads it for a video: the free
-    memory, the host's, the attention backend, the DiT's format, the load of the models and the
+    memory, the host's, the DiT's format, the load of the models and the
     words for a refused memory. Taken here at the call, not imported by stills.py, so that one
     function replaces each for a test as it does for the video's run."""
     return stills.Reads(
         free=_free_memory,
         host=_host_available,
-        attention=_attention,
         dit_model=_dit_model,
         load=_load,
         refused=_refused,
@@ -1411,9 +1410,7 @@ def _run(args: argparse.Namespace) -> int:
 
             # What the driver reports free, and what the plan may count on of it: all of it,
             # but on a driver that gives memory the card doesn't have, where the run is held to
-            # less (seedvr2x/memory.py); the plan's lines and its refusals name each figure. The
-            # DiT's peak by the fit of the attention backend this run takes, today's on a
-            # resume too (_attention).
+            # less (seedvr2x/memory.py); the plan's lines and its refusals name each figure.
             free = memory.reading(_free_memory(identity.device))
             host = _host_available()
             # The system memory the plan is made with, beside memory.reading's GPU line, so that
@@ -1431,7 +1428,6 @@ def _run(args: argparse.Namespace) -> int:
                     host / memory.GIB,
                     host,
                 )
-            attention = _attention()
             # The DiT's figures by its file's format, fp16's, int8's or a GGUF's (peaks.DITS): a
             # plan made loads the models, so its file is there.
             assert dit is not None, "a plan made loads its models"
@@ -1441,7 +1437,6 @@ def _run(args: argparse.Namespace) -> int:
                     *(free, target, shots, pins, host),
                     split=split,
                     recorded=kept_plan,
-                    attention=attention,
                     compile_vae=args.compile,
                     dit_model=dit_model,
                     dit_file=dit.name,
@@ -1463,7 +1458,6 @@ def _run(args: argparse.Namespace) -> int:
                         recorded=kept_plan,
                         refused=error,
                         split=split,
-                        attention=attention,
                         dit_model=dit_model,
                     )
                 except planner.PlanError as again:
@@ -1502,7 +1496,6 @@ def _run(args: argparse.Namespace) -> int:
                     dict(
                         split=split,
                         recorded=kept_plan,
-                        attention=attention,
                         compile_vae=args.compile,
                         dit_model=dit_model,
                     ),
@@ -2284,7 +2277,7 @@ def _load(
         logger.error("%s, as the models loaded: nothing was run%s", _refused(error), kept)
         return None
     seconds = time.monotonic() - started
-    logger.info("models loaded in %.1f s, attention: %s", spent(seconds), models.attention)
+    logger.info("models loaded in %.1f s", spent(seconds))
     return models, seconds
 
 
@@ -3474,15 +3467,12 @@ def _early_memory(
     through NVML alone (memory.card_state; memory.early takes this process's CUDA context off it):
     no torch, no CUDA context, no GPU probe (memory.startup). The planner's own arithmetic judges
     the record's shot, plan and pins, the system memory and the weights' placement as it will
-    later, but for the system memory, unread before torch (blockswap.available), and the attention
-    backend, which FlashAttention 2's presence tells (importlib, not imported). The refusal stays
+    later, but for the system memory, unread before torch (blockswap.available). The refusal stays
     at the plan, later, the memory moving meanwhile; this never refuses, and says in a debug line
     where it judged nothing. PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md says "NVML only"
-    and no more): the host's memory unchecked here, the attention by find_spec."""
-    from importlib.util import find_spec
-
+    and no more): the host's memory unchecked here."""
     import planner
-    from seedvr2x import memory, peaks
+    from seedvr2x import memory
     from seedvr2x.errors import Refusal
     from seedvr2x.passes import Plan
     from seedvr2x.shots import Shot
@@ -3497,7 +3487,6 @@ def _early_memory(
         known = Plan.recorded(recorded.get("plan"))
         shots = [Shot(int(shot["start"]), int(shot["end"])) for shot in recorded["shots"]]
         planner.check_recorded(known, shots, target)
-        attention = peaks.FLASH_ATTN_2 if find_spec("flash_attn") else peaks.SDPA
         dit_model = _early_dit_model(args)
         if dit_model is None:
             logger.debug(
@@ -3514,7 +3503,6 @@ def _early_memory(
             None,
             split=args.color_correction == "split",
             recorded=known,
-            attention=attention,
             dit_model=dit_model,
         )
     except planner.PlanError as error:
@@ -3688,17 +3676,6 @@ def _early_dit_model(args: argparse.Namespace) -> "Architecture | None":
         return None if path is None else _dit_model(path)
     except ModelError:
         return None
-
-
-def _attention() -> str:
-    """The attention backend this run's DiT takes: FlashAttention 2 where it imports, else
-    PyTorch's SDPA, as the loader decides it for every attention module, and warns of
-    (model.attention_backend, model.load_models). The plan's DiT peak is predicted by that
-    backend's fit (peaks.DIT_ATTENTION): today's, never a recorded environment's, which a
-    resume in another one would plan by."""
-    from seedvr2x import model
-
-    return model.attention_backend()
 
 
 def _host_available(
@@ -5049,10 +5026,10 @@ def _job_record(content: dict[str, Any]) -> "Record":
     its sample aspect as used (input), the output's size (output); from the settings the
     resolution, the model files by the names given and their SHA-256, the seed, the colour
     correction, the level and the cuts (the threshold, or the list's SHA-256); from the plan the
-    tiles (0 untiled), the window cap (0: each shot in one window) and --compile; the attention
-    kernel of its environment; and whether a resume planned it again (environment_changes: a
-    change whose `after` holds a plan, resume.shape_change). A job planned again holds the new
-    plan's values: each unit's own stay in the manifest (its runs' window_cap)."""
+    tiles (0 untiled), the window cap (0: each shot in one window) and --compile; and whether a
+    resume planned it again (environment_changes: a change whose `after` holds a plan,
+    resume.shape_change). A job planned again holds the new plan's values: each unit's own stay in
+    the manifest (its runs' window_cap)."""
     from fractions import Fraction
 
     from seedvr2x.record import Model, Record, Video, cuts_sha256
@@ -5082,7 +5059,6 @@ def _job_record(content: dict[str, Any]) -> "Record":
         color_correction=settings["color_correction"],
         encode_tile=side(plan["encode_tiles"]),
         decode_tile=side(plan["decode_tiles"]),
-        attention=content["environment"]["attention"],
         video=Video(
             plan["window"] or 0,
             settings["quality"],

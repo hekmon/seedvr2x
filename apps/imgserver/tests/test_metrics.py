@@ -222,10 +222,10 @@ def test_the_info_carries_the_version_the_models_and_the_attention() -> None:
 def test_the_info_can_be_filled_after_the_start() -> None:
     metrics = Metrics()
     assert read(metrics)[named("info")].samples[0].labels == {}
-    metrics.info.update(version="1", attention="flash_attn_2")
+    metrics.info.update(version="1", attention="sdpa")
     assert read(metrics)[named("info")].samples[0].labels == {
         "version": "1",
-        "attention": "flash_attn_2",
+        "attention": "sdpa",
     }
 
 

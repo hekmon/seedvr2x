@@ -23,7 +23,7 @@ SHOTS = (Shot(0, 45),)
 
 
 def inputs() -> reg.Inputs:
-    return reg.Inputs(HD, SHOTS, peaks.FLASH_ATTN_2)
+    return reg.Inputs(HD, SHOTS)
 
 
 def plan_log(
@@ -36,9 +36,7 @@ def plan_log(
     (planner.said), as the command's --verbose log has them, the plan's with a time and a
     logger in front, and `room`, if given, the run's disk line."""
     reading = reg.readings(free, monkeypatch)[0]
-    made, predicted = planner.plan(
-        reading, HD, SHOTS, planner.Pins(), host, attention=peaks.FLASH_ATTN_2
-    )
+    made, predicted = planner.plan(reading, HD, SHOTS, planner.Pins(), host)
     said = planner.said(made, predicted, "a card", HD, SHOTS, planner.Pins(), disk=room)
     return "\n".join(f"2026-10-30 12:00:00 INFO cli.planner: {line}" for line in said)
 
@@ -89,7 +87,7 @@ def test_a_reading_and_the_inputs_are_read_from_a_manifest(monkeypatch: pytest.M
     # The record the planner makes (Peaks.record) in the manifest's shape (cli._run).
     free = READINGS["card"]
     reading = reg.readings(free, monkeypatch)[0]
-    made, predicted = planner.plan(reading, HD, SHOTS, planner.Pins(), None, attention=peaks.SDPA)
+    made, predicted = planner.plan(reading, HD, SHOTS, planner.Pins(), None)
     record = made.record()
     record["memory"].update(predicted.record())
     content: dict[str, Any] = {
@@ -99,12 +97,12 @@ def test_a_reading_and_the_inputs_are_read_from_a_manifest(monkeypatch: pytest.M
         "plan": record,
     }
     found, read = reg.recorded_inputs(content)
-    assert found == reg.Inputs(HD, SHOTS, peaks.SDPA)
+    assert found == reg.Inputs(HD, SHOTS)
     # Exact: the bytes the driver and the card gave, and held, the reserve being recorded.
     assert read == free
     # A driver that refuses leaves no reserve.
     refusing = reg.readings(READINGS["refuses"], monkeypatch)[0]
-    again, predicted = planner.plan(refusing, HD, SHOTS, planner.Pins(), None, attention=peaks.SDPA)
+    again, predicted = planner.plan(refusing, HD, SHOTS, planner.Pins(), None)
     content["plan"] = again.record() | {"memory": again.record()["memory"] | predicted.record()}
     assert reg.recorded_inputs(content)[1] == READINGS["refuses"]
 
@@ -124,14 +122,13 @@ def test_the_dit_s_format_is_read_from_a_manifest_and_fp16_where_none_is_recorde
     for dit_model, name in ((peaks.FP16, "fp16"), (peaks.INT8, "int8")):
         made, predicted = planner.plan(
             *(reading, HD, SHOTS, planner.Pins(), None),
-            attention=peaks.SDPA,
             dit_model=dit_model,
         )
         record = made.record()
         record["memory"].update(predicted.record())
         assert record["memory"]["dit_format"] == name
         found, _ = reg.recorded_inputs(base | {"plan": record})
-        assert found == reg.Inputs(HD, SHOTS, peaks.SDPA, dit_model=dit_model)
+        assert found == reg.Inputs(HD, SHOTS, dit_model=dit_model)
         said = planner.said(made, predicted, "a card", HD, SHOTS, planner.Pins())
         assert reg.planner_says(reading, found, None) == reg.compared(
             reg.plan_lines("\n".join(said))
@@ -389,7 +386,7 @@ def test_the_disk_line_a_manifest_records_is_the_runs_without_its_free_space() -
 def test_the_inputs_carry_the_disk_line_of_the_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
     free = READINGS["card"]
     reading = reg.readings(free, monkeypatch)[0]
-    made, predicted = planner.plan(reading, HD, SHOTS, planner.Pins(), None, attention=peaks.SDPA)
+    made, predicted = planner.plan(reading, HD, SHOTS, planner.Pins(), None)
     content: dict[str, Any] = {
         "input": {"size": [960, 540], "sample_aspect": "1"},
         "shots": [{"start": 0, "end": 45, "seed": 42}],
@@ -408,7 +405,7 @@ def test_a_plan_with_the_jobs_masters_agrees_on_whatever_disk_it_ran(
     for room in (500 << 30, 2 << 20):  # the disk has room, and is short
         log = plan_log(free, monkeypatch, room=masters_line(room, sizes=(None, None)))
         # The log's job is two segments of 20 and 25 frames: 45 frames in all, as `wanted`'s.
-        with_disk = reg.Inputs(HD, SHOTS, peaks.FLASH_ATTN_2, wanted)
+        with_disk = reg.Inputs(HD, SHOTS, wanted)
         verdict = reg.compare_with_planner("run", log, free, with_disk, None, monkeypatch)
         assert verdict.agrees, verdict
 
@@ -424,7 +421,7 @@ def test_a_plan_with_other_masters_than_the_jobs_fails_saying_the_disk_line(
         None,  # no disk line at all
     ):
         log = plan_log(free, monkeypatch, room=log_room)
-        with_disk = reg.Inputs(HD, SHOTS, peaks.FLASH_ATTN_2, wanted)
+        with_disk = reg.Inputs(HD, SHOTS, wanted)
         verdict = reg.compare_with_planner("the run", log, free, with_disk, None, monkeypatch)
         assert not verdict.agrees
         with pytest.raises(pytest.fail.Exception) as failed:

@@ -1368,7 +1368,7 @@ def test_the_plan_names_a_smaller_file_that_runs_a_longer_window_where_the_host_
     # yet run longer windows: the line names them by the window, as DESIGN.md has it, "where the
     # card or the host's memory is short for float16".
     arguments = (24 * GIB, HD, shots(101), Pins(), 8 * GIB)
-    options: dict[str, Any] = dict(split=True, attention="sdpa", dit_model=peaks.FP16)
+    options: dict[str, Any] = dict(split=True, dit_model=peaks.FP16)
     made, predicted = planner.plan(*arguments, **options)
     found = {
         name: planner.plan(*arguments, **dict(options, dit_model=model))
@@ -1405,7 +1405,6 @@ def test_said() -> None:
         " margin of 0.60 GiB left to the desktop and other programs; no reserve, the driver"
         " refusing memory the card doesn't have",
         "plan: frames: 1920x1080 padded to 1920x1104 for the model, 8,280 tokens a latent",
-        "plan: attention: FlashAttention 2, which is installed",
         "plan: shots: 1, the longest of 301 frames (76 latents)",
         "plan: windows: 39 latents at most (153 frames), the longest the budget holds: 0 of 1 shot"
         " in one window, 1 join; a longer window, fewer joins; --window N caps them",
@@ -2055,25 +2054,18 @@ def test_the_unpinned_case_skips_a_small_card_alone() -> None:
         test_regression.unpinned(logged([host], "ERROR"), f"the plan is refused: {host}")
 
 
-def test_the_dit_s_fit_is_its_attention_backend_s() -> None:
-    # DESIGN.md, Memory planner, Per-phase peaks: the planner holds a fit per attention backend
-    # and takes the run's. On the lean attention both backends peak alike (measured equal to the
-    # MiB), so both hold the one fit: 61.243 KiB a token, 0.996 MiB a window and the 0.081 GiB
-    # that bounds every window, the 1-latent 1080p one's. Each prediction is at or over its
-    # measure, for either backend, and within 0.081 GiB of it.
-    flash, sdpa = peaks.FLASH_ATTN_2, peaks.SDPA
-    assert peaks.DIT_ATTENTION == {
-        flash: (round(0.081 * GIB), 1.0),
-        sdpa: (round(0.081 * GIB), 1.0),
-    }
+def test_the_dit_s_fit_is_the_lean_attention_s() -> None:
+    # DESIGN.md, Memory planner, Per-phase peaks: the planner holds one fit for the DiT, the lean
+    # attention's under PyTorch's SDPA (FlashAttention 2, which peaked the same to the MiB, is no
+    # longer run): 61.243 KiB a token, 0.996 MiB a window and the 0.081 GiB that bounds every
+    # window, the 1-latent 1080p one's. Each prediction is at or over its measure and within
+    # 0.081 GiB of it.
+    assert peaks.DIT_ATTENTION == round(0.081 * GIB)
     padded = {1104: OURS_1080, 2192: OURS_4K}
     assert len(LEAN_WINDOWS) == 19
     margins: list[tuple[float, int, int, int]] = []
     for rows, latents, swapped, vae, peak in LEAN_WINDOWS:
-        window = (padded[rows], latents, swapped, vae)
-        fitted = peaks.dit_peak(*window)
-        assert fitted == peaks.dit_peak(*window, attention=flash)
-        assert peaks.dit_peak(*window, attention=sdpa) == fitted
+        fitted = peaks.dit_peak(padded[rows], latents, swapped, vae)
         assert fitted >= peak, (rows, latents, swapped)
         margins.append((gib(fitted - peak), rows, latents, swapped))
     # The least margin is 0.0012 GiB, at 1 latent of 1080p (whose peak is elsewhere in the step,
@@ -2085,42 +2077,26 @@ def test_the_dit_s_fit_is_its_attention_backend_s() -> None:
     assert 0.0739 <= round(min(others), 4) and round(max(others), 4) <= 0.0745
     # 12 latents at 1080p, no block swapped, the VAE's weights there: 21.90 GiB.
     assert peaks.dit_peak(OURS_1080, 12) == 23_516_133_819
-    # The VAE's weights away, as under FlashAttention 2.
-    apart = peaks.dit_peak(OURS_1080, 6, 0, False, sdpa)
-    assert peaks.dit_peak(OURS_1080, 6, 0, True, sdpa) - apart == peaks.VAE_WEIGHTS
-    with pytest.raises(ValueError, match="attention 'xformers': the DiT's fit is flash_attn_2's"):
-        peaks.dit_peak(OURS_1080, 6, attention="xformers")
-    with pytest.raises(ValueError, match="attention 'xformers': the DiT's fit is flash_attn_2's"):
-        planner.plan(our_free(24), HD, shots(6), Pins(), None, attention="xformers")
-
-    # The plan is made for the backend the run takes, and on the lean attention both take the one
-    # fit: 1080p on a 24 GB card, a shot of 301 frames, the same windows of 39 latents with 32
-    # blocks swapped under either (the plain attention's SDPA swapped 30 for 28); the plan's
-    # second line and its record say which backend ran.
+    # The VAE's weights away.
+    apart = peaks.dit_peak(OURS_1080, 6, 0, False)
+    assert peaks.dit_peak(OURS_1080, 6, 0, True) - apart == peaks.VAE_WEIGHTS
+    # 1080p on a 24 GB card, a shot of 301 frames: windows of 39 latents with 32 blocks swapped;
+    # the plan's record names no kernel and its lines none.
     free, job = our_free(24), (HD, shots(76), Pins(), None)
     made, predicted = planner.plan(free, *job)
     assert bare(made) == Plan(39, Tiles(1856), Tiles(1088), 32, 1, 0, vae_in_dit=False)
-    other, slower = planner.plan(free, *job, attention=sdpa)
-    assert bare(other) == bare(made) and slower.dit == predicted.dit
-    assert slower.dit == peaks.dit_peak(OURS_1080, 39, 32, False, sdpa)
-    assert (predicted.record()["attention"], slower.record()["attention"]) == (flash, sdpa)
-    said = planner.said(other, slower, "a card", HD, shots(76), Pins())
-    assert said_line(said, "attention") == (
-        "plan: attention: PyTorch's SDPA, FlashAttention 2 not being installed"
-    )
+    assert predicted.dit == peaks.dit_peak(OURS_1080, 39, 32, False)
+    assert "attention" not in predicted.record()
+    said = planner.said(made, predicted, "a card", HD, shots(76), Pins())
+    assert not [line for line in said if "attention" in line or "FlashAttention" in line]
     # The same window where the card was full: a shot of 1,197 frames in windows of 40 latents
-    # with 33 blocks swapped under either (20 with 35 and 19 with 36 before).
+    # with 33 blocks swapped (20 with 35 and 19 with 36 before the lean attention).
     made, _ = planner.plan(free, HD, shots(300), Pins(), None)
-    other, _ = planner.plan(free, HD, shots(300), Pins(), None, attention=sdpa)
-    assert (made.window, made.swapped, other.window, other.swapped) == (40, 33, 40, 33)
-    # 4K's smallest window, 5 latents, takes 22.40 GiB of free VRAM at the old fit's FlashAttention
-    # 2 and 23.47 by SDPA's, so that a card emulated at 24 GB, 22.51 GiB free, was refused 4K
-    # without it; on the lean attention the two take the same plan there (rule: one fit).
+    assert (made.window, made.swapped) == (40, 33)
+    # 4K's smallest window, 5 latents, on a card emulated at 24 GB, 22.51 GiB free: planned.
     emulated = 24_168_824_832
-    flash_plan, flash_peaks = planner.plan(emulated, UHD, shots(5), Pins(), None)
-    sdpa_plan, sdpa_peaks = planner.plan(emulated, UHD, shots(5), Pins(), None, attention=sdpa)
-    assert flash_plan == sdpa_plan and flash_peaks.dit == sdpa_peaks.dit
-    assert flash_plan.window == 5
+    plan, _ = planner.plan(emulated, UHD, shots(5), Pins(), None)
+    assert plan.window == 5
 
 
 # ---- The floor, last rungs (DESIGN.md, Allocator, Small cards): the plan's lines ---------------

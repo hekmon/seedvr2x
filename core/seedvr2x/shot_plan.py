@@ -247,7 +247,6 @@ class Peaks:
     # How `free` was read: what the driver reported free to the process, what the whole card had
     # free where that was read, and whether the run is held to the card (seedvr2x/memory.py).
     reading: Reading
-    attention: str  # the attention backend the DiT's peak is the fit of (DIT_ATTENTION)
     # What the run holds of a shot in system memory at the moment it holds the most, and that
     # moment, one of MOMENTS (host_moments): the job's shot that holds the most, of `holder`
     # latents, the longest but where a shorter one in fewer windows holds more (_shot_held);
@@ -308,11 +307,10 @@ class Peaks:
         for information, never compared (resume.UNCOMPARED): bytes, the longest window in
         latents. `free` is the memory the plan was made in; beside it, what the driver reported
         free to the process (driver_free, the same figure on a driver that refuses) and what the
-        whole card had free (card_free; null where it wasn't read), the attention backend the
-        DiT's peak was predicted for, and the format of the DiT's file the peaks were predicted
-        for (dit_format, DIT_FORMATS' name, read back by planner.recorded_dit_model). Of `host`, the
-        system memory the plan takes, host_shot
-        is one shot's part, the shot that holds the most (Peaks.shot). PROVISIONAL
+        whole card had free (card_free; null where it wasn't read), and the format of the DiT's
+        file the peaks were predicted for (dit_format, DIT_FORMATS' name, read back by
+        planner.recorded_dit_model). Of `host`, the system memory the plan takes, host_shot is one
+        shot's part, the shot that holds the most (Peaks.shot). PROVISIONAL
         (implementation, 2026-10-10 and 12): the fields' names; and a window shortened or tiles
         shrunk for the host's memory (Peaks.shortened, Peaks.shrunk) aren't recorded: the plan's
         lines say them."""
@@ -324,7 +322,6 @@ class Peaks:
             # (reserve_taken; until 2026-11-06 one number); null on a driver that refuses, which
             # leaves none.
             "reserve": self.reserve_taken(),
-            "attention": self.attention,
             "dit_format": _format_name(self.dit_model),
             "budget": self.budget,
             "encode_peak": self.encode,
@@ -357,7 +354,7 @@ def _format_name(dit_model: Architecture) -> str:
 @dataclass(frozen=True)
 class _Job:
     """What the planner counts a job by: the memory it may count on, its size, its shots'
-    lengths, the attention backend its DiT runs on, and its DiT's file's format."""
+    lengths, and its DiT's file's format."""
 
     free: int  # bytes: what the plan may count its peaks in (reading.counted)
     target: tuple[int, int]  # frames.target_size
@@ -365,7 +362,6 @@ class _Job:
     frames: int  # its longest shot's frames
     split: bool
     reading: Reading  # how `free` was read, for the plan's words and its record
-    attention: str  # DIT_ATTENTION's
     compile_vae: bool = False  # the VAE compiled (--compile): its passes at COMPILE_PEAK
     # The DiT's file's format, whose figures its phase and its weights' places are counted by
     # (peaks.DITS): fp16's, int8's or a dynamic GGUF file's.
@@ -420,7 +416,6 @@ def plan(
     *,
     split: bool = False,
     recorded: Plan | None = None,
-    attention: str = peaks.FLASH_ATTN_2,
     compile_vae: bool = False,
     compile_fixed: bool = False,
     dit_model: Architecture = peaks.FP16,
@@ -442,9 +437,7 @@ def plan(
     to the card they name what the driver reports, what the whole card has free where it was
     read, and what the plan counts on. The margin is MARGIN on a driver that refuses, and none
     on a run held to the card, whose `counted` is under torch's limit by what measures the same
-    need already (_Job.margin): the budget is then all the plan counts on. attention: the
-    backend the run's DiT takes (model.attention_backend), whose fit the DiT's peak is
-    predicted by (DIT_ATTENTION).
+    need already (_Job.margin): the budget is then all the plan counts on.
 
     The DiT's phase is judged by the job's longest window alone (dit_peak; _dit_need): nothing
     of a shot is on the GPU beside the window it runs, its noise drawn in system memory
@@ -493,8 +486,8 @@ def plan(
     from it as it is, the cap, the tiles and the compile flags, and where the weights are and
     the scratch's allowance planned again around it (DESIGN.md, Memory planner, A plan shapes
     the output a little); one with tiles of which one covers the frame is no plan's, refused
-    (planner.check_recorded). Where the weights are is planned for the backend given, a resume's
-    too: FlashAttention installed since, or gone, the recorded shape is held to today's fit.
+    (planner.check_recorded). Where the weights are is planned by today's fit, a resume's too:
+    a record made with FlashAttention 2, before it went (2026-11-08), is held to SDPA's.
 
     On a run held to the card each phase is judged by its predicted peak and its own reserve
     beyond it (peaks.reserve, by the step's P and the allocator the reading names; Peaks.reserves;
@@ -566,7 +559,6 @@ def plan(
                 host_available,
                 split=split,
                 recorded=None,
-                attention=attention,
                 compile_vae=True,
                 compile_fixed=True,
                 dit_model=dit_model,
@@ -580,13 +572,12 @@ def plan(
                 (free, target, shots, pins, host_available),
                 dict(
                     split=split,
-                    attention=attention,
                     dit_model=dit_model,
                     held=held,
                     in_memory=in_memory,
                 ),
             ) from None
-    job = _job(free, target, shots, split, attention, compile_vae, dit_model, held, in_memory)
+    job = _job(free, target, shots, split, compile_vae, dit_model, held, in_memory)
     if pins.swap_blocks is not None and pins.swap_blocks > peaks.BLOCKS:
         swap = Setting("swap_blocks", str(pins.swap_blocks))
         raise PinRefused(
@@ -791,8 +782,8 @@ def _compile_refusal(
     (DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in", decided on 2026-10-29): the same
     command without --compile and, for a tile pinned, the pin within the shapes that the planner
     takes (the untiled pass if it is within them, else the largest tile that fits). `job` is plan's
-    free, target, shots, pins and host_available, `options` its split, attention, dit_model,
-    held and in_memory.
+    free, target, shots, pins and host_available, `options` its split, dit_model, held
+    and in_memory.
     A job no plain plan fits is refused as it was, whatever --compile asked: the plain plan's
     refusal. A job the plain plan fits only with a last rung of the floor (the decoder's tail, the
     VAE's least room; no rung is taken compiled, unmeasured there), its compiled plan refused for
@@ -1182,7 +1173,6 @@ def _job(
     target: tuple[int, int],
     shots: Sequence[Shot],
     split: bool,
-    attention: str = peaks.FLASH_ATTN_2,
     compile_vae: bool = False,
     dit_model: Architecture = peaks.FP16,
     held: bool = False,
@@ -1190,10 +1180,6 @@ def _job(
 ) -> _Job:
     if not shots:
         raise ValueError("a job without a shot")
-    if attention not in peaks.DIT_ATTENTION:
-        raise ValueError(
-            f"attention {attention!r}: the DiT's fit is {peaks.FLASH_ATTN_2}'s or {peaks.SDPA}'s"
-        )
     if dit_model not in peaks.DITS:
         raise ValueError(
             f"{dit_model.name}: the DiT's figures are for its fp16, int8 and dynamic GGUF files"
@@ -1204,7 +1190,6 @@ def _job(
     frames = max(shot.frames for shot in shots)
     return _Job(
         *(reading.counted, target, tuple(lengths), frames, split, reading),
-        attention,
         compile_vae,
         dit_model,
         held,
@@ -1239,12 +1224,11 @@ def _split(length: int, cap: int) -> int:
 
 def _dit_peak(job: _Job, cap: int | None, swapped: int, vae_in_dit: bool) -> int:
     """The predicted peak of the job's DiT phase under a cap, in bytes, `swapped` blocks swapped
-    and the VAE's weights there or not: its longest window's (dit_peak), on the attention
-    backend the job runs; nothing of a shot is on the GPU beside the window, its noise drawn in
-    system memory (shot_pass.sample_windows). What the plan records (_peaks): real memory,
-    unlike the reserve beyond it."""
+    and the VAE's weights there or not: its longest window's (dit_peak); nothing of a shot is on
+    the GPU beside the window, its noise drawn in system memory (shot_pass.sample_windows). What
+    the plan records (_peaks): real memory, unlike the reserve beyond it."""
     latents = _longest(job.lengths, cap)
-    return peaks.dit_peak(job.padded, latents, swapped, vae_in_dit, job.attention, job.dit_model)
+    return peaks.dit_peak(job.padded, latents, swapped, vae_in_dit, job.dit_model)
 
 
 def _dit_reserve(job: _Job, cap: int | None) -> int:
@@ -1252,9 +1236,7 @@ def _dit_reserve(job: _Job, cap: int | None) -> int:
     reserve of its longest window (peaks.reserve), by the window's P (peaks.dit_working) and the
     allocator the reading names. Whatever the blocks swapped and the VAE's place: P is what the
     window takes over the weights."""
-    working = peaks.dit_working(
-        job.padded, _longest(job.lengths, cap), job.attention, job.dit_model
-    )
+    working = peaks.dit_working(job.padded, _longest(job.lengths, cap), job.dit_model)
     return peaks.reserve(peaks.DIT_PHASE, working, job.reading.allocator, job.reading.margin)
 
 
@@ -1281,7 +1263,7 @@ def _longest_cap(job: _Job, swapped: int) -> int | None:
 
     def possible(cap: int) -> bool:
         latents = _longest(job.lengths, cap)
-        least = peaks.dit_least(job.padded, latents, swapped, False, job.attention, job.dit_model)
+        least = peaks.dit_least(job.padded, latents, swapped, False, job.dit_model)
         return least <= job.budget
 
     low, high = job.smallest, job.lengths[-1]
@@ -2032,7 +2014,6 @@ def _peaks(job: _Job, plan: Plan) -> Peaks:
         latents,
         peaks.tokens(job.padded, 1),
         job.reading,
-        job.attention,
         held_by_shot,
         moment,
         holder,

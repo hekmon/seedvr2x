@@ -65,7 +65,6 @@ def made(
     free: int | Reading,
     host: int | None = None,
     *,
-    attention: str = peaks.FLASH_ATTN_2,
     dit_model: Architecture = peaks.FP16,
     split: bool = True,
     pins: Pins = still_plan.NO_PINS,
@@ -78,7 +77,6 @@ def made(
         host,
         process=PROCESS,
         input_pixels=input_pixels,
-        attention=attention,
         dit_model=dit_model,
         split=split,
         pins=pins,
@@ -576,7 +574,7 @@ def test_the_fewest_swapped_blocks_with_the_vae_leaving_first() -> None:
         for vae in (True, False):
             if swapped == plan.models.swapped and vae == plan.models.vae_in_dit:
                 continue
-            least = peaks.dit_least(still_plan._most(FOUR_K), 1, swapped, vae, plan.attention)
+            least = peaks.dit_least(still_plan._most(FOUR_K), 1, swapped, vae)
             assert round(least + peaks.PER_WINDOW * plan.windows) > plan.budget
     assert plan.dit_peak <= plan.budget
 
@@ -585,7 +583,7 @@ def test_the_dit_phase_counts_the_most_tokens_and_the_most_windows() -> None:
     plan = made(EIGHT_K, card(48))
     frame = still_plan._most(EIGHT_K)
     expected = round(
-        peaks.dit_least(frame, 1, plan.models.swapped, plan.models.vae_in_dit, plan.attention)
+        peaks.dit_least(frame, 1, plan.models.swapped, plan.models.vae_in_dit)
         + peaks.PER_WINDOW * still_plan.windows_most(EIGHT_K)
     )
     assert plan.dit_peak == expected == peaks.dit_peak(frame, 1, 0, True)
@@ -610,30 +608,25 @@ def test_the_budget_has_the_margin_on_a_driver_that_refuses_and_none_on_a_held_r
     assert on_card.margin == 0 and on_card.budget == on_card.reading.counted
 
 
-def test_int8_needs_less_and_sdpa_the_same() -> None:
+def test_int8_needs_less() -> None:
     # SDPA planned more than FlashAttention 2 on the plain attention (swapped >=, dit_peak >);
-    # on the lean attention the two kernels share one fit, and one plan.
+    # on the lean attention the two kernels shared one fit, and SDPA, the one kernel, keeps it.
     fp16 = made(EIGHT_K, card(24))
     int8 = made(EIGHT_K, card(24), dit_model=peaks.INT8)
-    sdpa = made(EIGHT_K, card(24), attention=peaks.SDPA)
     assert int8.models.swapped < fp16.models.swapped
     assert int8.pinned < fp16.pinned
-    assert sdpa.models == fp16.models and sdpa.pinned == fp16.pinned
     same = made(EIGHT_K, card(96))
-    assert made(EIGHT_K, card(96), attention=peaks.SDPA).dit_peak == same.dit_peak
     assert made(EIGHT_K, card(96), dit_model=peaks.INT8).dit_peak < same.dit_peak
     # The DiT's floor, every block swapped (the two slots stay): 9.745 GiB of free VRAM at 8K in
-    # fp16 and under SDPA, 9.700 in int8 (18.52, 18.48 and 19.40 on the plain attention, whose
+    # fp16, 9.700 in int8 (18.52, 18.48 and 19.40 on the plain attention, whose
     # card of 19 GiB is now far above all three).
     free = Reading(round(9.72 * GIB), None, round(9.72 * GIB), False)
     made(EIGHT_K, free, dit_model=peaks.INT8)
-    for attention in (peaks.FLASH_ATTN_2, peaks.SDPA):
-        with pytest.raises(PlanRefusal) as refused:
-            made(EIGHT_K, free, attention=attention)
-        assert refused.value.phase == "dit"
+    with pytest.raises(PlanRefusal) as refused:
+        made(EIGHT_K, free)
+    assert refused.value.phase == "dit"
     roomy = Reading(round(9.8 * GIB), None, round(9.8 * GIB), False)
     made(EIGHT_K, roomy)
-    made(EIGHT_K, roomy, attention=peaks.SDPA)
 
 
 @pytest.mark.parametrize("gguf", [peaks.GGUF_7B, peaks.GGUF_7B_SHARP], ids=["7b", "sharp"])
@@ -993,7 +986,6 @@ def test_the_segments_judge_a_picture_by_each_step_s_reserve_beyond_its_peak() -
     working = peaks.dit_working(
         still_plan._most(plan.bound, plan.picture),
         1,
-        plan.attention,
         plan.dit_model,
         still_plan.windows_most(plan.bound, plan.picture),
     )
@@ -1086,7 +1078,7 @@ def test_said_without_a_target_gives_the_plan_in_the_planners_words() -> None:
         "bound: pictures within 7680x4320 in either orientation, padded to at most 7712x4352"
         in text
     )
-    assert "attention: FlashAttention 2" in text
+    assert "attention" not in text.lower() and "flashattention" not in text.lower()
     assert f"blocks swapped: {plan.models.swapped} of the DiT's 36" in text
     assert "the VAE: off the GPU in the DiT's phase, its 0.47 GiB given to the DiT" in text
     assert f"{plan.dit_peak / GIB:.2f} GiB at the most" in text and f"{plan.windows}" in text
@@ -1160,8 +1152,7 @@ def test_said_names_the_pins_and_the_formats() -> None:
     text = "\n".join(still_plan.said(plan, (2160, 3840), say=cli_say))
     assert "pinned by --swap-blocks" in text and "pinned by --decode-tile" in text
     assert "DiT: its weights in int8" in text
-    sdpa = "\n".join(still_plan.said(made(FOUR_K, card(48), attention=peaks.SDPA)))
-    assert "attention: PyTorch's SDPA, FlashAttention 2 not being installed" in sdpa
+    assert "attention" not in text.lower() and "flashattention" not in text.lower()
 
 
 def test_said_on_a_held_run_names_the_figures() -> None:
@@ -1196,7 +1187,7 @@ def test_said_on_a_held_run_names_the_figures() -> None:
 def test_plan_returns_the_models_the_loaders_follow() -> None:
     plan = made(EIGHT_K, card(32))
     assert isinstance(plan.models, ModelPlan) and not plan.models.compile_vae
-    assert plan.bound == EIGHT_K and plan.split and plan.attention == peaks.FLASH_ATTN_2
+    assert plan.bound == EIGHT_K and plan.split and not hasattr(plan, "attention")
     assert plan.process == PROCESS
 
 
@@ -1418,12 +1409,10 @@ def test_an_input_of_no_pixels_is_a_value_error() -> None:
 # ---- What a phase takes, for a reservation -------------------------------------------------------
 
 PEAKED = [
-    pytest.param(FOUR_K, card(24), peaks.FLASH_ATTN_2, INPUT, id="4K-24GB-FA2"),
-    pytest.param(FOUR_K, card(24), peaks.SDPA, INPUT, id="4K-24GB-SDPA"),
-    pytest.param(FOUR_K, card(24), peaks.FLASH_ATTN_2, 24_000_000, id="4K-24GB-24MP"),
-    pytest.param(HD, card(24), peaks.FLASH_ATTN_2, INPUT, id="1080p-24GB-FA2"),
-    pytest.param(HD, card(24), peaks.SDPA, INPUT, id="1080p-24GB-SDPA"),
-    pytest.param(HD, card(16), peaks.FLASH_ATTN_2, LARGE_PHOTO, id="1080p-16GB-108MP"),
+    pytest.param(FOUR_K, card(24), INPUT, id="4K-24GB"),
+    pytest.param(FOUR_K, card(24), 24_000_000, id="4K-24GB-24MP"),
+    pytest.param(HD, card(24), INPUT, id="1080p-24GB"),
+    pytest.param(HD, card(16), LARGE_PHOTO, id="1080p-16GB-108MP"),
 ]
 
 
@@ -1440,9 +1429,9 @@ def peak_of(bound: still_plan.Bound) -> tuple[int, int]:
     return bound[1], bound[0]
 
 
-@pytest.mark.parametrize(("bound", "free", "attention", "pixels"), PEAKED)
+@pytest.mark.parametrize(("bound", "free", "pixels"), PEAKED)
 def test_the_bounds_own_picture_takes_no_more_of_the_dit_phase_and_its_vae_phases_fit_the_budget(
-    bound: still_plan.Bound, free: Reading, attention: str, pixels: int
+    bound: still_plan.Bound, free: Reading, pixels: int
 ) -> None:
     # bound_peaks is the plan's guarantee, not a ceiling over every picture: the DiT's phase is
     # the most any picture within the bound takes, so that a picture's own is equal or under it;
@@ -1450,7 +1439,7 @@ def test_the_bounds_own_picture_takes_no_more_of_the_dit_phase_and_its_vae_phase
     # every picture has) or the input's copies, the larger, while a picture takes the largest
     # tile that fits the budget (tiles), up to it: its pass is over the proof's, and the plan
     # holds it under the budget with its room.
-    plan = made(bound, free, attention=attention, input_pixels=pixels)
+    plan = made(bound, free, input_pixels=pixels)
     most = still_plan.bound_peaks(plan)
     assert list(most) == list(still_plan.PHASES)
     job, models = still_plan._job_of(plan), plan.models
@@ -1473,11 +1462,11 @@ def test_the_bounds_own_picture_takes_no_more_of_the_dit_phase_and_its_vae_phase
             assert own[phase].allocated >= most[phase].allocated, (phase, target)
 
 
-@pytest.mark.parametrize(("bound", "free", "attention", "pixels"), PEAKED)
+@pytest.mark.parametrize(("bound", "free", "pixels"), PEAKED)
 def test_every_smaller_picture_and_input_takes_less_of_the_dit_phase_and_fits_the_budget(
-    bound: still_plan.Bound, free: Reading, attention: str, pixels: int
+    bound: still_plan.Bound, free: Reading, pixels: int
 ) -> None:
-    plan = made(bound, free, attention=attention, input_pixels=pixels)
+    plan = made(bound, free, input_pixels=pixels)
     most = still_plan.bound_peaks(plan)
     long, short = bound
     targets = [
@@ -1501,11 +1490,11 @@ def test_every_smaller_picture_and_input_takes_less_of_the_dit_phase_and_fits_th
                 assert smaller[phase].allocated <= found[phase].allocated, (phase, target)
 
 
-@pytest.mark.parametrize(("bound", "free", "attention", "pixels"), PEAKED)
+@pytest.mark.parametrize(("bound", "free", "pixels"), PEAKED)
 def test_a_phases_models_and_room_follow_the_placement(
-    bound: still_plan.Bound, free: Reading, attention: str, pixels: int
+    bound: still_plan.Bound, free: Reading, pixels: int
 ) -> None:
-    plan = made(bound, free, attention=attention, input_pixels=pixels)
+    plan = made(bound, free, input_pixels=pixels)
     models = plan.models
     vae = peaks.VAE_WEIGHTS if models.vae_in_dit else 0
     expected = peaks.dit_on_gpu(None, models.swapped, plan.dit_model) + vae
@@ -1532,7 +1521,7 @@ def test_the_bounds_dit_phase_is_the_dit_peak_and_a_pictures_is_its_own_windows(
     own = still_plan.picture_peaks(plan, (2160, 3840), INPUT)["dit"]
     padded = padded_size((2160, 3840))
     assert own.allocated == peaks.dit_peak(
-        padded, 1, plan.models.swapped, plan.models.vae_in_dit, plan.attention, plan.dit_model
+        padded, 1, plan.models.swapped, plan.models.vae_in_dit, plan.dit_model
     )
     # A picture whose padded frame takes fewer tokens takes less of the DiT's phase.
     small = still_plan.picture_peaks(plan, (1080, 1920), INPUT)["dit"]
@@ -2080,7 +2069,6 @@ def test_a_measured_margin_over_the_rule_is_each_phases_room_in_a_picture_s_plan
         working = peaks.dit_working(
             still_plan._most(job.bound, job.picture),
             1,
-            job.attention,
             job.dit_model,
             still_plan.windows_most(job.bound, job.picture),
         )

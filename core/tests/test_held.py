@@ -67,7 +67,7 @@ class Files:
         runner = SimpleNamespace(dit=dit, vae=vae)
         generator = torch.Generator().manual_seed(5)
         text = [torch.randn(3, WIDTH, generator=generator).to(torch.bfloat16) for _ in range(2)]
-        models = model.Models(runner, text[0], text[1], "none", CPU, plan)
+        models = model.Models(runner, text[0], text[1], CPU, plan)
         if dit_parts or plan.swapped:
             models.placement = Placement(dit, CPU, plan.swapped, parts=dit_parts)
         models.vae = vae_parts.get(model.VAE_PART)
@@ -625,7 +625,7 @@ def test_the_helper_finds_what_stays_on_the_device(monkeypatch: pytest.MonkeyPat
     holder = torch.nn.ModuleList([rope])
     runner = SimpleNamespace(dit=holder, vae=torch.nn.Linear(2, 2))
     text = torch.zeros(2)
-    models = model.Models(runner, text, text.clone(), "none", CPU)
+    models = model.Models(runner, text, text.clone(), CPU)
     assert any("RoPE cache" in each for each in strays(models, card))
     type(rope).get_axial_freqs.cache_clear()  # pyright: ignore[reportFunctionMemberAccess]
     assert strays(models, card) == []

@@ -1027,13 +1027,12 @@ def fits(
     host_available: int | None,
     *,
     split: bool = False,
-    attention: str = peaks.FLASH_ATTN_2,
 ) -> str | None:
     """Why a plan given, the planner's own or one made here by hand, doesn't fit a job's memory:
     the sentence the planner says of every plan it makes, by the two functions shot_plan.plan
     judges with (shot_plan._job, shot_plan._unfit); None when it fits. The tests' own: no run
     judges a plan handed to it, and the planner keeps no public function for it."""
-    job = shot_plan._job(free, target, film, split, attention)  # pyright: ignore[reportPrivateUsage]
+    job = shot_plan._job(free, target, film, split)  # pyright: ignore[reportPrivateUsage]
     return shot_plan._unfit(job, plan, host_available)  # pyright: ignore[reportPrivateUsage]
 
 
@@ -1713,7 +1712,7 @@ def test_the_host_s_window_is_searched_from_the_next_one_down_to_the_smallest() 
     # The smallest window the job can run. 4K (1080p before the refit: on the lean attention its
     # shot of 45 latents never comes down to 5), a shot of 45 latents, a run held to its card
     # that counts on 17.05 GiB (16.95 before the DiT's share went from 0.3 to 0.33 of P, which
-    # left the card alone windows of 5 there), under SDPA, 18 GiB of system memory: the card
+    # left the card alone windows of 5 there), 18 GiB of system memory: the card
     # alone holds windows of 6, every part of the weights pinned, 18.66 GiB; windows of 5, the
     # smallest, plan, with the VAE's weights kept on the GPU, and are taken, where the job was
     # refused had the search stopped a window short. The figure counted is the card's less
@@ -1721,11 +1720,11 @@ def test_the_host_s_window_is_searched_from_the_next_one_down_to_the_smallest() 
     # GiB when the flat 4.5 GiB was taken off it, 17.625 less 4.5).
     held = Reading(13 * GIB, None, round(17.05 * GIB), True, round(0.5 * GIB))
     job = (held, UHD, shots(45))
-    alone, _ = shot_plan.plan(*job, Pins(), None, attention=peaks.SDPA)
-    made, predicted = shot_plan.plan(*job, Pins(), 18 * GIB, attention=peaks.SDPA)
+    alone, _ = shot_plan.plan(*job, Pins(), None)
+    made, predicted = shot_plan.plan(*job, Pins(), 18 * GIB)
     assert (alone.window, made.window, made.vae_in_dit) == (6, 5, True)
     assert predicted.shortened == shot_plan.Shortened(6, 1866, 1800)
-    assert "of system memory" in refused(*job, Pins(window=6), 18 * GIB, attention=peaks.SDPA)
+    assert "of system memory" in refused(*job, Pins(window=6), 18 * GIB)
 
 
 def test_host_moments() -> None:
@@ -2131,7 +2130,6 @@ def test_peaks_record() -> None:
         "card_free": None,
         # No reserve: the driver refuses memory the card doesn't have.
         "reserve": None,
-        "attention": "flash_attn_2",
         # The DiT's format the peaks were predicted for: the default's, fp16.
         "dit_format": "fp16",
         "budget": our_free(24) - MARGIN,
@@ -2321,33 +2319,27 @@ def test_a_held_run_s_choices_for_the_host_take_no_margin_either() -> None:
     assert (on_it.free, on_it.budget) == (40 * GIB - MARGIN,) * 2
 
 
-def test_resumed_on_another_attention_backend() -> None:
+def test_resumed_on_the_one_fit() -> None:
     # Where the weights are is planned again on every resume, from the memory free that day
-    # (DESIGN.md, Memory planner, A plan shapes the output a little), and for the attention
-    # backend of that day's run: FlashAttention installed since, or gone, the recorded shape is
-    # held to today's fit. On the plain attention a shape recorded with FlashAttention 2 and taken
-    # up on SDPA had the same windows and tiles and two more blocks swapped, and the other way
-    # round two fewer; the lean attention gives both backends one fit (peaks.DIT_ATTENTION), so
-    # the resume is the same plan under either.
+    # (DESIGN.md, Memory planner, A plan shapes the output a little): the recorded shape is held
+    # to today's fit. On the plain attention a shape recorded with FlashAttention 2 and taken up
+    # on SDPA had the same windows and tiles and two more blocks swapped; the lean attention gave
+    # both one fit (peaks.DIT_ATTENTION) and SDPA is the one kernel left, so a shape recorded by
+    # a run of either, before or after FlashAttention 2 went, resumes as the same plan.
     free, job = our_free(24), (HD, shots(76), Pins(), None)
     shape = Plan(39, Tiles(1856), Tiles(1088))
-    with_flash = Plan(39, Tiles(1856), Tiles(1088), 32, 1, 0, vae_in_dit=False)
-    assert bare(shot_plan.plan(free, *job, recorded=shape)[0]) == with_flash
-    resumed, predicted = shot_plan.plan(free, *job, recorded=with_flash, attention=peaks.SDPA)
-    assert bare(resumed) == with_flash  # swapped 30 for 28 before the refit
-    assert predicted.attention == peaks.SDPA
-    back, predicted = shot_plan.plan(free, *job, recorded=resumed, attention=peaks.FLASH_ATTN_2)
-    assert (bare(back), predicted.attention) == (with_flash, peaks.FLASH_ATTN_2)
-    # A shape whose windows only FlashAttention 2's fit held on that card was refused on SDPA
-    # (windows of 20 latents, 23.23 GiB by SDPA's fit, every block swapped); the same shape and
-    # the same windows are one plan, fitting or refused alike, under either backend.
+    recorded = Plan(39, Tiles(1856), Tiles(1088), 32, 1, 0, vae_in_dit=False)
+    assert bare(shot_plan.plan(free, *job, recorded=shape)[0]) == recorded
+    resumed, predicted = shot_plan.plan(free, *job, recorded=recorded)
+    assert bare(resumed) == recorded
+    assert "attention" not in predicted.record()
+    # A shape whose windows hold on that card is one plan, fitting or refused alike.
     long = (HD, shots(300), Pins(), None)
-    recorded, flash = shot_plan.plan(free, *long)
+    recorded, first = shot_plan.plan(free, *long)
     assert bare(recorded) == Plan(40, Tiles(1856), Tiles(1088), 33, 1, 0, vae_in_dit=False)
     assert fits(recorded, free, HD, shots(300), None) is None
-    assert fits(recorded, free, HD, shots(300), None, attention=peaks.SDPA) is None
-    same, sdpa = shot_plan.plan(free, *long, recorded=recorded, attention=peaks.SDPA)
-    assert same == recorded and sdpa.dit == flash.dit
+    same, again = shot_plan.plan(free, *long, recorded=recorded)
+    assert same == recorded and again.dit == first.dit
 
 
 # ---- Weights held: the pinned copies exist already (shot_plan.plan's held) -----------------------
@@ -2583,7 +2575,7 @@ def test_the_reserve_is_the_step_s_beyond_its_peak(monkeypatch: pytest.MonkeyPat
                 reading(allocator), target, shots(latents), Pins(), None
             )
             padded = padded_size(target)
-            working = peaks.dit_working(padded, predicted.window, predicted.attention)
+            working = peaks.dit_working(padded, predicted.window)
             assert predicted.reserves["dit"] == peaks.reserve(peaks.DIT_PHASE, working, allocator)
             vae_phases: tuple[tuple[Phase, int | None], ...] = (
                 ("encode", made.resident_encode),
@@ -3081,7 +3073,7 @@ def test_a_compile_job_whose_pin_is_beyond_the_shapes_keeps_the_plain_refusal() 
     # 1080p job pinned untiled on a 32 GiB card, which the plain plan fits only with the tail, is
     # refused as before the rungs (the plain plan's PinRefused), not told to drop --compile.
     job = (32 * GIB, HD, shots(300), Pins(encode_tile=0, decode_tile=0), None)
-    options: dict[str, Any] = {"split": True, "attention": peaks.SDPA}
+    options: dict[str, Any] = {"split": True}
     made, _ = shot_plan.plan(*job, **options)
     assert made.tail_frames
     with pytest.raises(PlanError) as compiled:

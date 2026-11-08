@@ -321,7 +321,7 @@ class FakeVAE(torch.nn.Module):
 def fake_models(vae: FakeVAE | None = None) -> Models:
     config = OmegaConf.create({"vae": {"scaling_factor": 0.9152}})
     runner = SimpleNamespace(vae=vae or FakeVAE(), config=config)
-    return Models(runner, torch.zeros(1), torch.zeros(1), "sdpa", torch.device("cpu"))
+    return Models(runner, torch.zeros(1), torch.zeros(1), torch.device("cpu"))
 
 
 def test_every_shape_and_slice_kind_is_warmed() -> None:

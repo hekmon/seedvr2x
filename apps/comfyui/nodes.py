@@ -23,7 +23,7 @@ What the V3 schema changes for a node, read in ComfyUI v0.44.0:
   giving the cut list Upscale Video takes (an optional input there, recommended; unwired, the clip
   is one shot); the cuts and the possible cuts are said in ComfyUI's console.
 - seedvr2x Upscale Image and seedvr2x Upscale Video: the pictures and the models' handle, then
-  the settings as widgets (resolution, attention, colour correction, seed, plan only), then the
+  the settings as widgets (resolution, colour correction, seed, plan only), then the
   numbers the plan makes as optional inputs of seedvr2x's own types (each pass's tile, the blocks
   swapped, a clip's window length; the user's Desktop test, 2026-11-05): unwired, the plan
   chooses; wired, the value is taken exactly. No value stands for auto. The plan is made at run
@@ -313,7 +313,7 @@ def _checked(handle: models_module.Handle, node: str = "seedvr2x Upscale") -> No
 
 # ---- The settings an upscale node carries --------------------------------------------------------
 
-# The widgets are the choices with a default the user reads (resolution, attention, colour
+# The widgets are the choices with a default the user reads (resolution, colour
 # correction, seed, plan only). The numbers the plan makes are optional sockets of seedvr2x's own
 # types (the user, 2026-11-05), each given by its value node below (seedvr2x Tile, Blocks Swapped,
 # Window Length): a link dragged from the socket and released on the canvas makes ComfyUI offer
@@ -357,25 +357,6 @@ def _window_input() -> Any:
         tooltip="Optional: connect a seedvr2x Window Length node to set the longest stretch of"
         " the clip the model works on at once. Unconnected, the plan chooses the longest that"
         " fits the card.",
-    )
-
-
-def _attention_input() -> Any:
-    return io.Combo.Input(
-        "attention",
-        options=list(plans.ATTENTIONS),
-        default=plans.AUTO,
-        display_name=plans.LABELS["attention"],
-        # On seedvr2x's lean attention the two kernels peak alike and take about the same time:
-        # research/docs/small-cards.md, FlashAttention 2 against the lean SDPA (RTX 5090,
-        # cudaMallocAsync, 2026-11-06): the 4K picture's DiT step 17.43 GiB under both, 2.87 s
-        # with FlashAttention 2 and 2.80 with SDPA; a 1080p window of 11 latents 16.66 GiB, 8.16
-        # and 7.37 s. So no speed claim: the plain attention's fifth off (2.60 s against 3.26)
-        # went with it.
-        tooltip="auto: FlashAttention 2 if it is installed in ComfyUI's environment, else"
-        " PyTorch's SDPA. The two take the same memory and about the same time (measured on an"
-        " RTX 5090). They round differently, so their pictures differ very slightly."
-        " flash_attn_2 stops with an error where it is not installed.",
     )
 
 
@@ -505,7 +486,7 @@ def picture_planner(
     process = picture_process(size, (out_height, out_width), count)
 
     def planner(
-        reading: Reading, host: int | None, attention: str, architecture: Architecture, held: bool
+        reading: Reading, host: int | None, architecture: Architecture, held: bool
     ) -> models_module.Planned[PicturePlan]:
         made = still_plan.plan(
             bound,
@@ -513,7 +494,6 @@ def picture_planner(
             host,
             process=process,
             input_pixels=height * width,
-            attention=attention,
             dit_model=architecture,
             split=settings.split,
             pins=settings.picture_pins(),
@@ -554,7 +534,6 @@ class UpscaleImage(io.ComfyNode):
                 ),
                 _models_input(),
                 _resolution_input(),
-                _attention_input(),
                 *_correction_inputs(),
                 _plan_only_input(),
                 _tile_input("encode_tile", "encode"),
@@ -577,7 +556,6 @@ class UpscaleImage(io.ComfyNode):
         images: torch.Tensor,
         models: models_module.Handle,
         resolution: int,
-        attention: str,
         color_correction: bool,
         seed: int,
         plan_only: bool,
@@ -593,7 +571,6 @@ class UpscaleImage(io.ComfyNode):
                 encode_tile=encode_tile,
                 decode_tile=decode_tile,
                 swap_blocks=swap_blocks,
-                attention=attention,
                 color_correction=color_correction,
                 seed=seed,
             )
@@ -606,7 +583,6 @@ class UpscaleImage(io.ComfyNode):
             started = time.monotonic()
             with models_module.session(
                 models,
-                settings.attention,
                 planner,
                 plan_only=plan_only,
                 preparing=progress.Preparing(show, plans.file_label),
@@ -621,7 +597,6 @@ class UpscaleImage(io.ComfyNode):
                         output=(out_width, out_height),
                         resolution=resolution,
                         dit=models.dit,
-                        attention=run.attention,
                         plan=made,
                         tiles=tiles,
                         room=run.room,
@@ -721,7 +696,7 @@ def clip_planner(
     of the card, its largest phase (Peaks.need: a VAE pass with the room it is held to)."""
 
     def planner(
-        reading: Reading, host: int | None, attention: str, architecture: Architecture, held: bool
+        reading: Reading, host: int | None, architecture: Architecture, held: bool
     ) -> models_module.Planned[ClipPlan]:
         made, expected = clip.plan(
             reading,
@@ -730,7 +705,6 @@ def clip_planner(
             settings.clip_pins(),
             host,
             correct=settings.split,
-            attention=attention,
             dit_model=architecture,
             held=held,
         )
@@ -796,7 +770,6 @@ class UpscaleVideo(io.ComfyNode):
                 _models_input(),
                 _resolution_input(),
                 _quality_input(),
-                _attention_input(),
                 *_correction_inputs(),
                 _plan_only_input(),
                 # The first optional socket (the user, 2026-11-08): optional because a clip of
@@ -831,7 +804,6 @@ class UpscaleVideo(io.ComfyNode):
         images: torch.Tensor,
         models: models_module.Handle,
         resolution: int,
-        attention: str,
         color_correction: bool,
         seed: int,
         plan_only: bool,
@@ -856,7 +828,6 @@ class UpscaleVideo(io.ComfyNode):
                 encode_tile=encode_tile,
                 decode_tile=decode_tile,
                 swap_blocks=swap_blocks,
-                attention=attention,
                 color_correction=color_correction,
                 seed=seed,
             )
@@ -880,7 +851,6 @@ class UpscaleVideo(io.ComfyNode):
             started = time.monotonic()
             with models_module.session(
                 models,
-                settings.attention,
                 planner,
                 plan_only=plan_only,
                 clip=size,
@@ -896,7 +866,6 @@ class UpscaleVideo(io.ComfyNode):
                         output=(out_width, out_height),
                         resolution=resolution,
                         dit=models.dit,
-                        attention=run.attention,
                         plan=made,
                         expected=expected,
                         room=run.room,

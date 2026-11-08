@@ -175,23 +175,17 @@ def test_the_models_load_sets_the_samplers_bars_by_the_log_level(
     assert len(seen) == 2
 
 
-def test_sdpa_is_said_at_info_and_flash_attention_2_by_each_app(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # The load's attention line (model.say_attention): PyTorch's SDPA said at INFO with why it is
-    # no problem, never a warning (the user read the warning as one, 2026-11-08); FlashAttention 2
-    # is left to each app's own lines (the command line's plan, the nodes' plan).
+def test_the_load_names_no_attention_kernel(caplog: pytest.LogCaptureFixture) -> None:
+    # PyTorch's SDPA is the one attention kernel (2026-11-08): no kernel to choose, say or check
+    # (model.attention_backend and model.say_attention are gone), and no line of a load names one.
+    from pathlib import Path
+
+    import torch
+
     from seedvr2x import model
 
+    assert not hasattr(model, "attention_backend") and not hasattr(model, "say_attention")
     caplog.set_level(logging.DEBUG, logger="seedvr2x")
-    model.say_attention("sdpa")
-    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (
-            logging.INFO,
-            "attention: PyTorch's SDPA (FlashAttention 2 is not installed; the two take the same"
-            " memory and about the same time)",
-        )
-    ]
-    caplog.clear()
-    model.say_attention("flash_attn_2")
-    assert caplog.records == []
+    with pytest.raises(Exception):  # noqa: B017 (the files are missing: only the log is read)
+        model.load_models(Path("absent-dit"), Path("absent-vae"), torch.device("cpu"))
+    assert not any("attention" in r.getMessage().lower() for r in caplog.records)

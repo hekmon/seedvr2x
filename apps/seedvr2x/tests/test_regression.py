@@ -13,6 +13,15 @@ master and frames kept as the case's reference.
 The references hold seedvr2x's output from then on: a change that moves its bits is allowed with
 a measured reason, and makes them again, said in its commit.
 
+Those were made under FlashAttention 2. When it went (2026-11-08: PyTorch's SDPA the one attention
+kernel, DESIGN.md, Vendored model code), they were made again under SDPA on the RTX 5090 by main
+666a6cb, each case's command in an environment where FlashAttention 2 doesn't import, at the
+card's sizes of cases.json, and this test held its every case to them on that code, then on the
+code that removed FlashAttention 2. SDPA's are the only references since; the FlashAttention 2
+ones are kept aside, under a name that says so, unused. Another card's references made before
+(the 96 GB card's) are FlashAttention 2's, which an SDPA run never matches: they are made again
+under SDPA before that card's next gate.
+
 Until 2026-11-04 the references were numz's, and seedvr2x ran in three modes for the tests only to
 reproduce them: numz's padding, numz's mirrored tail and numz's draw of the noise on the GPU.
 Those modes are gone, and so is numz's own output as a reference; the cases' input and their
@@ -596,12 +605,11 @@ def logged_host(log: str) -> int | None:
 @dataclass(frozen=True)
 class Inputs:
     """What a job's plan is made from besides the memory, read from the manifest --plan left
-    (recorded_inputs): the target size, the shots, and the attention backend and the DiT's
-    format the plan was predicted for."""
+    (recorded_inputs): the target size, the shots and the DiT's format the plan was predicted
+    for."""
 
     target: tuple[int, int]
     shots: tuple[Shot, ...]
-    attention: str
     # The disk line the plan is given (disk.Disk.line), for the job's masters; its free space,
     # which compared() drops, is nothing here. None: no disk line (the CPU tests of the rest).
     disk: str | None = None
@@ -632,7 +640,7 @@ def recorded_disk(content: dict[str, Any]) -> str | None:
 def recorded_inputs(content: dict[str, Any]) -> tuple[Inputs, Free]:
     """The inputs of the plan a manifest's content records, with the free memory it was made in:
     the target from the input's size and sample aspect at the setting's resolution (cli._run, job.
-    target_size), the shots as recorded, the attention backend and the DiT's format of the plan's
+    target_size), the shots as recorded, the DiT's format of the plan's
     record (fp16 where it names none, planner.recorded_dit_model), the disk line of its masters
     (recorded_disk)."""
     source, settings = content["input"], content["settings"]
@@ -643,7 +651,6 @@ def recorded_inputs(content: dict[str, Any]) -> tuple[Inputs, Free]:
     inputs = Inputs(
         target,
         shots,
-        memory_record["attention"],
         recorded_disk(content),
         planner.recorded_dit_model(memory_record),
     )
@@ -686,7 +693,6 @@ def planner_says(reading: memory.Reading, inputs: Inputs, host: int | None) -> l
             inputs.shots,
             planner.Pins(),
             host,
-            attention=inputs.attention,
             dit_model=inputs.dit_model,
         )
     except planner.PlanError as error:

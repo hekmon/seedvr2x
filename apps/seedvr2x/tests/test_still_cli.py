@@ -258,7 +258,6 @@ def test_a_picture_is_a_shot_of_one_frame_on_the_gpu(
         host,
         process=stills._process(size, (out_height, out_width), 16),  # pyright: ignore[reportPrivateUsage]
         input_pixels=size[0] * size[1],
-        attention=cli._attention(),  # pyright: ignore[reportPrivateUsage]
         dit_model=peaks.FP16,
         split=True,
         pins=still_plan.NO_PINS
@@ -270,7 +269,7 @@ def test_a_picture_is_a_shot_of_one_frame_on_the_gpu(
         f"\n{case}: {size[1]}x{size[0]} to {out_width}x{out_height}; free {free / GIB:.2f} GiB,"
         f" planned in {counted / GIB:.2f} (budget {plan.budget / GIB:.2f}); {plan.models};"
         f" encode {tiles.encode} ({tiles.encode_peak / GIB:.2f} GiB), decode {tiles.decode}"
-        f" ({tiles.decode_peak / GIB:.2f} GiB); attention {plan.attention}"
+        f" ({tiles.decode_peak / GIB:.2f} GiB)"
     )
     if pinned is not None:
         assert tiles.encode is not None and tiles.decode is not None, "the case tiles both passes"
@@ -357,9 +356,7 @@ class Machine:
         self.passes: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         self.free = FREE
         self.library: Any = None  # still.upscale, as the library has it
-        self.models: Any = SimpleNamespace(
-            attention="none", device=torch.device("cpu"), enter=lambda phase: None
-        )
+        self.models: Any = SimpleNamespace(device=torch.device("cpu"), enter=lambda phase: None)
 
 
 def nearest(
@@ -417,7 +414,6 @@ def machine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Machine:
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (made.free, TOTAL))
     monkeypatch.setattr(cli, "_free_memory", read_free)
     monkeypatch.setattr(cli, "_host_available", lambda: HOST)
-    monkeypatch.setattr(cli, "_attention", lambda: "flash_attn_2")
     monkeypatch.setattr(cli, "_dit_model", lambda path: peaks.FP16)
     monkeypatch.setattr(model, "load_models", load)
     monkeypatch.setattr(still, "upscale", upscale)
@@ -429,8 +425,6 @@ def use_library(made: Machine, monkeypatch: pytest.MonkeyPatch, models: model.Mo
     arithmetic: test_still.py's), each call recorded."""
     real = made.library
     stand_in_dit(monkeypatch)
-    # What main._load logs of the loaded models.
-    models.attention = "none"  # pyright: ignore[reportAttributeAccessIssue]
     made.models = models
 
     def upscale(*arguments: Any, **keywords: Any) -> npt.NDArray[np.float32]:
@@ -486,7 +480,7 @@ def recorded(
     output): this command's name and version, make_picture's 40 x 24 source, `output` (width,
     height) as written, command()'s --resolution 48 and square pixels, w.safetensors for both
     models, SEED, the colour correction, the tiles of the pass it ran (still.upscale's keywords),
-    and the attention the machine stands in."""
+    and the attention kernel, always SDPA."""
 
     def side(tiles: Tiles | None) -> int:
         return 0 if tiles is None else tiles.size
@@ -505,7 +499,6 @@ def recorded(
         colour,
         side(keywords["encode_tiles"]),
         side(keywords["decode_tiles"]),
-        "flash_attn_2",
     )
 
 
@@ -1377,7 +1370,7 @@ def test_the_file_carries_seedvr2xs_record(
         ("color_correction", "split"),
         ("encode_tile", "0"),
         ("decode_tile", "0"),
-        ("attention", "flash_attn_2"),
+        ("attention", "sdpa"),
     ]
     messages = [r.getMessage() for r in caplog.records]
     assert f"w.safetensors: SHA-256 {EMPTY_SHA256}, read as it loaded" in messages
@@ -1605,7 +1598,6 @@ def test_plan_says_the_pictures_plan_and_loads_and_writes_nothing(
     for opening in (
         "memory: ",
         "bound: the picture alone, 80x48 as stored",
-        "attention: ",
         "blocks swapped: ",
         "the DiT's phase: ",
         "system memory: ",
@@ -1614,6 +1606,7 @@ def test_plan_says_the_pictures_plan_and_loads_and_writes_nothing(
         "decode: ",
     ):
         assert any(line.startswith(f"plan: {opening}") for line in lines), opening
+    assert not [line for line in lines if line.startswith("plan: attention")]
     # The same plan as a run's: the run logs the lines --plan does, then loads.
     caplog.clear()
     assert run(machine, source, output) == 0

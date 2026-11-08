@@ -339,7 +339,6 @@ def plan_again(
     recorded: Plan,
     refused: PlanError,
     split: bool = False,
-    attention: str = peaks.FLASH_ATTN_2,
     dit_model: Architecture = peaks.FP16,
 ) -> tuple[Plan, Peaks]:
     """The plan of a job resumed whose recorded shape no longer fits the memory free (`refused`,
@@ -386,7 +385,6 @@ def plan_again(
                 held,
                 host_available,
                 split=split,
-                attention=attention,
                 compile_vae=recorded.compile_vae,
                 compile_fixed=True,
                 dit_model=dit_model,
@@ -626,7 +624,7 @@ def said(
     from seedvr2x.shots import shot_layout
 
     job = _job(
-        *(predicted.reading, target, shots, False, predicted.attention),
+        *(predicted.reading, target, shots, False),
         plan.compile_vae,
         predicted.dit_model,
     )
@@ -645,11 +643,6 @@ def said(
         f"frames: {out_width}x{out_height} padded to {width}x{height} for the model,"
         f" {predicted.tokens:,} tokens a latent"
     )
-    if predicted.attention == peaks.FLASH_ATTN_2:
-        lines.append("attention: FlashAttention 2, which is installed")
-    else:
-        # The lean attention peaks alike under both kernels (peaks.DIT_ATTENTION).
-        lines.append("attention: PyTorch's SDPA, FlashAttention 2 not being installed")
     if job.dit_model == peaks.INT8:
         lines.append(_int8_said())
     elif job.dit_model in (peaks.GGUF_7B, peaks.GGUF_7B_SHARP):
@@ -949,10 +942,6 @@ def beyond_measured(plan: Plan) -> list[str]:
         for phase, tiles in passes
         if tiles is not None and tiles.size > peaks.TILE_MAX
     ]
-
-
-# The attention backends as the plan's lines name them (model.load_models' own words for SDPA).
-_ATTENTION_SAID = {peaks.FLASH_ATTN_2: "FlashAttention 2", peaks.SDPA: "PyTorch's SDPA"}
 
 
 def card_detail(peaks: Peaks) -> str | None:

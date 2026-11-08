@@ -437,25 +437,25 @@ def test_the_probes_allocator_margin_reaches_the_plan_and_none_is_none(
     machine.held_card = 32 * GIB
     seen: list[float | None] = []
 
-    def planner(reading, host, attention, architecture, held):  # type: ignore[no-untyped-def]
+    def planner(reading, host, architecture, held):  # type: ignore[no-untyped-def]
         seen.append(reading.margin)
         raise Seen
 
     for margin in (None, 0.5, None):
         models.reset()
         machine.allocator_margin = margin
-        with pytest.raises(Seen), models.session(handle(tmp_path), None, planner):
+        with pytest.raises(Seen), models.session(handle(tmp_path), planner):
             pass
         assert seen[-1] == margin
     # The probe runs once a layout and kernel (reset forgets it); a plan only reads no probe, and
     # counts the margin an earlier run of the process found.
     models.reset()
     machine.allocator_margin = 0.5
-    with pytest.raises(Seen), models.session(handle(tmp_path), None, planner, plan_only=True):
+    with pytest.raises(Seen), models.session(handle(tmp_path), planner, plan_only=True):
         pass
     assert seen[-1] is None
-    with pytest.raises(Seen), models.session(handle(tmp_path), None, planner):
+    with pytest.raises(Seen), models.session(handle(tmp_path), planner):
         pass
-    with pytest.raises(Seen), models.session(handle(tmp_path), None, planner, plan_only=True):
+    with pytest.raises(Seen), models.session(handle(tmp_path), planner, plan_only=True):
         pass
     assert seen[-2:] == [0.5, 0.5]

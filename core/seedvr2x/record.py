@@ -19,10 +19,15 @@ from dataclasses import dataclass
 from fractions import Fraction
 from xml.sax.saxutils import escape
 
-from seedvr2x.peaks import FLASH_ATTN_2, SDPA
-
 # The repository's address, in the creator's line and the video's seedvr2x_url.
 URL = "https://github.com/hekmon/seedvr2x"
+
+# The attention kernel the DiT runs, in the record's attention field: PyTorch's SDPA, the one
+# kernel since FlashAttention 2 went (2026-11-08; DESIGN.md, Vendored model code). The field stays,
+# constant, as provenance: an output made before says what made it (`flash_attn_2` or `sdpa`).
+# Also the name a job's environment records (the CLI's environment.py) and the image server's
+# info gives.
+ATTENTION = "sdpa"
 
 # IPTC's digital source type for "augmentation, correction or enhancement using a Generative AI
 # model" (IPTC NewsCodes, digitalsourcetype): the field platforms read to label a picture so.
@@ -93,8 +98,8 @@ class Record:
     (--resolution, given or its default) and sample_aspect the one used (the source's, or
     --input-sar's), which the sizes alone don't pin. Tiles are the VAE passes' tile sides, in
     output pixels, 0 for an untiled pass; their overlap is passes.OVERLAP, which no plan
-    chooses. attention is peaks' name of the kernel the DiT ran (FLASH_ATTN_2 or SDPA).
-    ValueError for a field out of its range."""
+    chooses. The attention field is ATTENTION, the one kernel. ValueError for a field out of its
+    range."""
 
     app: str
     version: str
@@ -108,7 +113,6 @@ class Record:
     color_correction: str
     encode_tile: int
     decode_tile: int
-    attention: str
     video: Video | None = None
 
     def __post_init__(self) -> None:
@@ -126,8 +130,6 @@ class Record:
             raise ValueError("a record's resolution and sample aspect are positive")
         if self.seed < 0 or self.encode_tile < 0 or self.decode_tile < 0:
             raise ValueError("a record's seed and tiles are 0 or more")
-        if self.attention not in (FLASH_ATTN_2, SDPA):
-            raise ValueError(f"attention {self.attention!r}: {FLASH_ATTN_2} or {SDPA}")
         if self.video is not None:
             if self.video.window < 0:
                 raise ValueError(f"a record's window cap is 0 or more: {self.video.window}")
@@ -164,7 +166,7 @@ class Record:
             ("color_correction", self.color_correction),
             ("encode_tile", str(self.encode_tile)),
             ("decode_tile", str(self.decode_tile)),
-            ("attention", self.attention),
+            ("attention", ATTENTION),
         ]
         if self.video is not None:
             found += [
@@ -229,9 +231,7 @@ def tag_names() -> frozenset[str]:
     model = Model("", "0" * 64)
     names: set[str] = set()
     for video in (Video(0, "", False, False, "0"), Video(0, "", False, False, None, "0" * 64)):
-        sample = Record(
-            "a", "0", (1, 1), (1, 1), 1, Fraction(1), model, model, 0, "", 0, 0, SDPA, video
-        )
+        sample = Record("a", "0", (1, 1), (1, 1), 1, Fraction(1), model, model, 0, "", 0, 0, video)
         names.update(name for name, _ in sample.tags())
     return frozenset(names)
 

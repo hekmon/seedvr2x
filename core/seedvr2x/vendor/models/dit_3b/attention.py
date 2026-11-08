@@ -11,41 +11,16 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
-# Modified for seedvr2x: attention runs FlashAttention 2 when installed, else SDPA.
+# Modified for seedvr2x: attention runs PyTorch's SDPA alone.
 
 import torch
 import torch.nn.functional as F
 
-# seedvr2x: FlashAttention 2 when installed, else SDPA (DESIGN.md, Vendored model code):
-# numz's compatibility layer and its FA3 and SageAttention backends are gone. The availability
-# test and the FA2 call are numz's (src/optimization/compatibility.py:136-143, 284-330).
-try:
-    from flash_attn import flash_attn_varlen_func as _fa2_varlen
-    import flash_attn_2_cuda  # noqa: F401
-    FLASH_ATTN_2_AVAILABLE = True
-except (ImportError, AttributeError, OSError):
-    _fa2_varlen = None
-    FLASH_ATTN_2_AVAILABLE = False
-
-
-@torch._dynamo.disable
-def call_flash_attn_2_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
-    if not FLASH_ATTN_2_AVAILABLE:
-        raise ImportError("Flash Attention 2 is not available")
-    if torch.is_tensor(max_seqlen_q):
-        max_seqlen_q = int(max_seqlen_q.item())
-    if torch.is_tensor(max_seqlen_k):
-        max_seqlen_k = int(max_seqlen_k.item())
-    return _fa2_varlen(
-        q=q,
-        k=k,
-        v=v,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_k=cu_seqlens_k,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
-        **kwargs
-    )
+# seedvr2x: PyTorch's SDPA alone (DESIGN.md, Vendored model code): numz's compatibility layer
+# and its FlashAttention and SageAttention backends are gone. FlashAttention 2, the last kept,
+# went on 2026-11-08: on numz's attention it gave the DiT the same time within 1.5%
+# (research/docs/attention.md), and on the lean attention the same peak to the MiB, SDPA 2% and
+# 10% the quicker (research/docs/small-cards.md, FlashAttention 2 against the lean SDPA).
 
 from torch import nn
 
@@ -109,9 +84,6 @@ class FlashAttentionVarlen(nn.Module):
     
     Supported backends:
     - sdpa: PyTorch SDPA (fully compilable, always available)
-    - flash_attn_2: Flash Attention 2 (Ampere+)
-    
-    All non-SDPA backends use @torch._dynamo.disable wrapper (C++ extensions).
     """
 
     def __init__(self, attention_mode: str = 'sdpa', compute_dtype: torch.dtype = None):
@@ -119,7 +91,7 @@ class FlashAttentionVarlen(nn.Module):
         Initialize with specified attention backend.
         
         Args:
-            attention_mode: 'sdpa' or 'flash_attn_2'
+            attention_mode: 'sdpa'
             compute_dtype: Compute dtype for attention (set by pipeline, defaults to None for auto-detection)
         """
         super().__init__()
@@ -143,17 +115,11 @@ class FlashAttentionVarlen(nn.Module):
             k = k.to(self.compute_dtype)
             v = v.to(self.compute_dtype)
         
-        # seedvr2x: the two backends left; another mode is an error, not a silent SDPA run.
-        if self.attention_mode == 'flash_attn_2':
-            return call_flash_attn_2_varlen(
-                q, k, v, cu_seqlens_q, cu_seqlens_k, 
-                max_seqlen_q, max_seqlen_k, **kwargs
-            )
-        elif self.attention_mode == 'sdpa':
-            # PyTorch SDPA
-            return pytorch_varlen_attention(
-                q, k, v, cu_seqlens_q, cu_seqlens_k,
-                max_seqlen_q, max_seqlen_k, **kwargs
-            )
-        else:
-            raise ValueError(f"attention_mode {self.attention_mode!r}: 'flash_attn_2' or 'sdpa'")
+        # seedvr2x: SDPA, the one backend left; another mode is an error, not a silent SDPA run.
+        if self.attention_mode != 'sdpa':
+            raise ValueError(f"attention_mode {self.attention_mode!r}: 'sdpa'")
+        # PyTorch SDPA
+        return pytorch_varlen_attention(
+            q, k, v, cu_seqlens_q, cu_seqlens_k,
+            max_seqlen_q, max_seqlen_k, **kwargs
+        )

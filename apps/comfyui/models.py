@@ -17,7 +17,7 @@ One run is `session`, a context manager both upscale nodes use:
    this run reads its own, and a kept set of another file before the new one is pinned;
 1. the files found and checked (pull.resolve, weights.check_models, pull.check_pinned: their
    header, then each pinned file's size, its SHA-256 left to the load, which proves it), and the
-   environment probe (probe.check) for that DiT layout and attention kernel, once per process;
+   environment probe (probe.check) for that DiT layout, once per process;
 2. the models: kept ones are read once, every weight in its pinned copy and none on the card
    (passes.HELD), after a plan for the card alone refused nothing (a refusal comes before a
    16 GB read), and registered with ComfyUI; ones not kept are read for the run, after its plan;
@@ -52,7 +52,7 @@ import numpy as np
 import torch
 from comfy.model_patcher import ModelPatcher
 
-from seedvr2x import blockswap, memory, model, peaks, pull, waiting, weights
+from seedvr2x import blockswap, memory, model, pull, waiting, weights
 from seedvr2x.errors import ModelError, ModelMissing, ModelsRefused, PlanRefused, Refusal
 from seedvr2x.memory import Reading
 from seedvr2x.model import Models
@@ -174,9 +174,8 @@ class Machine(Protocol):
     def free(self) -> int: ...
     def reading(self, free: int) -> Reading: ...
     def host(self) -> int | None: ...
-    def attention(self) -> str: ...
     def dit_model(self, path: Path) -> Architecture: ...
-    def probe(self, architecture: Architecture, attention: str) -> float | None: ...
+    def probe(self, architecture: Architecture) -> float | None: ...
     def load(
         self,
         files: ModelFiles,
@@ -246,16 +245,13 @@ class CudaMachine:
             logger.warning("the system memory available is unread: the plan doesn't check it")
         return found
 
-    def attention(self) -> str:
-        return model.attention_backend()
-
     def dit_model(self, path: Path) -> Architecture:
         return weights.check(path, "dit")
 
-    def probe(self, architecture: Architecture, attention: str) -> float | None:
+    def probe(self, architecture: Architecture) -> float | None:
         from seedvr2x import probe
 
-        return probe.check(self.device, architecture, attention).allocator_margin
+        return probe.check(self.device, architecture).allocator_margin
 
     def load(
         self,
@@ -435,10 +431,10 @@ class Entry:
 
 
 _entries: dict[tuple[str, str], Entry] = {}
-# The probes done, by DiT layout and attention kernel, and the allocator's margin each found (a
+# The probes done, by DiT layout, and the allocator's margin each found (a
 # share of a step's P, probe.Probed.allocator_margin; None: none measured, the measurement being
 # unbuilt), which the plans of this process count with the rule's share, the larger of the two.
-_probed: dict[tuple[str, str], float | None] = {}
+_probed: dict[str, float | None] = {}
 
 # The models of runs not kept that ended in an abandoned wait on the GPU (waiting.abandoned),
 # held on purpose: dropping them runs their finalizers (blockswap.HostCopy's cudaHostUnregister),
@@ -512,14 +508,14 @@ class Planned[T]:
 
 
 # A node's planner: the plan for a card as it would be with ComfyUI's models gone (the reading),
-# the system memory available (None: unchecked), the attention kernel, the DiT's format and
+# the system memory available (None: unchecked), the DiT's format and
 # whether the weights' pinned copies exist already. PlanRefused as the library raises it.
-type Planner[T] = Callable[[Reading, int | None, str, Architecture, bool], Planned[T]]
+type Planner[T] = Callable[[Reading, int | None, Architecture, bool], Planned[T]]
 
 
 class Run[T]:
     """What a node gets in a session: the models placed for its plan, the plan, the room it took,
-    the attention kernel it runs, the handle, what keeping the weights came to (`keeping`) and the
+    the handle, what keeping the weights came to (`keeping`) and the
     notes to say in the plan once (`notes`: ComfyUI having dropped the weights). The models are
     the session's: over when it ends, they are no longer reachable from here, so that a node still
     holding its Run after the `with` keeps no weight alive. A plan only has none: `models` is
@@ -530,7 +526,6 @@ class Run[T]:
         models: Models | None,
         planned: Planned[T],
         room: plans.Room,
-        attention: str,
         handle: Handle,
         keeping: plans.Keeping,
         notes: tuple[str, ...] = (),
@@ -539,7 +534,6 @@ class Run[T]:
         self._models: Models | None = models
         self.planned = planned
         self.room = room
-        self.attention = attention
         self.handle = handle
         self.keeping = keeping
         self.notes = notes
@@ -787,46 +781,17 @@ def provide(handle: Handle, show: Callable[[str], None]) -> None:
     said_where(folder, tuple(there), absent)
 
 
-def _attention(machine: Machine, requested: str | None) -> str:
-    """The attention kernel of the run: the environment's (FlashAttention 2 where it imports, else
-    SDPA) unless the node's attention setting asked for one; SDPA is always there, FlashAttention
-    2 only where it imports."""
-    available = machine.attention()
-    if requested is None:
-        return available
-    if requested == peaks.FLASH_ATTN_2 and available != peaks.FLASH_ATTN_2:
-        raise words.attention_missing()
-    return requested
-
-
-def _set_attention(models: Models, attention: str) -> None:
-    """The attention kernel set on the DiT's attention modules, as the loader sets the
-    environment's (model.load_models), where the node's setting asked for the other one."""
-    if models.attention == attention:
-        return
-    from seedvr2x.vendor.models.dit_3b import attention as attention_3b
-    from seedvr2x.vendor.models.dit_7b import attention as attention_7b
-
-    dit = getattr(models.runner, "dit", None)
-    for module in () if dit is None else dit.modules():
-        if isinstance(
-            module, attention_7b.FlashAttentionVarlen | attention_3b.FlashAttentionVarlen
-        ):
-            module.attention_mode = attention
-    models.attention = attention
-
-
-def _probe(machine: Machine, architecture: Architecture, attention: str) -> float | None:
-    """The environment probe, before the first load in this process for this DiT layout and this
-    attention kernel (probe.check: each kernel the file needs, held to the CPU's numbers; cached
+def _probe(machine: Machine, architecture: Architecture) -> float | None:
+    """The environment probe, before the first load in this process for this DiT layout
+    (probe.check: each kernel the file needs, held to the CPU's numbers; cached
     on disk by the environment's fingerprint). A refusal is worded for the nodes. Returns the
     allocator's margin the cache holds for the environment (None: none measured, which is every
     run until the probe measures it; probe.py)."""
-    key = (architecture.name, attention)
+    key = architecture.name
     if key in _probed:
         return _probed[key]
     try:
-        margin = machine.probe(architecture, attention)
+        margin = machine.probe(architecture)
     except Refusal as error:
         raise words.refusal(error) from error
     _probed[key] = margin
@@ -837,7 +802,6 @@ def _plan[T](
     planner: Planner[T],
     reading: Reading,
     host: int | None,
-    attention: str,
     architecture: Architecture,
     held: bool,
     handle: Handle,
@@ -847,14 +811,14 @@ def _plan[T](
     that would plan the run (pull.smaller_planning: the file never changed by itself), and with
     the clip's size where the run is a clip's (words.ClipSize)."""
     try:
-        return planner(reading, host, attention, architecture, held)
+        return planner(reading, host, architecture, held)
     except PlanRefused as refused:
         smaller: list[pull.Smaller] = []
         if refused.kind in ("memory", "host", "input"):
 
             def plans_with(other: Architecture) -> bool | None:
                 try:
-                    planner(reading, host, attention, other, held)
+                    planner(reading, host, other, held)
                 except PlanRefused:
                     return None
                 return True
@@ -1149,7 +1113,6 @@ def _freeing(show: Callable[[str], None] | None) -> Generator[None]:
 @contextmanager
 def session[T](
     handle: Handle,
-    attention: str | None,
     planner: Planner[T],
     *,
     plan_only: bool = False,
@@ -1176,7 +1139,7 @@ def session[T](
     before = _machine
     earlier = before is not None and waiting.failed(model.card_index(before.device)) is not None
     try:
-        with _session(handle, attention, planner, plan_only, clip, preparing) as run:
+        with _session(handle, planner, plan_only, clip, preparing) as run:
             yield run
     except BaseException as error:
         made = _machine
@@ -1208,7 +1171,6 @@ def session[T](
 @contextmanager
 def _session[T](
     handle: Handle,
-    attention: str | None,
     planner: Planner[T],
     plan_only: bool,
     clip: words.ClipSize | None,
@@ -1253,19 +1215,16 @@ def _session[T](
         files, architecture = _prepare(handle, machine_, preparing)
     else:
         files, architecture = entry.files, entry.architecture
-    chosen = _attention(machine_, attention)
     if plan_only:
         ours = None if entry is None else entry.patcher
         # No probe runs for a plan only; the margin an earlier run of this process found counts.
-        reading, own, held, reserve = _read(
-            machine_, ours, _probed.get((architecture.name, chosen))
-        )
+        reading, own, held, reserve = _read(machine_, ours, _probed.get(architecture.name))
         host = machine_.host()
         # Weights to be pinned by the run come out of the memory the host has available.
         counted = (
             host if entry is not None or not keep or host is None else max(host - keeping.size, 0)
         )
-        planned = _plan(planner, reading, counted, chosen, architecture, keep, handle, clip)
+        planned = _plan(planner, reading, counted, architecture, keep, handle, clip)
         room = plans.Room(
             card=machine_.name(),
             free=own.reported,
@@ -1277,16 +1236,14 @@ def _session[T](
             host=host,
             plan_only=True,
         )
-        yield Run(
-            None, planned, room, chosen, handle, keeping, (), 0 if entry is None else entry.host
-        )
+        yield Run(None, planned, room, handle, keeping, (), 0 if entry is None else entry.host)
         return
-    margin = _probe(machine_, architecture, chosen)
+    margin = _probe(machine_, architecture)
     if keep and entry is None:
         # A refusal comes before the read of the files: the plan for the card alone, the pinned
         # copies not counted (the host is checked by the plan that follows).
         early, _, _, _ = _read(machine_, None, margin)
-        _plan(planner, early, None, chosen, architecture, True, handle, clip)
+        _plan(planner, early, None, architecture, True, handle, clip)
         entry, note = _load_kept(handle, machine_, files, architecture, preparing)
         if note:
             notes.append(note)
@@ -1297,7 +1254,7 @@ def _session[T](
 
     reading, own, held, reserve = _read(machine_, ours, margin)
     host = machine_.host()
-    planned = _plan(planner, reading, host, chosen, architecture, keep, handle, clip)
+    planned = _plan(planner, reading, host, architecture, keep, handle, clip)
     needed = needed_free(planned.needs)
     # ComfyUI's own free memory counts the room it keeps for the system: the run needs that much
     # free beyond its plan, and is asked for it.
@@ -1356,12 +1313,10 @@ def _session[T](
                 models = _load(machine_, files, planned.models, preparing)
         except Refusal as error:
             raise words.refusal(error, model_dir=bool(handle.model_dir), keep=keep) from error
-        _set_attention(models, chosen)
         run = Run(
             models,
             planned,
             room,
-            chosen,
             handle,
             keeping,
             tuple(notes),

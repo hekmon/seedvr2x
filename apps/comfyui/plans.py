@@ -121,7 +121,6 @@ def window_latents(frames: int) -> int:
 WINDOW_FRAMES_MIN = window_frames(WINDOW_MIN)
 WINDOW_FRAMES_MAX = window_frames(WINDOW_MAX)
 WINDOW_FRAMES_STEP = 4
-ATTENTIONS = (AUTO, peaks.SDPA, peaks.FLASH_ATTN_2)
 # Upscale Video's quality, the library's levels (shotruns.QUALITY): standard, the default, runs each
 # shot once, as the command line's --quality does.
 QUALITY_DEFAULT = "standard"
@@ -150,7 +149,6 @@ LABELS = {
     "encode_tile": "encode tile",
     "decode_tile": "decode tile",
     "resolution": "resolution",
-    "attention": "attention",
     "quality": "quality",
     "color_correction": "colour correction",
     "seed": "seed",
@@ -280,7 +278,7 @@ def problems(
 @dataclass(frozen=True)
 class Settings:
     """The choices of an upscale node, and nothing of a plan: the pins the plan takes exactly
-    (None: left to the plan), the attention kernel (None: whichever the environment runs), the
+    (None: left to the plan), the
     colour correction (CORRECTIONS) and the seed. Held by value: a workflow saved and run again
     gives the same."""
 
@@ -288,7 +286,6 @@ class Settings:
     swap_blocks: int | None = None
     encode_tile: int | None = None  # 0: untiled
     decode_tile: int | None = None  # 0: untiled
-    attention: str | None = None
     color_correction: str = "split"
     seed: int = SEED
 
@@ -300,7 +297,6 @@ class Settings:
         swap_blocks: int | None = None,
         encode_tile: int | None = None,
         decode_tile: int | None = None,
-        attention: str = AUTO,
         color_correction: bool = True,
         seed: int = SEED,
     ) -> "Settings":
@@ -314,8 +310,6 @@ class Settings:
             decode_tile=decode_tile,
             seed=seed,
         )
-        if attention not in ATTENTIONS:
-            found.append(f"attention {attention!r}: must be one of {', '.join(ATTENTIONS)}")
         if not isinstance(color_correction, bool):  # pyright: ignore[reportUnnecessaryIsInstance]
             found.append(f"colour correction {color_correction!r}: must be on or off")
         if found:
@@ -325,7 +319,6 @@ class Settings:
             swap_blocks,
             encode_tile,
             decode_tile,
-            None if attention == AUTO else attention,
             CORRECTIONS[0] if color_correction else CORRECTIONS[1],
             seed,
         )
@@ -511,17 +504,9 @@ def _frames(length: int) -> str:
     return f"{window_frames(length)} frames"
 
 
-_ATTENTION = {peaks.FLASH_ATTN_2: "FlashAttention 2", peaks.SDPA: "PyTorch's SDPA"}
-
-
-def _common(dit: str, attention: str, swapped: int, settings: Settings) -> list[str]:
+def _common(dit: str, swapped: int, settings: Settings) -> list[str]:
     return [
         f"model: {DIT_LABELS.get(dit, dit)}",
-        _became(
-            "attention",
-            settings.attention is not None,
-            _ATTENTION.get(attention, attention),
-        ),
         _swap(settings.swap_blocks is not None, swapped),
         f"{LABELS['color_correction']}: {'on' if settings.split else 'off'}"
         f" ({settings.color_correction})",
@@ -558,7 +543,6 @@ def picture_text(
     output: tuple[int, int],
     resolution: int,
     dit: str,
-    attention: str,
     plan: StillPlan,
     tiles: PictureTiles,
     room: Room,
@@ -578,7 +562,7 @@ def picture_text(
         f" to {output[0]}x{output[1]} (resolution {resolution})",
         *notes,
         *_room(room, plan.reading, still_plan.reserve_taken(plan)),
-        *_common(dit, attention, plan.models.swapped, settings),
+        *_common(dit, plan.models.swapped, settings),
         _tiles("encode_tile", settings.encode_tile is not None, tiles.encode, tiles.encode_peak),
         _tiles("decode_tile", settings.decode_tile is not None, tiles.decode, tiles.decode_peak),
         keeping.line,
@@ -634,7 +618,6 @@ def clip_text(
     output: tuple[int, int],
     resolution: int,
     dit: str,
-    attention: str,
     plan: Plan,
     expected: Peaks,
     room: Room,
@@ -680,7 +663,7 @@ def clip_text(
         *per_shot,
         *notes,
         *_room(room, expected.reading, expected.reserve_taken()),
-        *_common(dit, attention, plan.swapped, settings),
+        *_common(dit, plan.swapped, settings),
         _became(
             "window",
             settings.window is not None,

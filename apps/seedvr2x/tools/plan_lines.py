@@ -117,7 +117,7 @@ class Lines(Matrix):
         self.kept.append((made, case.target, case.shots))
         smaller = None
         if self.smaller:
-            options = {"split": case.split, "recorded": None, "attention": case.attention}
+            options = {"split": case.split, "recorded": None}
             options |= {"compile_vae": case.compile_vae, "dit_model": self.dit}
             arguments = (case.free, case.target, case.shots, case.pins, case.host)
             ok, smaller = self.attempt(
@@ -158,7 +158,6 @@ class Lines(Matrix):
                 recorded=kept,
                 refused=error,
                 split=case.split,
-                attention=case.attention,
                 dit_model=self.dit,
             )
         )

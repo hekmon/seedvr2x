@@ -171,7 +171,7 @@ class ToyMachine(StandIn):
         return loaded
 
 
-def toy_planner(reading: Reading, host: int | None, attention: str, arch, held: bool):  # type: ignore[no-untyped-def]
+def toy_planner(reading: Reading, host: int | None, arch, held: bool):  # type: ignore[no-untyped-def]
     plan = ModelPlan(swapped=2, resident_encode=0, resident_decode=0, vae_in_dit=False)
     return models.Planned(None, plan, models.Needs(peak=1 * GIB, margin=0, reading=reading))
 
@@ -187,7 +187,7 @@ def test_nothing_of_the_models_is_left_on_the_card_after_a_run(
     h = handle(tmp_path)
     held: model.Models | None = None
     try:
-        with models.session(h, None, toy_planner) as run:  # type: ignore[arg-type]
+        with models.session(h, toy_planner) as run:  # type: ignore[arg-type]
             held = run.models
             held.enter("dit")
             held.enter("decode")
@@ -201,7 +201,7 @@ def test_nothing_of_the_models_is_left_on_the_card_after_a_run(
     assert toy.loads == [HELD] and held is not None
     assert strays(held, toy.card) == []
     # And again: the models placed for a second run, then freed.
-    with models.session(h, None, toy_planner) as run:  # type: ignore[arg-type]
+    with models.session(h, toy_planner) as run:  # type: ignore[arg-type]
         run.models.enter("dit")
     assert strays(held, toy.card) == []
 
@@ -230,7 +230,7 @@ def test_nothing_waits_on_the_card_to_give_the_models_back_after_an_abandoned_wa
     held: model.Models | None = None
     emptied = 0
     with pytest.raises(management.InterruptProcessingException):
-        with models.session(h, None, toy_planner) as run:  # type: ignore[arg-type]
+        with models.session(h, toy_planner) as run:  # type: ignore[arg-type]
             held = run.models
             held.enter("dit")
             held.enter("decode")
@@ -250,7 +250,7 @@ def test_nothing_waits_on_the_card_to_give_the_models_back_after_an_abandoned_wa
     # The next run is refused before the card is read or the models are placed.
     reads = len(management.empties)
     with pytest.raises(words.Refused, match="restart ComfyUI"):
-        with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+        with models.session(h, toy_planner):  # type: ignore[arg-type]
             pytest.fail("a run went on")
     assert sent == [] and len(management.empties) == reads == emptied
     assert toy.loads == [HELD], "nothing was loaded again either"
@@ -360,7 +360,7 @@ def left_release(
 
     monkeypatch.setattr(model, "synchronize", synchronize)
     with pytest.raises(management.InterruptProcessingException):
-        with models.session(h, None, toy_planner) as run:  # type: ignore[arg-type]
+        with models.session(h, toy_planner) as run:  # type: ignore[arg-type]
             run.models.enter("dit")
             run.models.enter("decode")
             sim.kernel("work", lambda: None, [])
@@ -393,7 +393,7 @@ def test_the_work_a_left_release_waited_for_is_asked_without_waiting_and_all_of_
     slept = len(sim.slept)  # type: ignore[attr-defined]
     for _ in range(2):
         with pytest.raises(words.Refused, match="still busy with the last work") as refused:
-            with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+            with models.session(h, toy_planner):  # type: ignore[arg-type]
                 pytest.fail("a run went on")
         assert "restart ComfyUI" in str(refused.value)
     assert waiting.abandoned() and len(models._left_on_card) == 1  # pyright: ignore[reportPrivateUsage]
@@ -405,7 +405,7 @@ def test_the_work_a_left_release_waited_for_is_asked_without_waiting_and_all_of_
     sim.settle()
     held = models.kept(h)
     assert held is not None and held.models is not None
-    with models.session(h, None, toy_planner) as run:  # type: ignore[arg-type]
+    with models.session(h, toy_planner) as run:  # type: ignore[arg-type]
         assert run.models is held.models
         run.models.enter("dit")
     assert not waiting.abandoned() and models._left_on_card == []  # pyright: ignore[reportPrivateUsage]
@@ -423,10 +423,10 @@ def test_models_not_kept_are_let_go_when_the_card_finishes(
     # release the next run completes would wait for it.
     sim.drain(sim.main)
     with pytest.raises(words.Refused, match="still busy with the last work"):
-        with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+        with models.session(h, toy_planner):  # type: ignore[arg-type]
             pytest.fail("a run went on")
     sim.settle()
-    with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+    with models.session(h, toy_planner):  # type: ignore[arg-type]
         pass
     assert models._left_on_card == [] and not waiting.abandoned()  # pyright: ignore[reportPrivateUsage]
     toy.made.clear()
@@ -442,7 +442,7 @@ def test_a_card_a_cuda_error_failed_is_never_cleared_by_the_query(
     waiting.fail(0, RuntimeError("CUDA error: an illegal memory access was encountered"))
     loads = len(toy.loads)
     with pytest.raises(words.Refused, match="failed during an earlier seedvr2x run"):
-        with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+        with models.session(h, toy_planner):  # type: ignore[arg-type]
             pytest.fail("a run went on")
     assert waiting.abandoned() and waiting.failed() is not None and len(toy.loads) == loads
     models.reset()
@@ -479,7 +479,7 @@ def left_wait(
     monkeypatch.setattr(waiting, "sleep", sleep)
     monkeypatch.setattr(model, "synchronize", lambda device: None)
     with pytest.raises(management.InterruptProcessingException):
-        with models.session(h, None, toy_planner) as run:  # type: ignore[arg-type]
+        with models.session(h, toy_planner) as run:  # type: ignore[arg-type]
             run.models.enter("dit")
             first = sim.main
             sim.kernel("n-2", lambda: None, [])
@@ -512,11 +512,11 @@ def test_work_queued_behind_a_left_wait_on_any_stream_keeps_the_card_busy(
     assert sim.sides[0].queue if stream == "side" else sim.main.queue
     loads = len(toy.loads)
     with pytest.raises(words.Refused, match="still busy with the last work"):
-        with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+        with models.session(h, toy_planner):  # type: ignore[arg-type]
             pytest.fail("a run went on")
     assert waiting.abandoned() and len(toy.loads) == loads
     sim.settle()
-    with models.session(h, None, toy_planner) as run:  # type: ignore[arg-type]
+    with models.session(h, toy_planner) as run:  # type: ignore[arg-type]
         run.models.enter("dit")
     assert not waiting.abandoned() and models._left_on_card == []  # pyright: ignore[reportPrivateUsage]
 
@@ -530,7 +530,7 @@ def test_models_not_kept_are_synchronized_in_the_poll_before_they_are_let_go(
     monkeypatch.setattr(model, "synchronize", lambda device: order.append("synchronize"))
     real = model.forget
     monkeypatch.setattr(model, "forget", lambda each: order.append("forget") or real(each))
-    with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+    with models.session(h, toy_planner):  # type: ignore[arg-type]
         pass
     assert order[:2] == ["synchronize", "forget"]
 
@@ -545,7 +545,7 @@ def test_a_cancel_during_the_release_the_next_run_completes_leaves_the_mark_kept
     monkeypatch.setattr(model, "synchronize", lambda device: waiting.wait(lambda: False, 0.01))
     monkeypatch.setattr(waiting, "sleep", lambda seconds: management.interrupt_current_processing())
     with pytest.raises(words.Refused, match="still busy with the last work"):
-        with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+        with models.session(h, toy_planner):  # type: ignore[arg-type]
             pytest.fail("a run went on")
     assert waiting.abandoned() and len(models._left_on_card) == 1  # pyright: ignore[reportPrivateUsage]
     models.reset()

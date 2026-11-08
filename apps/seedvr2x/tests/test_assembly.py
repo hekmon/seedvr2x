@@ -595,7 +595,6 @@ def recorded(decode_tile: int, *, seed: int = 42, cut_threshold: str | None = "0
         "split",
         0,
         decode_tile,
-        "sdpa",
         Video(
             20,
             "maximum",
