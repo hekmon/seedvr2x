@@ -54,6 +54,17 @@ REFLECTED = 8
 BLACK = 16
 
 
+def factor_said(source: tuple[int, int], output: tuple[int, int]) -> str:
+    """The upscale factor as the apps' plans say it beside the sizes, "x4.5": the output's short
+    side over the source's, `source` (width, height) as displayed (its sample aspect applied) and
+    `output` (width, height) as written, at most two decimals, trailing zeros dropped (x4.5,
+    x3.54, x2; the user's third ComfyUI test, 2026-11-08). One wording for every app."""
+    ratio = Fraction(min(output), min(source))
+    hundredths = math.floor(ratio * 100 + Fraction(1, 2))
+    whole, part = divmod(hundredths, 100)
+    return f"x{whole}" if part == 0 else f"x{whole}.{part:02d}".rstrip("0")
+
+
 def padding(size: tuple[int, int]) -> tuple[int, int]:
     """(rows, columns) reflected from a picture of size (height, width), before the black ones:
     the fewest rows, at least REFLECTED, that bring its height to a multiple of MULTIPLE, 8 to

@@ -1273,7 +1273,9 @@ def test_the_profile_is_carried_and_the_picture_written_upright(
     lines = [r.getMessage() for r in caplog.records]
     assert any(
         line.startswith(f"{source}: a PNG picture")
-        and line.endswith("with its ICC profile and its orientation, 6; output 48x80, a 16-bit PNG")
+        and line.endswith(
+            "with its ICC profile and its orientation, 6; output 48x80 (x2), a 16-bit PNG"
+        )
         for line in lines
     ), lines
     line = next(line for line in lines if line.startswith("upscaled in"))
@@ -1851,7 +1853,9 @@ def test_the_library_makes_the_webp_the_command_writes(
             written.format == "WEBP" and written.bits == 8 and written.pixels.shape == (48, 80, 3)
         )
         lines = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
-        assert any(line.endswith("output 80x48, a lossless WebP, 8-bit") for line in lines), lines
+        assert any(line.endswith("output 80x48 (x2), a lossless WebP, 8-bit") for line in lines), (
+            lines
+        )
         assert any(
             line.startswith("upscaled in ")
             and line.endswith(f"wrote {output}: 80x48, 8-bit lossless WebP, RGB")

@@ -267,7 +267,7 @@ def test_the_plan_is_said_whole_in_the_console_and_the_node_shows_one_short_line
     # The plan's parts in the nodes' words: the pictures, the card and ComfyUI's models, what
     # ComfyUI was asked, the DiT's placement, the passes, the choices, the models' RAM.
     for part in (
-        "1 image 40x24 to 80x48 (resolution 48)",
+        "1 image 40x24 to 80x48 (x2, resolution 48)",
         "graphics card: a stand-in card, 32.00 GiB free; ComfyUI's own models use 0.00 GiB",
         "no need to unload ComfyUI's models",
         # Each setting and what it came to: a value given as set, the rest as the plan chose.
@@ -601,7 +601,7 @@ def test_the_plan_says_each_shot(
         _, text = run_shots(machine, tmp_path, pictures(33), cuts, window=5)
     lines = text.splitlines()
     assert lines[0] == (
-        "plan: a clip of 33 frames 40x24 to 80x48 (resolution 48), in 3 shots, each"
+        "plan: a clip of 33 frames 40x24 to 80x48 (x2, resolution 48), in 3 shots, each"
         " upscaled on its own"
     )
     assert lines[1].startswith("shot 1: frames 0 to 4 (5 frames): ")

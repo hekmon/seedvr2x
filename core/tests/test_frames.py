@@ -8,7 +8,7 @@ import torch
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as TVF
 
-from seedvr2x.frames import output_size, short_side, target_size
+from seedvr2x.frames import factor_said, output_size, short_side, target_size
 from seedvr2x.vendor.data.image.transforms.na_resize import NaResize
 
 
@@ -180,3 +180,22 @@ def test_a_picture_whose_even_crop_cannot_be_padded_is_refused_as_too_small() ->
             except TargetTooSmall:
                 passed = False
             assert passed == still_plan._paddable(output_size((height, width))), (height, width)
+
+
+@pytest.mark.parametrize(
+    ("source", "output", "said"),
+    [
+        ((320, 240), (1440, 1080), "x4.5"),
+        ((1920, 1080), (3840, 2160), "x2"),
+        ((542, 305), (1918, 1080), "x3.54"),  # 3.5409...
+        ((1000, 1000), (1005, 1005), "x1.01"),  # 1.005 rounds half up
+        ((1000, 1000), (1104, 1104), "x1.1"),  # trailing zero dropped
+        ((240, 320), (1080, 1440), "x4.5"),  # portrait: the short sides
+        ((1920, 1080), (1440, 810), "x0.75"),  # smaller
+    ],
+)
+def test_the_factor_is_the_short_sides_ratio_at_two_decimals_at_most(
+    source: tuple[int, int], output: tuple[int, int], said: str
+) -> None:
+    # The apps' plans say it beside the sizes (the user's third ComfyUI test, 2026-11-08).
+    assert factor_said(source, output) == said

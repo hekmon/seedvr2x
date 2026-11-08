@@ -945,7 +945,7 @@ def test_a_default_that_makes_the_output_smaller_than_the_source_says_what_keeps
     ]
     messages = [r.getMessage() for r in caplog.records]
     said = next(n for n, m in enumerate(messages) if "no --resolution given" in m)
-    assert "output 1170x1080, square pixels" in messages[said - 1]
+    assert "output 1170x1080 (x0.9), square pixels" in messages[said - 1]
 
 
 @pytest.mark.usefixtures("stand_in")

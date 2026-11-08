@@ -1079,7 +1079,11 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   ORF's and RW2's magic numbers no TIFF; a picture over Pillow's limit and under its refusal said
   in the library's own INFO line, from a header-only PNG, the library touching neither Pillow's
   limit nor the warning filters; every refusal, the commands it gives run. `tests/test_frames.py`
-  holds `frames.short_side` (the `--resolution` that keeps the displayed size) to `target_size`,
+  holds `frames.factor_said` (the upscale factor the apps' plans say beside the sizes, the short
+  sides' ratio at two decimals at most: x4.5, x3.54, x2; the nodes' first plan line, the CLI's
+  picture read line and video output line: `test_nodes.py`, `test_still_cli.py`,
+  `test_cli_run.py`), `frames.short_side` (the `--resolution` that keeps the displayed size) to
+  `target_size`,
   and `frames.check_picture_target`: a picture's output is its target cropped to even sides, and
   the plan's bound refuses one under the padding's 17 rows (resolution 17 on a 40x24 picture, a
   28x17 target and a 28x16 output), so the picture is refused first as `TargetTooSmall`, its size

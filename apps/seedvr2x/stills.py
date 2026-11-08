@@ -152,7 +152,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     from job import DEFAULT_RESOLUTION, default_smaller
     from seedvr2x import memory, picture, png, pull, still_plan, webp
     from seedvr2x.errors import JobError, Refusal
-    from seedvr2x.frames import check_picture_target, output_size, target_size
+    from seedvr2x.frames import check_picture_target, factor_said, output_size, target_size
     from seedvr2x.weights import check_models
 
     # Refused first, before the file is read and before anything else is asked of the machine:
@@ -191,7 +191,9 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     _check_tile_pins(args, target)
     # The file's size is the model's, its sides swapped by the turn for orientations 5 to 8.
     written = (out_height, out_width) if pic.orientation >= 5 else (out_width, out_height)
-    logger.info("%s", _read_said(name, pic, written, bits, _is_webp(output)))
+    # The factor by the short sides, the source's as displayed (DESIGN.md: the apps agree).
+    factor = factor_said((round(width * sample_aspect), height), (out_width, out_height))
+    logger.info("%s", _read_said(name, pic, written, bits, _is_webp(output), factor))
     if args.resolution is None and (said := default_smaller(name, width, height, sample_aspect)):
         logger.info("%s", said)
     # The model files, as a video's run has them, minus the shot detector, which a picture never
@@ -595,13 +597,17 @@ def _write(path: Path, data: bytes) -> None:
         raise
 
 
-def _read_said(name: str, pic: "Picture", size: tuple[int, int], bits: int, lossless: bool) -> str:
-    """The line saying what was read and what is made of it."""
+def _read_said(
+    name: str, pic: "Picture", size: tuple[int, int], bits: int, lossless: bool, factor: str
+) -> str:
+    """The line saying what was read and what is made of it, the upscale factor beside the
+    output's size (frames.factor_said)."""
     height, width = pic.pixels.shape[:2]
     made = "a lossless WebP, 8-bit" if lossless else f"a {bits}-bit PNG"
     return (
         f"{name}: a {pic.format} picture, {width}x{height}, {pic.bits}-bit"
-        f" {'grey' if pic.grey else 'RGB'}{_kept(pic)}; output {size[0]}x{size[1]}, {made}"
+        f" {'grey' if pic.grey else 'RGB'}{_kept(pic)}; output {size[0]}x{size[1]} ({factor}),"
+        f" {made}"
     )
 
 

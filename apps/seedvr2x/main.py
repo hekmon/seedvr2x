@@ -990,7 +990,7 @@ def _run(args: argparse.Namespace) -> int:
     from media.writer import check_command
     from seedvr2x import memory, pull
     from seedvr2x.errors import JobError, Refusal
-    from seedvr2x.frames import check_target, output_size, target_size
+    from seedvr2x.frames import check_target, factor_said, output_size, target_size
     from seedvr2x.shot_plan import Pins
     from seedvr2x.shots import SHARED, Shot
     from seedvr2x.weights import check_models
@@ -1292,11 +1292,15 @@ def _run(args: argparse.Namespace) -> int:
         listing = _Listing(source, found_cuts, len(shots), model_files)
         segments, paths = _segments(args, source, shots, directory)
         out_height, out_width = output_size(target)
+        # The upscale factor by the short sides, the source's as displayed (frames.factor_said:
+        # the nodes' plans say it alike).
+        shown = (round(declared.stream.width * declared.sample_aspect), declared.stream.height)
         logger.info(
-            "%s; output %dx%d, square pixels",
+            "%s; output %dx%d (%s), square pixels",
             _plural(len(segments), "output segment"),
             out_width,
             out_height,
+            factor_said(shown, (out_width, out_height)),
         )
         _say_default_smaller(args, resolution_given, declared)
         import manifest

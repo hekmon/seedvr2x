@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 
+from seedvr2x import frames as frames_
 from seedvr2x import memory, peaks, pull, shotcuts, shotruns, shots, still_plan
 from seedvr2x.memory import GIB, Reading
 from seedvr2x.passes import Plan, Tiles
@@ -559,7 +560,8 @@ def picture_text(
     outputs = count * output[0] * output[1] * 3 * 4
     lines = [
         f"plan{' (plan only)' if room.plan_only else ''}: {what} {source[0]}x{source[1]}"
-        f" to {output[0]}x{output[1]} (resolution {resolution})",
+        f" to {output[0]}x{output[1]} ({frames_.factor_said(source, output)}, resolution"
+        f" {resolution})",
         *notes,
         *_room(room, plan.reading, still_plan.reserve_taken(plan)),
         *_common(dit, plan.models.swapped, settings),
@@ -646,7 +648,8 @@ def clip_text(
         " so they are out of the RAM available",
     ]
     first = f"plan{' (plan only)' if room.plan_only else ''}: a clip of {frames} frames"
-    first += f" {source[0]}x{source[1]} to {output[0]}x{output[1]} (resolution {resolution})"
+    first += f" {source[0]}x{source[1]} to {output[0]}x{output[1]}"
+    first += f" ({frames_.factor_said(source, output)}, resolution {resolution})"
     if len(cuts) == 1:
         windows = len(shots.shot_layout(cuts[0].frames, plan.window))
         first += ": " + (
