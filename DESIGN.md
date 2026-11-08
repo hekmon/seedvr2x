@@ -167,7 +167,9 @@ never requires it.
   - FlashAttention 2 and `torch.compile`'s Triton there (SDPA works everywhere)
   - the driver spilling VRAM into system memory instead of failing (numz enforces the physical
     limit for this), which the planner must prevent. A Windows driver does it under WSL too,
-    where seedvr2x runs today (see [Allocator](#allocator))
+    where seedvr2x runs today (see [Allocator](#allocator)), and Windows itself does it in
+    the nodes' process: held to the card there too since 2026-11-08 (Allocator, Windows
+    itself)
 
 ## Terms
 
@@ -300,7 +302,12 @@ seedvr2x/                the repository
       its dynamic models alone (impl-nodes' reading of v0.44.0); posing as one would lean on
       comfy-aimdo's internals, so the registration stays plain and the cap is seedvr2x's guard.
     - On the card only while a node runs. The plan is made for the card as it would be with
-      ComfyUI's models gone (its free memory and what ComfyUI says its own models hold), and
+      ComfyUI's models gone (its free memory and what ComfyUI says its own models hold), less
+      the room it leaves the rest of the card: since 2026-11-08 ComfyUI's own reserve for the
+      system too (its `--reserve-vram`, by default 0.68 GiB on a 32 GB card under Windows),
+      decided that day as the larger of it and a held run's 0.5 GiB ([Allocator](#allocator)),
+      not their sum, the two being one need, so that a small card gives up no more than one
+      of them (built as their sum until the nodes' next pass); and
       ComfyUI is asked to free only the room that plan needs (`free_memory`) and 0.25 GiB: its
       partial unload stops at the free memory asked and keeps a buffer of its own, and an exact
       ask left the card 0.04 to 0.11 GiB short (impl-nodes, 2026-11-05). Its models stay where
@@ -455,7 +462,13 @@ seedvr2x/                the repository
     masters with seedvr2x's record, `--until` and `--segment-cmd`, and later several GPUs.
     From an 8-bit YUV video the nodes upscale ComfyUI's own decode, 8 bits a channel, where the
     CLI converts to 16: the outputs differ by a fraction of a level (0.26 at most on the clip
-    measured), and from an RGB source they are the CLI's bit for bit; the README is to say so.
+    measured), and from an RGB source they are the CLI's bit for bit in the same environment
+    (the same torch, its CUDA build and the attention kernel); the README is to say so. Across
+    environments they differ as any two environments' outputs do: ComfyUI's torch 2.12.1
+    under Windows against the CLI's 2.14.1 under WSL2, both on SDPA, gave no frame equal, 38.7
+    and 43.7 dB of PSNR on the two shots of a lossless RGB clip, 2.0 and 0.5% of the pixels
+    off by more than 8 levels of 255, the nodes repeating theirs bit for bit (impl-win-1,
+    2026-11-08).
     Nothing resumes in ComfyUI: a stopped run starts over, and the README points long films to
     the CLI.
   - **Small cards are the nodes' users,** not a side case: v0.1.0 gives them seedvr2x's own
@@ -486,19 +499,28 @@ seedvr2x/                the repository
     parts kept to the apps. On macOS that is Apple's M chips, with PyTorch's MPS backend and
     the planner of one pool ([Not in the first version](#not-in-the-first-version)). On Windows
     the library must run right, not only import: pinned host memory, the card's readings, and
-    the driver's fallback to system memory, on by default.
+    the driver's fallback to system memory, on by default. Built for the nodes on 2026-11-08
+    (impl-win-1, ComfyUI 0.44.2 on the RTX 5090 under Windows itself, its torch 2.12.1, the
+    desktop on the card): the card read through NVML's `nvml.dll` and the driver's
+    `nvcuda.dll`, Windows itself taken for a driver that lends, each step keeping its
+    allocator's reserve, ComfyUI's own reserve for the system kept, and a CUDA error said
+    before anything is freed ([Allocator](#allocator), Windows itself).
   - ComfyUI's process is not seedvr2x's: its Python, its torch and its allocator are its user's.
     ComfyUI's defaults are the nodes' first case, nearly every user's (the user, 2026-11-05):
     `cudaMallocAsync` on its CUDA 13 builds, its dynamic VRAM on. Under `cudaMallocAsync`
     nothing slows and no bit moves, but its pool takes more of the card than torch's limit
     counts, which the plan counts on the card ([Allocator](#allocator), place-study,
     2026-11-05): on an 8 GB card a picture still fits, a 1080p clip only under torch's own
-    allocator with its expandable segments. Under a driver that lends system memory (Windows,
-    WSL2), where seedvr2x itself runs them, not `cudaMallocAsync`, the nodes say once that
+    allocator with its expandable segments. Under WSL2's driver, which lends system memory,
+    where seedvr2x itself runs them, not `cudaMallocAsync`, the nodes say once that
     `--disable-cuda-malloc` with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` gives them
     (ComfyUI sets no segments of its own, impl-nodes' reading; without them torch's own
     allocator plans with the 4.5 GiB alone, as the CLI's does under a user's own such
-    setting), and their README says what they give on a small card. Its
+    setting), and their README says what they give on a small card. Torch's Windows build has
+    none (2026-11-08), so on Windows itself `cudaMallocAsync` stays the nodes' allocator, each
+    step planned with its pool's reserve and said at INFO, and torch's own allocator, which
+    `--disable-cuda-malloc` gives there, is warned of with the way back; an 8 GB card's 1080p
+    clip, which only the segments fit, is unmeasured there. Its
     Desktop app offers torch 2.9.1 to 2.13.0 on
     CUDA 12.6, 12.8 or 13.0, so no list of figures made ahead holds: an environment probe, a
     brick of the library, checks at the first run in an environment that each kernel the
@@ -3588,7 +3610,9 @@ first pass, whose shots are its input, and before the models load:
         seedvr2x's own context as 0.75 GiB (since 2026-10-30; 1.23 before, the rise once
         measured through a first pass): the RTX 5090 measured 0.67 on a resume under WSL2
         (the bare context 0.49, the probe and warm-up 0.18 more), the same to 0.01 GiB three
-        times; provisional until the 96 GB card measures Linux's driver.
+        times; provisional until the 96 GB card measures Linux's driver. On Windows itself
+        NVML counts what a process has made resident, not what it allocated, so the early
+        reading is optimistic there: the CLI's, v0.2.0's to measure.
       - With `--accept-env-change`, a recorded shape that no longer fits is planned again for
         what is left, from the memory free then, as a new GPU is taken (decided on
         2026-10-28, the user's go; built on 2026-10-29). What still fits of it is kept, and
@@ -3727,9 +3751,11 @@ it, 2 to 10% at one latent and nothing measurable at 6.
 ### Allocator
 `cudaMallocAsync` is the allocator where the driver refuses a full card (it trims its pool
 there; `native` fragments and fails), and torch's own where the driver gives memory the card
-doesn't have (below). Set by seedvr2x before torch is imported, documented, overridable: a
-user's `PYTORCH_CUDA_ALLOC_CONF` or `PYTORCH_ALLOC_CONF` stands, an empty one being no setting.
-The GPU's memory refused stops a run in one line, before the models load as after.
+doesn't have (below); on Windows itself, whose torch has no expandable segments, it stays
+`cudaMallocAsync`, its pool counted beside each step (Windows itself, below). Set by seedvr2x
+before torch is imported, documented, overridable: a user's `PYTORCH_CUDA_ALLOC_CONF` or
+`PYTORCH_ALLOC_CONF` stands, an empty one being no setting. The GPU's memory refused stops a
+run in one line, before the models load as after.
 - During a window the GPU holds more than torch's peak, the pool's slack: 2.7 to 3.7 GiB at 6
   latents of 1080p, 3.4 on the 96 GB card at 12. Where the driver refuses a full card, the
   pool gives it back, and the planner's margin was measured that way.
@@ -3751,6 +3777,8 @@ The GPU's memory refused stops a run in one line, before the models load as afte
     card. Otherwise it is asked, by one request of the free memory and 0.25 GiB, freed at
     once (1 to 2 s): refused, nothing changes; given, or no answer, the run is held. It
     says so, and the plan's first line and its refusals name each figure for what it is.
+    On Windows itself the driver is taken for one that lends, unasked (Windows itself,
+    below).
   - Held by torch's own allocator under torch's limit: the smaller of the driver's figure and of
     the card's, less what is left to the rest of the card, 0.5 GiB (3 GiB where NVML doesn't
     answer, said in a warning). At 0.2, as first built, the checks ran with 0.16 to 0.20 GiB to
@@ -3976,11 +4004,12 @@ The GPU's memory refused stops a run in one line, before the models load as afte
       attention (impl-place, 2026-11-06: 1080p windows of 1 to 19 latents and the 4K
       picture's step, the pool 0.35 to 1.70 GiB beyond the allocated peak, every point under
       the rule by 0.039 GiB at least, where the earlier max(0.6, 0.2 × P) fell short by up to
-      0.20), and max(1.25, 0.35 × P) beyond a VAE pass, unmeasured under 1.25. The check
-      between units on the card's figure is the only bound there, and may lose a step's whole
-      reserve before it stops the run (provisional). ComfyUI's environment probe is to
-      measure the pool's share where the nodes run (read by the plan, not yet measured), and
-      the larger figure counts, under the segments too.
+      0.20), and max(1.25, 0.35 × P) beyond a VAE pass, unmeasured under 1.25; under Windows
+      itself every step measured kept within the rule (2026-11-08, Windows itself below).
+      The check between units on the card's figure is the only bound there, and may lose a
+      step's whole reserve before it stops the run (provisional). ComfyUI's environment probe
+      is to measure the pool's share where the nodes run (read by the plan, not yet
+      measured), and the larger figure counts, under the segments too.
     - The tiles stay the largest that fit, untiled where the frame was measured so (the user:
       a large card runs as close to ByteDance's untiled code as it holds; quality is not
       traded on speed alone), and no rule by speed. Measured against the untiled output (the
@@ -4032,6 +4061,77 @@ The GPU's memory refused stops a run in one line, before the models load as afte
       1080p job pinned to `--window 8` with 20 blocks swapped, 0.02 GiB short, the refusal
       naming `--window 7`); the compiled jobs only a rung would fit, 4 to 9 a file, are
       refused as above.
+- **Windows itself** (impl-win-1, 2026-11-08: the RTX 5090 under Windows, its desktop on the
+  card and a browser drawing ComfyUI's page, the nodes in ComfyUI 0.44.2 on its torch 2.12.1
+  and `cudaMallocAsync`, a synthetic clip of 120 frames at the sizes of the user's). The
+  nodes' abort the user met, the desktop lagging and then ComfyUI gone with exit code 3, had
+  one cause. Windows itself was taken for a driver that refuses, the probe being behind
+  WSL2's device alone, so the plan kept no reserve beside each step for the pool. A 1080p
+  clip's untiled decode, planned at 28.03 GiB of the 30.05 free, peaked at the 26.88 GiB
+  allocated that it was predicted, but the pool held 5.2 to 5.6 GiB more, and ComfyUI's
+  process took the card past its 31.82 GiB: Windows paged the desktop's own memory off it
+  (its compositor's 1,321 MiB to 1,050, the browser's 232 to 124, a browser frame of
+  1,004 ms) and the decode's slices ran 30 times slower. The run then failed one of two
+  ways: the allocator's out of memory, clean (8 runs of 9), or, the browser drawing, a
+  kernel's asynchronous "CUDA error: out of memory" met at an event's query, which ComfyUI's
+  own unloading met again after. Such an error pending when a free comes ends the process:
+  under `cudaMallocAsync` a free is a CUDA call, made in torch's deleter, which may not throw
+  (shown alone on the card: a pending error, then a tensor freed, gave the user's exit code
+  and fatal error; torch's own allocator frees there with no call, the error raised at the
+  next synchronisation). With `CUDA_LAUNCH_BLOCKING=1` the same decode passed, the pool
+  0.74 GiB over its peak: the 5 GiB grow with the CPU running ahead, and no kernel was at
+  fault. Decided for that baton and built that night, by the cause:
+  - Windows itself is taken for a driver that lends, unasked. The probe's one request was
+    refused there, in a process alone, the driver's fallback to system memory turned off in
+    its panel, and yet ComfyUI's process took the card past its size: one request doesn't
+    tell what a run meets. A run is held and each step keeps its allocator's reserve.
+    Torch's Windows build has no expandable segments ("not supported on this platform"), so
+    seedvr2x reads them as off there, and `cudaMallocAsync` is the CLI's and the server's
+    default there too.
+  - The card is read through NVML's `nvml.dll` and the driver's `nvcuda.dll`. NVML counts
+    what a process has made resident there, not what it allocated (24 GiB allocated: NVML
+    12.15 GiB free, the driver 4.69), so the smaller figure a held reading takes was the
+    driver's at every step measured; Windows' own budget for the process (DXGI's) is
+    advisory, the use going past it with no failure.
+  - ComfyUI's own reserve for the system is kept (its `extra_reserved_memory()`), taken off
+    the card's free memory and said on the card line (the room it makes: Repository and
+    apps, the nodes).
+  - A CUDA error is said before anything is freed. Any CUDA error but torch's out of memory, a
+    kernel's "CUDA error: out of memory" among them (the context is lost: ComfyUI met it
+    again), marks its card failed, per card and never cleared; every free on an error's way
+    out asks the card first and frees nothing on a failed card, an interrupt during that
+    question still freeing. The nodes keep the error and the models, say that the graphics
+    card failed, with CUDA's line and the restart, on the node, at ERROR in ComfyUI's console
+    and in its error, and refuse every later run, the Cuts node's too, with nothing read.
+    The CLI and the server end their process on it, as before.
+  The user's case then ran end to end, the browser drawing the previews, twice with the same
+  frames bit for bit: 101.6 s, the decode in 1088-px tiles, over 3 GiB of the card left at
+  its fullest, no browser frame over 33 ms and the desktop's memory untouched; a picture to
+  4K in 18.2 s. Measured beside it:
+  - The pool beyond each step's allocated peak: 1.00 GiB at a DiT window of 17 latents, 3.2
+    to 3.7 at an untiled clip encode, 4.66 at a decode in 1088-px tiles, 5.18 to 5.62 (about
+    0.21 × P) at an untiled decode, 0.98 and 1.46 at an encode and a decode in 512-px tiles,
+    1.61 at a 4K picture's encode: every step within the pool's rule (above).
+  - ComfyUI's dynamic VRAM (comfy-aimdo 0.6.0) held 8 to 40 MB, none of seedvr2x's memory;
+    with it off, the same figures and the same outcome.
+  - The desktop, about 2.4 GiB of the card, lost its memory only where the plan before took
+    the card past it. With the changes it kept it in every run, ComfyUI's reserve kept or not
+    (without it 1.3 GiB left at the fullest and one frame of 392 ms as a phase began; with
+    it 263 ms at most, as a phase began too): the room buys margin, not fluidity, and the
+    nodes need no room of their own for the desktop.
+  Decided on 2026-11-08, on its questions:
+  - A driver that refuses keeps its plan, the pool trimming itself where the card is full
+    (the planner's margin and the VAE's room were measured so): each step's reserve by its
+    allocator stays a held run's. A desktop on such a card, its share growing mid-run, is the
+    96 GB card's to measure (the cards v0.1.0 is tested on).
+  - The abort's mechanism is torch's, and ComfyUI's own cleaning after such an error can
+    still meet it: the restart the nodes ask for is the way out. A report to PyTorch with the
+    minimal reproduction is the user's to send.
+  - The CLI and the server on Windows itself are v0.2.0's: `cudaMallocAsync` their default
+    there, a resume's early reading NVML's alone (what is resident: optimistic there,
+    provisional), untested natively.
+  - The detector's close waits on the card outside the poll (`torch.cuda.synchronize`), and
+    nothing tests its close on a failed card: both to mend with the nodes' next pass.
 - **The vendored RoPE's tables** (`vendor/models/dit_7b/rope.py:44`, an `lru_cache` of 128
   keyed by each block's rotary module and the window's shape, float16, 60 values a
   position), live since numz's wrapper went
@@ -4988,7 +5088,7 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   Two drivers in v0.1.0: Linux's own, which refuses (the 96 GB card emulates every size,
   headless or with a desktop's share played by a program holding memory and moving it), and
   WSL2's, which lends system memory (the RTX 5090 with its real desktop, emulating 32 GB and
-  less). Windows itself, in v0.2.0, is a third.
+  less). Windows itself, in v0.2.0, is a third, which lends too (2026-11-08, Allocator).
 - **`torch.compile` on the 96 GB card** (see [Memory planner](#memory-planner)). The study ran
   on an RTX 5090 alone: the 96 GB card died before its part
   ([compile.md](research/docs/compile.md)). Left for it:
