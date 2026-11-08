@@ -211,7 +211,15 @@ class Models:
         the plan has them apart: the VAE's before the DiT comes back, the DiT's before the
         VAE's do. What comes back is queued, one copy per part, ahead of the unit's work: the
         7B whole, 15.35 GiB, in 0.30 s from its pinned copies on a desktop's PCIe 5.0 link
-        (research/scripts/placement_bench.py)."""
+        (research/scripts/placement_bench.py).
+
+        A phase change ends with the poll (synchronize, through waiting.wait) for those copies:
+        the first copy to the CPU after a change, a pageable one, would otherwise wait for them
+        in C, out of a stop's reach (DESIGN.md, Allocator, "Out of the stop's reach"). On a card
+        abandoned or failed (waiting.abandoned) it waits no more, as release does not. The
+        phase's entry is then the copies with their transfer, which the CLI's and the
+        calibration's own wait after enter (timing.ENTER, "enter-dit", "enter-decode") finds
+        done: theirs returns at once, and the term means what it meant."""
         # Where seedvr2x holds itself to the card (a driver that gives system memory in its
         # place), other programs filling the card stop the run here, before the unit passes it
         # (seedvr2x/memory.py), a re-hold bounded by the reserve of the step about to run, `phase`.
@@ -243,6 +251,8 @@ class Models:
             self.placement.enter(phase, resident)
         if self.vae is not None and not away and self.vae.device is None:
             self.vae.enter(backend)
+        if not waiting.abandoned(card_index(self.device)):
+            synchronize(self.device)
         self.phase = phase
         logger.debug("phase %s entered in %.3f s", phase, time.monotonic() - started)
 

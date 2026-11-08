@@ -274,6 +274,66 @@ def test_release_skips_under_its_own_devices_mark_only(
     assert not waiting.abandoned(0)
 
 
+PLAN = ModelPlan(swapped=3, resident_encode=1, resident_decode=0, vae_in_dit=True)
+
+
+def test_a_change_of_phase_ends_with_the_poll_for_its_copies(
+    files: Files, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The copies Models.enter queues are waited for in the poll (model.synchronize, through
+    # waiting.wait) so that a stop reaches them, not in the first pageable copy after (in C).
+    models = files.load(HELD)
+    models.place(PLAN)
+    polls: list[str | None] = []
+    monkeypatch.setattr(model, "synchronize", lambda device: polls.append(models.phase))
+    models.enter("encode")
+    # The phase is entered once the poll is done: it has not been entered while it waits.
+    assert polls == [None] and models.phase == "encode"
+    # Called before every unit, most calls find the phase entered already: no poll.
+    models.enter("encode")
+    assert len(polls) == 1
+    models.enter("dit")
+    models.enter("decode")
+    assert len(polls) == 3 and models.phase == "decode"
+    models.release()
+
+
+def test_a_stop_in_the_poll_at_a_phase_s_entry_leaves_no_phase_and_release_works(
+    files: Files, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models = files.load(HELD)
+    models.place(PLAN)
+
+    def stopped(device: torch.device) -> None:
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr(model, "synchronize", stopped)
+        with pytest.raises(KeyboardInterrupt):
+            models.enter("dit")
+    assert models.phase is None
+    models.release()
+    assert files.sim.live() == 0
+
+
+def test_a_card_abandoned_or_failed_is_not_waited_on_at_a_phase_s_entry(
+    files: Files, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models = files.load(HELD)
+    models.place(PLAN)
+    polls: list[int] = []
+    monkeypatch.setattr(model, "synchronize", lambda device: polls.append(1))
+    monkeypatch.setattr(waiting, "_abandoned", {0})
+    models.enter("dit")
+    assert polls == [] and models.phase == "dit"
+    # Failed is abandoned too (waiting.fail), as release reads it.
+    monkeypatch.setattr(waiting, "_abandoned", set())
+    monkeypatch.setattr(waiting, "failed", lambda index: RuntimeError("CUDA error"))
+    monkeypatch.setattr(waiting, "abandoned", lambda index: True)
+    models.enter("decode")
+    assert polls == []
+
+
 def test_models_are_placed_again_after_a_run_that_raised(files: Files) -> None:
     # A forward that raises inside a window, then the run's end (release), a window's failure
     # leaving the slots mid-stream: the next plan's run has the bits it should.

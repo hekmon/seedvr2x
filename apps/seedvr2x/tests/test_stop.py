@@ -53,6 +53,9 @@ TESTS = Path(__file__).resolve().parent
 #   own frame, so that it runs when the stop's traceback is released, as
 #   blockswap.HostCopy's does (cudaHostUnregister of pinned memory);
 # - cuda-error: the step raises the error CUDA gives after a fault, with the same finalizer;
+# - type-error: the same with a TypeError, not a CUDA error (impl-stop's R2 hung in Python's
+#   teardown after one);
+# - type-error-plain: the TypeError on a process that never used CUDA;
 # - c-call: the step's 2 s spent in C calls (libc's usleep), not in Python's sleep.
 DRIVER = r"""
 import atexit, ctypes, os, sys, time, weakref
@@ -65,7 +68,7 @@ slow = sys.argv[2]
 mode = os.environ.get("STOP_MODE", "")
 libc = ctypes.CDLL(None)
 
-HANGS = ("stall", "atexit", "finalizer", "cuda-error")
+HANGS = ("stall", "atexit", "finalizer", "cuda-error", "type-error")
 if mode in HANGS:
     from seedvr2x import waiting
     waiting.cuda_used = lambda: True
@@ -114,12 +117,14 @@ class Slow(t.Steps):
             write(frames)
             written.append(len(frames))
             if len(written) == 1:
-                if mode in ("finalizer", "cuda-error"):
+                if mode in ("finalizer", "cuda-error", "type-error"):
                     held = Holder()
                     weakref.finalize(held, libc.pause)
                 inside(name)
                 if name == slow and mode == "cuda-error":
                     raise RuntimeError("CUDA error: an illegal memory access was encountered")
+                if name == slow and mode in ("type-error", "type-error-plain"):
+                    raise TypeError("a bug in the run")
                 if name == slow and mode in HANGS:
                     hang()
         super().decode(models, merged, count, target, first_then_inside, *names, **tiled)
@@ -441,6 +446,31 @@ def test_a_cuda_error_ends_the_process_without_waiting_for_the_gpu(job: Path) ->
     # What was done is kept: the same command resumes.
     assert progress(job) == ([False, False], [1, 1, 0])
     resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])
+
+
+def test_any_error_once_cuda_was_used_ends_the_process_without_waiting_for_the_gpu(
+    job: Path,
+) -> None:
+    # A TypeError, no CUDA error, with a finalizer blocked in C on an object of the decode's
+    # frame: through Python's teardown the process would stay for ever (impl-stop's R2).
+    found, _, text = upscale(*(job, "out", "decode 0"), mode="type-error", within=ENDS_WITHIN)
+    assert found == 1, text
+    assert "Traceback (most recent call last)" in text
+    assert "TypeError: a bug in the run" in text
+    line = "the run failed: a bug in the run; the process ends without waiting for the GPU"
+    assert line in text
+    assert "on a CUDA error" not in text
+    # The line is logged with exc_info: the traceback follows its line in the log.
+    assert text.index("Traceback (most recent call last)") > text.index(line)
+    assert progress(job) == ([False, False], [1, 1, 0])
+    resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])
+
+
+def test_an_error_without_cuda_keeps_pythons_traceback_and_status(job: Path) -> None:
+    found, _, text = upscale(*(job, "out", "decode 0"), mode="type-error-plain", within=60)
+    assert found == 1, text
+    assert "TypeError: a bug in the run" in text
+    assert "the process ends without waiting for the GPU" not in text
 
 
 AT = datetime(2026, 10, 10, 22, 0, tzinfo=UTC)

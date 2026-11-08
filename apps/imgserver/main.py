@@ -290,10 +290,18 @@ class Stop:
     def handle(self, number: int, frame: FrameType | None) -> None:
         if self.asked.is_set():
             logger.warning("asked to stop again: the process ends now")
+            # 128 + the signal is POSIX's status for a process ended by one (130, 143); Windows
+            # has no such convention, and the same number is kept there. Nothing in the server
+            # starts a child process that this exit would leave behind.
             os._exit(128 + number)
         self.asked.set()
         if self.during_start:
             raise KeyboardInterrupt
+
+
+# Windows has no SIGUSR1 (signal.SIGUSR1 is missing there): the stacks on a signal are POSIX's
+# (DESIGN.md, Allocator, the hang of 2026-11-06); a Windows twin is a later baton's.
+HAS_SIGUSR1 = hasattr(signal, "SIGUSR1")
 
 
 def command() -> int:
@@ -307,7 +315,7 @@ def main(argv: Sequence[str] | None = None, *, owns_process: bool = False) -> in
     """Serve with argv (sys.argv[1:] when None) and return the exit status. With owns_process
     (command alone sets it), the process ends once the server has stopped where it has used
     CUDA (_end), and main never returns then."""
-    if owns_process:
+    if owns_process and HAS_SIGUSR1:
         # Every thread's Python stack on SIGUSR1, to stderr, the server going on (DESIGN.md,
         # Allocator, the hang of 2026-11-06): faulthandler's handler is C's, so it answers with
         # a thread inside a CUDA call too.
@@ -355,7 +363,22 @@ def main(argv: Sequence[str] | None = None, *, owns_process: bool = False) -> in
     )
     from seedvr2x import waiting
 
-    code = serve(options, key, listen, services.Card, Metrics())
+    try:
+        code = serve(options, key, listen, services.Card, Metrics())
+    except Exception as error:
+        # serve has stopped the server in its finally (the pictures running answered, the
+        # socket closed) and re-raised what it does not know: once CUDA was used, Python's
+        # teardown could wait on a stalled GPU forever (the CLI's R2 hung so after a TypeError;
+        # DESIGN.md, Allocator, "Out of the stop's reach"), so the traceback is logged first and
+        # the process ends as after a stop. Without CUDA, or in process, as before.
+        if not (owns_process and waiting.cuda_used()):
+            raise
+        logger.error(
+            "the server failed: %s; the process ends without waiting for the GPU",
+            error,
+            exc_info=error,
+        )
+        _end(1)
     if owns_process and waiting.cuda_used():
         _end(code)
     return code

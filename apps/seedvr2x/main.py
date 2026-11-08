@@ -233,6 +233,11 @@ def _pillow_size_warning_off() -> None:
 EX_TEMPFAIL = 75
 
 
+# Windows has no SIGUSR1 (signal.SIGUSR1 is missing there): the stacks on a signal are POSIX's
+# (DESIGN.md, Allocator, the hang of 2026-11-06); a Windows twin is a later baton's.
+HAS_SIGUSR1 = hasattr(signal, "SIGUSR1")
+
+
 def command() -> int:
     """The seedvr2x script (the pyproject's `seedvr2x = "main:command"`): main, which owns its
     process and ends it at once on a stop at once or a CUDA error (main's owns_process)."""
@@ -253,7 +258,7 @@ def main(argv: list[str] | None = None, *, owns_process: bool = False) -> int:
     # HF_HOME/.agent_harnesses.json (utils/_headers.py:183-189, utils/_detect_agent.py:143-163,
     # 180-203).
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-    if owns_process:
+    if owns_process and HAS_SIGUSR1:
         # Every thread's Python stack on SIGUSR1, to stderr, the run going on (DESIGN.md,
         # Allocator, the hang of 2026-11-06, which had none to show): faulthandler's handler is
         # C's, so it answers with the main thread inside a CUDA call too.
@@ -280,17 +285,29 @@ def main(argv: list[str] | None = None, *, owns_process: bool = False) -> int:
         except Terminated as error:
             return _stopped_at_once("SIGTERM", 143, error, owns_process)
         except Exception as error:
-            if not (owns_process and waiting.cuda_failed(error)):
+            # Any error once CUDA was used ends through here, not through Python's teardown,
+            # which can wait on a stalled GPU forever (impl-stop's R2 hung there after a
+            # TypeError; DESIGN.md, Allocator, "Out of the stop's reach"). The command's expected
+            # refusals return a status from _run and never get here; what escapes it is a bug,
+            # or a CUDA error. Without CUDA, or in process (main(argv)), as before.
+            if not (owns_process and (waiting.cuda_used() or waiting.cuda_failed(error))):
                 raise
             _ignore_stops()
             # What is kept is the job's to say (a picture's run keeps nothing): MANUAL.md says
             # a video job's units are.
-            logger.error(
-                "the run failed on a CUDA error, after which the GPU's work may never end: %s;"
-                " the process ends without waiting for the GPU",
-                error,
-                exc_info=error,
-            )
+            if waiting.cuda_failed(error):
+                logger.error(
+                    "the run failed on a CUDA error, after which the GPU's work may never end:"
+                    " %s; the process ends without waiting for the GPU",
+                    error,
+                    exc_info=error,
+                )
+            else:
+                logger.error(
+                    "the run failed: %s; the process ends without waiting for the GPU",
+                    error,
+                    exc_info=error,
+                )
             _end(1)
         finally:
             _unmake()
@@ -301,6 +318,8 @@ def _stopped_at_once(how: str, status: int, error: BaseException, owns_process: 
     """A stop at once (stop.py), said: its status, or the process ended (_end) where main owns it
     and the process has used CUDA, the line saying it ends without waiting for the GPU and, where
     the stop came inside a wait on it, how long that wait had lasted (waiting.ended)."""
+    # The statuses 130 and 143 are 128 plus the signal, POSIX's convention for a process ended by
+    # one; Windows has none, and seedvr2x keeps the same numbers there.
     if not (owns_process and waiting.cuda_used()):
         logger.error("stopped at once (%s)", how)
         return status
@@ -333,8 +352,9 @@ def _end(status: int) -> NoReturn:
     with its card's memory held until it was killed, a normal exit of that job taking 1.4 s at
     most. What they would have done the kernel does: the locks' descriptors closed, the memory
     pinned and the card's given back, ffmpeg's processes killed by their parent's death
-    (media/ffmpeg.py). The writers and readers were stopped by the unwinding (media/writer.py's
-    abort, run.Inputs)."""
+    (media/ffmpeg.py: PDEATHSIG, POSIX's; on Windows the kernel has no such call, and nothing
+    here decides what os._exit leaves of them: a later baton's). The writers and readers
+    were stopped by the unwinding (media/writer.py's abort, run.Inputs)."""
     _unmake()
     _unlock()
     logging.shutdown()

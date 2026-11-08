@@ -295,7 +295,7 @@ class Service:
     failure: str = ""
     # The longest time of each step of a picture in the warm-up, in the run's own seconds
     # (waiting.monotonic): the step's estimate for every later picture, which is within the bound
-    # the warm-up's pictures are at.
+    # the warm-up's pictures are at. Kept so, decided 2026-11-07 (DESIGN.md, Allocator).
     estimates: dict[str, float] = field(default_factory=dict[str, float])
     _estimated: threading.Lock = field(default_factory=threading.Lock)
 

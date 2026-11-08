@@ -2471,11 +2471,14 @@ def test_the_card_is_checked_before_every_unit(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(memory, "check", record)
     runner = SimpleNamespace(dit=None, vae=None)
-    models = model.Models(runner, torch.empty(0), torch.empty(0), "none", "the card", ModelPlan())  # pyright: ignore[reportArgumentType]
+    # A device by its identity, of no card's type: Models.enter's poll at a change of phase
+    # (model.synchronize) waits on none.
+    card = SimpleNamespace(type="cpu", index=None)
+    models = model.Models(runner, torch.empty(0), torch.empty(0), "none", card, ModelPlan())  # pyright: ignore[reportArgumentType]
     models.enter("encode")
     models.enter("encode")
     # Each call judges the step about to run: the re-hold it allows is that step's reserve.
-    assert checked == [("the card", "encode")] * 2 and models.phase == "encode"
+    assert checked == [(card, "encode")] * 2 and models.phase == "encode"
 
     def refused(device: object, step: str | None = None) -> None:
         raise torch.OutOfMemoryError("other programs hold the rest of the card's memory")

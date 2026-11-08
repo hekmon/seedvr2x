@@ -774,11 +774,22 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   the process still there 30 s after the signal), and a decode raising a CUDA error: exit 143 or
   130 within 30 s, the line with the wait's length, the job's files as `test_stopped_at_once`
   checks them and the resume as if uninterrupted; exit 1 and the CUDA error's line; a run that
-  never used CUDA keeping the line before (`stopped at once (SIGTERM)`) and its exit. Ctrl-C and
+  never used CUDA keeping the line before (`stopped at once (SIGTERM)`) and its exit. Any other
+  error that escapes the run once CUDA was used ends so too, `main`'s `except Exception`: logged
+  at ERROR with its traceback (`the run failed: ...; the process ends without waiting for the
+  GPU`, the CUDA error keeping its own line) and `_end(1)`; the command's expected refusals
+  return their status from `_run` and never get there; mode `type-error` (a TypeError with the
+  blocked finalizer: exit 1 within 30 s, the resume as if uninterrupted) and `type-error-plain`
+  (no CUDA: Python's traceback and status as before). Ctrl-C and
   SIGTERM are ignored from the line to the exit; a CUDA error in `--compile`'s warm-up is the
   card's, not a CompileError (`seedvr2x/compiling.py`). The image
   server's `command` ends the process the same way once `serve` has returned
-  (`apps/imgserver/main.py`'s `_end`), its first SIGTERM still waiting for the pictures running.
+  (`apps/imgserver/main.py`'s `_end`), its first SIGTERM still waiting for the pictures running,
+  and so does an unexpected exception from `serve` once CUDA was used, logged with its traceback
+  first (`tests/test_main.py`; without CUDA it is raised as before). The POSIX-only parts have
+  a guard each: `HAS_SIGUSR1` (both apps' `main.py`) for the stacks on SIGUSR1, Windows having
+  no such signal; the statuses 130 and 143 (128 plus the signal) and ffmpeg's end with the
+  parent (`PDEATHSIG`) are POSIX's, said in comments, their Windows twins a later baton's.
 - Every thread's stack on SIGUSR1: `command` registers `faulthandler` (all threads, to stderr,
   not chained) in the CLI and the image server; `tests/test_stop.py` sends it inside a slow step,
   the main thread in Python's sleep and in C calls (libc's `usleep`, mode `c-call`): the main
@@ -801,7 +812,10 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   unit, abandoned per card (`abandoned(index)`, CUDA's numbering; cleared only by a release of that
   card whose waits all completed, never by another wait or card); `Models.release` sends nothing
   back while its own card's mark holds (`core/tests/test_held.py`,
-  `apps/comfyui/tests/test_release.py`), `cuda_used` and `cuda_failed`, and its import making no
+  `apps/comfyui/tests/test_release.py`; `Models.enter` ends a change of phase with the poll for the
+  copies it queued, so that a stop reaches them, on a card neither abandoned nor failed:
+  `test_held.py`, with `run._enter`'s and the calibration's own waits then no-ops and the enter
+  terms (`timing.ENTER`) meaning what they meant), `cuda_used` and `cuda_failed`, and its import making no
   torch; `tests/test_memory.py` NVML's activity (`memory.activity`) on its stand-in. The CLI names
   each unit in `run._begin` with the calibration's estimate; the image server each step of a picture
   inside its model's lock, the warm-up's longest time of that step its estimate:

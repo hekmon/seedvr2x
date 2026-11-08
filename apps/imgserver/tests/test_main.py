@@ -326,6 +326,74 @@ def test_a_card_that_refuses_ends_the_start_with_1(monkeypatch: pytest.MonkeyPat
     assert run() == 1
 
 
+class Ended(BaseException):
+    """What the replaced main._end raises, so that a test sees the process end where it would."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def failing_serve(monkeypatch: pytest.MonkeyPatch) -> None:
+    def serve(*args: Any) -> int:
+        raise TypeError("a bug in serve")
+
+    monkeypatch.setattr(main, "serve", serve)
+
+    def end(code: int) -> None:
+        raise Ended(code)
+
+    monkeypatch.setattr(main, "_end", end)
+
+
+def test_an_unexpected_error_once_cuda_was_used_ends_through_end_traceback_first(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Python's teardown could wait on a stalled GPU for ever (the CLI's R2 after a TypeError).
+    from seedvr2x import waiting
+
+    failing_serve(monkeypatch)
+    monkeypatch.setattr(waiting, "cuda_used", lambda: True)
+    monkeypatch.setattr(main.faulthandler, "register", lambda *args, **kwargs: None)
+    with pytest.raises(Ended) as ended:
+        main.main([], owns_process=True)
+    assert ended.value.code == 1
+    (record,) = [r for r in caplog.records if "the server failed" in r.getMessage()]
+    assert "the process ends without waiting for the GPU" in record.getMessage()
+    assert record.exc_info is not None and record.exc_info[0] is TypeError
+
+
+@pytest.mark.parametrize("owns_process", [True, False])
+def test_an_unexpected_error_without_cuda_or_in_process_is_raised_as_before(
+    owns_process: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from seedvr2x import waiting
+
+    failing_serve(monkeypatch)
+    monkeypatch.setattr(waiting, "cuda_used", lambda: False)
+    monkeypatch.setattr(main.faulthandler, "register", lambda *args, **kwargs: None)
+    with pytest.raises(TypeError, match="a bug in serve"):
+        main.main([], owns_process=owns_process)
+
+
+def test_the_stacks_on_sigusr1_are_registered_only_where_the_signal_exists(
+    served: list[Served], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registered: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        main.faulthandler, "register", lambda *args, **kwargs: registered.append(args)
+    )
+    monkeypatch.setattr(main, "HAS_SIGUSR1", False)
+    assert main.main([], owns_process=True) == 0
+    assert registered == []
+    monkeypatch.setattr(main, "HAS_SIGUSR1", True)
+    from seedvr2x import waiting
+
+    monkeypatch.setattr(waiting, "cuda_used", lambda: False)
+    assert main.main([], owns_process=True) == 0
+    assert registered == [(signal.SIGUSR1,)]
+
+
 # ---- The API key ---------------------------------------------------------------------------------
 
 KEY = "k3y-that-must-not-be-logged"

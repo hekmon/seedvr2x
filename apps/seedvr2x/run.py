@@ -262,16 +262,21 @@ def _enter(models: Models, phase: Phase, progress: Progress, key: Key) -> tuple[
     """Put the models in `phase` (Models.enter) before unit `key`: the seconds that took, and its
     estimate. A change of phase is a term of the unit that opens it (DESIGN.md, Memory planner,
     Time estimates), given to the clock here where the unit lists one (timing.units_of): its
-    copies waited for. A unit listing none pays its estimate of none, its enter's time, if any,
-    left out of its kind's (_made)."""
+    copies waited for, which Models.enter itself waits for in the poll (so a stop reaches it): the
+    wait here finds them done and the term is the same. A unit listing none pays its estimate of
+    none, its enter's time left out of its kind's (_made: the whole less `entering`): that time
+    now holds the transfer, which the unit's own work absorbed before, so that a change of phase
+    no term lists (the encode's, the VAE's part alone) is counted in no estimate, a fraction of
+    a second (blockswap.py: the 7B whole in 0.30 s)."""
     listed = progress.lists(key, ENTER[phase])
     estimate = (progress.clock.estimate(ENTER[phase], 1) or 0.0) if listed else 0.0
     begun = time.monotonic()
     models.enter(phase)
     if listed:
-        # Models.enter queues the weights' copies and returns (blockswap.py: "the caller needn't
-        # wait"): waited for, so that the term holds the transfer, which the unit's work would
-        # wait for anyway (a review's finding, 2026-10-21: else the next step absorbed it).
+        # Models.enter waits for the weights' copies in the poll at a phase change itself (it
+        # queued them: model.py), so this wait is a no-op there; kept so that the term holds the
+        # transfer whatever enter does (a review's finding, 2026-10-21: else the next step
+        # absorbed it).
         synchronize(models.device)
     seconds = time.monotonic() - begun
     if listed:

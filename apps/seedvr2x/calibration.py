@@ -188,7 +188,8 @@ def calibrate(
             begun = time.monotonic()
             models.enter(phase)
             if left[0] != phase and phase in ENTER:
-                # Its copies waited for, as the run's _enter waits: the term holds the transfer.
+                # Its copies waited for, as the run's _enter waits (Models.enter already waits in
+                # the poll, so this is a no-op): the term holds the transfer.
                 synchronize(models.device)
                 if counted:
                     entered[phase].append(time.monotonic() - begun)
