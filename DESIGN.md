@@ -391,29 +391,35 @@ seedvr2x/                the repository
       alone, waiting on the event its stop sets, its sends queued by ComfyUI and never
       blocking, so that its join needs no time cap); and, once a unit's time is measured, the
       nodes name their units for the waits on the GPU ([Allocator](#allocator), the hang): a
-      wait past its bound is said on the node with the way out, ComfyUI restarted, and Cancel
-      leaves such a wait. The release after a run that a Cancel or an error ended waits for
-      the card's last work in the same poll, ComfyUI's Cancel its check (decided 2026-11-06:
-      not a stream's query, which can't tell a slow card from a dead one), the node saying
-      "freeing the card: waiting for the GPU to finish its last work; Cancel again to leave
-      it, then restart ComfyUI"; a healthy card's release ends in a moment and the text before
-      it comes back, and a release after a run that ended well checks nothing. A second Cancel
-      leaves the wait and marks the card abandoned, whatever its bound, the user's repeated
-      press deciding as a repeated signal does in the CLI: the node says "the card stopped
-      answering: restart ComfyUI", and every later run is refused. The mark is per card,
-      cleared only by a release on that card whose waits all completed, or by a new process;
-      models not kept wait for the card in the same poll (`model.synchronize`, the library's
-      brick: no release of their own until a second app needs one) before they are freed,
-      and stay held while the card is marked. README's Limits say that a card that stopped
-      answering needs ComfyUI restarted, its own cache release waiting on the card too.
-      Decided on 2026-11-07, to be built with the stop's follow-up: a mark the card itself
-      clears, since a second Cancel pressed in impatience on a healthy card would otherwise
-      cost a restart. At the next run's start the work the release left is asked, without
-      waiting, whether it has finished: finished, the release is completed then (the models
-      held are freed), the mark cleared and the run goes on; not finished, the run is
-      refused, saying that the card is still busy with its last work, to wait or to restart
-      ComfyUI; a CUDA error keeps the mark. While one card is marked, runs are refused on
-      every card, until GPU selection places runs on other cards: then by card.
+      wait past its bound is said on the node with the way out, and Cancel leaves such a
+      wait. The release after a run that a Cancel or an error ended waits for the card's last
+      work in the same poll, ComfyUI's Cancel its check (decided 2026-11-06: not a stream's
+      query, which can't tell a slow card from a dead one), the node saying that it is
+      freeing the card, waiting for the GPU's last work, and that Cancel again leaves the
+      wait; a healthy card's release ends in a moment and the text before it comes back, and
+      a release after a run that ended well checks nothing. A second Cancel leaves the wait
+      and marks the card abandoned, whatever its bound, the user's repeated press deciding as
+      a repeated signal does in the CLI; models not kept wait for the card in the same poll
+      (`model.synchronize`, the library's brick: no release of their own until a second app
+      needs one) before they are freed, and stay held while the card is marked. The mark is
+      per card, and one the card itself clears (decided on 2026-11-07, since a second Cancel
+      pressed in impatience on a healthy card would otherwise cost a restart; built on
+      2026-11-08, impl-stop-2): the work the release left, or a wait in the run that Cancel
+      left, is kept as its streams' events (`waiting.expect`, `pend`), and the next run's
+      start asks them, without waiting, whether it has finished (`waiting.settle`, a query
+      alone). Finished, the release is completed then, in the same poll and Cancel check (the
+      models held freed), the mark cleared and the run goes on; not finished, the run is
+      refused with nothing read, saying that the card is still busy with an earlier run's
+      last work, to wait and run again, or to restart ComfyUI if it doesn't finish. A Cancel
+      during that release keeps the mark; a release on that card whose waits all completed,
+      or a new process, clears it too. A card a CUDA error failed is never asked and never
+      cleared: ComfyUI is restarted ([Allocator](#allocator), Windows itself). While one card
+      is marked, runs are refused on every card, until GPU selection places runs on other
+      cards: then by card. Settling is the nodes' alone: the CLI's and the server's processes
+      end on a repeated stop, and a new process starts with no mark. README's Limits say so.
+      The nodes' texts for all this, written in that baton, are long: they are the nodes'
+      next pass's to reword with the rest, into the one line of status the user asked of a
+      node (2026-11-07).
     - A clip is whole in RAM, as ComfyUI's Load Video gives it: the nodes stream nothing, keep
       nothing on disk and resume nothing. The plan counts the clip's frames in host memory and
       refuses past it, saying what the CLI does instead: a film streamed shot by shot, never
@@ -2468,7 +2474,8 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       meanwhile and that Ctrl-C again kills it at once (decided on 2026-10-28, the user; built
       on 2026-10-29, the line 0.2 s after SIGTERM where the command still runs). 2 s before,
       short for a command flushing to a slow disk; 5 s stays within the 10 s a container's
-      stop gives the whole process.
+      stop gives the whole process. A stop the watcher ends, its main thread held, kills the
+      group at once (2026-11-08, [Allocator](#allocator)).
       `{out}` is
       required and written bare: seedvr2x replaces it by the quoted name of a partial file,
       a `.mkv` by its suffix, put in place once whole.
@@ -4221,6 +4228,56 @@ run in one line, before the models load as after.
     needs no main thread, saying so. The user's repeated signal decides, not a grace period.
   - Any error once CUDA was used ends through the command's exit, its traceback first, in both
     apps; the first copy after a phase change is waited for in the poll at the phase's entry.
+- **Built on 2026-11-08** (impl-stop-2, the RTX 5090), out of reach no more:
+  - The DiT's waits. Torch's sync debug mode counted 5,050 host syncs in one 1080p window of
+    21 latents, every block making its windows' indices, lengths and sizes again (3,960 of
+    them the attention windows' shapes). Those are now made once a forward and kept on the
+    host (`Cache.held`, the vendored cache's, whatever its `disable`), but RoPE's frequencies
+    and the modulation's repeated embedding, a token's size each, made in each block as
+    before (held, the embedding alone would add gigabytes to the peak). An event after each
+    block, the one two blocks back waited for in the poll before the next is queued, holds
+    the host two blocks ahead of the card. 260 syncs are left, each behind a poll. The same
+    bits (milestone 1's regression, 6 of 6; each window's digest), a window 3% (21 latents)
+    to 22% (1 latent) faster, its peak about 40 bytes a token more (6.7 MiB at 21 latents of
+    1080p; 0.35 MB at 1 latent, under the fit's margin at its tightest point; 4K's points
+    the 96 GB card's to measure with the rest). The 3B's blocks keep theirs, outside the
+    files changed.
+  - The watcher, the CLI's and POSIX's: `signal.set_wakeup_fd`'s pipe, read by a thread as
+    the signals come, each Python handler writing its answer into the same pipe, so that the
+    signals left unanswered are counted in order, with no clock. A stop at once asked while
+    another is unanswered (SIGTERM twice, Ctrl-C a third time) ends the process from that
+    thread, once: the lines flushed within 5 s, one line naming the frame held and for how
+    long, a `--segment-cmd`'s process group killed at once, then `os._exit` (143 or 130). A
+    main thread held in one call past its unit's bound, outside a wait, gets the stall's
+    line, naming the frame. A stall at a shot's first window, reproduced: the main thread was
+    held in C in a kernel's launch as each block's rotary module made its tables
+    (`get_axial_freqs`), most likely with CUDA's launch queue full behind the stalled stream
+    (inferred); the line came by itself at 56 s, one SIGTERM went unanswered, and the second
+    ended the process 1.4 s later, no ffmpeg left (on main's code a SIGTERM there stayed
+    unanswered 20 s, until SIGKILL).
+  - Any exception once CUDA was used ends the CLI through the command's exit, at ERROR with
+    its traceback ("the run failed: …; the process ends without waiting for the GPU", a CUDA
+    error keeping its own line), the refusals still returning their status; the image server
+    the same for an unexpected exception from `serve`. A change of phase ends with the poll
+    for the copies it queued (`Models.enter`). SIGUSR1's stacks are behind a check that the
+    platform has it; the statuses 128 + the signal, ffmpeg's end with its parent and the
+    watcher (Windows' wakeup takes a socket) are POSIX's, their Windows twins the CLI's on
+    Windows, v0.2.0's.
+  Decided the same day, on its questions:
+  - In a launch a single stop is not answered; the repeated one is the way, as decided. One
+    set of RoPE tables for all blocks (fewer launches and less memory, where the blocks'
+    rotary buffers are equal: the checkpoint stores each block's, unchecked) is a measure
+    for later, not the stop's.
+  - Milestone 1's references were made with FlashAttention 2, and a run under SDPA fails every
+    case, by 40 to 63 levels of 16 bits on average, which reads as a regression: the test is
+    to say the kernel a run took and the one its references were made with, and to skip each
+    case naming both where they differ, as a card without references skips; references under
+    SDPA, the kernel most users run, are made at the next GPU session, so that the gate holds
+    both.
+  - The watcher's open points stay so: a main thread that answered the first stop and then
+    hangs in that stop's own cleaning is not covered (the signals are ignored from the stop's
+    line on); the frame named is the innermost Python one; its NVML reading is card 0's
+    until GPU selection.
 
 ## Pause and resume
 
@@ -4434,7 +4491,9 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
   - `--dump-frames` is refused inside the output directory.
 - **Stopping:**
   - Ctrl-C once finishes the unit in progress and stops before the next (exit 130).
-  - Twice, or SIGTERM, stops at once (exit 130, or 143 for SIGTERM).
+  - Twice, or SIGTERM, stops at once (exit 130, or 143 for SIGTERM). Asked again while the
+    main thread answers neither (SIGTERM twice, Ctrl-C a third time), the process ends from a
+    thread that needs no main thread (2026-11-08, [Allocator](#allocator)).
   - ffmpeg runs in its own process groups, out of the terminal's reach.
   - The run polls the GPU (every 10 ms) before device-to-host copies: Python can't run a
     signal handler during a blocking CUDA copy (a decode slice takes ~8 s at 1080p), and two
