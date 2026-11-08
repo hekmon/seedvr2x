@@ -67,10 +67,11 @@ windows.
 
 seedvr2x Cuts runs seedvr2x's shot detector, TransNetV2 (a file of about 30 MB), on the clip's
 frames, shrunk to its small input in torch, with no ffmpeg. The file is seedvr2x Models': Models
-fetches it into Hugging Face's cache with the other files, or reads it from its `model folder`
-where the folder has it, under the name `transnetv2.safetensors` (a folder without it takes it from
-the cache, fetched there when missing; nothing is written into your folder). Cuts takes Models'
-output, so a clip that needs cuts wires Models into both. The detector runs on the card ComfyUI
+fetches it into Hugging Face's cache with the other files or, with a `model folder`, reads it from
+the folder alone, under the name `transnetv2.safetensors`: a folder without it is refused by Cuts
+when it runs, which says where to get the file (nothing is downloaded and the cache is not read
+when a folder is given). Cuts takes Models' output, so a clip that needs cuts wires Models into
+both. The detector runs on the card ComfyUI
 uses while the node runs, and on the processor where there is none, and frees its memory after.
 `threshold` is how sure the detector must be that a frame starts a new shot: 0.3 by default, the
 command line's. A cut found for nothing only gives a shot its own windows, so the default errs
@@ -243,10 +244,11 @@ README](../seedvr2x/README.md#model-files)).
   name, the DiT's and the VAE's never downloaded: the VAE, `seedvr2x_ema_vae_fp16.safetensors`, and
   the model file chosen, under its name in the repository (`seedvr2x_ema_7b_sharp_fp16.safetensors`
   for the default), the same files and names the command line reads from a folder. A path that is no
-  folder, or a folder lacking the DiT's or the VAE's file, is refused by the node, saying which. The
-  shot detector's file, `transnetv2.safetensors`, is the folder's where it has one; a folder without
-  it takes it from Hugging Face's cache, fetched there when missing, and nothing is written into the
-  folder.
+  folder, or a folder lacking the DiT's or the VAE's file, is refused by the node, saying which. A
+  folder is your choice of no cache and no download: every file comes from it, the shot detector's
+  `transnetv2.safetensors` too, and Hugging Face's cache is not read. A folder without the
+  detector's file is fine for pictures; seedvr2x Cuts refuses it when it runs, naming the file, the
+  folder and where to get it. Nothing is written into the folder.
 
 **On Windows.** Without Windows' Developer Mode, huggingface_hub can't make the links its cache is
 built of: it copies the files instead, and says so once in ComfyUI's console, in a warning that

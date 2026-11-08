@@ -23,6 +23,7 @@ The node raises the result, `Refused`, an exception ComfyUI shows with its messa
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from seedvr2x import peaks, pull
 from seedvr2x.errors import (
@@ -413,6 +414,19 @@ def _not_in_folder(file: str, node: str) -> str:
         f"{file} is not in the folder wired to {folder_input(node)}: put the file there under"
         " that name, or unwire the input to use Hugging Face's cache, where seedvr2x fetches its"
         " files"
+    )
+
+
+def detector_missing(folder: Path) -> Refused:
+    """The shot detector's file not in the model folder seedvr2x Models was given, at seedvr2x
+    Cuts' run: a folder is the user's choice of no cache and no download (the user, 2026-11-08),
+    so the way is the folder's, the file from its URL as the library advises for a file missing
+    from a directory (pull's), or the input unwired."""
+    name = pull.DETECTOR
+    return Refused(
+        f"{name}, the shot detector's file that {CUTS} reads, is not in the model folder wired to"
+        f" {MODELS} ({folder}): put it there under that name, from {pull.url(name)}, or unwire"
+        f" {folder_input(MODELS)} to use Hugging Face's cache, where seedvr2x fetches its files"
     )
 
 

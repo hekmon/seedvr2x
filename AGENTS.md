@@ -1376,24 +1376,28 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   probabilities and the possible cuts, without a lead; the node's line "scanning 64/120 frames",
   "2 shots · 1 possible cut below 0.30"; no text output; no mode and no folder input, the
   models handle required and refused if it is none (naming the node), the threshold, the file the
-  handle's folder's where the folder has it, else the cache's fetched by its pin (nothing written
-  into a folder; the fallback from a folder without it said at debug), a file the cache lacks
-  (lost since Models ran, or never had) fetched with the INFO line before it on Cuts' own bar,
+  handle's folder's alone where a folder is given (the user, 2026-11-08: a folder is the choice of
+  no cache and no download), a folder without it, or one it has gone from since Models ran,
+  refused in the nodes' words naming the file, the folder and its URL (`words.detector_missing`),
+  nothing fetched and the cache not read (`no_cache`), else the cache's fetched by its pin
+  (nothing written into a folder), a file the cache lacks (lost since Models ran, or never had)
+  fetched with the INFO line before it on Cuts' own bar,
   the detector closed after, the alpha left out, its refusals, its list into
   Upscale Video, its file's refusals worded for seedvr2x Models' "model folder" input (unwire it
   for Hugging Face's cache, or wire a folder), sizes with separators);
   `tests/test_models_node.py` seedvr2x Models as the user sees it: the missing files downloaded
   on a bar of the node's own in bytes (one bar of the three downloads, the shot detector's 30.5 MB
   fetched after the DiT's and the VAE's, the total whole from the first, never back, full at the
-  end; a detector that can't be had, offline with a folder or without, said at WARNING and the
-  handle given) with its bytes over their time and no
+  end; a detector that can't be had, offline without a folder, said at WARNING and the handle
+  given) with its bytes over their time and no
   "seedvr2x" in it ("downloading 3.1/8.9 GB", whole from the first by the pins' sizes, then one
   line, "Sharp 7B int8 · kept in RAM" or
   "· not kept in RAM" by `decide_keeping`; the short label of each DiT file), nothing downloaded
   for the DiT and the VAE with a folder, a file missing from the folder refused at this node (one
   line a file, in the nodes' words naming the "model folder" input; the detector's no part of it),
-  a folder with the detector's file using it and one without taking the cache's, fetched there
-  when missing, the folder left as it was, a value that is no folder refused, quotes, spaces
+  a folder with the detector's file using it and one without saying nothing of it (no warning:
+  Cuts may not be wired) and asking nothing of the cache, the folder left as it was, a value that is
+  no folder refused, quotes, spaces
   and an empty value, a "~" that begins it the home folder (`os.path.expanduser`, HOME and
   USERPROFILE set), the console lines of each file's place and size (`said_where`: in Hugging
   Face's cache with `HF_HOME` named, downloaded into it, or in the model folder; in the order DiT,

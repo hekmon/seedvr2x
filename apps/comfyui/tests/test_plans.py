@@ -91,7 +91,8 @@ def test_the_models_nodes_labels_placeholder_and_tooltips_say_what_they_are() ->
         folder.tooltip
     )
     # The shot detector's file too: a folder without it takes it from the cache, writes nothing.
-    assert pull.DETECTOR in folder.tooltip and "nothing is written into a folder" in folder.tooltip
+    assert pull.DETECTOR in folder.tooltip
+    assert "nothing is downloaded and Hugging Face's cache is not read" in folder.tooltip
     assert "shot detector" in nodes.Models.GET_SCHEMA().description
     assert "Connect any string node" in folder.tooltip
     # What the folder must hold, by the files' names, every DiT file's name made by its rule.

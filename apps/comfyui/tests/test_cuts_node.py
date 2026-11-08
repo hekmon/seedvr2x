@@ -1,7 +1,8 @@
 """seedvr2x Cuts over the untrained detector's weights (the file written as core's test_detector
 does) and over scripted probabilities: the cut list it gives Upscale Video, the text of the cuts
 and the possible cuts, the detector's file the one seedvr2x Models provided (the handle's folder's
-or Hugging Face's cache's) found, checked and given back."""
+alone, refused where the folder lacks it, or Hugging Face's cache's) found, checked and given
+back."""
 
 import logging
 import re
@@ -393,31 +394,56 @@ def test_a_failed_card_refuses_the_cuts_node_and_a_cuda_error_marks_it(
     models.reset()
 
 
-def test_the_detector_is_the_handles_folders_where_it_has_it_else_the_caches(
+def no_cache(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
+    """Hugging Face's cache made to fail any test that reads it or downloads into it, the calls
+    recorded: a model folder is the user's choice of neither (the user, 2026-11-08)."""
+    asked: list[tuple[str, ...]] = []
+
+    def never(*args: Any, **kwargs: Any) -> Any:
+        asked.append(tuple(str(each) for each in args))
+        raise AssertionError("Hugging Face's cache asked with a model folder given")
+
+    for name in ("fetch", "cached", "cache", "resolve"):
+        monkeypatch.setattr(pull, name, never)
+    return asked
+
+
+def test_the_detector_is_the_folders_alone_where_one_is_given_else_the_caches(
     weights_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     scripted(monkeypatch, {}, 12)
-    fetched: list[tuple[str, ...]] = []
     pinned: list[Path] = []
+    monkeypatch.setattr(pull, "check_pin", lambda name, path, *args, **kwargs: pinned.append(path))
+    # A folder that has it: its file, the cache neither read nor written.
+    with monkeypatch.context() as inside:
+        asked = no_cache(inside)
+        run_cuts(clip_images(12), model_dir=str(weights_dir))
+        assert asked == [] and pinned == [weights_dir / pull.DETECTOR]
+    # A folder without it (Models' folder holds the DiT and the VAE): refused, naming the file,
+    # the folder and where to get it; nothing fetched and the cache not read.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    pinned.clear()
+    with monkeypatch.context() as inside:
+        asked = no_cache(inside)
+        with pytest.raises(words.Refused) as refused:
+            run_cuts(clip_images(12), model_dir=str(empty))
+        assert asked == [] and pinned == []
+    text = str(refused.value)
+    assert text.startswith(f"{pull.DETECTOR}, the shot detector's file that seedvr2x Cuts reads,")
+    assert f"is not in the model folder wired to seedvr2x Models ({empty})" in text
+    assert pull.url(pull.DETECTOR) in text
+    assert 'or unwire the "model folder" input of seedvr2x Models to use' in text
+    assert "--" not in text
+    assert list(empty.iterdir()) == [], "nothing is written into a user's folder"
+    # No folder: the cache's.
+    fetched: list[tuple[str, ...]] = []
 
     def fetch(pins: Any, download: Any = None, progress: Any = None) -> Any:
         fetched.append(tuple(pins))
         return {name: weights_dir / name for name in pins}
 
     monkeypatch.setattr(pull, "fetch", fetch)
-    monkeypatch.setattr(pull, "check_pin", lambda name, path, *args, **kwargs: pinned.append(path))
-    # A folder that has it: its file, nothing fetched.
-    run_cuts(clip_images(12), model_dir=str(weights_dir))
-    assert fetched == [] and pinned == [weights_dir / pull.DETECTOR]
-    # A folder without it (Models' folder holds the DiT and the VAE): the cache's, by its pin.
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    pinned.clear()
-    run_cuts(clip_images(12), model_dir=str(empty))
-    assert fetched == [(pull.DETECTOR,)] and pinned == [weights_dir / pull.DETECTOR]
-    assert list(empty.iterdir()) == [], "nothing is written into a user's folder"
-    # No folder: the cache's.
-    fetched.clear()
     run_cuts(clip_images(12))
     assert fetched == [(pull.DETECTOR,)]
 
@@ -452,33 +478,29 @@ def test_a_file_the_cache_lost_since_models_ran_is_fetched_saying_so_first_on_a_
     assert any(text.startswith("downloading 0.0/0.0 MB") for text in shown_on("9"))
 
 
-def test_a_folder_without_the_detectors_file_reads_the_caches_and_says_so_at_debug(
-    weights_dir: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+def test_a_detectors_file_gone_from_the_folder_since_models_ran_is_refused_never_fetched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The folder Models was given has no such file, or no longer: the cache's is read, and the
-    # fallback is said (no silent fallback).
+    # seedvr2x Models ran on a folder that had the file, and ComfyUI keeps its output between
+    # prompts: a file taken from the folder since is refused at Cuts' run, never taken from the
+    # cache (the user, 2026-11-08), whatever the cache holds.
     scripted(monkeypatch, {}, 12)
-    monkeypatch.setattr(
-        pull, "fetch", lambda pins, **_: {name: weights_dir / name for name in pins}
-    )
-    empty = tmp_path / "a folder of models"
-    empty.mkdir()
-    caplog.set_level(logging.DEBUG, logger="seedvr2x_comfyui.nodes")
-    # The node run as ComfyUI runs it, not through run_cuts, whose console holds INFO and up.
-    execute(
-        nodes.Cuts,
-        "7",
-        images=clip_images(12),
-        models=models.Handle(plans.DEFAULT_DIT, str(empty)),
-        threshold=shotcuts.THRESHOLD,
-    )
-    assert (
-        f"the model folder {empty} has no {pull.DETECTOR}: Hugging Face's cache's is read"
-        in unprefixed(caplog)
-    )
+    folder = tmp_path / "a folder of models"
+    folder.mkdir()
+    untrained_weights(folder)
+    monkeypatch.setattr(pull, "check_pin", lambda *args, **kwargs: None)
+    handle = models.Handle(plans.DEFAULT_DIT, str(folder))
+    asked = no_cache(monkeypatch)
+    execute(nodes.Cuts, "7", images=clip_images(12), models=handle, threshold=shotcuts.THRESHOLD)
+    (folder / pull.DETECTOR).unlink()
+    caplog.set_level(logging.DEBUG, logger="seedvr2x_comfyui")
+    with pytest.raises(words.Refused, match="is not in the model folder wired to seedvr2x Models"):
+        execute(
+            nodes.Cuts, "7", images=clip_images(12), models=handle, threshold=shotcuts.THRESHOLD
+        )
+    assert asked == []
+    said = unprefixed(caplog)
+    assert not any("cache's is read" in line or "downloading" in line for line in said)
 
 
 def test_comfyuis_cancel_is_the_check_of_the_detectors_waits_its_close_among_them(

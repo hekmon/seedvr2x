@@ -693,23 +693,13 @@ def model_folder(value: str | None, node: str = words.MODELS) -> str:
     return text
 
 
-def detector_folder(handle: Handle) -> Path | None:
-    """The folder the shot detector's file is read from: the handle's model folder where it holds
-    the file under its name, else None, Hugging Face's cache. The one place that decides it (the
-    Models node provides the file and the Cuts node loads it by this), because a folder is never
-    written into: where it lacks the file, the cache's is used and fetched there when missing."""
-    folder = handle.directory
-    if folder is not None and (folder / pull.DETECTOR).is_file():
-        return folder
-    return None
-
-
 def said_where(folder: Path | None, names: tuple[str, ...], downloaded: set[str]) -> None:
     """One INFO line for each of the model files, where it is and how large: a file of the cache
     by its pin's size (the cache holds nothing else under seedvr2x's names), a file of the model
     folder `folder` by its own (one of another size is refused by its pin when the upscale node
-    checks it): the cache's directory, which HF_HOME moves, or the folder. A file the folder lacks
-    is the cache's (the shot detector's, detector_folder)."""
+    checks it): the cache's directory, which HF_HOME moves, or the folder. `names` are the files
+    there: a file the folder lacks is not said (the shot detector's: seedvr2x Cuts refuses it
+    when it runs)."""
     for name in names:
         pin = pull.PINNED.get(name)
         if folder is not None and (folder / name).is_file():
@@ -723,20 +713,22 @@ def said_where(folder: Path | None, names: tuple[str, ...], downloaded: set[str]
 
 
 def provide(handle: Handle, show: Callable[[str], None]) -> None:
-    """The files the Models node's choice needs, there when it has run: the DiT's, the VAE's and
-    the shot detector's. With a model folder, the DiT's file and the VAE's present in it, nothing
-    read; without, what Hugging Face's cache lacks of them downloaded into it. The detector's is
-    the folder's where it has it, else Hugging Face's cache's, downloaded there when missing
-    (detector_folder). The bytes on a bar of the node's own, the downloads' sizes all known from
-    the first (`expected`), its lines told to `show`; ComfyUI's Cancel honoured as the upscale
-    nodes' downloads are (progress.Preparing). Where each is is said in the console. The files'
-    headers and pins are checked by the nodes that read them (`_prepare`, the Cuts node). A
-    refusal is worded for the nodes (words.refusal), the Models node's.
+    """The files the Models node's choice needs, there when it has run: the DiT's, the VAE's and the
+    shot detector's. With a model folder, the DiT's file and the VAE's present in it, nothing read;
+    without, what Hugging Face's cache lacks of them downloaded into it. The detector's alike: with
+    a folder, its file there or not, nothing said where it is not (seedvr2x Cuts, which alone reads
+    it, may not be wired, and refuses it when it runs); without, the cache's, downloaded there when
+    missing. A folder is the user's choice of no cache and no download (the user, 2026-11-08): every
+    file from it alone, the cache never read. The bytes on a bar of the node's own, the downloads'
+    sizes all known from the first (`expected`), its lines told to `show`; ComfyUI's Cancel honoured
+    as the upscale nodes' downloads are (progress.Preparing). Where each is is said in the console.
+    The files' headers and pins are checked by the nodes that read them (`_prepare`, the Cuts node).
+    A refusal is worded for the nodes (words.refusal), the Models node's.
 
-    The detector's file, which seedvr2x Cuts alone reads, holds no other node up: where it can't
-    be had (offline, the Hub out of reach, no room), the node says so at WARNING and gives its
-    handle, and Cuts fetches it when it runs (review M2 of impl-nodes-6: an offline folder of the
-    DiT and the VAE, which ran Upscale Image before, was refused for it)."""
+    The detector's file, which seedvr2x Cuts alone reads, holds no other node up: without a folder,
+    where it can't be had (offline, the Hub out of reach, no room), the node says so at WARNING and
+    gives its handle, and Cuts fetches it when it runs (review M2 of impl-nodes-6: an offline folder
+    of the DiT and the VAE, which ran Upscale Image before, was refused for it)."""
     names = (handle.dit, plans.VAE_FILE)
     detector = pull.DETECTOR
     folder = handle.directory
@@ -752,7 +744,7 @@ def provide(handle: Handle, show: Callable[[str], None]) -> None:
                 raise missing[0] if len(missing) == 1 else ModelsRefused(missing)
         else:
             absent = {name for name in names if pull.cached(name) is None}
-        fetching = detector_folder(handle) is None and pull.cached(detector) is None
+        fetching = folder is None and pull.cached(detector) is None
         sizes = {name: pull.PINNED[name].size for name in absent}
         if fetching:
             sizes[detector] = pull.PINNED[detector].size
@@ -767,6 +759,8 @@ def provide(handle: Handle, show: Callable[[str], None]) -> None:
     except Refusal as error:
         raise words.refusal(error, model_dir=folder is not None) from error
     there = [*names, detector]
+    if folder is not None and not (folder / detector).is_file():
+        there.remove(detector)
     if fetching:
         try:
             pull.fetch({detector: pull.PINNED[detector]}, progress=downloading.download)

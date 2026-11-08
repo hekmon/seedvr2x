@@ -168,11 +168,11 @@ class Models(io.ComfyNode):
                     " _int8_convrot.safetensors or _dyn.gguf in place of _fp16.safetensors for"
                     " the int8 and dynamic GGUF files; no _sharp for the 7B. These are the names"
                     " seedvr2x's command line reads from a folder too; and the shot detector's"
-                    f" file, {pull.DETECTOR}, which a folder without it takes from Hugging Face's"
-                    " cache (fetched there when missing; nothing is written into a folder). Connect"
-                    " any string node to it, ComfyUI's String node for one. Not connected: Hugging"
-                    " Face's cache, shared with seedvr2x's command line, where the files are"
-                    " downloaded the first time they are needed.",
+                    f" file, {pull.DETECTOR}, which seedvr2x Cuts reads. With a folder every file"
+                    " comes from it: nothing is downloaded and Hugging Face's cache is not read."
+                    " Connect any string node to it, ComfyUI's String node for one. Not"
+                    " connected: Hugging Face's cache, shared with seedvr2x's command line, where"
+                    " the files are downloaded the first time they are needed.",
                 ),
             ],
             outputs=[
@@ -1073,33 +1073,32 @@ class Cuts(io.ComfyNode):
     def _probabilities(
         images: torch.Tensor, handle: models_module.Handle, show: Callable[[str], None]
     ) -> npt.NDArray[np.float32]:
-        """The detector's probability for each frame, (T,) float32: its file the one seedvr2x
-        Models provided (models.detector_folder: the handle's folder's, else Hugging Face's
-        cache's, fetched again, on the node's bar and text, where the cache has lost it) and
-        checked against its pin, loaded onto the card ComfyUI runs on (the processor where that
-        is not a card), run (the frames scanned on a bar of their own, a batch at a time, and
-        ComfyUI's Cancel honoured between batches) and given back. Three channels of the images:
-        an alpha is of no use to it. On a card a CUDA error failed (waiting.fail) it is refused at
-        its start, as the upscale nodes are; one it meets marks the card, and nothing is emptied
-        from torch's cache after it (the detector keeps its model: detector.Detector.close)."""
+        """The detector's probability for each frame, (T,) float32: its file the one seedvr2x Models
+        provided: with a model folder, the folder's alone, refused where the folder lacks it
+        (words.detector_missing: nothing fetched, the cache not read, a folder being the user's
+        choice of neither); without, Hugging Face's cache's, fetched again, on the node's bar and
+        text, where the cache has lost it; checked against its pin, loaded onto the card ComfyUI
+        runs on (the processor where that is not a card), run (the frames scanned on a bar of their
+        own, a batch at a time, and ComfyUI's Cancel honoured between batches) and given back. Three
+        channels of the images: an alpha is of no use to it. On a card a CUDA error failed
+        (waiting.fail) it is refused at its start, as the upscale nodes are; one it meets marks the
+        card, and nothing is emptied from torch's cache after it (the detector keeps its model:
+        detector.Detector.close)."""
         device = management.get_torch_device()
         card = (device.index or 0) if getattr(device, "type", "") == "cuda" else 0
         failed = waiting.failed(card)
         if failed is not None:
             raise words.card_failed(failed, earlier=True)
-        directory = models_module.detector_folder(handle)
+        directory = handle.directory
         name, pin = pull.DETECTOR, pull.PINNED[pull.DETECTOR]
         hashes = pull.Hashes()
+        if directory is not None and not (directory / name).is_file():
+            # Not in the folder, from the start or gone since Models ran: never fetched, the
+            # cache never read (the user, 2026-11-08: a folder is the choice of no cache and no
+            # download, however it got its files).
+            raise words.detector_missing(directory)
         try:
             if directory is None:
-                if handle.directory is not None:
-                    # The folder has no such file (Models said the cache's, or the file has gone
-                    # from the folder since): no silent fallback.
-                    logger.debug(
-                        "the model folder %s has no %s: Hugging Face's cache's is read",
-                        handle.directory,
-                        name,
-                    )
                 if pull.cached(name) is None:
                     # Models fetched it when it ran, or could not (models.provide), and ComfyUI
                     # keeps its output between prompts (the same words as models._prepare's for
