@@ -560,6 +560,26 @@ def least_of(made: Plan) -> int:
     return host_need(replace(made, scratch_allowance=0), HD, shots(76))
 
 
+def one_cap_per_layout(film: list[Shot], caps: range) -> list[int]:
+    """The first of `caps` (window caps, in latents) for each distinct layout of the film's DiT
+    windows under them (shot_layout, shot by shot), in order.
+
+    Caps under which every shot runs the same windows plan the same: the planner reads a pinned
+    cap only through the windows the shots run under it (shot_plan._longest, the shots' layouts
+    for the host's figure), the cap itself echoed in the plan and its refusal alone, and its own
+    walk down the caps skips one whose longest window is the last one tried's ("plans the same",
+    shot_plan._window_that_runs), a coarser grouping than this one. Planned cap by cap, the
+    grid's 2,685 calls (2026-11-07) gave the outcome the test asserts the same within each of
+    their 764 distinct layouts (2026-11-08): one cap a layout proves of every window what every
+    cap did, in 764 calls, each refused pin costing the planner a walk down every shorter window
+    to word its advice."""
+    first: dict[tuple[tuple[tuple[int, int], ...], ...], int] = {}
+    for cap in caps:
+        layout = tuple(tuple(shot_layout(shot.frames, cap)) for shot in film)
+        first.setdefault(layout, cap)
+    return list(first.values())
+
+
 def test_the_planner_takes_the_longest_window_the_host_holds() -> None:
     # The choices are made for the GPU's memory, the longest window first, and the system memory
     # is checked after them: more free VRAM turned a job that was planned into one refused for
@@ -621,7 +641,8 @@ def test_the_planner_takes_the_longest_window_the_host_holds() -> None:
     # Over a grid of jobs, memories and hosts: a plan with a window shortened for the host is
     # the plan that window pinned makes, every longer window refused there for the system
     # memory, up to the one the card alone gives; and a job refused for the system memory has
-    # no window that plans.
+    # no window that plans. "Every window" is every distinct layout of the film's windows, one
+    # cap planned for each (one_cap_per_layout says why that proves the same).
     shortened = unheld = 0
     films = (shots(76), shots(40), shots(12, 133), shots(5))
     frees = (12.5, 15, 18.5, 24, 31, 40, 41.5)
@@ -657,7 +678,8 @@ def test_the_planner_takes_the_longest_window_the_host_holds() -> None:
                             said = str(error)
                             shrunk = ", its VAE's tiles shrunk to keep the DiT on the GPU: "
                             assert said.endswith(" GiB short") or shrunk in said, said
-                            assert all(plans(cap) is not None for cap in range(5, window + 1))
+                            caps = one_cap_per_layout(film, range(5, window + 1))
+                            assert all(plans(cap) is not None for cap in caps)
                             unheld += 1
                         continue
                     if peaks.shortened is None:
@@ -668,7 +690,7 @@ def test_the_planner_takes_the_longest_window_the_host_holds() -> None:
                     assert peaks.shortened.taken > peaks.shortened.available
                     again = planner.plan(*case, Pins(window=made.window), available, split=True)
                     assert again == (made, replace(peaks, shortened=None))
-                    for cap in range(made.window + 1, window + 1):
+                    for cap in one_cap_per_layout(film, range(made.window + 1, window + 1)):
                         said = plans(cap)
                         if longest(lengths, cap) == peaks.window:
                             assert said is None  # the same windows, under a larger cap
