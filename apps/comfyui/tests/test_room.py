@@ -17,7 +17,7 @@ from standins import (
     upscale_image,
 )
 
-from seedvr2x import peaks, still_plan
+from seedvr2x import memory, peaks, still_plan
 from seedvr2x.memory import Reading
 
 SETTINGS = plans.Settings()
@@ -308,15 +308,106 @@ def test_a_reserve_over_the_free_memory_leaves_nothing_and_never_less(
     assert seen and all(each.reported == 0 and each.counted == 0 for each in seen)
 
 
-def test_the_card_line_says_the_room_kept_for_the_system_only_where_there_is_one(
+def test_the_card_line_says_the_room_left_to_the_rest_of_the_card_only_where_there_is_one(
     machine: StandIn, tmp_path
 ) -> None:
     management.EXTRA_RESERVED = 700 * 1024**2
     text = upscale(handle(tmp_path))
-    assert "32.00 GiB free; ComfyUI keeps 0.68 GiB of it for the system, its own models use" in text
-    assert "and seedvr2x counts on 31.32 GiB" in text
+    assert (
+        "32.00 GiB free; ComfyUI's own models use 0.00 GiB of it; 0.68 GiB is left to the rest of"
+        " the card (ComfyUI's reserve), and seedvr2x counts on 31.32 GiB" in text
+    )
     management.reset()
     models.reset()
     models.use(machine)
     text = upscale(handle(tmp_path))
-    assert "for the system" not in text and "ComfyUI's own models use 0.00 GiB" in text
+    assert "left to the rest of the card" not in text and "reserve" not in text
+    assert "ComfyUI's own models use 0.00 GiB of it, and seedvr2x counts on 32.00 GiB" in text
+
+
+def test_the_card_line_names_the_larger_room_once_on_a_held_run(machine: StandIn, tmp_path) -> None:
+    machine.held_card = 32 * GIB
+    room = (memory.HELD_BACK / GIB, "seedvr2x's least on this driver")
+    for reserve, said in (
+        (0, room),
+        (memory.HELD_BACK // 2, room),
+        (memory.HELD_BACK, (memory.HELD_BACK / GIB, "ComfyUI's reserve")),  # equal: ComfyUI's
+        (2 * GIB, (2.0, "ComfyUI's reserve")),
+    ):
+        management.reset()
+        models.reset()
+        models.use(machine)
+        management.EXTRA_RESERVED = reserve
+        text = upscale(handle(tmp_path))
+        figure, source = said
+        assert f"{figure:.2f} GiB is left to the rest of the card ({source})" in text, reserve
+        assert text.count("left to the rest of the card") == 1
+        assert "for the system" not in text
+
+
+def held_need(machine: StandIn, tmp_path) -> int:
+    """The free memory the stand-in picture's plan needs on a held card (needed_free), read from
+    the plan the nodes made on a card with room to spare."""
+    seen: list[models.Needs] = []
+    real = nodes.picture_planner(SETTINGS, (48, 80), PICTURE)
+
+    def planner(reading: Reading, *args: object) -> object:
+        planned = real(reading, *args)  # type: ignore[arg-type]
+        seen.append(planned.needs)
+        return planned
+
+    with models.session(handle(tmp_path), None, planner):  # type: ignore[arg-type]
+        pass
+    return models.needed_free(seen[-1])
+
+
+def test_the_room_a_held_run_asks_is_the_larger_of_comfys_reserve_and_seedvr2xs_least(
+    machine: StandIn, tmp_path
+) -> None:
+    """One need, not their sum (DESIGN.md, Allocator, Windows itself): a card with exactly the
+    plan's need and the room free is not asked, a byte less is, and ComfyUI is asked for the need
+    and the room once."""
+    machine.held_card = 32 * GIB
+    need = held_need(machine, tmp_path)
+    assert need >= memory.HELD_BACK  # the need holds the least back already (needed_free)
+    for reserve in (0, memory.HELD_BACK // 2, memory.HELD_BACK, 2 * GIB):
+        management.reset()
+        models.reset()
+        models.use(machine)
+        management.EXTRA_RESERVED = reserve
+        resident = comfy_model(12 * GIB)
+        beyond = max(reserve - memory.HELD_BACK, 0)
+        # Free: the need and the room beyond what the need holds back, exactly: nothing is asked.
+        management.card.outside = 32 * GIB - 12 * GIB - need - beyond
+        assert machine.free() == need + beyond
+        upscale(handle(tmp_path))
+        assert asks(machine) == [] and resident.loaded_size() == 12 * GIB, reserve
+        management.card.outside += 1
+        upscale(handle(tmp_path))
+        ((wanted, _device, _kept),) = asks(machine)
+        assert wanted == need + beyond + models.ASK_MARGIN, reserve
+
+
+def test_the_plan_of_a_held_run_counts_the_card_less_the_larger_room(
+    machine: StandIn, tmp_path
+) -> None:
+    machine.held_card = 32 * GIB
+    for reserve, room in ((GIB // 4, memory.HELD_BACK), (3 * GIB, 3 * GIB)):
+        management.reset()
+        models.reset()
+        models.use(machine)
+        management.EXTRA_RESERVED = reserve
+        resident = comfy_model(5 * GIB)
+        seen: list[Reading] = []
+
+        def planner(reading: Reading, *args: object, into: list[Reading] = seen) -> object:
+            into.append(reading)
+            raise words.Refused("stop here")
+
+        with pytest.raises(words.Refused):
+            with models.session(handle(tmp_path), None, planner):  # type: ignore[arg-type]
+                pass
+        # The card is 32 GiB with ComfyUI's 5 GiB on it: free 27, 32 counted without them, and the
+        # room off once.
+        assert {each.counted for each in seen} == {32 * GIB - room}, reserve
+        del resident

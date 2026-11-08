@@ -473,3 +473,23 @@ def test_the_console_says_where_the_detectors_file_is_and_how_large_it_is(
         f"shot detector, {size}, downloaded into Hugging Face's cache: {cache}; HF_HOME moves it"
         in (unprefixed(caplog))
     )
+
+
+def test_comfyuis_cancel_is_the_check_of_the_detectors_waits_its_close_among_them(
+    monkeypatch: pytest.MonkeyPatch, weights_dir: Path
+) -> None:
+    # The detector's close waits on the card through the poll (detector.Detector.close), which a
+    # check ends: the Cuts node gives it ComfyUI's Cancel, as the upscale nodes give theirs, and
+    # the check before is back after the node.
+    scripted(monkeypatch, {}, 12)
+    checks: list[object] = []
+    close = shot_detector.Detector.close
+
+    def recorded(self: shot_detector.Detector) -> None:
+        checks.append(getattr(waiting._named, "check", None))  # pyright: ignore[reportPrivateUsage]
+        close(self)
+
+    monkeypatch.setattr(shot_detector.Detector, "close", recorded)
+    run_cuts(clip_images(12), model_dir=str(weights_dir))
+    assert checks == [management.throw_exception_if_processing_interrupted]
+    assert getattr(waiting._named, "check", None) is None  # pyright: ignore[reportPrivateUsage]

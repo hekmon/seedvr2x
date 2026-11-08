@@ -200,13 +200,25 @@ class Detector:
         On a card a CUDA error other than out of memory failed (waiting.fail), found so or met by
         the poll that comes first, nothing is freed: the model is kept for the process's life
         (_left), since under cudaMallocAsync a free there reports the error again inside torch's
-        deleter and aborts the process (waiting.py's docstring)."""
+        deleter and aborts the process (waiting.py's docstring).
+
+        The wait for the card's work is the poll (model.synchronize, every 10 ms in waiting.wait),
+        not torch.cuda.synchronize, which holds the main thread in C: a stop, or an app's check
+        (ComfyUI's Cancel, set by the nodes as the wait's check), reaches it between two polls.
+        An exception that ends the wait and is no CUDA failure (that stop or Cancel) keeps the
+        model the same way: freeing it would wait on a card that may not answer. The exception goes
+        through."""
         if self._model is None:
             return
-        if self._device.type == "cuda" and not self._settled():
-            _left.append(self._model)
-            self._model = None
-            return
+        if self._device.type == "cuda":
+            try:
+                settled = self._settled()
+            except BaseException:
+                self._keep()
+                raise
+            if not settled:
+                self._keep()
+                return
         self._model = None
         self._held = np.empty((0, HEIGHT, WIDTH, 3), np.uint8)
         if self._device.type == "cuda":
@@ -223,18 +235,28 @@ class Detector:
                 torch.cuda.memory_reserved(self._device) / 2**20,
             )
 
+    def _keep(self) -> None:
+        """Leave the model alive for the process (_left), unfreed, and the detector closed."""
+        assert self._model is not None
+        _left.append(self._model)
+        self._model = None
+
     def _settled(self) -> bool:
-        """The card not failed, its work waited for; a CUDA error other than out of memory met
-        there marks it (waiting.fail) and gives False."""
-        index = self._device.index or 0
-        if waiting.failed(index) is not None:
+        """The card not failed, its work waited for through the poll; a CUDA error other than out
+        of memory met there marks it (model.synchronize's marking) and gives False. Any other
+        exception, a stop or a Cancel the wait's check raises included, goes through."""
+        # Imported here: seedvr2x.model brings in the vendored model, which the detector, run
+        # before the models load (the first pass), has no use for until it closes (1.2 s to
+        # import, 2026-11-08).
+        from seedvr2x import model
+
+        if model.failed(self._device):
             return False
         try:
-            torch.cuda.synchronize(self._device)
+            model.synchronize(self._device)
         except Exception as error:
             if not waiting.cuda_failed(error):
                 raise
-            waiting.fail(index, error)
             return False
         return True
 

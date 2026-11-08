@@ -552,14 +552,25 @@ def _taken(reading: Reading) -> int:
     return reading.reported if reading.card is None else min(reading.reported, reading.card)
 
 
+def room_beyond(reading: Reading, reserve: int) -> int:
+    """What ComfyUI's `reserve` asks of the card beyond what the reading already holds back
+    (`reading.left`, torch's limit on a held run), in bytes. The room left to the rest of the card
+    is the larger of the two, one need (DESIGN.md, Allocator, Windows itself): the plan counts
+    `reading.left` itself (memory.counted), and this is the rest of the room. 0 where seedvr2x's
+    least is the larger; the whole reserve where the run is not held (`left` is 0 there)."""
+    return max(reserve - reading.left, 0)
+
+
 def with_comfy_gone(reading: Reading, held: int, reserve: int = 0) -> Reading:
     """`reading` with the `held` bytes ComfyUI's own models have on the card counted free and the
-    `reserve` ComfyUI keeps for the system counted gone: the reading the plan is made in, for the
-    card as it would be without those models and with that room left. Each figure of the reading
-    moves by `held` less `reserve` (never below 0), and a held run's counted memory is taken again
-    from them (memory.reading): the driver's and the card's figures less what torch is held back
-    by and the reserve."""
-    delta = held - reserve
+    room left to the rest of the card counted gone: the reading the plan is made in, for the card
+    as it would be without those models and with that room left. The room is the larger of the
+    `reserve` ComfyUI keeps for the system and the reading's own `left` (room_beyond): `left` is
+    taken off by memory.counted, so each figure of the reading moves by `held` less what the
+    reserve asks beyond it (never below 0), and a held run's counted memory is taken again from
+    them: the driver's and the card's figures less what torch is held back by (the room) and,
+    under torch's own allocator without the segments, RESERVE besides."""
+    delta = held - room_beyond(reading, reserve)
     if delta == 0:
         return reading
     if not reading.held:
@@ -1244,11 +1255,12 @@ def _session[T](
     needed = needed_free(planned.needs)
     # ComfyUI's own free memory counts the room it keeps for the system: the run needs that much
     # free beyond its plan, and is asked for it.
-    asked = max(_taken(own) - reserve, 0) < needed
+    beyond = room_beyond(own, reserve)
+    asked = max(_taken(own) - beyond, 0) < needed
     if asked:
         # The free amount wanted, in the figure ComfyUI reads (the driver's), which is above the
         # card's where NVML reports less.
-        wanted = needed + reserve + ASK_MARGIN + max(own.reported - _taken(own), 0)
+        wanted = needed + beyond + ASK_MARGIN + max(own.reported - _taken(own), 0)
         logger.info(
             "asking ComfyUI for %.2f GiB free on the card for this run (%.2f GiB free, %.2f GiB"
             " used by its models; %.2f GiB of that over what the run needs, for what its unloading"
@@ -1266,7 +1278,7 @@ def _session[T](
         # out, though this process can use it (readings, as _read).
         management.soft_empty_cache()
         after = machine_.reading(machine_.free())
-        there = max(after.counted - reserve, 0)
+        there = max(after.counted - beyond, 0)
         if there < planned.needs.peak + planned.needs.margin:
             raise words.not_freed(
                 need=planned.needs.peak + planned.needs.margin,

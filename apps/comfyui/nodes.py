@@ -1146,7 +1146,13 @@ class Cuts(io.ComfyNode):
             pull.check_pin(name, path, pin, hashes, cache, "detector", load=True)
             if getattr(device, "type", "") != "cuda" or not torch.cuda.is_available():
                 device = torch.device("cpu")
-            with shot_detector.Detector(path, device, hashes=hashes) as found:
+            # ComfyUI's Cancel the check of the detector's waits on the card, its close's among
+            # them (detector.Detector.close waits through the poll): a card that stops answering
+            # there is left by Cancel, the model kept, as the upscale nodes' waits are.
+            with (
+                waiting.checking(management.throw_exception_if_processing_interrupted),
+                shot_detector.Detector(path, device, hashes=hashes) as found,
+            ):
                 return shot_detector.probabilities(
                     found,
                     images[..., :3].detach().to("cpu", torch.float32),

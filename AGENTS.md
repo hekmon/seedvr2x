@@ -888,7 +888,15 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   interpreter's exit are not seedvr2x's. A decode's normal end polls the card before its causal
   memory is freed (`model.decode_sliced`); `synchronize` marks an error its event's record or
   query meets; `Models.release` polls before its first free; the environment probe passes such an
-  error up uncached (`probe._run`), and the detector's close keeps its model on a failed card.
+  error up uncached (`probe._run`), and the detector's close keeps its model on a failed card and
+  waits for the card's work through the poll (`model.synchronize`, never `torch.cuda.synchronize`,
+  which holds the main thread in C), so that a stop or the app's check reaches it:
+  `core/tests/test_detector_close.py`, on the CPU with torch's CUDA calls replaced, holds a healthy
+  close (the event polled, then the memory given back, no blocking wait), a card found failed
+  (nothing called, the model kept in `_left`), a CUDA error met by the poll (the card marked, the
+  model kept, nothing freed), out of memory and a check that raises (ComfyUI's Cancel: the model
+  kept, the exception through, nothing freed); the Cuts node runs the detector, its close
+  included, with ComfyUI's Cancel as the waits' check (`apps/comfyui/tests/test_cuts_node.py`).
   `core/tests/test_waiting.py` holds the mark (a wait's error, no bound needed; out of memory and
   other errors unmarked; a completed release leaving it); `tests/test_shot_pass.py` a poll after
   the last write with the memory held, a CUDA error at a poll inside a tile's pass or the
@@ -1241,11 +1249,19 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   `tests/test_registration.py` holds the one patcher (its sizes, strong
   references, Unload models and POST /free dropping the weights, the next run loading again,
   keep in RAM off, `--disable-smart-memory`); `tests/test_room.py` the room (the plan made for the
-  card without ComfyUI's models and less the room ComfyUI keeps for the system
-  (`extra_reserved_memory`, read at each run; the stand-in's `EXTRA_RESERVED` is 0 unless a test
-  sets it, so that the other tests' figures stay theirs; asked of ComfyUI beside the plan's need,
-  not twice; a card short once it is kept refused; a reserve over the free memory counting 0; the
-  card line saying it only where there is one), `free_memory` asked for the plan's largest phase plus
+  card without ComfyUI's models and less the room left to the rest of the card: the larger of
+  ComfyUI's reserve (`extra_reserved_memory`, read at each run; the stand-in's `EXTRA_RESERVED` is 0
+  unless a test sets it, so that the other tests' figures stay theirs) and seedvr2x's own least on a
+  held run (`Reading.left`, `HELD_BACK`, or `HELD_BACK_UNREAD` where the card's figure is unread),
+  one need and not their sum (DESIGN.md, Allocator, Windows itself; `models.room_beyond`,
+  `with_comfy_gone`): a reserve under the least giving the least, over it the reserve, equal the
+  reserve, on a held run (`test_room.py`, `test_machine.py`), the reserve alone where the run is
+  not held, torch's own allocator without the segments keeping its flat `RESERVE` on top; the
+  room asked of ComfyUI beside the plan's need once, in `asked`, `wanted` and the check after it (a
+  card with exactly the need and the room is not asked, a byte less is); a reserve over the free
+  memory counting 0; the card line naming the room once and what set it, ComfyUI's reserve (equal
+  figures included) or seedvr2x's least on this driver, and no room part where there is none),
+  `free_memory` asked for the plan's largest phase plus
   `ASK_MARGIN` (a partial unload's buffer) and only when the card has less than the phase alone,
   never more, seedvr2x's registration kept, a card still short of the phase refused, the
   library's command-line allocator and limit warnings left out of ComfyUI's console for the

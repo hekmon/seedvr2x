@@ -41,6 +41,34 @@ def test_the_room_kept_for_the_system_is_counted_gone_and_never_below_nothing() 
     assert models.with_comfy_gone(reading, 0, 12 * GIB) == Reading(0, None, 0, False)
 
 
+def test_the_room_is_the_larger_of_comfys_reserve_and_the_least_a_held_reading_leaves() -> None:
+    # One need, not the sum: memory.counted takes the reading's `left` off, so the shift only adds
+    # what the reserve asks beyond it (DESIGN.md, Allocator, Windows itself).
+    taken = 12 * GIB
+    for left, reserve, room in (
+        (memory.HELD_BACK, 0, memory.HELD_BACK),
+        (memory.HELD_BACK, memory.HELD_BACK // 2, memory.HELD_BACK),
+        (memory.HELD_BACK, memory.HELD_BACK, memory.HELD_BACK),
+        (memory.HELD_BACK, 2 * GIB, 2 * GIB),
+        # The card's figure unread: the larger least.
+        (memory.HELD_BACK_UNREAD, 2 * GIB, memory.HELD_BACK_UNREAD),
+        (memory.HELD_BACK_UNREAD, 4 * GIB, 4 * GIB),
+    ):
+        shell = Reading(taken, None, 0, True, left, memory.SEGMENTS)
+        reading = replace(shell, counted=memory.counted(taken, shell))
+        shifted = models.with_comfy_gone(reading, 5 * GIB, reserve)
+        assert shifted.counted == 17 * GIB - room, (left, reserve)
+        assert models.room_beyond(reading, reserve) == room - left
+    # Torch's own allocator without the segments keeps its flat reserve on top of the room.
+    shell = Reading(taken, taken, 0, True, memory.HELD_BACK, memory.PLAIN)
+    reading = replace(shell, counted=memory.counted(taken, shell))
+    shifted = models.with_comfy_gone(reading, 0, 2 * GIB)
+    assert shifted.counted == taken - 2 * GIB - memory.RESERVE
+    # A driver that refuses leaves what ComfyUI keeps alone.
+    plain = Reading(taken, None, taken, False)
+    assert models.with_comfy_gone(plain, 0, 2 * GIB).counted == taken - 2 * GIB
+
+
 def test_comfys_models_are_counted_free_for_a_held_run_as_the_library_counts_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -398,7 +398,8 @@ class Room:
     had available when the plan was made (`host`, None: unread), whether the run is a plan
     only, which asks ComfyUI for nothing and loads nothing, and the bytes asked of ComfyUI over
     `needed` where it was asked (`margin`, models.ASK_MARGIN), and the room ComfyUI keeps of the
-    card for the system, which the plan leaves free (`reserve`, models.system_reserve)."""
+    card for the system (`reserve`, models.system_reserve), of which and the reading's own `left`
+    the larger is the room the plan leaves free to the rest of the card (the card line, `_room`)."""
 
     card: str
     free: int
@@ -443,14 +444,22 @@ def _spare(reading: Reading, reserves: Mapping[str, int] | None) -> list[str]:
 
 
 def _room(room: Room, reading: Reading, reserves: Mapping[str, int] | None = None) -> list[str]:
+    # One room, the larger of ComfyUI's reserve and the least seedvr2x leaves on this driver
+    # (reading.left, 0 on a driver that refuses); equal figures are ComfyUI's (DESIGN.md,
+    # Allocator, Windows itself).
+    left = max(room.reserve, reading.left)
+    source = (
+        "ComfyUI's reserve" if room.reserve >= reading.left else "seedvr2x's least on this driver"
+    )
     kept = (
-        f"ComfyUI keeps {gib(room.reserve)} of it for the system, its own models use"
-        if room.reserve
-        else "ComfyUI's own models use"
+        f"ComfyUI's own models use {gib(room.comfy)} of it; {gib(left)} is left to the rest of the"
+        f" card ({source}), and seedvr2x counts on {gib(reading.counted)}"
+        if left
+        else f"ComfyUI's own models use {gib(room.comfy)} of it, and seedvr2x counts on"
+        f" {gib(reading.counted)}"
     )
     lines = [
-        f"graphics card: {room.card}, {gib(room.free)} free; {kept}"
-        f" {gib(room.comfy)} of it, and seedvr2x counts on {gib(reading.counted)}",
+        f"graphics card: {room.card}, {gib(room.free)} free; {kept}",
         *_spare(reading, reserves),
     ]
     if room.plan_only:
