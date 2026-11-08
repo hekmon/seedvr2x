@@ -732,11 +732,6 @@ def probability(value: float) -> str:
     return str(Decimal(float(value)).quantize(Decimal("0.001"), rounding=ROUND_DOWN))
 
 
-def one_shot_text(frames: int) -> str:
-    """The Cuts node's console text for "one shot": the clip taken whole, no detection run."""
-    return f"one shot, the whole clip of {frames} frames; no detection was run"
-
-
 def cuts_text(
     frames: int,
     threshold: float,
@@ -831,8 +826,3 @@ def cuts_line(shots_found: int, possible: int, threshold: float) -> str:
         return line(shot, "no possible cut")
     cuts = f"{possible} possible cut{'' if possible == 1 else 's'}"
     return line(shot, f"{cuts} below {threshold:.2f}")
-
-
-def one_shot_line(frames: int) -> str:
-    """What the Cuts node shows for "one shot": "one shot: 120 frames"."""
-    return f"one shot: {frames} frames"

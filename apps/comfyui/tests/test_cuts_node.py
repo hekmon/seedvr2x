@@ -1,6 +1,7 @@
 """seedvr2x Cuts over the untrained detector's weights (the file written as core's test_detector
 does) and over scripted probabilities: the cut list it gives Upscale Video, the text of the cuts
-and the possible cuts, the one shot mode, the detector's file found, checked and given back."""
+and the possible cuts, the detector's file the one seedvr2x Models provided (the handle's folder's
+or Hugging Face's cache's) found, checked and given back."""
 
 import logging
 import re
@@ -45,21 +46,20 @@ def clip_images(count: int, channels: int = 3) -> torch.Tensor:
 
 def run_cuts(
     images: torch.Tensor,
-    mode: str = "detect",
     threshold: float = shotcuts.THRESHOLD,
     model_dir: str = "",
     unique_id: str | None = "7",
 ) -> tuple[tuple[Shot, ...], str]:
+    """The node run with a Models handle on `model_dir` ("": Hugging Face's cache)."""
     with nodes_console() as said:
         out = execute(
             nodes.Cuts,
             unique_id,
             images=images,
-            mode=mode,
+            models=models.Handle(plans.DEFAULT_DIT, model_dir),
             threshold=threshold,
-            model_dir=model_dir,
         )
-    # The one text the node says whole: the cuts, or the clip taken as one shot.
+    # The one text the node says whole: the cuts.
     return out[0], said.messages[0] if said.messages else ""
 
 
@@ -95,19 +95,6 @@ def scripted(
         shot_detector, "probabilities", lambda found, images, progress=None: probabilities
     )
     return made
-
-
-def test_one_shot_is_the_whole_clip_and_runs_no_detector(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def refuse(*args: object, **kwargs: object) -> None:
-        raise AssertionError("the detector ran in one shot mode")
-
-    monkeypatch.setattr(shot_detector, "Detector", refuse)
-    monkeypatch.setattr(pull, "fetch", refuse)
-    cuts, text = run_cuts(clip_images(21), mode="one shot")
-    assert cuts == (Shot(0, 21),)
-    assert text == "one shot, the whole clip of 21 frames; no detection was run"
 
 
 def test_the_cuts_are_the_shots_between_the_detections_and_the_text_says_them(
@@ -228,17 +215,7 @@ def test_the_detectors_file_is_fetched_from_hugging_faces_cache_and_checked_agai
     assert asked == [(pull.DETECTOR, weights_dir / pull.DETECTOR, True)]
 
 
-def test_a_file_that_is_not_in_the_folder_is_refused_in_the_nodes_words(tmp_path: Path) -> None:
-    with pytest.raises(words.Refused, match="is not in the folder wired to the") as refused:
-        run_cuts(clip_images(6), model_dir=str(tmp_path))
-    assert "transnetv2.safetensors" in str(refused.value) and "--" not in str(refused.value)
-    # The folder is the Cuts node's own input, not the Models node's.
-    assert 'the "model folder" input of seedvr2x Cuts' in str(refused.value)
-    assert "seedvr2x Models" not in str(refused.value)
-    assert "unwire the input to use Hugging Face's cache" in str(refused.value)
-
-
-def test_a_file_that_is_not_the_pin_is_refused_in_the_nodes_words(
+def test_a_file_that_is_not_the_pin_is_refused_in_the_nodes_words_for_models_folder(
     tmp_path: Path,
 ) -> None:
     untrained_weights(tmp_path)
@@ -246,15 +223,16 @@ def test_a_file_that_is_not_the_pin_is_refused_in_the_nodes_words(
         run_cuts(clip_images(6), model_dir=str(tmp_path))
     text = str(refused.value)
     assert "hf download" not in text and "--" not in text
-    assert 'unwire the "model folder" input of seedvr2x Cuts' in text
-    assert "seedvr2x Models" not in text
+    # The folder is seedvr2x Models' input, not this node's (which has none).
+    assert 'unwire the "model folder" input of seedvr2x Models to use' in text
+    assert "seedvr2x Cuts" not in text
     # Sizes with their separators, as the nodes write them elsewhere.
     assert re.search(
         r"size \d{1,3}(,\d{3})* bytes, where seedvr2x's has \d{1,3}(,\d{3})+ bytes", text
     )
 
 
-def test_a_file_that_cannot_be_had_or_is_damaged_names_the_cuts_node_and_its_own_folder(
+def test_a_file_that_cannot_be_had_or_is_damaged_names_seedvr2x_models(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     name = pull.DETECTOR
@@ -266,10 +244,10 @@ def test_a_file_that_cannot_be_had_or_is_damaged_names_the_cuts_node_and_its_own
     with pytest.raises(words.Refused, match="Hugging Face's offline mode is on") as refused:
         run_cuts(clip_images(6))
     text = str(refused.value)
-    assert 'wire a folder that has them to the "model folder" input of seedvr2x Cuts' in text
-    assert "seedvr2x Models" not in text
+    assert 'wire a folder that has them to the "model folder" input of seedvr2x Models' in text
+    assert "seedvr2x Cuts" not in text
 
-    # A damaged file in a folder wired to the node: the way out unwires the input, on this node.
+    # A damaged file in the folder wired to Models: the way out unwires that input.
     folder = tmp_path / "models"
     folder.mkdir()
     untrained_weights(folder)
@@ -281,8 +259,16 @@ def test_a_file_that_cannot_be_had_or_is_damaged_names_the_cuts_node_and_its_own
     with pytest.raises(words.Refused) as refused:
         run_cuts(clip_images(6), model_dir=str(folder))
     text = str(refused.value)
-    assert 'unwire the "model folder" input of seedvr2x Cuts' in text
-    assert "seedvr2x Models" not in text and "--" not in text
+    assert 'unwire the "model folder" input of seedvr2x Models' in text
+    assert "seedvr2x Cuts" not in text and "--" not in text
+
+    # The cache's file damaged: the way out deletes it from the cache, no folder named.
+    monkeypatch.setattr(
+        pull, "fetch", lambda pins, download=None, progress=None: {n: folder / n for n in pins}
+    )
+    with pytest.raises(words.Refused) as refused:
+        run_cuts(clip_images(6))
+    assert "Hugging Face's cache" in str(refused.value) and "wire" not in str(refused.value)
 
 
 def shown_on(node: str) -> list[str]:
@@ -317,17 +303,30 @@ def test_the_node_shows_the_scan_then_the_shots_and_the_possible_cuts_in_one_lin
     assert "100 frames, 2 cuts found at threshold 0.3: 3 shots" in lines
 
 
-def test_one_shot_shows_its_frames_and_a_refusal_shows_its_line(
+def test_a_refusal_shows_its_line_and_is_said_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    run_cuts(clip_images(21), mode="one shot", unique_id="4")
-    assert shown_on("4") == ["one shot: 21 frames"]
+    monkeypatch.setattr(
+        pull,
+        "check_pin",
+        lambda *a, **k: (_ for _ in ()).throw(
+            ModelDamaged(f"x: cut short; {AGAIN}", file=pull.DETECTOR, role="detector")
+        ),
+    )
+    monkeypatch.setattr(
+        pull, "fetch", lambda pins, download=None, progress=None: {n: tmp_path / n for n in pins}
+    )
     with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui"):
         with pytest.raises(words.Refused):
-            run_cuts(clip_images(6), model_dir=str(tmp_path), unique_id="5")
+            run_cuts(clip_images(6), unique_id="5")
     assert shown_on("5") == ["refused: see the error"]
     refused = [line for line in unprefixed(caplog) if line.startswith("refused: ")]
-    assert len(refused) == 1 and "is not in the folder wired to the" in refused[0]
+    assert len(refused) == 1 and "delete it from Hugging Face's cache" in refused[0]
+
+
+def test_a_value_that_is_no_handle_is_refused_naming_the_node(weights_dir: Path) -> None:
+    with pytest.raises(TypeError, match="seedvr2x Cuts takes the output of seedvr2x Models"):
+        execute(nodes.Cuts, "7", images=clip_images(3), models="a folder", threshold=0.3)
 
 
 def test_images_that_are_no_clip_are_refused(weights_dir: Path) -> None:
@@ -335,8 +334,6 @@ def test_images_that_are_no_clip_are_refused(weights_dir: Path) -> None:
         run_cuts(torch.zeros(0, *PICTURE, 3), model_dir=str(weights_dir))
     with pytest.raises(words.Refused, match="2 channels"):
         run_cuts(torch.zeros(3, *PICTURE, 2), model_dir=str(weights_dir))
-    with pytest.raises(words.Refused, match="mode 'sometimes'"):
-        run_cuts(clip_images(3), mode="sometimes", model_dir=str(weights_dir))
     for bad in (0.0, 1.5, -1.0):
         with pytest.raises(words.Refused, match="above 0 and at most 1"):
             run_cuts(clip_images(3), threshold=bad, model_dir=str(weights_dir))
@@ -362,20 +359,18 @@ def test_the_node_has_the_cuts_output_and_a_hidden_id() -> None:
     # The cuts and the possible cuts are said in the console: no text output.
     assert [(each.id, each.io_type) for each in schema.outputs] == [("cuts", "SEEDVR2X_CUTS")]
     inputs: dict[str, Any] = {each.id: each for each in schema.inputs}
-    assert list(inputs) == ["images", "mode", "threshold", "model_dir"]
-    assert inputs["mode"].options == ["detect", "one shot"] and inputs["mode"].default == "detect"
+    # No mode (wired, it detects) and no folder (seedvr2x Models' alone): the detector's file
+    # comes with the models handle, the upscale nodes' own type.
+    assert list(inputs) == ["images", "models", "threshold"]
+    assert inputs["models"].io_type == "SEEDVR2X_MODELS" and not inputs["models"].optional
+    assert "shot detector" in inputs["models"].tooltip
     assert inputs["threshold"].default == shotcuts.THRESHOLD == 0.3
     assert inputs["threshold"].io_type == "FLOAT" and inputs["threshold"].round is False
-    folder = inputs["model_dir"]
-    assert folder.display_name == "model folder" and folder.io_type == "STRING"
-    # An optional input and no widget: it asks for nothing to be filled in (the user, 2026-11-08).
-    assert folder.optional and folder.force_input and folder.as_dict()["forceInput"] is True
-    assert folder.tooltip.startswith("Optional.") and pull.DETECTOR in folder.tooltip
-    assert "Hugging Face's cache" in folder.tooltip and "Not connected" in folder.tooltip
+    assert "one shot" not in inputs["threshold"].tooltip
     found = nodes.Cuts.INPUT_TYPES()
-    assert "model_dir" in found["optional"] and "model_dir" not in found["required"]
-    assert found["optional"]["model_dir"][1]["forceInput"] is True
-    assert "default" not in found["optional"]["model_dir"][1], "no value stands in for a folder"
+    assert list(found["required"]) == ["images", "models", "threshold"]
+    assert not found.get("optional")
+    assert "seedvr2x Models" in schema.description and "one shot" not in schema.description
 
 
 def test_a_failed_card_refuses_the_cuts_node_and_a_cuda_error_marks_it(
@@ -398,80 +393,91 @@ def test_a_failed_card_refuses_the_cuts_node_and_a_cuda_error_marks_it(
     models.reset()
 
 
-def test_the_folder_input_is_optional_and_an_unwired_one_is_the_cache(
-    weights_dir: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_the_detector_is_the_handles_folders_where_it_has_it_else_the_caches(
+    weights_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     scripted(monkeypatch, {}, 12)
-    fetched: list[object] = []
+    fetched: list[tuple[str, ...]] = []
+    pinned: list[Path] = []
 
     def fetch(pins: Any, download: Any = None, progress: Any = None) -> Any:
         fetched.append(tuple(pins))
         return {name: weights_dir / name for name in pins}
 
     monkeypatch.setattr(pull, "fetch", fetch)
-    # Not given at all, as the executor leaves an unwired optional input.
-    node_out = execute(nodes.Cuts, "7", images=clip_images(12), mode="detect", threshold=0.3)
-    assert node_out[0] == (Shot(0, 12),)
-    assert fetched == [(pull.DETECTOR,)], "Hugging Face's cache, fetched by its pin"
-    # Quotes (Windows' "Copy as path") and spaces around a folder are taken off.
+    monkeypatch.setattr(pull, "check_pin", lambda name, path, *args, **kwargs: pinned.append(path))
+    # A folder that has it: its file, nothing fetched.
+    run_cuts(clip_images(12), model_dir=str(weights_dir))
+    assert fetched == [] and pinned == [weights_dir / pull.DETECTOR]
+    # A folder without it (Models' folder holds the DiT and the VAE): the cache's, by its pin.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    pinned.clear()
+    run_cuts(clip_images(12), model_dir=str(empty))
+    assert fetched == [(pull.DETECTOR,)] and pinned == [weights_dir / pull.DETECTOR]
+    assert list(empty.iterdir()) == [], "nothing is written into a user's folder"
+    # No folder: the cache's.
     fetched.clear()
-    run_cuts(clip_images(12), model_dir=f' "{weights_dir}" ')
-    assert fetched == [], "a folder: nothing fetched"
-    # A value empty once stripped is an unwired input, said.
-    caplog.set_level(logging.INFO, logger="seedvr2x_comfyui")
-    run_cuts(clip_images(12), model_dir=' "" ')
+    run_cuts(clip_images(12))
     assert fetched == [(pull.DETECTOR,)]
-    assert "the model folder given is empty: Hugging Face's cache is used" in unprefixed(caplog)
 
 
-def test_a_value_that_is_no_folder_is_refused_before_anything_runs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def never(*args: object, **kwargs: object) -> None:
-        raise AssertionError("went on past a folder that does not exist")
-
-    monkeypatch.setattr(shot_detector, "Detector", never)
-    monkeypatch.setattr(pull, "fetch", never)
-    for value in (str(tmp_path / "nowhere"), str(tmp_path / "file.txt")):
-        (tmp_path / "file.txt").write_text("x")
-        with pytest.raises(words.Refused, match="is not a folder") as refused:
-            run_cuts(clip_images(6), model_dir=value)
-        assert 'the "model folder" input of seedvr2x Cuts' in str(refused.value)
-        assert "or unwire the input to use Hugging Face's cache" in str(refused.value)
-
-
-def test_the_console_says_where_the_detectors_file_is_and_how_large_it_is(
+def test_a_file_the_cache_lost_since_models_ran_is_fetched_saying_so_first_on_a_bar(
     weights_dir: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     scripted(monkeypatch, {}, 12)
+    kept = {"in": True}
+    monkeypatch.setattr(pull, "cached", lambda name: weights_dir / name if kept["in"] else None)
+
+    def fetch(pins: Any, download: Any = None, progress: Any = None) -> Any:
+        # As pull.fetch: a file in the cache is told nothing; one missing, its bytes.
+        for name in pins:
+            if not kept["in"]:
+                progress(name, 0, 100)
+                progress(name, 100, 100)
+        return {name: weights_dir / name for name in pins}
+
+    monkeypatch.setattr(pull, "fetch", fetch)
     caplog.set_level(logging.INFO, logger="seedvr2x_comfyui")
-    size = plans.size_text(pull.PINNED[pull.DETECTOR].size)
-    assert size == "30.5 MB"
-    run_cuts(clip_images(12), model_dir=str(weights_dir))
-    # A folder's file by its own size (here the untrained weights' file the test wrote).
-    own = plans.size_text((weights_dir / pull.DETECTOR).stat().st_size)
-    assert f"shot detector, {own}, in the model folder: {weights_dir}" in unprefixed(caplog)
-    # From the cache: found there, then downloaded into it where the cache lacked it.
-    cache = Path("/the/cache")
-    monkeypatch.setattr(pull, "cache", lambda: cache)
-    here = {"in": True}
-    monkeypatch.setattr(pull, "cached", lambda name: weights_dir / name if here["in"] else None)
+    run_cuts(clip_images(12), unique_id="8")
+    said = "shot detector is not in Hugging Face's cache: downloading it"
+    assert said not in unprefixed(caplog), "found in the cache: nothing said"
+    assert not any(text.startswith("downloading") for text in shown_on("8"))
+    kept["in"] = False
+    caplog.clear()
+    run_cuts(clip_images(12), unique_id="9")
+    lines = unprefixed(caplog)
+    assert lines.index(said) < lines.index("downloading the shot detector")
+    # The second run's own bar and lines: the download, then the scan.
+    assert any(text.startswith("downloading 0.0/0.0 MB") for text in shown_on("9"))
+
+
+def test_a_folder_without_the_detectors_file_reads_the_caches_and_says_so_at_debug(
+    weights_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The folder Models was given has no such file, or no longer: the cache's is read, and the
+    # fallback is said (no silent fallback).
+    scripted(monkeypatch, {}, 12)
     monkeypatch.setattr(
-        pull,
-        "fetch",
-        lambda pins, download=None, progress=None: {name: weights_dir / name for name in pins},
+        pull, "fetch", lambda pins, **_: {name: weights_dir / name for name in pins}
     )
-    caplog.clear()
-    run_cuts(clip_images(12))
-    assert f"shot detector, {size}, in Hugging Face's cache: {cache}; HF_HOME moves it" in (
-        unprefixed(caplog)
+    empty = tmp_path / "a folder of models"
+    empty.mkdir()
+    caplog.set_level(logging.DEBUG, logger="seedvr2x_comfyui.nodes")
+    # The node run as ComfyUI runs it, not through run_cuts, whose console holds INFO and up.
+    execute(
+        nodes.Cuts,
+        "7",
+        images=clip_images(12),
+        models=models.Handle(plans.DEFAULT_DIT, str(empty)),
+        threshold=shotcuts.THRESHOLD,
     )
-    here["in"] = False
-    caplog.clear()
-    run_cuts(clip_images(12))
     assert (
-        f"shot detector, {size}, downloaded into Hugging Face's cache: {cache}; HF_HOME moves it"
-        in (unprefixed(caplog))
+        f"the model folder {empty} has no {pull.DETECTOR}: Hugging Face's cache's is read"
+        in unprefixed(caplog)
     )
 
 

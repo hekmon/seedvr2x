@@ -178,9 +178,9 @@ def test_seedvr2x_widgets_are_those_of_the_schema_at_their_defaults(name: str) -
             else:
                 assert isinstance(value, str)
         if node["type"] == "seedvr2xCuts":
-            # The model folder is an optional input and no widget: no saved value for it.
-            assert [widget.id for widget, _ in saved if widget] == ["mode", "threshold"]
-            assert values == ["detect", shotcuts.THRESHOLD]
+            # No mode and no folder: the threshold is its one widget.
+            assert [widget.id for widget, _ in saved if widget] == ["threshold"]
+            assert values == [shotcuts.THRESHOLD]
         elif node["type"] != "seedvr2xModels":
             # No widget of a number the plan makes: the workflow shows the plan's own choices.
             by_id_ = {widget.id: value for widget, value in saved if widget is not None}
@@ -248,13 +248,19 @@ def test_every_link_joins_an_output_to_an_input_of_its_type(name: str) -> None:
         for output in node["outputs"]:
             assert set(output["links"] or []) <= listed
     # A seedvr2x node's required socket is wired (the nodes take no default for a handle or the
-    # pictures), and every optional one left unwired: the plan chooses.
+    # pictures), and every optional one left unwired: the plan chooses. The one exception is the
+    # clip workflow's `cuts` socket of Upscale Video: optional (unwired, the clip is one shot) but
+    # recommended by its tooltip, so the example wires seedvr2x Cuts into it.
     for node in workflow["nodes"]:
         if node["type"] in SCHEMAS:
-            unwired = optional(node["type"])
+            unwired = [
+                each
+                for each in optional(node["type"])
+                if (node["type"], each) != ("seedvr2xUpscaleVideo", "cuts")
+            ]
             for socket in node["inputs"]:
                 assert (socket["link"] is None) == (socket["name"] in unwired), socket["name"]
-            assert {each["name"] for each in node["inputs"]} >= set(unwired)
+            assert {each["name"] for each in node["inputs"]} >= set(optional(node["type"]))
 
 
 def source(workflow: dict[str, Any], node: Node, socket: str) -> Node:
@@ -327,13 +333,17 @@ def test_the_clip_workflow_takes_the_frame_rate_and_audio_of_the_video_it_loads(
 
 def test_the_clip_workflow_finds_the_cuts_of_the_frames_it_upscales() -> None:
     """Load Video, Cuts, Models, Upscale Video: the same frames go to Cuts and to the upscale, the
-    cut list is wired to the upscale's required cuts input, and Cuts is at its defaults (the
-    detector at the command line's threshold)."""
+    cut list is wired to the upscale's optional cuts input (the example takes the recommended
+    way), Cuts takes the same Models node as the upscale (it gives the detector's file), and Cuts
+    is at its defaults (the detector at the command line's threshold)."""
     workflow = load("clip")
     (upscale,) = of_type(workflow, "seedvr2xUpscaleVideo")
     (cuts,) = of_type(workflow, "seedvr2xCuts")
     (components,) = of_type(workflow, "GetVideoComponents")
     assert source(workflow, cuts, "images") is components
+    (models,) = of_type(workflow, "seedvr2xModels")
+    assert source(workflow, cuts, "models") is models
+    assert source(workflow, upscale, "models") is models
     assert source(workflow, upscale, "cuts") is cuts
     assert source(workflow, upscale, "images") is components
     assert cuts["order"] < upscale["order"]

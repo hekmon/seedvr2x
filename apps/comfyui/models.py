@@ -633,8 +633,8 @@ def _prepare(
     """The model files found and checked as the server checks them (service.check_files): the
     directory or Hugging Face's cache, pulled at the pinned revision where missing, their headers
     checked, each pinned file's size checked and its SHA-256 left to the load. The detector is not
-    needed. A refusal is worded for the nodes (words.refusal). The bytes of a download are told to
-    `preparing`, which shows them on the node."""
+    needed here (the Cuts node loads it). A refusal is worded for the nodes (words.refusal). The
+    bytes of a download are told to `preparing`, which shows them on the node."""
     try:
         if handle.directory is None:
             # The Models node fetched what was missing when it ran, and ComfyUI keeps its output
@@ -684,38 +684,55 @@ def model_folder(value: str | None, node: str = words.MODELS) -> str:
     return text
 
 
+def detector_folder(handle: Handle) -> Path | None:
+    """The folder the shot detector's file is read from: the handle's model folder where it holds
+    the file under its name, else None, Hugging Face's cache. The one place that decides it (the
+    Models node provides the file and the Cuts node loads it by this), because a folder is never
+    written into: where it lacks the file, the cache's is used and fetched there when missing."""
+    folder = handle.directory
+    if folder is not None and (folder / pull.DETECTOR).is_file():
+        return folder
+    return None
+
+
 def said_where(folder: Path | None, names: tuple[str, ...], downloaded: set[str]) -> None:
     """One INFO line for each of the model files, where it is and how large: a file of the cache
-    by its pin's size (the cache holds nothing else under seedvr2x's names), a file of a folder by
-    its own (one of another size is refused by its pin when the upscale node checks it): the
-    cache's directory, which HF_HOME moves, or the model folder `folder`."""
+    by its pin's size (the cache holds nothing else under seedvr2x's names), a file of the model
+    folder `folder` by its own (one of another size is refused by its pin when the upscale node
+    checks it): the cache's directory, which HF_HOME moves, or the folder. A file the folder lacks
+    is the cache's (the shot detector's, detector_folder)."""
     for name in names:
         pin = pull.PINNED.get(name)
-        if folder is not None:
-            path = folder / name
-            size = path.stat().st_size if path.is_file() else 0
-        else:
-            size = 0 if pin is None else pin.size
-        if folder is not None:
+        if folder is not None and (folder / name).is_file():
+            size = (folder / name).stat().st_size
             where = f"in the model folder: {folder}"
         else:
+            size = 0 if pin is None else pin.size
             how = "downloaded into" if name in downloaded else "in"
             where = f"{how} Hugging Face's cache: {pull.cache()}; HF_HOME moves it"
         logger.info("%s, %s, %s", plans.short_label(name), plans.size_text(size), where)
 
 
 def provide(handle: Handle, show: Callable[[str], None]) -> None:
-    """The files the Models node's choice needs, there when it has run: with a model folder, the
-    DiT's file and the VAE's present in it, nothing downloaded and nothing read; without, what
-    Hugging Face's cache lacks of them downloaded into it (the bytes on a bar of the node's own,
-    its lines told to `show`; ComfyUI's Cancel honoured as the upscale nodes' downloads
-    are, progress.Preparing). Where each is is said in the console. The files' headers and pins
-    are checked by the upscale node, which reads them (`_prepare`). A refusal is worded for the
-    nodes (words.refusal), the Models node's."""
+    """The files the Models node's choice needs, there when it has run: the DiT's, the VAE's and
+    the shot detector's. With a model folder, the DiT's file and the VAE's present in it, nothing
+    read; without, what Hugging Face's cache lacks of them downloaded into it. The detector's is
+    the folder's where it has it, else Hugging Face's cache's, downloaded there when missing
+    (detector_folder). The bytes on a bar of the node's own, the downloads' sizes all known from
+    the first (`expected`), its lines told to `show`; ComfyUI's Cancel honoured as the upscale
+    nodes' downloads are (progress.Preparing). Where each is is said in the console. The files'
+    headers and pins are checked by the nodes that read them (`_prepare`, the Cuts node). A
+    refusal is worded for the nodes (words.refusal), the Models node's.
+
+    The detector's file, which seedvr2x Cuts alone reads, holds no other node up: where it can't
+    be had (offline, the Hub out of reach, no room), the node says so at WARNING and gives its
+    handle, and Cuts fetches it when it runs (review M2 of impl-nodes-6: an offline folder of the
+    DiT and the VAE, which ran Upscale Image before, was refused for it)."""
     names = (handle.dit, plans.VAE_FILE)
-    downloaded: set[str] = set()
+    detector = pull.DETECTOR
+    folder = handle.directory
+    absent: set[str] = set()
     try:
-        folder = handle.directory
         if folder is not None:
             missing: list[ModelError] = [
                 ModelMissing(f"{folder / name}: {weights.MISSING}", file=name)
@@ -726,19 +743,34 @@ def provide(handle: Handle, show: Callable[[str], None]) -> None:
                 raise missing[0] if len(missing) == 1 else ModelsRefused(missing)
         else:
             absent = {name for name in names if pull.cached(name) is None}
-            downloading = Preparing(
-                show, plans.file_label, expected={name: pull.PINNED[name].size for name in absent}
-            )
+        fetching = detector_folder(handle) is None and pull.cached(detector) is None
+        sizes = {name: pull.PINNED[name].size for name in absent}
+        if fetching:
+            sizes[detector] = pull.PINNED[detector].size
+        downloading = Preparing(show, plans.file_label, expected=sizes)
+        if folder is None:
             pull.resolve(
                 None, handle.dit, plans.VAE_FILE, detector=False, progress=downloading.download
             )
             # A Cancel pressed during a download reported from another thread is still pending:
             # honoured here, on the node's own thread (progress.Preparing).
             management.throw_exception_if_processing_interrupted()
-            downloaded = absent
     except Refusal as error:
-        raise words.refusal(error, model_dir=handle.directory is not None) from error
-    said_where(handle.directory, names, downloaded)
+        raise words.refusal(error, model_dir=folder is not None) from error
+    there = [*names, detector]
+    if fetching:
+        try:
+            pull.fetch({detector: pull.PINNED[detector]}, progress=downloading.download)
+            management.throw_exception_if_processing_interrupted()
+            absent.add(detector)
+        except Refusal as error:
+            there.remove(detector)
+            logger.warning(
+                "the shot detector's file, which seedvr2x Cuts reads, was not downloaded, and Cuts"
+                " downloads it when it runs: %s",
+                words.refusal(error, model_dir=folder is not None),
+            )
+    said_where(folder, tuple(there), absent)
 
 
 def _attention(machine: Machine, requested: str | None) -> str:

@@ -2,7 +2,7 @@
   "id": "3abe2710-6955-509b-a2f1-8cc1e4c90e86",
   "revision": 0,
   "last_node_id": 9,
-  "last_link_id": 11,
+  "last_link_id": 12,
   "nodes": [
     {
       "id": 1,
@@ -31,7 +31,8 @@
           "name": "models",
           "type": "SEEDVR2X_MODELS",
           "links": [
-            1
+            1,
+            12
           ]
         }
       ],
@@ -156,14 +157,15 @@
           "link": 4
         },
         {
-          "name": "cuts",
-          "type": "SEEDVR2X_CUTS",
-          "link": 11
-        },
-        {
           "name": "models",
           "type": "SEEDVR2X_MODELS",
           "link": 1
+        },
+        {
+          "name": "cuts",
+          "type": "SEEDVR2X_CUTS",
+          "shape": 7,
+          "link": 11
         },
         {
           "name": "window",
@@ -233,10 +235,9 @@
           "link": 10
         },
         {
-          "name": "model_dir",
-          "type": "STRING",
-          "shape": 7,
-          "link": null
+          "name": "models",
+          "type": "SEEDVR2X_MODELS",
+          "link": 12
         }
       ],
       "outputs": [
@@ -252,7 +253,6 @@
         "Node name for S&R": "seedvr2xCuts"
       },
       "widgets_values": [
-        "detect",
         0.3
       ]
     },
@@ -355,7 +355,7 @@
       1,
       0,
       5,
-      2,
+      1,
       "SEEDVR2X_MODELS"
     ],
     [
@@ -419,8 +419,16 @@
       9,
       0,
       5,
-      1,
+      2,
       "SEEDVR2X_CUTS"
+    ],
+    [
+      12,
+      1,
+      0,
+      9,
+      1,
+      "SEEDVR2X_MODELS"
     ]
   ],
   "groups": [

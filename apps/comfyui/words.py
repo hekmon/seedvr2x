@@ -642,7 +642,3 @@ def seed_past_the_cuts(seed: int, start: int, highest: int) -> Refused:
 
 def cuts_not_a_list() -> Refused:
     return Refused(f"seedvr2x Upscale Video takes the cuts output of {CUTS}")
-
-
-def detector_missing(name: str) -> Refused:
-    return Refused(_not_in_folder(name, CUTS))

@@ -368,8 +368,8 @@ def upscale_video(
 ) -> tuple[Any, str]:
     """seedvr2x Upscale Video run as ComfyUI runs it: (the frames, the plan's text as the console
     had it). `cuts`: the
-    cut list seedvr2x Cuts gives, one shot of the whole clip by default; `quality`: the widget's
-    value (ComfyUI gives every widget's, the default standard)."""
+    cut list seedvr2x Cuts gives, unwired by default (one shot of the whole clip); `quality`: the
+    widget's value (ComfyUI gives every widget's, the default standard)."""
     from comfyui import nodes
 
     with nodes_console() as said:
@@ -377,11 +377,12 @@ def upscale_video(
             nodes.UpscaleVideo,
             unique_id,
             images=images,
-            cuts=(Shot(0, len(images)),) if cuts is None else cuts,
             models=handle,
             resolution=resolution,
             plan_only=plan_only,
             quality=quality,
+            # An unwired optional input is not given (the executor leaves it out).
+            **({} if cuts is None else {"cuts": cuts}),
             **inputs(settings, video=True),
         )
     return out[0], plan_of(said)

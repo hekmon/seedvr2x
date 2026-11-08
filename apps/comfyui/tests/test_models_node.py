@@ -1,8 +1,10 @@
 """seedvr2x Models as the user sees it (the user, 2026-11-08): the model folder an optional input
 (stripped of quotes and spaces, an empty value the cache, a value that is no folder refused), the
-downloads on the node's own bar with its one short status line, nothing downloaded from a folder
-and a file missing there refused at this node, the files' places said in ComfyUI's console, and
-the upscale node downloading again a file the cache has lost since."""
+downloads (the shot detector's file with the DiT's and the VAE's) on the node's own bar with its
+lines, nothing downloaded for the DiT and the VAE from a folder and a file
+missing there refused at this node, the detector's file the folder's or the cache's, the files'
+places said in ComfyUI's console, and the upscale node downloading again a file the cache has
+lost since."""
 
 import logging
 import threading
@@ -26,7 +28,8 @@ INT8 = "seedvr2x_ema_7b_sharp_int8_convrot.safetensors"
 INT8_LABEL = plans.DIT_LABELS[INT8]
 VAE = plans.VAE_FILE
 CACHE = Path("/the/cache")
-SIZES = (pull.PINNED[INT8].size, pull.PINNED[VAE].size)
+DETECTOR = pull.DETECTOR
+SIZES = (pull.PINNED[INT8].size, pull.PINNED[VAE].size, pull.PINNED[DETECTOR].size)
 
 
 def unprefixed(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -63,13 +66,16 @@ class Cache:
         monkeypatch.setattr(pull, "cache", lambda: CACHE)
         monkeypatch.setattr(pull, "cached", lambda name: CACHE / name if name in self.has else None)
         monkeypatch.setattr(pull, "resolve", self.resolve)
+        monkeypatch.setattr(pull, "fetch", self.fetch)
+        self.fetched: list[tuple[str, ...]] = []
 
     def resolve(
         self, model_dir: Path | None, dit: str, vae: str, detector: bool = False, **options: Any
     ) -> ModelFiles:
         self.asked.append((model_dir, dit, vae, detector))
         tell = options["progress"]
-        missing = [name for name in (dit, vae) if name not in self.has]
+        wanted = (dit, vae, DETECTOR) if detector else (dit, vae)
+        missing = [name for name in wanted if name not in self.has]
         for name in missing:
             tell(name, 0, pull.PINNED[name].size)
         for step in self.steps:
@@ -82,6 +88,16 @@ class Cache:
             ModelFile(dit, CACHE / dit), ModelFile(vae, CACHE / vae), CACHE, pull.Hashes()
         )
 
+    def fetch(self, pins: Any, download: Any = None, progress: Any = None) -> dict[str, Path]:
+        """pull.fetch: what the folder's Models node asks for the detector alone."""
+        self.fetched.append(tuple(pins))
+        for name in pins:
+            if name not in self.has:
+                progress(name, 0, pull.PINNED[name].size)
+                progress(name, pull.PINNED[name].size, pull.PINNED[name].size)
+                self.has.add(name)
+        return {name: CACHE / name for name in pins}
+
 
 def test_the_missing_files_are_downloaded_on_a_bar_of_the_nodes_with_their_time_under_them(
     monkeypatch: pytest.MonkeyPatch,
@@ -90,8 +106,10 @@ def test_the_missing_files_are_downloaded_on_a_bar_of_the_nodes_with_their_time_
     cache.steps = [3_100_000_000, 20_000_000_000]
     found = run_models()
     assert found == models.Handle(INT8, "", "on")
-    assert cache.asked == [(None, INT8, VAE, False)], "the DiT and the VAE, never the detector"
-    # One bar, in bytes, of both downloads together, made at the first byte, ending full.
+    # The DiT's and the VAE's in one resolve, then the shot detector's on its own (its failure
+    # holds no other node up: test_a_detector_that_cant_be_had_is_said_and_the_handle_given).
+    assert cache.asked == [(None, INT8, VAE, False)] and cache.fetched == [(DETECTOR,)]
+    # One bar, in bytes, of the three downloads together, made at the first byte, ending full.
     (bar,) = ProgressBar.created
     total = sum(SIZES)
     assert set(bar.totals) == {total} and bar.updates[-1] == total
@@ -102,6 +120,8 @@ def test_the_missing_files_are_downloaded_on_a_bar_of_the_nodes_with_their_time_
     # forms); one line at the end.
     assert all(text.count("\n") == 1 for text in texts[:-1]), texts
     assert all("seedvr2x" not in text for text in texts)
+    # The total moved by the detector's 30.5 MB: 8.8 GB of the two files, 8.9 with it.
+    assert total - sum(SIZES[:2]) == 30_482_632 and f"{total / 1e9:.1f}" == "8.9"
     assert (
         texts[0] == f"downloading 0.0/{total / 1e9:.1f} GB\n0 s elapsed \u00b7 estimating time left"
     )
@@ -112,7 +132,7 @@ def test_the_missing_files_are_downloaded_on_a_bar_of_the_nodes_with_their_time_
 def test_the_end_line_says_whether_the_model_is_kept_by_the_keeping_it_comes_to(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    Cache(monkeypatch, has=(INT8, VAE))
+    Cache(monkeypatch, has=(INT8, VAE, DETECTOR))
     run_models(keep="on", unique_id="1")
     run_models(keep="off", unique_id="2")
     assert node_texts("1") == ["Sharp 7B int8 · kept in RAM"]
@@ -138,23 +158,30 @@ def test_the_console_says_where_each_file_is_and_whether_it_was_downloaded(
     here = f"in Hugging Face's cache: {CACHE}; HF_HOME moves it"
     Cache(monkeypatch, has=(INT8,))
     run_models()
-    # The DiT was there, the VAE is fetched; the sizes are the pins'.
+    # The DiT was there, the VAE and the detector are fetched; the sizes are the pins'.
     assert f"Sharp 7B int8, 8.3 GB, {here}" in unprefixed(caplog)
     assert f"VAE, 0.5 GB, downloaded into Hugging Face's cache: {CACHE}; HF_HOME moves it" in (
         unprefixed(caplog)
     )
-    # Said each time the node runs, found now.
+    assert (
+        f"shot detector, 30.5 MB, downloaded into Hugging Face's cache: {CACHE}; HF_HOME moves it"
+        in unprefixed(caplog)
+    )
+    # Said each time the node runs, found now, in the order DiT, VAE, shot detector.
     caplog.clear()
     run_models()
     assert f"Sharp 7B int8, 8.3 GB, {here}" in unprefixed(caplog)
     assert f"VAE, 0.5 GB, {here}" in unprefixed(caplog)
+    assert f"shot detector, 30.5 MB, {here}" in unprefixed(caplog)
+    where = [line for line in unprefixed(caplog) if ", in Hugging Face's cache" in line]
+    assert [line.split(",")[0] for line in where] == ["Sharp 7B int8", "VAE", "shot detector"]
     assert not any("downloaded" in line for line in unprefixed(caplog))
     assert all(
         line.startswith(console.PREFIX) and "seedvr2x:" not in line for line in caplog.messages
     )
 
 
-def test_with_a_folder_nothing_is_downloaded_and_the_console_names_it(
+def test_with_a_folder_the_dit_and_the_vae_are_not_downloaded_and_the_console_names_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     def never(*args: object, **kwargs: object) -> None:
@@ -163,23 +190,98 @@ def test_with_a_folder_nothing_is_downloaded_and_the_console_names_it(
     monkeypatch.setattr(pull, "fetch", never)
     monkeypatch.setattr(pull, "resolve", never)
     caplog.set_level(logging.INFO, logger="seedvr2x_comfyui")
-    for name in (INT8, VAE):
+    for name in (INT8, VAE, DETECTOR):
         (tmp_path / name).write_bytes(b"x")
     found = run_models(model_dir=str(tmp_path))
     assert found == models.Handle(INT8, str(tmp_path), "on")
-    # A folder's file by its own size, not its pin's (refused by the pin when it is read).
+    # A folder's file by its own size, not its pin's (refused by the pin when it is read); the
+    # detector's the folder's where the folder has it.
     one = plans.size_text(1)
-    assert f"Sharp 7B int8, {one}, in the model folder: {tmp_path}" in unprefixed(caplog)
-    assert f"VAE, {one}, in the model folder: {tmp_path}" in unprefixed(caplog)
+    lines = unprefixed(caplog)
+    assert f"Sharp 7B int8, {one}, in the model folder: {tmp_path}" in lines
+    assert f"VAE, {one}, in the model folder: {tmp_path}" in lines
+    assert f"shot detector, {one}, in the model folder: {tmp_path}" in lines
     assert not ProgressBar.created
     assert node_texts("4") == ["Sharp 7B int8 · kept in RAM"]
+
+
+@pytest.mark.parametrize("folder", [False, True])
+def test_a_detector_that_cant_be_had_is_said_and_the_handle_given(
+    folder: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Offline, the detector's file in neither the folder nor the cache (review M2 of impl-nodes-6):
+    # the DiT and the VAE are there, and a picture needs nothing else, so the node gives its
+    # handle; Cuts fetches the file when it runs, or refuses in Models' words.
+    for name in (INT8, VAE):
+        (tmp_path / name).write_bytes(b"x")
+    cache = Cache(monkeypatch, has=(INT8, VAE))
+
+    def offline(pins: Any, download: Any = None, progress: Any = None) -> Any:
+        cache.fetched.append(tuple(pins))
+        raise ModelUnreachable(
+            "transnetv2.safetensors: not in the cache, and offline", file=DETECTOR
+        )
+
+    monkeypatch.setattr(pull, "fetch", offline)
+    caplog.set_level(logging.INFO, logger="seedvr2x_comfyui")
+    found = run_models(model_dir=str(tmp_path) if folder else None)
+    assert found.dit == INT8 and cache.fetched == [(DETECTOR,)]
+    lines = unprefixed(caplog)
+    (warned,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert (
+        warned.getMessage()
+        .removeprefix(console.PREFIX)
+        .startswith(
+            "the shot detector's file, which seedvr2x Cuts reads, was not downloaded, and Cuts"
+            " downloads it when it runs: transnetv2.safetensors: not in the cache, and offline"
+        )
+    )
+    # Its place is said for the two that are there, none for it; the node's end line as ever.
+    assert not any(line.startswith("shot detector, ") for line in lines)
+    assert any(line.startswith("Sharp 7B int8, ") for line in lines)
+    assert node_texts("4")[-1] == "Sharp 7B int8 · kept in RAM"
+
+
+def test_a_folder_without_the_detector_takes_it_from_the_cache_fetched_there_when_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    for name in (INT8, VAE):
+        (tmp_path / name).write_bytes(b"x")
+    cache = Cache(monkeypatch)
+    monkeypatch.setattr(pull, "resolve", lambda *args, **kwargs: pytest.fail("resolved"))
+    caplog.set_level(logging.INFO, logger="seedvr2x_comfyui")
+    run_models(model_dir=str(tmp_path))
+    # Missing from the cache too: fetched there, on the node's bar, the folder left as it was.
+    assert cache.fetched == [(DETECTOR,)]
+    (bar,) = ProgressBar.created
+    assert set(bar.totals) == {SIZES[2]} and bar.updates[-1] == SIZES[2]
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted([INT8, VAE])
+    shown = f"{plans.size_text(1)}, in the model folder: {tmp_path}"
+    lines = unprefixed(caplog)
+    assert f"Sharp 7B int8, {shown}" in lines and f"VAE, {shown}" in lines
+    assert (
+        f"shot detector, 30.5 MB, downloaded into Hugging Face's cache: {CACHE}; HF_HOME moves it"
+        in lines
+    )
+    # Found in the cache: nothing fetched, said as in the cache.
+    caplog.clear()
+    ProgressBar.created.clear()
+    cache.fetched.clear()
+    run_models(model_dir=str(tmp_path))
+    assert cache.fetched == [] and not ProgressBar.created
+    assert (
+        f"shot detector, 30.5 MB, in Hugging Face's cache: {CACHE}; HF_HOME moves it"
+        in unprefixed(caplog)
+    )
 
 
 def test_a_file_missing_from_the_folder_is_refused_at_this_node_in_the_nodes_words(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(pull, "resolve", lambda *args, **kwargs: pytest.fail("downloaded"))
+    monkeypatch.setattr(pull, "fetch", lambda *args, **kwargs: pytest.fail("downloaded"))
     (tmp_path / INT8).write_bytes(b"x")
+    (tmp_path / DETECTOR).write_bytes(b"x")
     with pytest.raises(words.Refused) as refused:
         run_models(model_dir=str(tmp_path))
     text = str(refused.value)
@@ -191,7 +293,7 @@ def test_a_file_missing_from_the_folder_is_refused_at_this_node_in_the_nodes_wor
     with pytest.raises(words.Refused) as refused:
         run_models(model_dir=str(tmp_path))
     lines = str(refused.value).splitlines()
-    assert [line.split(" ")[0] for line in lines] == [INT8, VAE]
+    assert [line.split(" ")[0] for line in lines] == [INT8, VAE], "the detector is no part of it"
     # Nothing was said on the node as if it had succeeded.
     assert not any("kept in RAM" in text for text in node_texts("4"))
 
@@ -309,7 +411,7 @@ def test_the_downloading_line_is_in_the_totals_unit() -> None:
     downloading.download(INT8, 0, SIZES[0])
     downloading.download(VAE, 0, SIZES[1])
     downloading.download(INT8, 4_000_000_000, SIZES[0])
-    assert where(shown[-1]) == f"downloading 4.0/{sum(SIZES) / 1e9:.1f} GB"
+    assert where(shown[-1]) == f"downloading 4.0/{sum(SIZES[:2]) / 1e9:.1f} GB"
 
 
 # ---- The upscale node: a file the cache lost since the Models node ran ---------------------------
@@ -329,6 +431,7 @@ def test_a_file_gone_from_the_cache_since_is_downloaded_again_by_the_upscale_nod
         cache.asked.append((model_dir, dit, vae, False))
         fetched.extend(name for name in (dit, vae) if name not in cache.has)
         options["progress"](vae, 0, pull.PINNED[vae].size)
+        assert options["detector"] is False, "the upscale nodes need no detector"
         return ModelFiles(
             ModelFile(dit, tmp_path / dit), ModelFile(vae, tmp_path / vae), CACHE, pull.Hashes()
         )

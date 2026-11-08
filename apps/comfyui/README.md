@@ -13,19 +13,19 @@ before any model loads.
 
 ## The nodes
 
-- **seedvr2x Models** chooses the model file by name, with its size and its error per weight, as
-  the [model card](../../models/hf/README.md) gives it (how far its stored weights are from
-  ByteDance's original, the median over the 7B's 288 large matrices): `Sharp 7B, float16
-  (16.5 GB, 0.02%)` (the default), `Sharp 7B, int8 (8.3 GB, 0.86%)`, `Sharp 7B, dynamic GGUF
-  (4.8 GB, 7.55%)`, and the regular 7B in each. It downloads what Hugging Face's cache lacks of the
-  model file and the VAE when it runs, once ([Model files](#model-files)), and says on the node
-  the file chosen and whether it is kept in RAM. It also chooses whether the model stays in RAM
-  between runs: `auto`, `on` or `off` ([Memory](#memory)). Its optional input `model folder`,
-  unconnected by default, reads the files from a folder you give instead of the cache. Nothing is
-  loaded here: the first upscale run loads.
+- **seedvr2x Models** chooses the model file by name, with its size and its error per weight, as the
+  [model card](../../models/hf/README.md) gives it (how far its stored weights are from ByteDance's
+  original, the median over the 7B's 288 large matrices): `Sharp 7B, float16 (16.5 GB, 0.02%)` (the
+  default), `Sharp 7B, int8 (8.3 GB, 0.86%)`, `Sharp 7B, dynamic GGUF (4.8 GB, 7.55%)`, and the
+  regular 7B in each. It downloads what Hugging Face's cache lacks of the model file, the VAE and
+  the shot detector's file (for seedvr2x Cuts) when it runs, once ([Model files](#model-files)), and
+  says on the node the file chosen and whether it is kept in RAM. It also chooses whether the model
+  stays in RAM between runs: `auto`, `on` or `off` ([Memory](#memory)). Its optional input `model
+  folder`, unconnected by default, reads the files from a folder you give instead of the cache.
+  Nothing is loaded here: the first upscale run loads.
 - **seedvr2x Cuts** finds where a clip changes scene ([Cuts and shots](#cuts-and-shots)): it takes
-  the clip's frames, and gives the cut list that Upscale Video needs; the cuts are said in
-  ComfyUI's console.
+  the clip's frames and the output of seedvr2x Models (which provides the shot detector's file),
+  and gives the cut list that Upscale Video takes; the cuts are said in ComfyUI's console.
 - **seedvr2x Upscale Image** upscales each picture of a batch on its own, to the output's short
   side given by `resolution` (1080 by default).
 - **seedvr2x Upscale Video** upscales a clip's frames shot by shot, each shot in sliding windows
@@ -34,8 +34,8 @@ before any model loads.
   library's `seedvr2x/plan settings`, set one of the plan's numbers yourself
   ([Setting a value yourself](#setting-a-value-yourself)). The other three are in `seedvr2x`.
 
-Each upscale node takes `images` first (Upscale Video then takes `cuts`), then `models`, and gives
-`images`. Its settings are widgets, each at its default:
+Each upscale node takes `images` first, then `models`, and gives `images`. Its settings are widgets,
+each at its default:
 
 | Widget | Default | Notes |
 | --- | --- | --- |
@@ -50,30 +50,31 @@ The numbers the plan makes are optional inputs: [Setting a value yourself](#sett
 
 Each upscale node makes its plan at run time, where the input's size and the card are known, and
 says it whole in ComfyUI's console; the node itself shows two short lines, where the run is and
-its time ([While it runs](#while-it-runs)). The nodes have no text output: the plan and the cuts are read in
-the console. The plan is made for the card as it would be without ComfyUI's own models.
+its time ([While it runs](#while-it-runs)). The nodes have no text output: the plan and the cuts are
+read in the console. The plan is made for the card as it would be without ComfyUI's own models.
 
 ## Cuts and shots
 
 The model works on a stretch of frames at once, in windows that overlap, and a window that holds a
-cut blends the two scenes. So Upscale Video takes the clip's **cut list**, a required input that
-only seedvr2x Cuts gives, and upscales each shot of it on its own: no window crosses a cut. The
-list is a fact of the clip (the same images go to Cuts and to Upscale Video), not a setting, and the
-plan is made once for the clip, the longest shot's windows deciding it. Each shot is seeded as the
-command line seeds a shot: the `seed` plus the shot's first frame, counted from 0. The plan names
-the shots one by one: where each is, and its windows.
+cut blends the two scenes. So Upscale Video takes the clip's **cut list** from seedvr2x Cuts and
+upscales each shot of it on its own: no window crosses a cut. The `cuts` input is optional but
+recommended: unwired, the clip is upscaled as one shot (the console says so), and a clip with cuts
+would have frames mixed across them. The list is a fact of the clip (the same images go to Cuts and
+to Upscale Video), not a setting, and the plan is made once for the clip, the longest shot's
+windows deciding it. Each shot is seeded as the command line seeds a shot: the `seed` plus the
+shot's first frame, counted from 0. The plan names the shots one by one: where each is, and its
+windows.
 
-seedvr2x Cuts has two modes:
-
-- `detect` (the default) runs seedvr2x's shot detector, TransNetV2 (a file of about 30 MB,
-  downloaded once from Hugging Face into its cache, like the model files), on the clip's frames,
-  shrunk to its small input in torch, with no ffmpeg. It runs on the card ComfyUI uses while the node
-  runs, and on the processor where there is none, and frees its memory after. `threshold` is how
-  sure the detector must be that a frame starts a new shot: 0.3 by default, the command line's.
-  A cut found for nothing only gives a shot its own windows, so the default errs toward cutting.
-  Its optional input `model folder` is where to read the detector's file from instead of the
-  cache, as in seedvr2x Models.
-- `one shot` runs no detector: the whole clip is one shot, for a clip you know has no cut.
+seedvr2x Cuts runs seedvr2x's shot detector, TransNetV2 (a file of about 30 MB), on the clip's
+frames, shrunk to its small input in torch, with no ffmpeg. The file is seedvr2x Models': Models
+fetches it into Hugging Face's cache with the other files, or reads it from its `model folder`
+where the folder has it, under the name `transnetv2.safetensors` (a folder without it takes it from
+the cache, fetched there when missing; nothing is written into your folder). Cuts takes Models'
+output, so a clip that needs cuts wires Models into both. The detector runs on the card ComfyUI
+uses while the node runs, and on the processor where there is none, and frees its memory after.
+`threshold` is how sure the detector must be that a frame starts a new shot: 0.3 by default, the
+command line's. A cut found for nothing only gives a shot its own windows, so the default errs
+toward cutting.
 
 The console lists each cut by the frame its shot starts at, counted from 0, with the detector's
 probability, and the **possible cuts**: scenes it found less sure than the threshold, which are not
@@ -131,7 +132,7 @@ The node shows how far it has got, in what ComfyUI gives a node:
   | the GPU does not answer | the line it was on | `GPU not answering for 3 min` |
   | plan only | `plan: window 41 frames · decode 1088 px · encode 1024 px`, `plan: encode 1024 px · decode 1088 px` | `whole plan in the console` |
   | finished | `480 frames in 4 min 32 s`, `8 pictures in 41 s` | |
-  | seedvr2x Cuts | `scanning 64/120 frames`, `2 shots · 1 possible cut below 0.30`, `one shot: 120 frames` | |
+  | seedvr2x Cuts | `scanning 64/120 frames`, `2 shots · 1 possible cut below 0.30`, `1 shot · no possible cut` | |
 
   A clip of one shot has no shot part, and a run part is there only at enhanced and maximum. The
   time is rough: the time so far in seconds under a minute, then in whole minutes (whole hours
@@ -168,14 +169,15 @@ The node shows how far it has got, in what ComfyUI gives a node:
 - **The preview** is the newest frame decoded, as ComfyUI's samplers show their steps, once for each
   few frames of a clip and once for each picture of a batch, at ComfyUI's preview size
   (`--preview-size`, 512 by default).
-- **Before the upscale**, the downloads are seedvr2x Models': a bar of its own, in bytes, and on
-  the node the bytes ("downloading 3.1/8.3 GB") over the time left at their speed, then one line,
-  the file chosen and whether it is kept ("Sharp 7B int8 · kept in RAM"); ComfyUI keeps the node's output, so this happens once for as
-  long as the node's inputs stay as they are. The upscale node's bar starts with the reading of
-  the files into memory, in bytes ("reading 2.0/8.8 GB"), and again at 0 for the upscale; if a
-  file has gone from the cache since seedvr2x Models ran, the upscale node says so in ComfyUI's
-  console and downloads it again on that bar. seedvr2x Cuts shows the frames it has scanned, and
-  downloads its detector's file on its own bar.
+- **Before the upscale**, the downloads are seedvr2x Models': a bar of its own, in bytes, and on the
+  node the bytes ("downloading 3.1/8.3 GB") over the time left at their speed, then one line, the
+  file chosen and whether it is kept ("Sharp 7B int8 · kept in RAM"); ComfyUI keeps the node's
+  output, so this happens once for as long as the node's inputs stay as they are. The upscale node's
+  bar starts with the reading of the files into memory, in bytes ("reading 2.0/8.8 GB"), and again
+  at 0 for the upscale; if a file has gone from the cache since seedvr2x Models ran, the upscale
+  node says so in ComfyUI's console and downloads it again on that bar. seedvr2x Cuts shows the
+  frames it has scanned, and downloads its detector's file on its own bar if the cache lacks it
+  (lost since Models ran, or never downloaded).
 - **Cancel** stops the run after the tile or the window being made, or the piece of a file being
   read, and frees the card. Hugging Face's fast downloader (Xet) reports from a thread of its own,
   where a Cancel cannot stop it: the node leaves the pressed Cancel as it is and honours it as soon
@@ -200,7 +202,8 @@ pip install "diffusers>=0.42" omegaconf rotary-embedding-torch
   installs hold; diffusers past the command line's 0.40 is not yet compared with it bit for bit.
 - The two example workflows, `workflows/picture.json` and `workflows/clip.json`, load by dragging
   them into ComfyUI. Each has seedvr2x Models connected, every widget at its default and every
-  optional input unconnected; the clip's has seedvr2x Cuts between Load Video and Upscale Video.
+  optional input unconnected, but for the clip's `cuts`: it has seedvr2x Cuts between Load Video
+  and Upscale Video, with Models wired into Cuts as well as into Upscale Video.
 
 ## Model files
 
@@ -212,14 +215,16 @@ every seedvr2x app, the command line and the image server included ([the command
 README](../seedvr2x/README.md#model-files)).
 
 - **What they take.** The model file chosen: 16.5 GB for float16, 8.3 GB for int8, 4.8 GB for the
-  dynamic GGUF; the VAE, 0.5 GB; seedvr2x Cuts' shot detector, 30.5 MB.
+  dynamic GGUF; the VAE, 0.5 GB; the shot detector (for seedvr2x Cuts), 30.5 MB.
 - **Where they are.** On Windows `%USERPROFILE%\.cache\huggingface\hub`, on Linux
   `~/.cache/huggingface/hub`; or `hub` under the directory `HF_HOME` names, or the directory
   `HF_HUB_CACHE` names. ComfyUI's console says where each file is when seedvr2x Models runs
   ("Sharp 7B int8, 8.3 GB, in Hugging Face's cache: ...").
-- **Downloaded when missing.** seedvr2x Models downloads what the cache lacks of the model file
-  and the VAE when it runs, with its bar and its line, and again only if its inputs change or the
-  cache loses a file. With `HF_HUB_OFFLINE` set nothing is downloaded and the node says so.
+- **Downloaded when missing.** seedvr2x Models downloads what the cache lacks of the model file,
+  the VAE and the shot detector's file when it runs, with its bar and its line, and again only if
+  its inputs change or the cache loses a file. With `HF_HUB_OFFLINE` set nothing is downloaded and
+  the node says so. The shot detector's file holds no other node up: where it can't be downloaded,
+  the console says so and seedvr2x Models goes on, and seedvr2x Cuts tries again when it runs.
 - **Moving the cache.** Set `HF_HOME` before ComfyUI starts, to a folder on a disk with room for
   the files. For ComfyUI Desktop on Windows, in the user environment variables (Settings, System,
   About, Advanced system settings, Environment Variables; or `setx HF_HOME D:\hf` in a terminal),
@@ -231,11 +236,13 @@ README](../seedvr2x/README.md#model-files)).
 - **Using a folder instead.** Connect a string node (ComfyUI's String node, for one) holding the
   folder's path to seedvr2x Models' `model folder` input; quotes around the path (Windows' "Copy as
   path" adds them) and spaces at its ends are taken off, and an empty value is the same as
-  nothing connected. The files are read there by name, nothing downloaded: the VAE,
-  `seedvr2x_ema_vae_fp16.safetensors`, and the model file chosen, under its name in the repository
-  (`seedvr2x_ema_7b_sharp_fp16.safetensors` for the default), the same files and names the command
-  line reads from a folder. A path that is no folder, or a folder lacking one of the files, is
-  refused by the node, saying which.
+  nothing connected. The files are read there by name, the DiT's and the VAE's never downloaded:
+  the VAE, `seedvr2x_ema_vae_fp16.safetensors`, and the model file chosen, under its name in the
+  repository (`seedvr2x_ema_7b_sharp_fp16.safetensors` for the default), the same files and names
+  the command line reads from a folder. A path that is no folder, or a folder lacking the DiT's or
+  the VAE's file, is refused by the node, saying which. The shot detector's file,
+  `transnetv2.safetensors`, is the folder's where it has one; a folder without it takes it from
+  Hugging Face's cache, fetched there when missing, and nothing is written into the folder.
 
 **On Windows.** Without Windows' Developer Mode, huggingface_hub can't make the links its cache is
 built of: it copies the files instead, and says so once in ComfyUI's console, in a warning that

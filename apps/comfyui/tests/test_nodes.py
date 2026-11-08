@@ -662,6 +662,37 @@ def test_a_cut_list_that_is_not_for_these_frames_is_refused(machine: StandIn, tm
     assert machine.loads == []
 
 
+def test_an_unwired_cut_list_is_one_shot_said_once_in_the_console(
+    machine: StandIn, tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The cuts input is optional (the user, 2026-11-08): unwired, the clip is the library's clip
+    of all its frames, bit for bit what a cut list of one shot gives, and the console says why
+    once; wired, nothing of it."""
+    frames = pictures(21)
+    with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui.nodes"):
+        out, _ = upscale_video(handle(tmp_path), plans.Settings(window=5), frames, RESOLUTION, "1")
+        said = [each.removeprefix(console.PREFIX) for each in caplog.messages]
+        wired, _ = run_shots(machine, tmp_path, frames, (Shot(0, 21),), window=5)
+    expected = (
+        "no cut list: the clip is upscaled as one shot (wire seedvr2x Cuts for a clip with"
+        " several shots)"
+    )
+    assert said.count(expected) == 1
+    assert [each.removeprefix(console.PREFIX) for each in caplog.messages].count(expected) == 1
+    made = planned_clip(machine, plans.Settings(window=5), (Shot(0, 21),))
+    alone = clip.upscale(
+        fresh(machine),
+        frames.numpy(),
+        TARGET,
+        42,
+        window=made.window,
+        encode_tiles=made.encode_tiles,
+        decode_tiles=made.decode_tiles,
+        correct=True,
+    )
+    assert out.numpy().tobytes() == alone.tobytes() == wired.numpy().tobytes()
+
+
 def test_a_clip_the_host_cant_hold_is_refused_before_a_model_loads_in_the_nodes_words(
     machine: StandIn, tmp_path
 ) -> None:

@@ -340,16 +340,10 @@ def test_the_cuts_node_shows_the_shots_and_the_possible_cuts_in_one_line() -> No
     assert plans.cuts_line(1, 0, 0.3) == f"1 shot{DOT}no possible cut"
     assert plans.cuts_line(3, 2, 0.3) == f"3 shots{DOT}2 possible cuts below 0.30"
     assert plans.cuts_line(3, 2, 0.05) == f"3 shots{DOT}2 possible cuts below 0.05"
-    assert plans.one_shot_line(120) == "one shot: 120 frames"
     # Whole at any count: one line, never trimmed.
     many = plans.cuts_line(10**8, 10**8, 0.3)
     assert many == f"100000000 shots{DOT}100000000 possible cuts below 0.30"
-    for each in (
-        many,
-        plans.cuts_line(10**9, 10**9, 0.35),
-        plans.cuts_line(10**15, 0, 0.35),
-        plans.one_shot_line(10**30),
-    ):
+    for each in (many, plans.cuts_line(10**9, 10**9, 0.35), plans.cuts_line(10**15, 0, 0.35)):
         one_line(each)
 
 

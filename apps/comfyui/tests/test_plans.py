@@ -90,7 +90,9 @@ def test_the_models_nodes_labels_placeholder_and_tooltips_say_what_they_are() ->
     assert "Not connected: Hugging Face's cache, shared with seedvr2x's command line" in (
         folder.tooltip
     )
-    assert "Nothing is downloaded from a folder" in folder.tooltip
+    # The shot detector's file too: a folder without it takes it from the cache, writes nothing.
+    assert pull.DETECTOR in folder.tooltip and "nothing is written into a folder" in folder.tooltip
+    assert "shot detector" in nodes.Models.GET_SCHEMA().description
     assert "Connect any string node" in folder.tooltip
     # What the folder must hold, by the files' names, every DiT file's name made by its rule.
     assert plans.VAE_FILE in folder.tooltip and plans.DEFAULT_DIT in folder.tooltip
@@ -161,20 +163,28 @@ def test_the_pictures_come_first_then_the_models_then_the_widgets_then_the_plans
         "decode_tile",
         "swap_blocks",
     ]
-    # A clip's cut list is the clip's fact: a required socket, right after its frames.
-    # and the clip's quality, the video's alone (a picture is one frame in a latent of its own),
-    # right after the resolution.
+    # The clip's quality, the video's alone (a picture is one frame in a latent of its own), right
+    # after the resolution; its cut list the first optional socket (the user, 2026-11-08), before
+    # the plan's numbers.
     assert "quality" in video and "quality" not in image
     assert list(video) == [
         "images",
-        "cuts",
-        *list(image)[1:3],
+        "models",
+        "resolution",
         "quality",
         *list(image)[3:7],
+        "cuts",
         "window",
         *list(image)[7:],
     ]
-    assert video["cuts"].io_type == "SEEDVR2X_CUTS" and not video["cuts"].optional
+    assert video["cuts"].io_type == "SEEDVR2X_CUTS" and video["cuts"].optional
+    assert video["cuts"].tooltip == (
+        "Recommended: the shots from seedvr2x Cuts. Unwired, the clip is upscaled as one shot,"
+        " and a clip with cuts would have frames mixed across them."
+    )
+    description = nodes.UpscaleVideo.GET_SCHEMA().description
+    assert "unwired, the clip is upscaled as one shot" in description
+    assert "takes the clip as one shot" not in description
     for node in (nodes.UpscaleImage, nodes.UpscaleVideo):
         spec = schema_inputs(node)
         assert spec["images"].io_type == "IMAGE" and spec["models"].io_type == "SEEDVR2X_MODELS"
@@ -303,9 +313,7 @@ def test_every_input_and_output_has_a_label_and_a_tooltip() -> None:
     for node in (nodes.UpscaleImage, nodes.UpscaleVideo):
         schema = node.GET_SCHEMA()
         names = [each.display_name for each in schema.inputs]
-        assert names[:2] == (
-            ["images", "cuts"] if node is nodes.UpscaleVideo else ["images", "models"]
-        )
+        assert names[:2] == ["images", "models"]
         # The plan is said in ComfyUI's console: no text output.
         assert [(each.id, each.display_name) for each in schema.outputs] == [("images", "images")]
 

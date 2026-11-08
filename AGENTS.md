@@ -85,11 +85,14 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
   __init__.py nodes.py   V3 registration (`comfy_entrypoint`, a ComfyExtension; `io.ComfyNode`,
                          `io.Schema`); the nodes (Models, Cuts, Upscale Image, Upscale Video, and
                          the value nodes Tile, Blocks Swapped and Window Length: Upscale Video
-                         takes the Cuts node's cut list, a required input of its own type, and
+                         takes the Cuts node's cut list, an optional input of its own type (the
+                         first of its optional sockets; unwired, the clip is one shot), and
                          a quality widget: the model's runs over each shot; the settings are the
                          upscale nodes' widgets, the plan's numbers their optional sockets of
-                         seedvr2x's own types, no Tuning node; the Models and Cuts nodes'
-                         model folder an optional STRING input with no widget, `force_input`)
+                         seedvr2x's own types, no Tuning node; the Cuts node takes the Models
+                         node's output, which also provides the shot detector's file, and has
+                         no mode and no folder; the Models node's model folder an optional
+                         STRING input with no widget, `force_input`)
                          and ComfyUI's calls (the bar and the status of two lines it gets from
                          progress.py, Cancel, the plan said in the console, plan only, a
                          refusal's line: `_refusing`); no text outputs (the plan and the cuts are
@@ -1288,7 +1291,8 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   with an opaque alpha a view of the same memory and not a copy, the input said in the
   plan's RAM line and out of the comparison, and the INFO line naming the command line said once
   at import and never by a run; a clip at enhanced and maximum equal to `clip.upscale` at the
-  level shot by shot (the shot of 2 frames with one run of its two), a level that is no option
+  level shot by shot (the shot of 2 frames with one run of its two), an unwired cut list one shot
+  equal to `clip.upscale` of the whole clip with its INFO line once, a level that is no option
   refused at the node's start, the runs writing into the one output array, the bar over the
   runs' units moving forward and ending full, a Cancel between runs (`test_release.py`) freeing
   the card with no later run made; `apps/comfyui/tests/test_progress.py` what the nodes show
@@ -1348,33 +1352,40 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   check and no text; `tests/test_cuts_node.py` seedvr2x Cuts over the untrained detector's
   weights and scripted probabilities (the cut list, and the console's text of the cuts with their
   probabilities and the possible cuts, without a lead; the node's line "scanning 64/120 frames",
-  "2 shots · 1 possible cut below 0.30", "one shot: 120 frames"; no text output; one shot mode
-  running no detector, the threshold, the file found in a folder or
-  fetched by its pin, the detector closed after, the alpha left out, its refusals, its list into
-  Upscale Video, its file's refusals naming seedvr2x Cuts and its own "model folder" input
-  (unwire it for Hugging Face's cache, or wire a folder), sizes with separators; the folder an
-  optional input with `force_input` and no widget, unwired or empty (quotes and spaces taken off)
-  the cache and the empty one said, a value that is no folder refused naming seedvr2x Cuts, the
-  console line of the detector's file with its size and its place, found, downloaded or in the
-  folder); `tests/test_models_node.py` seedvr2x Models as the user sees it: the missing files
-  downloaded on a bar of the node's own in bytes (one bar of both downloads, never back, full at
-  the end) with its bytes over their time and no "seedvr2x" in it ("downloading 3.1/8.8 GB",
-  whole from the first by the pins' sizes, then one line, "Sharp 7B int8 · kept in RAM" or
+  "2 shots · 1 possible cut below 0.30"; no text output; no mode and no folder input, the
+  models handle required and refused if it is none (naming the node), the threshold, the file the
+  handle's folder's where the folder has it, else the cache's fetched by its pin (nothing written
+  into a folder; the fallback from a folder without it said at debug), a file the cache lacks
+  (lost since Models ran, or never had) fetched with the INFO line before it on Cuts' own bar,
+  the detector closed after, the alpha left out, its refusals, its list into
+  Upscale Video, its file's refusals worded for seedvr2x Models' "model folder" input (unwire it
+  for Hugging Face's cache, or wire a folder), sizes with separators);
+  `tests/test_models_node.py` seedvr2x Models as the user sees it: the missing files downloaded
+  on a bar of the node's own in bytes (one bar of the three downloads, the shot detector's 30.5 MB
+  fetched after the DiT's and the VAE's, the total whole from the first, never back, full at the
+  end; a detector that can't be had, offline with a folder or without, said at WARNING and the
+  handle given) with its bytes over their time and no
+  "seedvr2x" in it ("downloading 3.1/8.9 GB", whole from the first by the pins' sizes, then one
+  line, "Sharp 7B int8 · kept in RAM" or
   "· not kept in RAM" by `decide_keeping`; the short label of each DiT file), nothing downloaded
-  with a folder, a file missing from the folder refused at this node (one line a file, in the
-  nodes' words naming the "model folder" input), a value that is no folder refused, quotes, spaces
+  for the DiT and the VAE with a folder, a file missing from the folder refused at this node (one
+  line a file, in the nodes' words naming the "model folder" input; the detector's no part of it),
+  a folder with the detector's file using it and one without taking the cache's, fetched there
+  when missing, the folder left as it was, a value that is no folder refused, quotes, spaces
   and an empty value, the console lines of each file's place and size (`said_where`: in Hugging
-  Face's cache with `HF_HOME` named, downloaded into it, or in the model folder; each line
+  Face's cache with `HF_HOME` named, downloaded into it, or in the model folder; in the order DiT,
+  VAE, shot detector; each line
   `[seedvr2x]` once, no `seedvr2x:` of its own), a download refused when offline worded for this
   node, Cancel
   on the node's thread and from the downloader's (left pending, honoured when the download
   returns, no end line), and the upscale node downloading again a file the cache lost since the
   Models node ran, saying so before it downloads (cache mode only: a folder never asks the cache);
   `tests/test_plans.py`
-  the DiT files' names, the inputs (the pictures first, then the models, the widgets, then the
-  plan's numbers as optional sockets of seedvr2x's own types, no value standing for auto, each
-  type given by its value node alone: Tile, Blocks Swapped and Window Length on the planner's
-  grid of tiles, blocks and windows, the whole image at once, a window set in frames on the
+  the DiT files' names, the inputs (the pictures first, then the models, the widgets, then
+  Upscale Video's optional `cuts`, then the plan's numbers as optional sockets of seedvr2x's own
+  types, no value standing for auto, each type given by its value node alone: Tile, Blocks
+  Swapped and Window Length on the planner's grid of tiles, blocks and windows, the whole image
+  at once, a window set in frames on the
   model's grid and given in latents, a number off the grid refused queued or linked, a value no
   value node gives refused at the upscale node's start; every input and output with a
   label and a tooltip, none in the library's terms; the colour correction a BOOLEAN, split or
@@ -1416,11 +1427,13 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   read again after torch's cache is emptied; `tests/test_workflows.py` the two example workflows
   (`workflows/picture.json`, `clip.json`, ComfyUI's UI format): each parses, every node seedvr2x's
   or a stock one of a table read from v0.44.0, seedvr2x's sockets, outputs and widgets equal to
-  their V3 schemas' in count, order and defaults, every optional input unwired, every link
+  their V3 schemas' in count, order and defaults, every optional input unwired but Upscale Video's
+  `cuts` (optional, recommended by its tooltip, so the clip example wires it), every link
   joining an output to an input of its type, Models wired into the upscale node and no Tuning
   node, no text display (no Preview as Text node, no STRING link, no text output, the counters
-  agreeing with the nodes and links), the clip's Cuts between Load Video and Upscale Video. Smoke in
-  the real ComfyUI, CPU only, by hand: the folder linked into its `custom_nodes`, then
+  agreeing with the nodes and links), the clip's Cuts between Load Video and Upscale Video, with
+  Models wired into it. Smoke in the real ComfyUI, CPU only, by hand: the folder linked into its
+  `custom_nodes`, then
   `CUDA_VISIBLE_DEVICES= python main.py --cpu
   --quick-test-for-ci` in its environment with `PYTHONPATH` at `core/`, which lists the nodes
   among the custom nodes imported with no error, and a script that imports ComfyUI's `nodes`

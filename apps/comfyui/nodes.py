@@ -19,8 +19,9 @@ What the V3 schema changes for a node, read in ComfyUI v0.44.0:
   runs (auto, on, off) and, as an optional input, a model folder (unwired: Hugging Face's cache,
   where what is missing is downloaded here, on a bar of the node's). Gives a light handle
   (models.Handle); no file is read here.
-- seedvr2x Cuts: the shot detector on a clip's frames (or the clip taken as one shot), giving the
-  cut list Upscale Video takes; the cuts and the possible cuts are said in ComfyUI's console.
+- seedvr2x Cuts: the shot detector on a clip's frames, its file the one seedvr2x Models provides,
+  giving the cut list Upscale Video takes (an optional input there, recommended; unwired, the clip
+  is one shot); the cuts and the possible cuts are said in ComfyUI's console.
 - seedvr2x Upscale Image and seedvr2x Upscale Video: the pictures and the models' handle, then
   the settings as widgets (resolution, attention, colour correction, seed, plan only), then the
   numbers the plan makes as optional inputs of seedvr2x's own types (each pass's tile, the blocks
@@ -28,10 +29,10 @@ What the V3 schema changes for a node, read in ComfyUI v0.44.0:
   chooses; wired, the value is taken exactly. No value stands for auto. The plan is made at run
   time, where the input's size and the card are known (models.session), said in ComfyUI's
   console, then the library's pass over the pictures or the frames in memory; a clip's, one pass
-  for each shot of its cut list (a required input of seedvr2x's own type, a clip's fact), the
-  plan made once for the longest shot's windows. With "plan only" the node stops there: the plan
-  is in the console, the node's first line says its main numbers and what follows its pictures
-  is not run.
+  for each shot of its cut list (an optional input of seedvr2x's own type, a clip's fact;
+  unwired, the clip is one shot), the plan made once for the longest shot's windows. With "plan
+  only" the node stops there: the plan is in the console, the node's first line says its main
+  numbers and what follows its pictures is not run.
 
 A node's text box is a status of two lines at most (progress.py), never a log: what a node has to
 say besides goes to ComfyUI's console through the module's logger, and a refusal shows "refused:
@@ -50,7 +51,6 @@ import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from fractions import Fraction
-from pathlib import Path
 from typing import Any, cast, override
 
 import comfy.model_management as management
@@ -113,9 +113,10 @@ class Models(io.ComfyNode):
             category=CATEGORY,
             description=(
                 "Chooses seedvr2x's model file and where the model files are read from, and"
-                " downloads what Hugging Face's cache lacks of them (once, while this node's"
-                " inputs stay as they are). Nothing is loaded here: the upscale nodes load the"
-                " files, check them and fit them to your graphics card."
+                " downloads what Hugging Face's cache lacks of them, the shot detector's file"
+                " (about 30 MB, for seedvr2x Cuts) included (once, while this node's inputs stay"
+                " as they are). Nothing is loaded here: the other nodes load the files, check"
+                " them and fit them to your graphics card."
             ),
             inputs=[
                 io.Combo.Input(
@@ -166,18 +167,20 @@ class Models(io.ComfyNode):
                     f" {plans.DEFAULT_DIT} for {plans.DIT_LABELS[plans.DEFAULT_DIT]};"
                     " _int8_convrot.safetensors or _dyn.gguf in place of _fp16.safetensors for"
                     " the int8 and dynamic GGUF files; no _sharp for the 7B. These are the names"
-                    " seedvr2x's command line reads from a folder too. Connect any string node"
-                    " to it, ComfyUI's String node for one. Nothing is downloaded from a folder."
-                    " Not connected: Hugging Face's cache, shared with seedvr2x's command line,"
-                    " where the files are downloaded the first time they are needed.",
+                    " seedvr2x's command line reads from a folder too; and the shot detector's"
+                    f" file, {pull.DETECTOR}, which a folder without it takes from Hugging Face's"
+                    " cache (fetched there when missing; nothing is written into a folder). Connect"
+                    " any string node to it, ComfyUI's String node for one. Not connected: Hugging"
+                    " Face's cache, shared with seedvr2x's command line, where the files are"
+                    " downloaded the first time they are needed.",
                 ),
             ],
             outputs=[
                 ModelsType.Output(
                     "models",
                     display_name="models",
-                    tooltip="The model file chosen and where it is read from, for seedvr2x's"
-                    " upscale nodes. Nothing is loaded yet.",
+                    tooltip="The model file chosen and where the files are read from, for"
+                    " seedvr2x's upscale nodes and seedvr2x Cuts. Nothing is loaded yet.",
                 )
             ],
             hidden=[io.Hidden.unique_id],
@@ -303,9 +306,9 @@ def _output(array: npt.NDArray[np.float32]) -> torch.Tensor:
     return torch.from_numpy(array)  # pyright: ignore[reportUnknownMemberType]
 
 
-def _checked(handle: models_module.Handle) -> None:
+def _checked(handle: models_module.Handle, node: str = "seedvr2x Upscale") -> None:
     if not isinstance(handle, models_module.Handle):  # pyright: ignore[reportUnnecessaryIsInstance]
-        raise TypeError("seedvr2x Upscale takes the output of seedvr2x Models")
+        raise TypeError(f"{node} takes the output of seedvr2x Models")
 
 
 # ---- The settings an upscale node carries --------------------------------------------------------
@@ -441,12 +444,10 @@ def _resolution_input() -> Any:
     )
 
 
-def _models_input() -> Any:
-    return ModelsType.Input(
-        "models",
-        display_name="models",
-        tooltip="The output of seedvr2x Models: the model file and where it is read from.",
-    )
+def _models_input(
+    tooltip: str = "The output of seedvr2x Models: the model file and where it is read from.",
+) -> Any:
+    return ModelsType.Input("models", display_name="models", tooltip=tooltip)
 
 
 def _settings(**values: Any) -> plans.Settings:
@@ -776,14 +777,14 @@ class UpscaleVideo(io.ComfyNode):
             description=(
                 "Upscales a clip's frames with seedvr2x, each shot of the cut list on its own, in"
                 " overlapping windows that fit your graphics card: no window crosses a cut, so no"
-                " two scenes blend. Connect the cuts output of seedvr2x Cuts, which finds the"
-                " cuts or takes the clip as one shot. The clip is kept whole in your computer's"
-                " RAM, and a run stopped part way starts over from its first frame; for a long"
-                " film use seedvr2x's command line, which resumes. Each time it runs, seedvr2x"
-                " works out how to fit the job on your card: the plan, said shot by shot in"
-                " ComfyUI's console, while the node shows where the run is. The optional numbers"
-                " are the plan's: unconnected, it chooses them; a number connected is used"
-                " exactly, and the plan is built around it."
+                " two scenes blend. The cuts input takes the output of seedvr2x Cuts, which finds"
+                " the cuts (recommended); unwired, the clip is upscaled as one shot. The clip is"
+                " kept whole in your computer's RAM, and a run stopped part way starts over from"
+                " its first frame; for a long film use seedvr2x's command line, which resumes."
+                " Each time it runs, seedvr2x works out how to fit the job on your card: the"
+                " plan, said shot by shot in ComfyUI's console, while the node shows where the"
+                " run is. The optional numbers are the plan's: unconnected, it chooses them; a"
+                " number connected is used exactly, and the plan is built around it."
             ),
             inputs=[
                 io.Image.Input(
@@ -791,18 +792,23 @@ class UpscaleVideo(io.ComfyNode):
                     display_name="images",
                     tooltip="The clip's frames, in order.",
                 ),
-                CutsType.Input(
-                    "cuts",
-                    display_name="cuts",
-                    tooltip="The output of seedvr2x Cuts for these same frames: the shots of the"
-                    " clip, each upscaled on its own.",
-                ),
                 _models_input(),
                 _resolution_input(),
                 _quality_input(),
                 _attention_input(),
                 *_correction_inputs(),
                 _plan_only_input(),
+                # The first optional socket (the user, 2026-11-08): optional because a clip of
+                # one scene needs no detector, recommended because frames mixed across a cut
+                # blend two scenes.
+                CutsType.Input(
+                    "cuts",
+                    optional=True,
+                    display_name="cuts",
+                    tooltip="Recommended: the shots from seedvr2x Cuts. Unwired, the clip is"
+                    " upscaled as one shot, and a clip with cuts would have frames mixed across"
+                    " them.",
+                ),
                 _window_input(),
                 _tile_input("encode_tile", "encode"),
                 _tile_input("decode_tile", "decode"),
@@ -822,7 +828,6 @@ class UpscaleVideo(io.ComfyNode):
     def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
         cls,
         images: torch.Tensor,
-        cuts: tuple[Shot, ...],
         models: models_module.Handle,
         resolution: int,
         attention: str,
@@ -830,6 +835,7 @@ class UpscaleVideo(io.ComfyNode):
         seed: int,
         plan_only: bool,
         quality: str = plans.QUALITY_DEFAULT,
+        cuts: tuple[Shot, ...] | None = None,
         window: int | None = None,
         encode_tile: int | None = None,
         decode_tile: int | None = None,
@@ -855,7 +861,14 @@ class UpscaleVideo(io.ComfyNode):
             )
             clip_frames = _array(images)
             count, height, width = clip_frames.shape[:3]
-            shot_list = _cut_list(cuts, count)
+            if cuts is None:
+                logger.info(
+                    "no cut list: the clip is upscaled as one shot (wire seedvr2x Cuts for a clip"
+                    " with several shots)"
+                )
+                shot_list = (Shot(0, count),)
+            else:
+                shot_list = _cut_list(cuts, count)
             _check_seed(seed, shot_list)
             target = _target(width, height, resolution, picture=False)
             out_height, out_width = frames.output_size(target)
@@ -1001,8 +1014,6 @@ class UpscaleVideo(io.ComfyNode):
 
 # ---- seedvr2x Cuts -------------------------------------------------------------------------------
 
-# The modes of seedvr2x Cuts: the shot detector at a threshold, or the clip taken as one shot.
-CUT_MODES = ("detect", "one shot")
 THRESHOLD_MIN, THRESHOLD_MAX, THRESHOLD_STEP = 0.05, 1.0, 0.05
 
 
@@ -1018,12 +1029,11 @@ class Cuts(io.ComfyNode):
             description=(
                 "Finds where a clip changes scene, for seedvr2x Upscale Video, which upscales each"
                 " shot on its own so that no two scenes blend. seedvr2x's shot detector, TransNetV2"
-                " (about 30 MB, downloaded from Hugging Face into its cache the first time), runs"
-                " on your graphics card while the node runs, and on the processor without one;"
-                " frames are shrunk to its small input in torch, with no ffmpeg. It gives the cut"
-                " list, and says the cuts, and the possible cuts (scenes it is less sure of, to"
-                " check by eye), in ComfyUI's console. A clip you know is one scene can skip the"
-                " detector: one shot."
+                " (about 30 MB, provided by seedvr2x Models, which takes it from its model folder"
+                " or Hugging Face's cache), runs on your graphics card while the node runs, and on"
+                " the processor without one; frames are shrunk to its small input in torch, with"
+                " no ffmpeg. It gives the cut list, and says the cuts, and the possible cuts"
+                " (scenes it is less sure of, to check by eye), in ComfyUI's console."
             ),
             inputs=[
                 io.Image.Input(
@@ -1032,13 +1042,9 @@ class Cuts(io.ComfyNode):
                     tooltip="The clip's frames, in order: the same images that go to seedvr2x"
                     " Upscale Video.",
                 ),
-                io.Combo.Input(
-                    "mode",
-                    options=list(CUT_MODES),
-                    default=CUT_MODES[0],
-                    display_name="mode",
-                    tooltip="detect: find the cuts with seedvr2x's shot detector, at the threshold."
-                    " one shot: no detector, the whole clip is one shot, as if it had no cut.",
+                _models_input(
+                    "The output of seedvr2x Models: it gives the shot detector's file (and the"
+                    " model file, which this node does not use)."
                 ),
                 io.Float.Input(
                     "threshold",
@@ -1052,20 +1058,7 @@ class Cuts(io.ComfyNode):
                     f" {THRESHOLD_MIN:g} to {THRESHOLD_MAX:g}. The default, {shotcuts.THRESHOLD:g},"
                     " finds nearly every cut in live action and about 9 in 10 in animation, with"
                     " a few false ones, which cost little: a shot cut for nothing only gets its"
-                    " own windows. A lower value finds more cuts, with more false ones."
-                    " Not used in one shot mode.",
-                ),
-                # An optional input and no widget, as seedvr2x Models' (the user, 2026-11-08).
-                io.String.Input(
-                    "model_dir",
-                    optional=True,
-                    force_input=True,
-                    display_name=plans.LABELS["model_dir"],
-                    tooltip="Optional. A folder that has the detector's file, under its name,"
-                    f" {pull.DETECTOR}; the same folder as seedvr2x Models' can have it too."
-                    " Connect any string node to it, ComfyUI's String node for one. Not"
-                    " connected: Hugging Face's cache, where the file is downloaded the first"
-                    " time it is needed. Not used in one shot mode.",
+                    " own windows. A lower value finds more cuts, with more false ones.",
                 ),
             ],
             outputs=[
@@ -1080,46 +1073,38 @@ class Cuts(io.ComfyNode):
 
     @classmethod
     def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
-        cls, images: torch.Tensor, mode: str, threshold: float, model_dir: str | None = None
+        cls, images: torch.Tensor, models: models_module.Handle, threshold: float
     ) -> io.NodeOutput:
         show = _shower(_node_id(cls))
         with _refusing(show):
+            _checked(models, words.CUTS)
             if images.ndim != 4 or images.shape[0] < 1:
                 raise words.frames_missing()
             if images.shape[3] not in (3, 4):
                 raise words.channels(int(images.shape[3]))
             count = int(images.shape[0])
-            if mode not in CUT_MODES:
-                raise words.Refused(f"mode {mode!r}: must be one of {', '.join(CUT_MODES)}")
-            if mode == "one shot":
-                logger.info("%s", plans.one_shot_text(count))
-                show(plans.one_shot_line(count))
-                cut_list = (Shot(0, count),)
-            else:
-                if isinstance(threshold, bool) or not isinstance(threshold, int | float):  # pyright: ignore[reportUnnecessaryIsInstance]
-                    raise words.Refused(f"threshold {threshold!r}: must be a number")
-                if not 0 < threshold <= 1:
-                    raise words.Refused(f"threshold {threshold}: must be above 0 and at most 1")
-                found = cls._probabilities(
-                    images, models_module.model_folder(model_dir, words.CUTS), show
-                )
-                cuts = shotcuts.detected(found, float(threshold))
-                maybe = shotcuts.possible(found, float(threshold))
-                logger.info("%s", plans.cuts_text(count, float(threshold), cuts, maybe))
-                show(plans.cuts_line(len(cuts) + 1, len(maybe), float(threshold)))
-                starts = [0, *(each.frame for each in cuts)]
-                cut_list = tuple(
-                    Shot(start, end)
-                    for start, end in zip(starts, [*starts[1:], count], strict=True)
-                )
+            if isinstance(threshold, bool) or not isinstance(threshold, int | float):  # pyright: ignore[reportUnnecessaryIsInstance]
+                raise words.Refused(f"threshold {threshold!r}: must be a number")
+            if not 0 < threshold <= 1:
+                raise words.Refused(f"threshold {threshold}: must be above 0 and at most 1")
+            found = cls._probabilities(images, models, show)
+            cuts = shotcuts.detected(found, float(threshold))
+            maybe = shotcuts.possible(found, float(threshold))
+            logger.info("%s", plans.cuts_text(count, float(threshold), cuts, maybe))
+            show(plans.cuts_line(len(cuts) + 1, len(maybe), float(threshold)))
+            starts = [0, *(each.frame for each in cuts)]
+            cut_list = tuple(
+                Shot(start, end) for start, end in zip(starts, [*starts[1:], count], strict=True)
+            )
             return io.NodeOutput(cut_list)
 
     @staticmethod
     def _probabilities(
-        images: torch.Tensor, model_dir: str, show: Callable[[str], None]
+        images: torch.Tensor, handle: models_module.Handle, show: Callable[[str], None]
     ) -> npt.NDArray[np.float32]:
-        """The detector's probability for each frame, (T,) float32: its file found, fetched where
-        it is missing from Hugging Face's cache (its download on the node's bar and text) and
+        """The detector's probability for each frame, (T,) float32: its file the one seedvr2x
+        Models provided (models.detector_folder: the handle's folder's, else Hugging Face's
+        cache's, fetched again, on the node's bar and text, where the cache has lost it) and
         checked against its pin, loaded onto the card ComfyUI runs on (the processor where that
         is not a card), run (the frames scanned on a bar of their own, a batch at a time, and
         ComfyUI's Cancel honoured between batches) and given back. Three channels of the images:
@@ -1131,21 +1116,31 @@ class Cuts(io.ComfyNode):
         failed = waiting.failed(card)
         if failed is not None:
             raise words.card_failed(failed, earlier=True)
-        directory = Path(model_dir) if model_dir else None
+        directory = models_module.detector_folder(handle)
         name, pin = pull.DETECTOR, pull.PINNED[pull.DETECTOR]
         hashes = pull.Hashes()
         try:
-            downloaded: set[str] = set()
             if directory is None:
+                if handle.directory is not None:
+                    # The folder has no such file (Models said the cache's, or the file has gone
+                    # from the folder since): no silent fallback.
+                    logger.debug(
+                        "the model folder %s has no %s: Hugging Face's cache's is read",
+                        handle.directory,
+                        name,
+                    )
                 if pull.cached(name) is None:
-                    downloaded.add(name)
+                    # Models fetched it when it ran, or could not (models.provide), and ComfyUI
+                    # keeps its output between prompts (the same words as models._prepare's for
+                    # the DiT and the VAE).
+                    logger.info(
+                        "%s is not in Hugging Face's cache: downloading it", plans.short_label(name)
+                    )
                 preparing = progress.Preparing(show, plans.file_label)
                 path = pull.fetch({name: pin}, progress=preparing.download)[name]
+                management.throw_exception_if_processing_interrupted()
             else:
                 path = directory / name
-                if not path.is_file():
-                    raise words.detector_missing(name)
-            models_module.said_where(directory, (name,), downloaded)
             cache = None if directory is not None else pull.cache()
             pull.check_pin(name, path, pin, hashes, cache, "detector", load=True)
             if getattr(device, "type", "") != "cuda" or not torch.cuda.is_available():
@@ -1163,7 +1158,7 @@ class Cuts(io.ComfyNode):
                     progress.scanned(ProgressBar(int(images.shape[0])), show),
                 )
         except Refusal as error:
-            raise words.refusal(error, model_dir=directory is not None, node=words.CUTS) from error
+            raise words.refusal(error, model_dir=directory is not None) from error
         except BaseException as error:
             if not waiting.cuda_failed(error):
                 raise

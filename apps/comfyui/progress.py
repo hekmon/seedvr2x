@@ -782,9 +782,7 @@ class Preparing:
     # once (huggingface_hub's bar starts at the resume's size: review M1 of impl-nodes-6, 6.0 of
     # 8.3 GB on disk read "~1 s left" where 36 s were), so neither is counted as come at the rate.
     starts: dict[str, float] = field(init=False, default_factory=dict[str, float])
-    bases: dict[str, dict[str, int]] = field(
-        init=False, default_factory=dict[str, dict[str, int]]
-    )
+    bases: dict[str, dict[str, int]] = field(init=False, default_factory=dict[str, dict[str, int]])
 
     def __post_init__(self) -> None:
         self.started = self.now()
@@ -852,7 +850,10 @@ class Preparing:
         self._move()
 
     def _move(self) -> None:
-        total = sum(each[1] for each in self.downloads.values())
+        # The downloads' sizes known from the first (`expected`), so that a fetch told later (the
+        # Models node's detector, models.provide) leaves the bar's total as it was.
+        sizes = {**self.expected, **{each: size for each, (_, size) in self.downloads.items()}}
+        total = sum(sizes.values())
         total += max(self.announced, sum(each[1] for each in self.reads.values()))
         done = sum(each[0] for each in self.downloads.values())
         done += sum(each[0] for each in self.reads.values())
