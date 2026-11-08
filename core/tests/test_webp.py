@@ -262,7 +262,9 @@ def test_a_smooth_picture_is_smaller_than_the_png_of_the_same_8_bits() -> None:
 # Read back by seedvr2x's reader -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("icc", [None, PROFILE])
+# The ids are named: pytest's own id for a profile is its bytes, whose header holds the time
+# Pillow made it, so that two runs' ids would differ.
+@pytest.mark.parametrize("icc", [None, PROFILE], ids=["no profile", "an sRGB profile"])
 def test_the_reader_gives_back_the_same_pixels(icc: bytes | None) -> None:
     data = write(icc=icc)
     read = picture.read(data, "out.webp")
