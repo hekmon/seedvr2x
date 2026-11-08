@@ -215,10 +215,10 @@ def test_the_librarys_command_line_warnings_are_not_shown_in_comfyuis_process(
     monkeypatch.setattr(torch.cuda, "get_allocator_backend", lambda: "native")
     with caplog.at_level(logging.WARNING, logger=memory.logger.name):
         models._startup()  # pyright: ignore[reportPrivateUsage]
-        assert caplog.messages == ["another warning of the library's"]
+        assert caplog.messages == ["[seedvr2x] another warning of the library's"]
         # The filter is taken off with the call: the command line's own runs say it.
         memory.logger.warning("the allocator is the environment's, %s", "x")
-    assert caplog.messages[-1] == "the allocator is the environment's, x"
+    assert caplog.messages[-1] == "[seedvr2x] the allocator is the environment's, x"
 
 
 @pytest.mark.parametrize(

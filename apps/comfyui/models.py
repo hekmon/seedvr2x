@@ -146,7 +146,7 @@ def decide_keeping(handle: Handle) -> plans.Keeping:
             "ComfyUI runs with --disable-smart-memory, which unloads every model after each"
             " prompt: the models are read again for each run"
         )
-        _once("smart-memory", "seedvr2x: %s", because)
+        _once("smart-memory", "%s", because)
         kept = False
     return plans.Keeping(mode, kept, size, cap, source, because)
 
@@ -812,7 +812,7 @@ def _allocator_note(machine: Machine) -> None:
     if "lends" not in _told:
         _told.add("lends")
         logger.info(
-            "seedvr2x: this graphics driver borrows your computer's RAM when the card is full"
+            "this graphics driver borrows your computer's RAM when the card is full"
             " (Windows' shared GPU memory), which is slow; seedvr2x's plan leaves room on the card"
         )
     allocator = machine.allocator()
@@ -826,12 +826,12 @@ def _allocator_note(machine: Machine) -> None:
         _told.add("allocator")
         if allocator == "cudaMallocAsync":
             logger.info(
-                "seedvr2x: ComfyUI runs torch on cudaMallocAsync, whose memory holds more of the"
+                "ComfyUI runs torch on cudaMallocAsync, whose memory holds more of the"
                 " card than it uses: seedvr2x's plan leaves room for it beside each step"
             )
         else:
             logger.warning(
-                "seedvr2x: ComfyUI runs torch's own allocator, which has no expandable segments"
+                "ComfyUI runs torch's own allocator, which has no expandable segments"
                 " on Windows: a step short of room fails there, and the plan keeps %.1f GiB of the"
                 " card free beside the model's work. ComfyUI's default, cudaMallocAsync (ComfyUI"
                 " started without --disable-cuda-malloc), leaves the model more",
@@ -840,7 +840,7 @@ def _allocator_note(machine: Machine) -> None:
     elif allocator == "cudaMallocAsync":
         _once(
             "allocator",
-            "seedvr2x: this driver lends system memory where the card is full, and ComfyUI runs"
+            "this driver lends system memory where the card is full, and ComfyUI runs"
             " torch on cudaMallocAsync, its default allocator. Nothing slows down and no picture"
             " changes for it, but it holds more of the card than it uses, which the plan counts:"
             " on an 8 GB card a picture fits either way, a 1080p clip only under torch's own"
@@ -851,7 +851,7 @@ def _allocator_note(machine: Machine) -> None:
     elif not machine.reading(machine.free()).expandable:
         _once(
             "allocator",
-            "seedvr2x: this driver lends system memory where the card is full, and ComfyUI runs"
+            "this driver lends system memory where the card is full, and ComfyUI runs"
             " torch's own allocator without expandable segments, under which a step short of"
             " room fails and the plan keeps %.1f GiB of the card free beside the model's work: set"
             " PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True before starting ComfyUI, and a"
@@ -932,7 +932,7 @@ def _settle(card: int) -> None:
         raise words.card_busy()
     held = list(_left_on_card)
     kept_ones = [each.models for each in _entries.values() if each.models is not None]
-    logger.info("seedvr2x: the card finished the work an earlier run left; giving the models back")
+    logger.info("the card finished the work an earlier run left; giving the models back")
     device = machine().device
     try:
         # Outside a run, before ComfyUI's Cancel is the check (Progress.running): the release is
@@ -1043,7 +1043,7 @@ def session[T](
         # console and ComfyUI's error say what failed and the way out.
         _failures.append(error)
         refused = words.card_failed(failed)
-        logger.error("seedvr2x: %s", str(refused))
+        logger.error("%s", str(refused))
         if preparing is not None:
             preparing.show(FAILED)
         raise refused from error
@@ -1077,7 +1077,7 @@ def _session[T](
     _allocator_note(machine_)
     keeping = decide_keeping(handle)
     keep = keeping.kept
-    logger.info("seedvr2x: %s", keeping.line)
+    logger.info("%s", keeping.line)
     if not keep and not plan_only:
         # The weights of an earlier run, kept, are freed before this run reads its own: never
         # two sets pinned for one choice.
@@ -1260,8 +1260,7 @@ def _session[T](
                         waiting.pend(card, *models.queries())
                     _hold(models)
                     logger.warning(
-                        "seedvr2x: the models of this run are left on the card: %s; restart"
-                        " ComfyUI",
+                        "the models of this run are left on the card: %s; restart ComfyUI",
                         "a wait on the GPU was abandoned, and giving them back would wait on it"
                         " again"
                         if waiting.failed(card) is None

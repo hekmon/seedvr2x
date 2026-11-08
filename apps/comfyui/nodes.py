@@ -196,7 +196,7 @@ def _array(images: torch.Tensor) -> npt.NDArray[np.float32]:
     if count == 4:
         if bool((array[..., 3] < 1.0).any()):
             raise words.transparent()
-        logger.info("seedvr2x: the alpha channel is opaque everywhere, and left out")
+        logger.info("the alpha channel is opaque everywhere, and left out")
         array = array[..., :3]
     elif count != 3:
         raise words.channels(count)
@@ -617,7 +617,7 @@ class UpscaleImage(io.ComfyNode):
                 except still.NonFinite as error:
                     raise words.non_finite(str(error)) from error
                 moving.finish(f"{count} picture{'s' if count > 1 else ''}")
-        logger.info("seedvr2x: %d picture(s) upscaled in %.1f s", count, time.monotonic() - started)
+        logger.info("%d picture(s) upscaled in %.1f s", count, time.monotonic() - started)
         return io.NodeOutput(_output(outputs), text)
 
     @staticmethod
@@ -871,7 +871,7 @@ class UpscaleVideo(io.ComfyNode):
                 for number, each in enumerate(shot_list, 1):
                     if len(shot_list) > 1:
                         logger.info(
-                            "seedvr2x: shot %d of %d, frames %d to %d",
+                            "shot %d of %d, frames %d to %d",
                             number,
                             len(shot_list),
                             each.start,
@@ -882,7 +882,7 @@ class UpscaleVideo(io.ComfyNode):
                         *(quality, number),
                     )
                 moving.finish(f"{count} frame{'s' if count > 1 else ''}")
-        logger.info("seedvr2x: %d frame(s) upscaled in %.1f s", count, time.monotonic() - started)
+        logger.info("%d frame(s) upscaled in %.1f s", count, time.monotonic() - started)
         return io.NodeOutput(_output(out), text)
 
     @staticmethod

@@ -132,7 +132,7 @@ def test_the_run_says_the_decision_on_the_node_and_in_the_console(
     instance = server.PromptServer.instance
     # The plan is the first text on the node; the run's progress replaces it as it goes.
     assert instance is not None and instance.texts[0] == (text, "6")
-    said = "seedvr2x: keep in RAM between runs: auto -> not kept: 15."
+    said = "[seedvr2x] keep in RAM between runs: auto -> not kept: 15."
     assert any(line.startswith(said) for line in caplog.messages), "the console says it too"
     # Not kept: read for the run alone, nothing pinned in the registry, nothing registered.
     assert HELD not in machine.loads and models.kept(handle(tmp_path, dit=FP16)) is None

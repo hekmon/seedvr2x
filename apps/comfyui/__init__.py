@@ -19,7 +19,13 @@ published, are kept: a saved workflow names them.
 
 import logging
 
-from .nodes import comfy_entrypoint
+from . import console
+
+# "[seedvr2x] " before each of seedvr2x's lines in ComfyUI's console, from the first (console.py),
+# the library's lines at its import included.
+console.install()
+
+from .nodes import comfy_entrypoint  # noqa: E402
 
 __all__ = ["comfy_entrypoint"]
 

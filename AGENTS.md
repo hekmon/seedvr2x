@@ -103,6 +103,8 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          for the text alone (the time each second between events); the units
                          named for the library's waits on the GPU, ComfyUI's Cancel their check
   words.py               the nodes' words for each refusal, with the way out in ComfyUI's terms
+  console.py             "[seedvr2x] " before each of seedvr2x's lines in ComfyUI's console,
+                         installed by `__init__.py` before anything else is imported
   workflows/ README.md   the two example workflows (picture.json, clip.json: ComfyUI's UI format,
                          Models wired in), and the nodes' README, for users
   ruff.toml pyrightconfig.json pytest.ini     the checks' settings, the CLI's
@@ -139,7 +141,10 @@ folder package; the CLI by setuptools, which lists each top-level module (`py-mo
   MANUAL.md are `apps/seedvr2x/`'s.
 - The loggers: the library's are `seedvr2x.<module>`, the CLI's `cli.<module>` (`cli.main`,
   `cli.media.reader`), the nodes' `seedvr2x_comfyui.<module>` (ComfyUI's console shows INFO and
-  above, as bare messages).
+  above, as bare messages). In ComfyUI's process alone, each line of the library's and the nodes'
+  loggers begins with `[seedvr2x] ` (`apps/comfyui/console.py`: one handler on `seedvr2x` and on
+  `seedvr2x_comfyui` that prefixes the record on its way to the root's handlers, every other
+  node's line untouched); the nodes' own messages carry no `seedvr2x: ` of their own.
 - The ComfyUI nodes, `apps/comfyui/`, are checked and tested in the CLI's environment, from
   `apps/comfyui/` with `uv run --project ../seedvr2x` before each command ([Checks](#checks)):
   they have no lock of their own. ComfyUI imports the folder as a package, its folder not on
@@ -276,7 +281,8 @@ beside it; the `__init__.py` is seedvr2x's.
   DESIGN.md, Input).
 - **FlashAttention 2 is not a dependency.** PyPI only has its source, a long CUDA build, and
   seedvr2x runs without it: it uses FA2 when installed, else PyTorch's SDPA, and logs which one
-  runs; the two peak at the same memory since the lean attention (below), so a plan is one for
+  runs (the load says SDPA at INFO, neutrally, `model.say_attention`; the CLI's plan says either);
+  the two peak at the same memory since the lean attention (below), so a plan is one for
   both. To use it, build a wheel for your GPU ([setup_env.sh](research/scripts/setup_env.sh),
   [environment.md](research/docs/environment.md)) and install it into `apps/seedvr2x/.venv` with `uv
   pip install --no-deps <wheel>` (from `apps/seedvr2x/`). `uv run` keeps it, but `uv sync` removes
@@ -1218,7 +1224,16 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   hidden values; `server`'s `send_progress_text`, recording), and `tests/standins.py`
   the machine on the CPU (`models.Machine`: the card is the stand-in manager's, the models those
   of `core/tests/test_still.py` with place and release recorded) and ComfyUI's other models on the
-  stand-in card. `tests/test_registration.py` holds the one patcher (its sizes, strong
+  stand-in card. `tests/test_console.py` holds the console's prefix (`console.py`): the nodes', the
+  library's and the vendored code's lines prefixed through a root handler of the message alone, as
+  ComfyUI's, each line of a message of several, a traceback after its line, the root handlers' and
+  the loggers' levels kept, other loggers' lines untouched, the handler installed once and the
+  loggers still propagating (pytest 9 captures the records of a logger that propagates no more on
+  that logger too, which a copy re-sent to the root would have doubled), and, in a process of its
+  own started as ComfyUI starts, the nodes' import line prefixed. `core/tests/test_model.py` holds
+  the load's attention line (`model.say_attention`): SDPA at INFO in its neutral words, nothing for
+  FlashAttention 2.
+  `tests/test_registration.py` holds the one patcher (its sizes, strong
   references, Unload models and POST /free dropping the weights, the next run loading again,
   keep in RAM off, `--disable-smart-memory`); `tests/test_room.py` the room (the plan made for the
   card without ComfyUI's models and less the room ComfyUI keeps for the system

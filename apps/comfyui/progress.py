@@ -416,7 +416,7 @@ class Progress:
         if total != len(units) and not self.mismatch:
             self.mismatch = True
             logger.warning(
-                "seedvr2x: the %s has %d tiles, the progress counted %d: its bar is less exact",
+                "the %s has %d tiles, the progress counted %d: its bar is less exact",
                 pass_,
                 total,
                 len(units),
@@ -631,7 +631,7 @@ class Ticker:
                 self.progress.tick()
             except Exception as error:
                 # Only the text: the run goes on without the seconds between events.
-                logger.warning("seedvr2x: the time can't be said between events: %r", error)
+                logger.warning("the time can't be said between events: %r", error)
                 return
 
 

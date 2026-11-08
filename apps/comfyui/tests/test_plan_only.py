@@ -11,7 +11,7 @@ import server
 import torch
 from comfy.utils import ProgressBar
 from comfy_execution.graph_utils import ExecutionBlocker
-from comfyui import models, nodes, plans, words
+from comfyui import console, models, nodes, plans, words
 from standins import (
     GIB,
     PICTURE,
@@ -58,7 +58,7 @@ def test_a_picture_plan_only_gives_the_text_and_blocks_what_follows_the_picture(
     assert "plan only: nothing is loaded and ComfyUI's models stay as they are" in text
     instance = server.PromptServer.instance
     assert instance is not None and instance.texts == [(text, "12")]
-    assert text in caplog.messages
+    assert console.prefixed(text) in caplog.messages
     nothing_was_done(machine)
     assert models.kept(handle(tmp_path)) is None
     assert len(machine.headers) == 1, "the DiT's header was read"

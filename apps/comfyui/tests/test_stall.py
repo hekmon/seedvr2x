@@ -194,7 +194,7 @@ def test_a_wait_past_its_bound_is_said_on_the_node_and_in_the_console_and_cancel
     # The library's own line, on ComfyUI's console (a WARNING of seedvr2x.waiting), names the unit
     # and the way out; the bar was never touched by the ticker.
     (console,) = stall_lines(caplog)
-    assert console.startswith(f"{name}: a wait on the GPU has lasted 1 min 10 s")
+    assert console.startswith(f"[seedvr2x] {name}: a wait on the GPU has lasted 1 min 10 s")
     assert f"seedvr2x goes on waiting: {progress.WAY}" in console
     assert bar.updates == updates
     # Cancel left the wait: ended by the exception, past its bound, so the card is abandoned.

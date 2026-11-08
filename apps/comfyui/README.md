@@ -134,6 +134,8 @@ The node shows how far it has got, in what ComfyUI gives a node:
   their own, in bytes, with a line each ("downloading the sharp 7B (float16): 4.2 of 16.5 GB",
   "reading the sharp 7B (float16) into memory: 9.0 of 16.5 GB"); the bar starts again at 0 for the
   upscale. seedvr2x Cuts shows the frames it has scanned.
+- **ComfyUI's console** has the rest, each of seedvr2x's lines beginning with `[seedvr2x]`, the
+  library's included, so that they read apart from other nodes' lines, which are left as they are.
 - **Cancel** stops the run after the tile or the window being made, or the piece of a file being
   read, and frees the card. Hugging Face's fast downloader (Xet) reports from a thread of its own,
   where a Cancel cannot stop it: the node leaves the pressed Cancel as it is and honours it as soon
