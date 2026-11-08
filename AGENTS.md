@@ -841,14 +841,23 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   the calling thread's alone, that may raise and so end the wait; the nodes set ComfyUI's Cancel)
   called at each poll and never by a wait done at once, a wait past its bound that an exception
   ended, or a wait inside a release (`releasing`) that one ended whatever its bound and with no
-  unit, abandoned per card (`abandoned(index)`, CUDA's numbering; cleared only by a release of that
-  card whose waits all completed, never by another wait or card); `Models.release` sends nothing
+  unit, abandoned per card (`abandoned(index)`, CUDA's numbering; cleared by a release of that
+  card whose waits all completed, or by `settle(index)` once the events' queries kept by `wait`,
+  `expect` and `pend` (the work the abandoned wait and the rest of the release were waiting for,
+  and, recorded by `pend` at the abandon from `Models.queries`, by `Models.release`'s abandoned
+  branch and the nodes' lost branch, all that is queued behind it, on the compute and the side
+  stream, `Placement.streams`, `Cuda.queries`; none for a failed card) all say finished, asked
+  without waiting; the nodes' settle runs the release it then makes, and the synchronize of
+  models not kept before their `forget`, inside `waiting.releasing` and ComfyUI's Cancel as the
+  check, so that a second Cancel leaves it with the mark kept; never by another wait or card, and
+  never on a card `fail` marked, whatever the events say; the queries kept until a release completes); `Models.release` sends nothing
   back while its own card's mark holds (`core/tests/test_held.py`,
-  `apps/comfyui/tests/test_release.py`; `Models.enter` ends a change of phase with the poll for the
-  copies it queued, so that a stop reaches them, on a card neither abandoned nor failed:
-  `test_held.py`, with `run._enter`'s and the calibration's own waits then no-ops and the enter
-  terms (`timing.ENTER`) meaning what they meant), `cuda_used` and `cuda_failed`, and its import making no
-  torch; `tests/test_memory.py` NVML's activity (`memory.activity`) on its stand-in. The CLI names
+  `apps/comfyui/tests/test_release.py`), `cuda_used` and `cuda_failed`, and its import making no
+  torch. `Models.enter` ends a change of phase with the poll for the copies it queued, so that a
+  stop reaches them, on a card neither abandoned nor failed: `test_held.py`, with `run._enter`'s
+  and the calibration's own waits then no-ops and the enter terms (`timing.ENTER`) meaning what
+  they meant. `tests/test_memory.py` NVML's activity (`memory.activity`) on its stand-in. The CLI
+  names
   each unit in `run._begin` with the calibration's estimate; the image server each step of a picture
   inside its model's lock, the warm-up's longest time of that step its estimate:
   `tests/test_service.py` the estimates and the units named, `tests/test_web.py` /health's `stalled`
@@ -1278,10 +1287,18 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   ComfyUI) and the text normal again when it ends, Cancel leaving it at a poll, torch's cache not
   emptied and models not kept held rather than dropped after it (Unload models too), `running`
   giving the check and the unit back, and every later run refused at its start, nothing read or
-  placed, until ComfyUI restarts; the release after a run an exception ended (Cancel or an error)
+  placed, in the words of a card still busy (`words.card_busy`) while the work the wait was for is
+  pending, asked without waiting (`models._settle`); the release after a run an exception ended (Cancel or an error)
   run inside ComfyUI's interrupt as the check, the node's text `progress.FREEING` meanwhile, a
   second Cancel leaving it with the card marked whatever the bound, torch's cache not emptied and
-  the next run refused, `progress.STOPPED` after it, models not kept waiting for the device in the
+  the next run refused while the work is pending, `progress.STOPPED` after it, and the next run's
+  start completing the release once the work has finished (the models held freed, the mark
+  cleared, said at INFO, the run made, nothing read again; a pending side stream's work, the one
+  a later wait of the release would have covered, counted; models not kept let go; a mark a CUDA
+  error put never cleared; the query never waiting; a wait of the run itself past its bound and
+  left by Cancel, whose later work on either stream (`waiting.pend`) keeps the next run refused
+  until all of it is done, then the models not kept synchronized in the poll before `forget`, and
+  a Cancel during that release leaving the mark kept: `tests/test_release.py`), models not kept waiting for the device in the
   poll first (`model.synchronize`) under the same text and second Cancel, a healthy release putting
   the text back (none said before: cleared) and marking nothing, and one after a normal end with no
   check and no text; `tests/test_cuts_node.py` seedvr2x Cuts over the untrained detector's

@@ -21,7 +21,11 @@ release (releasing) that one ended, whatever its bound, marks its card abandoned
 card may never answer again, and whoever gives the models back (Models.release) leaves alone what
 would wait on it. The mark is per card, by CUDA's index, and only a release on that card whose
 waits all completed clears it, no other wait: a card that answered one wait may not answer the
-next, and a process that ran on several cards keeps each one's state apart.
+next, and a process that ran on several cards keeps each one's state apart. The work the
+abandoned waits were waiting for is kept as events' queries (wait, expect), which never wait: an
+app asks settle, without waiting, whether it has all finished, and gives the models back then, a
+release that completes clearing the mark, so that a second Cancel pressed in impatience on a
+healthy card costs no restart.
 
 A CUDA error other than torch's OutOfMemoryError (cuda_failed: a "CUDA error: out of memory" a
 kernel met is one) marks its card too, failed (fail, failed), whether a wait met it or the caller
@@ -42,7 +46,7 @@ import threading
 import time
 from collections.abc import Callable, Generator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from seedvr2x import clock
 
@@ -93,6 +97,7 @@ class Ended:
 class _Release:
     index: int
     ended: bool = False  # a wait in the block was ended by an exception, caught or not
+    pending: list[Callable[[], bool]] = field(default_factory=lambda: [])  # see expect
 
 
 @dataclass
@@ -118,6 +123,9 @@ _stacks_written = False
 # The cards (CUDA's indices) on which a wait was ended by an exception past its bound, or inside a
 # release, and no release has completed since.
 _abandoned: set[int] = set()
+# For each abandoned card, the queries (an event's, which never waits) of the work the abandoned
+# wait or the release was waiting for, until a release completes or settle finds it all done.
+_pending: dict[int, list[Callable[[], bool]]] = {}
 # The cards (CUDA's indices) a CUDA error other than out of memory was met on, with its text's first
 # line; never cleared (fail).
 _failed: dict[int, str] = {}
@@ -200,11 +208,39 @@ def releasing(index: int = 0) -> Generator[None]:
         yield
     finally:
         _named.releasing = before
+        if block.ended:
+            with _lock:
+                _pending.setdefault(index, []).extend(block.pending)
     # Only reached where the block ended without an exception. A failed card stays marked (fail).
     if not block.ended:
         with _lock:
             if index not in _failed:
                 _abandoned.discard(index)
+                _pending.pop(index, None)
+
+
+def expect(*queries: Callable[[], bool]) -> None:
+    """Inside a release (releasing), the work the rest of the release will wait for, as queries
+    that say whether it has finished (an event's `query`, which never waits and holds no frame):
+    kept for the card if the release ends in a wait an exception ended, so that settle can tell
+    later whether all of it has finished. A wait ended before the release reached its later
+    waits would otherwise leave those unknown: the compute stream's wait comes first and the
+    copy stream's after. Nothing outside a release."""
+    block: _Release | None = getattr(_named, "releasing", None)
+    if block is not None:
+        block.pending.extend(queries)
+
+
+def pend(index: int, *queries: Callable[[], bool]) -> None:
+    """Keep for card `index` (CUDA's numbering), already abandoned, queries (an event's `query`,
+    which never waits) of work that an abandoned wait did not cover: a wait past its bound that
+    an exception ended keeps only its own event, but the work queued behind it (the next blocks
+    on the compute stream, the copies on the side stream) is what a later release would wait for
+    too, so settle must see all of it finished. Nothing for a card marked failed (fail): it is
+    never queried, and an event recorded there would report the error again."""
+    with _lock:
+        if index not in _failed:
+            _pending.setdefault(index, []).extend(queries)
 
 
 @contextmanager
@@ -256,9 +292,11 @@ def wait(done: Callable[[], bool], poll: float, index: int = 0) -> None:
         with _lock:
             if state.past:
                 _abandoned.add(index)
+                _pending.setdefault(index, []).append(done)
             if release is not None:
                 release.ended = True
                 _abandoned.add(release.index)
+                release.pending.append(done)
         if cuda_failed(error):
             fail(index, error)
         raise
@@ -297,6 +335,41 @@ def abandoned(index: int = 0) -> bool:
     waits all completed, by no other wait, and never by another card's."""
     with _lock:
         return index in _abandoned
+
+
+def settle(index: int = 0) -> bool:
+    """Whether card `index` (CUDA's numbering) can be given back its releases: it was abandoned,
+    and all the work its abandoned waits were waiting for has finished, asked without waiting (the
+    events' queries, kept by wait and expect), or it was not abandoned at all. Then the mark is
+    cleared, so that the caller's release runs as a healthy one and its waits are immediate; a
+    release that then fails marks the card again. False, the mark kept, while any of that work is
+    pending, where nothing was recorded to ask about, and always for a card marked failed (fail):
+    a CUDA error is never cleared by a query. A query that raises a CUDA error marks the card
+    failed. DESIGN.md, Repository and apps, the nodes' Progress: a mark the card itself clears."""
+    with _lock:
+        if index in _failed:
+            return False
+        if index not in _abandoned:
+            return True
+        queries = list(_pending.get(index, ()))
+    if not queries:
+        return False
+    try:
+        finished = all([query() for query in queries])
+    except Exception as error:
+        if cuda_failed(error):
+            fail(index, error)
+        else:
+            logger.debug("the abandoned work can't be asked about: %r", error)
+        return False
+    if not finished:
+        return False
+    with _lock:
+        if index in _failed:
+            return False
+        _abandoned.discard(index)
+        _pending.pop(index, None)
+    return True
 
 
 def fail(index: int, error: BaseException) -> None:

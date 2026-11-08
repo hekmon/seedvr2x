@@ -216,6 +216,18 @@ class Cuda:
             done.record(stream)
             waiting.wait(done.query, 0.001, index)
 
+    def queries(self, *streams: Any) -> list[Callable[[], bool]]:
+        """For each of streams, an event recorded now behind its queued work, as the query that
+        says whether that work has finished: the call waits for nothing (the wait on the same
+        events is wait's), so that a caller can ask later, without waiting, what a wait that was
+        left would have waited for (waiting.expect)."""
+        found: list[Callable[[], bool]] = []
+        for stream in streams:
+            done = self.event()
+            done.record(stream)
+            found.append(done.query)
+        return found
+
 
 @dataclass
 class _Field:
@@ -1005,8 +1017,12 @@ class Placement:
         compute stream, the copies on the side stream. A buffer freed under a copy still queued
         would be written to after its memory is given to another tensor: the allocator knows
         nothing of the side stream's use of it."""
-        streams = [self._backend.compute(), *([] if self._side is None else [self._side])]
-        self._backend.wait(*streams)
+        self._backend.wait(*self.streams())
+
+    def streams(self) -> list[Any]:
+        """The streams this placement's work is queued on: the compute stream and, once a
+        prefetch has begun, the side stream of its copies. All that a wait for it covers."""
+        return [self._backend.compute(), *([] if self._side is None else [self._side])]
 
     def _fetch(self, j: int) -> None:
         """Queue swapped block j's copy into its slot on the side stream, after the end of the

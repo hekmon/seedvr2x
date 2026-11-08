@@ -5,7 +5,9 @@ over toy models, nothing of them left on the card (test_held.strays)."""
 
 import functools
 import gc
+import logging
 import weakref
+from typing import Any
 
 import comfy.model_management as management
 import numpy as np
@@ -314,3 +316,236 @@ def test_models_not_kept_drop_what_they_keep_on_the_device_besides_parameters(
     # The cache would keep the dropped DiT's module and its tensors up to 128 shapes.
     assert Rope.get_axial_freqs.cache_info().currsize == 0
     Rope.get_axial_freqs.cache_clear()
+
+
+# ---- A mark the card itself clears (waiting.settle, models._settle) ----------------------------
+
+
+def left_release(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch, keep: bool = True
+) -> tuple[ToyMachine, models.Handle, Sim]:
+    """A run Cancelled with work queued on both of the placement's streams, whose release a second
+    Cancel left at its first wait (the poll's sleep raises once): the real Models.release over the
+    simulated streams, whose waits go through the poll as Cuda.wait's do. The card is marked and
+    the work is still queued (the simulation runs it when told: `sim.settle()`)."""
+    toy = ToyMachine(machine.vae_models)
+    sim = Sim("compute-first")
+    toy.toy = Files(tmp_path, sim, monkeypatch)
+    toy.card = Card(monkeypatch)
+    models.use(toy)
+    h = handle(tmp_path, keep=keep)
+
+    pressed: list[int] = []
+    drained = sim.wait
+
+    def polled(*streams: Any) -> None:
+        if not pressed:
+            return drained(*streams)  # before the Cancel: the simulation runs what is queued
+        for stream in streams:
+            waiting.wait(lambda stream=stream: not stream.queue, 0.01)
+
+    monkeypatch.setattr(sim, "wait", polled)
+
+    def sleep(seconds: float) -> None:
+        if pressed == [0]:
+            pressed[0] = 1
+            raise management.InterruptProcessingException()
+
+    monkeypatch.setattr(waiting, "sleep", sleep)
+
+    def synchronize(device: Any) -> None:
+        # The poll on the current stream a run not kept ends with (the stand-in card is the CPU).
+        if pressed:
+            waiting.wait(lambda: not sim.main.queue, 0.01)
+
+    monkeypatch.setattr(model, "synchronize", synchronize)
+    with pytest.raises(management.InterruptProcessingException):
+        with models.session(h, None, toy_planner) as run:  # type: ignore[arg-type]
+            run.models.enter("dit")
+            run.models.enter("decode")
+            sim.kernel("work", lambda: None, [])
+            assert sim.sides, "the DiT's prefetch has a side stream"
+            sim.sides[0].queue.append(("kernel", "copy", lambda: None, []))
+            pressed.append(0)  # the first poll from here on is left, the release's
+            raise management.InterruptProcessingException()
+    assert waiting.abandoned() and len(models._left_on_card) == 1  # pyright: ignore[reportPrivateUsage]
+    # Later polls (the release the next run completes) let the simulation run what it has queued,
+    # as the device does; the tests count them to show that the query itself sleeps never.
+    slept: list[float] = []
+
+    def device_runs(seconds: float) -> None:
+        slept.append(seconds)
+        sim.settle()
+
+    monkeypatch.setattr(waiting, "sleep", device_runs)
+    sim.slept = slept  # type: ignore[attr-defined]
+    return toy, h, sim
+
+
+def test_the_work_a_left_release_waited_for_is_asked_without_waiting_and_all_of_it_counts(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    toy, h, sim = left_release(machine, tmp_path, monkeypatch)
+    loads, emptied = len(toy.loads), len(management.empties)
+    # The compute stream is drained and the side stream not: the later wait the release never
+    # reached counts, so the card is not finished and the run is refused in the new words.
+    sim.drain(sim.main)
+    slept = len(sim.slept)  # type: ignore[attr-defined]
+    for _ in range(2):
+        with pytest.raises(words.Refused, match="still busy with the last work") as refused:
+            with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+                pytest.fail("a run went on")
+        assert "restart ComfyUI" in str(refused.value)
+    assert waiting.abandoned() and len(models._left_on_card) == 1  # pyright: ignore[reportPrivateUsage]
+    assert len(toy.loads) == loads and len(management.empties) == emptied
+    assert len(sim.slept) == slept, "asking the card never waited"  # type: ignore[attr-defined]
+    # Once the side stream is through, the next run completes the release and goes on: the models
+    # kept, placed again, the mark cleared, said at INFO.
+    caplog.set_level(logging.INFO)
+    sim.settle()
+    held = models.kept(h)
+    assert held is not None and held.models is not None
+    with models.session(h, None, toy_planner) as run:  # type: ignore[arg-type]
+        assert run.models is held.models
+        run.models.enter("dit")
+    assert not waiting.abandoned() and models._left_on_card == []  # pyright: ignore[reportPrivateUsage]
+    assert toy.loads == [HELD], "nothing read again"
+    assert strays(held.models, toy.card) == []
+    assert "the card finished the work an earlier run left" in caplog.text
+
+
+def test_models_not_kept_are_let_go_when_the_card_finishes(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    toy, h, sim = left_release(machine, tmp_path, monkeypatch, keep=False)
+    alive = weakref.ref(models._left_on_card[0])  # pyright: ignore[reportPrivateUsage]
+    # Only the compute stream's poll was left, but the side stream's work counts as well: the
+    # release the next run completes would wait for it.
+    sim.drain(sim.main)
+    with pytest.raises(words.Refused, match="still busy with the last work"):
+        with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+            pytest.fail("a run went on")
+    sim.settle()
+    with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+        pass
+    assert models._left_on_card == [] and not waiting.abandoned()  # pyright: ignore[reportPrivateUsage]
+    toy.made.clear()
+    gc.collect()
+    assert alive() is None, "the models of a run not kept are let go"
+
+
+def test_a_card_a_cuda_error_failed_is_never_cleared_by_the_query(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    toy, h, sim = left_release(machine, tmp_path, monkeypatch)
+    sim.settle()
+    waiting.fail(0, RuntimeError("CUDA error: an illegal memory access was encountered"))
+    loads = len(toy.loads)
+    with pytest.raises(words.Refused, match="failed during an earlier seedvr2x run"):
+        with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+            pytest.fail("a run went on")
+    assert waiting.abandoned() and waiting.failed() is not None and len(toy.loads) == loads
+    models.reset()
+
+
+# ---- A wait in the run left by Cancel, past its bound (waiting.pend) ----------------------------
+
+
+def left_wait(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch, keep: bool = True
+) -> tuple[ToyMachine, models.Handle, Sim]:
+    """A run whose own wait (not a release's) on the compute stream's work is past its bound when
+    Cancel leaves it, the side stream's copies and two later compute kernels queued behind: the
+    wait's event covers only the first kernel (`_paced`'s block n-2 with n-1 and n behind it).
+    The card is marked, the work still queued; the run's end gives the models back (Models.release
+    abandoned, or the nodes' lost branch) and records what is queued on every stream."""
+    toy = ToyMachine(machine.vae_models)
+    sim = Sim("compute-first")
+    toy.toy = Files(tmp_path, sim, monkeypatch)
+    toy.card = Card(monkeypatch)
+    models.use(toy)
+    h = handle(tmp_path, keep=keep)
+    clock = [0.0]
+    monkeypatch.setattr(waiting, "monotonic", lambda: clock[0])
+    polls: list[int] = []
+
+    def sleep(seconds: float) -> None:
+        # The first poll puts the wait past its bound (60 s); the second is the Cancel.
+        clock[0] += 100.0
+        polls.append(1)
+        if len(polls) > 1:
+            raise management.InterruptProcessingException()
+
+    monkeypatch.setattr(waiting, "sleep", sleep)
+    monkeypatch.setattr(model, "synchronize", lambda device: None)
+    with pytest.raises(management.InterruptProcessingException):
+        with models.session(h, None, toy_planner) as run:  # type: ignore[arg-type]
+            run.models.enter("dit")
+            first = sim.main
+            sim.kernel("n-2", lambda: None, [])
+            assert sim.sides, "the DiT's prefetch has a side stream"
+            sim.sides[0].queue.append(("kernel", "copy", lambda: None, []))
+            sim.kernel("n-1", lambda: None, [])
+            sim.kernel("n", lambda: None, [])
+            waiting.unit("window", 1.0)
+            waiting.wait(lambda: len(first.queue) < 3, 0.01)
+    assert waiting.abandoned() and len(models._left_on_card) == 1  # pyright: ignore[reportPrivateUsage]
+    return toy, h, sim
+
+
+@pytest.mark.parametrize("stream", ["side", "compute"])
+@pytest.mark.parametrize("keep", [True, False])
+def test_work_queued_behind_a_left_wait_on_any_stream_keeps_the_card_busy(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch, keep: bool, stream: str
+) -> None:
+    toy, h, sim = left_wait(machine, tmp_path, monkeypatch, keep)
+    monkeypatch.setattr(waiting, "sleep", lambda seconds: sim.settle())
+    # The wait's own event is done; what is queued behind it is not, on one stream or the other.
+    if stream == "side":
+        while sim.step(sim.main):  # the compute stream through, the side stream's copies not
+            pass
+    else:
+        # The wait's own kernel only, two behind it; the side stream through.
+        sim.step(sim.main)
+        while sim.step(sim.sides[0]):
+            pass
+    assert sim.sides[0].queue if stream == "side" else sim.main.queue
+    loads = len(toy.loads)
+    with pytest.raises(words.Refused, match="still busy with the last work"):
+        with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+            pytest.fail("a run went on")
+    assert waiting.abandoned() and len(toy.loads) == loads
+    sim.settle()
+    with models.session(h, None, toy_planner) as run:  # type: ignore[arg-type]
+        run.models.enter("dit")
+    assert not waiting.abandoned() and models._left_on_card == []  # pyright: ignore[reportPrivateUsage]
+
+
+def test_models_not_kept_are_synchronized_in_the_poll_before_they_are_let_go(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, h, sim = left_wait(machine, tmp_path, monkeypatch, keep=False)
+    sim.settle()
+    order: list[str] = []
+    monkeypatch.setattr(model, "synchronize", lambda device: order.append("synchronize"))
+    real = model.forget
+    monkeypatch.setattr(model, "forget", lambda each: order.append("forget") or real(each))
+    with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+        pass
+    assert order[:2] == ["synchronize", "forget"]
+
+
+def test_a_cancel_during_the_release_the_next_run_completes_leaves_the_mark_kept(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, h, sim = left_wait(machine, tmp_path, monkeypatch, keep=False)
+    sim.settle()
+    # The card finished, then stalls again in the settle's synchronize; ComfyUI's Cancel (the
+    # check of the settle's polls) leaves it, the card marked and the models still held.
+    monkeypatch.setattr(model, "synchronize", lambda device: waiting.wait(lambda: False, 0.01))
+    monkeypatch.setattr(waiting, "sleep", lambda seconds: management.interrupt_current_processing())
+    with pytest.raises(words.Refused, match="still busy with the last work"):
+        with models.session(h, None, toy_planner):  # type: ignore[arg-type]
+            pytest.fail("a run went on")
+    assert waiting.abandoned() and len(models._left_on_card) == 1  # pyright: ignore[reportPrivateUsage]
+    models.reset()

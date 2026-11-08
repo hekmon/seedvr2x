@@ -150,9 +150,10 @@ class Models:
         never answer. The models are left as they were, with no phase and no plan, so that `enter`
         refuses them. A later `place` sends them back, waiting in the poll, which says what it
         waits for and which an app's check can leave; whether to place them again is the app's:
-        the nodes refuse the next run instead (DESIGN.md, Allocator, the hang of 2026-11-06). A
-        card marked failed by a CUDA error (waiting.fail) is abandoned too, and never placed on
-        again: the models are left as they are for the process's life (waiting.py's docstring)."""
+        the nodes settle it at the next run's start (DESIGN.md, Allocator, the hang of
+        2026-11-06). A card marked failed by a CUDA error (waiting.fail) is abandoned too, and
+        never placed on again: the models are left as they are for the process's life
+        (waiting.py's docstring)."""
         self._held("release")
         index = card_index(self.device)
         if waiting.abandoned(index):
@@ -165,12 +166,20 @@ class Models:
                 else f"the card failed ({error}) and every step of it would free memory there,"
                 " which can end the process; the process is for restarting",
             )
+            if error is None:
+                # The wait left kept only its own event: the work queued behind it, on every
+                # stream, is what the next release would wait for too (waiting.pend). Recording
+                # an event waits for nothing.
+                waiting.pend(index, *self.queries())
             self.phase = None
             self.model_plan = None
             return
         # Its waits are a release's (waiting.releasing): one a Cancel ends marks the card, and a
         # release that completes clears the mark.
         with waiting.releasing(index):
+            # What every wait below covers, kept in case a second Cancel leaves one (queries).
+            with marking(self.device):
+                waiting.expect(*self.queries())
             # The card polled before the first free (forget, in _send_back): a pending CUDA error
             # comes back here and marks it (synchronize), the models left as they were.
             synchronize(self.device)
@@ -180,6 +189,17 @@ class Models:
             self.text_pos = _to_host(self.text_pos)
             self.text_neg = _to_host(self.text_neg)
             blockswap.Cuda(self.device).trim()
+
+    def queries(self) -> list[Callable[[], bool]]:
+        """Events recorded now on every stream the models' work is queued on (the compute stream
+        and, in a DiT placement, its side stream), as queries that say whether that work has
+        finished: they never wait. For an app that gives the models back after a wait it may
+        leave (waiting.expect), so that waiting.settle can tell later, without waiting, that all
+        the work a release would wait for is done. Recording an event reports an earlier launch's
+        error too."""
+        backend = blockswap.Cuda(self.device)
+        streams = [backend.compute()] if self.placement is None else self.placement.streams()
+        return backend.queries(*streams)
 
     def _send_back(self) -> None:
         """The weights of release and place: the placement closed, the VAE's part left, the

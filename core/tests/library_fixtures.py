@@ -72,6 +72,7 @@ def no_card_failed(monkeypatch: pytest.MonkeyPatch) -> None:
     an unread card said yet (memory._unread), said once a process at INFO."""
     monkeypatch.setattr(waiting, "_failed", {})
     monkeypatch.setattr(waiting, "_abandoned", set())
+    monkeypatch.setattr(waiting, "_pending", {})
     monkeypatch.setattr(memory, "_unread_said", set())
 
 

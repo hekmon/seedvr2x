@@ -917,6 +917,54 @@ def _clear_frames(error: BaseException) -> None:
         pending += [each.__cause__, each.__context__]
 
 
+def _settle(card: int) -> None:
+    """The mark an earlier run's left wait put on the card, cleared by the card itself (DESIGN.md,
+    the nodes' Progress): asked, without waiting (waiting.settle), whether all the work the wait
+    was for has finished. Finished: the models held are given back now (Models.release, whose
+    waits are immediate once all streams are done, and which clears the mark), those of runs not
+    kept synchronized in the poll and let go, said at INFO. Both run as a release, with ComfyUI's
+    Cancel as the check.
+    Not finished: words.card_busy, the mark kept. A card a CUDA error failed is never cleared
+    (waiting.settle), and _session refuses it before this."""
+    if not waiting.settle(card):
+        if waiting.failed(card) is not None:
+            raise words.card_failed(waiting.failed(card) or "", earlier=True)
+        raise words.card_busy()
+    held = list(_left_on_card)
+    kept_ones = [each.models for each in _entries.values() if each.models is not None]
+    logger.info("seedvr2x: the card finished the work an earlier run left; giving the models back")
+    device = machine().device
+    try:
+        # Outside a run, before ComfyUI's Cancel is the check (Progress.running): the release is
+        # one (a second Cancel leaves it, the mark kept) and the check is ComfyUI's.
+        with (
+            waiting.releasing(card),
+            waiting.checking(management.throw_exception_if_processing_interrupted),
+        ):
+            for each in held:
+                # Models loaded without passes.HELD are never placed or released: a run not kept
+                # frees them by forget alone (below), as its end does.
+                if each.parts is not None:
+                    each.release()
+                if not any(each is other for other in kept_ones):
+                    # The device's work waited for in the poll before the frees (HostCopy's
+                    # cudaHostUnregister, torch's deleters), as a run's end does.
+                    model.synchronize(device)
+                _left_on_card.remove(each)
+                if not any(each is other for other in kept_ones):
+                    model.forget(each)
+    except BaseException as error:
+        # A release that waits again and is left, or a card that failed: marked by the wait.
+        if waiting.failed(card) is not None:
+            raise words.card_failed(waiting.failed(card) or "", earlier=True) from error
+        if waiting.abandoned(card):
+            raise words.card_busy() from error
+        raise
+    gc.collect()
+    if waiting.abandoned(card):
+        raise words.card_busy()
+
+
 @contextmanager
 def _freeing(show: Callable[[str], None] | None) -> Generator[None]:
     """The release of the models after a run an exception ended, in the with block: the node says
@@ -1022,9 +1070,10 @@ def _session[T](
         raise words.card_failed(failed, earlier=True)
     # Process-wide until runs go to other cards: models left on any card refuse every run.
     if waiting.abandoned(card) or _left_on_card:
-        # Nothing is read from the card, placed or waited on: an earlier run left a wait on the
-        # GPU that never ended, and the models it left are as they were (Models.release).
-        raise words.card_stopped()
+        # An earlier run left a wait on the GPU (a second Cancel): the work it was waiting for is
+        # asked about without waiting, and nothing is read from the card, placed or waited on
+        # while it is pending.
+        _settle(card)
     _allocator_note(machine_)
     keeping = decide_keeping(handle)
     keep = keeping.kept
@@ -1206,6 +1255,9 @@ def _session[T](
                             _hold(models)
             elif lost:
                 if models is not None:
+                    if waiting.failed(card) is None:
+                        # Everything queued behind the wait left, on every stream (waiting.pend).
+                        waiting.pend(card, *models.queries())
                     _hold(models)
                     logger.warning(
                         "seedvr2x: the models of this run are left on the card: %s; restart"
@@ -1228,6 +1280,8 @@ def _session[T](
                     # left by a second Cancel.
                     try:
                         with waiting.releasing(card), model.marking(machine_.device):
+                            # What the release the next run completes (_settle) would wait for.
+                            waiting.expect(*models.queries())
                             if ended:
                                 with _freeing(show):
                                     model.synchronize(machine_.device)

@@ -120,9 +120,11 @@ The node shows how far it has got, in what ComfyUI gives a node:
   minute), the text says so with how long it has waited, and ComfyUI's console says it with the
   card's reading. The wait is not given up on its own: a slow card (shared with a game) answers
   in the end, and the text goes back to normal. Cancel leaves the wait. If the card has stopped
-  answering, though, the work queued on it can't be undone inside ComfyUI: restart ComfyUI. A
-  run left that way gives nothing back to the card on its way out, as that would wait on it
-  again, and the next run is refused at its start, naming the restart, until ComfyUI is restarted.
+  answering, though, the work queued on it can't be undone inside ComfyUI. A run left that way
+  gives nothing back to the card on its way out, as that would wait on it again. At the next
+  run's start the node asks the card, without waiting, whether the work has finished: if so it
+  gives the models back and goes on; if not, the run is refused, saying that the card is still
+  busy, and you can wait and run again or restart ComfyUI.
   After a Cancel or an error the node's text says "freeing the card" while the models are given
   back: on a card that answers it ends in a moment, and pressing Cancel again leaves it.
 - **The preview** is the newest frame decoded, as ComfyUI's samplers show their steps, once for each
@@ -193,9 +195,11 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   lossless files (the `apps/seedvr2x` folder of this repository; ComfyUI's console says so once,
   when the nodes load).
 - **Nothing resumes.** A run that stops starts again.
-- **A card that stopped answering needs ComfyUI restarted.** Besides the nodes, ComfyUI's own
-  release of its cache after the run waits on the card too, so no node can free it: only a new
-  ComfyUI has a card that answers.
+- **A card that stopped answering may need ComfyUI restarted.** When a second Cancel leaves the
+  wait for the card, the next run asks the card, without waiting, whether it has finished its last
+  work: if it has, the nodes give their models back and the run goes on; if not, the run is
+  refused ("the graphics card is still busy"), and only a new ComfyUI is certain to have a card
+  that answers.
 - **A graphics card that failed needs ComfyUI restarted too.** A CUDA error other than running
   out of memory (an illegal memory access, a "CUDA error: out of memory" that a kernel met) leaves
   the card's state untrusted, and under ComfyUI's cudaMallocAsync freeing memory there can end

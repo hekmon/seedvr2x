@@ -57,10 +57,12 @@ Kind = Literal["encode", "window", "decode"]
 
 # The way out a wait on the GPU that lasts is said with, in a ComfyUI user's words (waiting.py;
 # DESIGN.md, Allocator, the hang of 2026-11-06). Cancel leaves the wait, but work queued on a card
-# that stopped answering can't be undone in the process: only a new one has a card that answers.
+# that stopped answering can't be undone in the process: the card finishes it or not, and the next
+# run asks it without waiting (models._settle).
 WAY = (
     "Cancel leaves the wait; if the card does not answer after that, restart ComfyUI, since work"
-    " queued on a stopped GPU can't be undone inside its process"
+    " queued on a stopped GPU can't be undone inside its process (a card that finishes it lets the"
+    " next run go on)"
 )
 
 # What the node says while the models are given back to the card after a run an exception ended
@@ -68,12 +70,13 @@ WAY = (
 # (waiting.releasing) where it does not.
 FREEING = (
     "freeing the card: waiting for the GPU to finish its last work; Cancel again to leave it,"
-    " then restart ComfyUI"
+    " then run again once the card has finished, or restart ComfyUI"
 )
 
 # What the node says once the release was left by a second Cancel or ended in an error: the card
-# is marked (waiting.abandoned) and the next run is refused (words.card_stopped).
-STOPPED = "the card stopped answering: restart ComfyUI"
+# is marked (waiting.abandoned): the next run asks the card, without waiting, whether it finished
+# (models._settle), and is refused (words.card_busy) while it has not.
+STOPPED = "the card has not finished its last work: run again once it has, or restart ComfyUI"
 
 # What the node says once a CUDA error other than out of memory failed the card (waiting.fail):
 # nothing on it is freed or run again in the process (models.session).

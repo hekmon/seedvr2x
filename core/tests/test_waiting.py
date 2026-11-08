@@ -739,3 +739,127 @@ def test_a_failed_card_stays_marked_through_a_release_that_completes(world: Worl
         fake.now = 0.0
         waiting.wait(fake.until(2.0), 1.0)
     assert waiting.abandoned() and waiting.failed(0) == ILLEGAL
+
+
+# ---- A mark the card itself clears (settle) ---------------------------------------------------
+
+
+class Work:
+    """Work queued on a card: a query that says whether it finished, and counts how often it was
+    asked. Nothing in it waits."""
+
+    def __init__(self) -> None:
+        self.finished = False
+        self.asked = 0
+
+    def query(self) -> bool:
+        self.asked += 1
+        return self.finished
+
+
+def abandon_in_release(world: World, work: Work, extra: Work | None = None) -> None:
+    """A release of card 0 left by a second Cancel at its wait for `work`, having recorded `extra`
+    (the later waits' work) first (expect)."""
+    fake = world.clock
+
+    def hook() -> None:
+        if fake.now >= 20.0:
+            raise Cancel
+
+    waiting.check(hook)
+    with pytest.raises(Cancel):
+        with waiting.releasing(0):
+            if extra is not None:
+                waiting.expect(extra.query)
+            waiting.wait(work.query, 10.0)
+    waiting.check(None)
+    assert waiting.abandoned()
+
+
+def test_settle_clears_the_mark_once_all_the_work_is_done_asked_without_waiting(
+    world: World,
+) -> None:
+    stuck, later = Work(), Work()
+    abandon_in_release(world, stuck, later)
+    slept = world.clock.now
+    assert not waiting.settle(), "nothing finished"
+    stuck.finished = True
+    assert not waiting.settle(), "the work the release had yet to wait for counts"
+    assert waiting.abandoned()
+    later.finished = True
+    assert waiting.settle() and not waiting.abandoned()
+    assert world.clock.now == slept, "the queries never slept"
+    assert waiting.settle(), "a card not abandoned is settled"
+
+
+def test_settle_clears_after_a_wait_past_its_bound_ended_outside_a_release(world: World) -> None:
+    work = Work()
+    fake = world.clock
+    fake.now = 0.0
+
+    def hook() -> None:
+        if fake.now >= 200.0:
+            raise Cancel
+
+    waiting.check(hook)
+    waiting.unit(UNIT, 30.0)
+    with pytest.raises(Cancel):
+        waiting.wait(work.query, 10.0)
+    waiting.check(None)
+    assert waiting.abandoned() and not waiting.settle()
+    work.finished = True
+    assert waiting.settle() and not waiting.abandoned()
+
+
+def test_settle_never_clears_a_failed_card_whatever_the_work_says(world: World) -> None:
+    work = Work()
+    work.finished = True
+    abandon_in_release(world, Work(), work)
+    waiting.fail(0, RuntimeError(ILLEGAL))
+    assert not waiting.settle() and waiting.abandoned() and waiting.failed(0) == ILLEGAL
+
+
+def test_settle_with_nothing_recorded_or_a_query_that_raises_keeps_the_mark(world: World) -> None:
+    waiting._abandoned.add(3)  # pyright: ignore[reportPrivateUsage]
+    assert not waiting.settle(3), "nothing to ask about: not known to be finished"
+
+    def raises() -> bool:
+        raise RuntimeError(ILLEGAL)
+
+    abandon_in_release(world, Work(), None)
+    waiting._pending[0] = [raises]  # pyright: ignore[reportPrivateUsage]
+    assert not waiting.settle()
+    assert waiting.failed(0) == ILLEGAL, "a CUDA error from the query marks the card failed"
+
+
+def test_a_release_that_completes_forgets_the_work_it_had_kept(world: World) -> None:
+    abandon_in_release(world, Work())
+    with waiting.releasing(0):
+        pass
+    assert not waiting.abandoned()
+    assert 0 not in waiting._pending  # pyright: ignore[reportPrivateUsage]
+    waiting.expect(Work().query)  # outside a release: nothing
+    assert 0 not in waiting._pending  # pyright: ignore[reportPrivateUsage]
+
+
+def test_pend_adds_queries_to_an_abandoned_card_and_settle_needs_all_of_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(waiting, "_abandoned", {0})
+    monkeypatch.setattr(waiting, "_pending", {0: [lambda: True]})
+    monkeypatch.setattr(waiting, "_failed", {})
+    later = [False]
+    waiting.pend(0, lambda: later[0])
+    assert waiting.settle(0) is False and waiting.abandoned(0)
+    later[0] = True
+    assert waiting.settle(0) is True and not waiting.abandoned(0)
+
+
+def test_pend_records_nothing_for_a_card_marked_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(waiting, "_abandoned", set())
+    monkeypatch.setattr(waiting, "_pending", {})
+    monkeypatch.setattr(waiting, "_failed", {})
+    waiting.fail(0, RuntimeError("CUDA error: an illegal memory access was encountered"))
+    waiting.pend(0, lambda: True)
+    assert waiting._pending == {}  # pyright: ignore[reportPrivateUsage]
+    assert waiting.settle(0) is False

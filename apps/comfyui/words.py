@@ -537,14 +537,13 @@ def not_freed(*, need: int, there: int, comfy: int) -> Refused:
     )
 
 
-def card_stopped() -> Refused:
-    """A run refused at its start: a wait on the GPU of an earlier run was left (Cancel) after it
-    had lasted past its bound, so that the card did not answer, and nothing can be given back to
-    it or read from it without waiting on it again (waiting.abandoned)."""
+def card_busy() -> Refused:
+    """A run refused at its start: the work an earlier run's release left (a second Cancel) is
+    still pending on the card, asked without waiting (waiting.settle)."""
     return Refused(
-        "the card stopped answering during an earlier seedvr2x run, and what was queued on it can't"
-        " be undone inside ComfyUI: restart ComfyUI, then run again. Nothing was read from the card"
-        " and nothing was run"
+        "the graphics card is still busy with the last work of an earlier seedvr2x run: wait for it"
+        " to finish and run again, or restart ComfyUI if it does not. Nothing was read from the"
+        " card and nothing was run"
     )
 
 

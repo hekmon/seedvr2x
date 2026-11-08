@@ -66,6 +66,7 @@ def world(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> 
     monkeypatch.setattr(waiting, "_stacks", lambda: None)
     monkeypatch.setattr(waiting, "_ended", None)
     monkeypatch.setattr(waiting, "_abandoned", set())
+    monkeypatch.setattr(waiting, "_pending", {})
     monkeypatch.setattr(waiting, "_stacks_written", False)
     monkeypatch.setattr(waiting, "_running", {})
     waiting.clear()
@@ -353,28 +354,22 @@ def stalled_run(
 
 
 @pytest.mark.parametrize("keep", [True, False])
-@pytest.mark.parametrize("forgotten", ["abandoned", "left"])
 def test_the_run_after_an_abandoned_wait_is_refused_at_once_with_nothing_read(
     machine: StandIn,
     tmp_path,
     world: WaitClock,
     monkeypatch: pytest.MonkeyPatch,
     keep: bool,
-    forgotten: str,
 ) -> None:
     h, happened = stalled_run(machine, tmp_path, world, monkeypatch, keep=keep)
     assert waiting.abandoned() and len(models._left_on_card) == 1  # pyright: ignore[reportPrivateUsage]
-    if forgotten == "left":
-        # A wait that completed since (another thread's) clears the flag: the models left on the
-        # card still refuse the run.
-        monkeypatch.setattr(waiting, "_abandoned", set())
     loads, emptied = len(machine.loads), len(management.empties)
     placed = len(machine.made[0].placed)  # type: ignore[attr-defined]
     free = machine.free
     reads: list[int] = []
     machine.free = lambda: reads.append(1) or free()  # type: ignore[method-assign]
     for plan_only in (False, True):
-        with pytest.raises(words.Refused, match="stopped answering") as refused:
+        with pytest.raises(words.Refused, match="still busy with the last work") as refused:
             run_video(
                 h, plans.Settings(window=5), pictures(5), RESOLUTION, "9", plan_only=plan_only
             )
@@ -503,7 +498,7 @@ def test_a_release_that_never_ends_says_so_and_a_second_cancel_leaves_it_and_mar
     assert happened["text"] == progress.FREEING
     assert progress.FREEING == (
         "freeing the card: waiting for the GPU to finish its last work; Cancel again to leave it,"
-        " then restart ComfyUI"
+        " then run again once the card has finished, or restart ComfyUI"
     )
     # The second Cancel left it: the card is marked whatever the bound (no unit was named), torch's
     # cache was not emptied after it, and the models are held, not collected.
@@ -517,7 +512,7 @@ def test_a_release_that_never_ends_says_so_and_a_second_cancel_leaves_it_and_mar
     assert getattr(waiting._named, "check", None) is None  # pyright: ignore[reportPrivateUsage]
     # The next run is refused at its start, nothing read.
     loads = len(machine.loads)
-    with pytest.raises(words.Refused, match="stopped answering"):
+    with pytest.raises(words.Refused, match="still busy with the last work"):
         run_video(h, plans.Settings(window=5), pictures(5), RESOLUTION, "9")
     assert len(machine.loads) == loads
 
@@ -593,7 +588,7 @@ def test_models_not_kept_wait_for_the_card_in_the_poll_after_a_cancel_and_a_seco
     assert waiting.abandoned() and len(models._left_on_card) == 1  # pyright: ignore[reportPrivateUsage]
     assert len(management.empties) == happened["empties"]
     assert ticker_threads() == []
-    with pytest.raises(words.Refused, match="stopped answering"):
+    with pytest.raises(words.Refused, match="still busy with the last work"):
         run_video(h, plans.Settings(window=5), pictures(5), RESOLUTION, "9")
 
 

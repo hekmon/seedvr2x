@@ -70,6 +70,10 @@ class Event:
         self.set = False
         stream.queue.append(("record", self))
 
+    def query(self) -> bool:
+        """Whether the stream has reached the record: asked, never waited for."""
+        return self.set
+
 
 class Sim(blockswap.Cuda):
     """The placement's CUDA calls, simulated on the CPU (the module's docstring). policy is the

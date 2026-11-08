@@ -168,6 +168,7 @@ def standin_models(vae_models: model.Models, events: list[Any], *, held: bool) -
         made.on_card = False
 
     made.place, made.release = place, release
+    made.queries = lambda: []
     return cast(model.Models, made)
 
 
