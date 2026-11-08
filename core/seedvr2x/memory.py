@@ -313,6 +313,14 @@ LENDS = (
     "the GPU's driver lends system memory where the card is full (WSL2, Windows): a run that"
     " passes the card slows down, then fails without an error to catch"
 )
+# The warning where the driver behind WSL2's device gave no answer (probe returned None): taken
+# for one that lends, as it did whenever it was asked (startup). A constant, as LENDS, so that an
+# app that says the lending in its own words leaves it out by these words (the nodes').
+UNANSWERED = (
+    "the GPU is Windows', reached through WSL2, and its driver didn't say whether it refuses what"
+    " the card can't hold: taken for one that gives system memory in its place, as that driver"
+    " did whenever it was asked"
+)
 
 
 @dataclass(frozen=True)
@@ -658,11 +666,7 @@ def startup() -> str:
         found = probe()
         if found is None:
             _spills = True
-            logger.warning(
-                "the GPU is Windows', reached through WSL2, and its driver didn't say whether"
-                " it refuses what the card can't hold: taken for one that gives system memory"
-                " in its place, as that driver did whenever it was asked"
-            )
+            logger.warning("%s", UNANSWERED)
         else:
             _spills = found.spills
             if _spills:

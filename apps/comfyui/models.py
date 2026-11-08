@@ -270,12 +270,14 @@ class CudaMachine:
 # seedvr2x holds itself to the card by a limit on torch, which the nodes never set (the limit
 # cannot be taken back in a process shared with other nodes); and the driver that lends system
 # memory (memory.LENDS), worded for a run that passes the card, which the nodes' plan keeps from
-# (the user, 2026-11-08: the nodes' own INFO line alone says it). The nodes say their own words,
-# once (_allocator_note).
+# (the user, 2026-11-08: the nodes' own INFO line alone says it), and WSL2's driver that didn't
+# answer, taken for one that lends (memory.UNANSWERED), the same finding in other words. The nodes
+# say their own words, once (_allocator_note).
 _COMMAND_LINE_WORDS = (
     "the allocator is the environment's",
     "seedvr2x holds itself to the card's own memory there",
     memory.LENDS,
+    memory.UNANSWERED,
 )
 
 

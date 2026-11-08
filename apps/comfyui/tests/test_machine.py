@@ -239,6 +239,9 @@ def test_the_librarys_command_line_warnings_are_not_shown_in_comfyuis_process(
         # The driver that lends, as memory.startup logs it (through "%s"): the nodes' own INFO
         # line says it (test_the_lending_driver_is_told_in_the_nodes_words_once).
         memory.logger.warning("%s", memory.LENDS)
+        # WSL2's driver that didn't answer, taken for one that lends: the same finding, said by
+        # the nodes' own line too.
+        memory.logger.warning("%s", memory.UNANSWERED)
         memory.logger.warning("another warning of the library's")
         return ""
 

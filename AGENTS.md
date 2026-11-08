@@ -1289,8 +1289,9 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   `free_memory` asked for the plan's largest phase plus
   `ASK_MARGIN` (a partial unload's buffer) and only when the card has less than the phase alone,
   never more, seedvr2x's registration kept, a card still short of the phase refused, the
-  library's command-line allocator and limit warnings and its driver that lends (`memory.LENDS`)
-  left out of ComfyUI's console for the nodes' own lines, once: `tests/test_machine.py`);
+  library's command-line allocator and limit warnings, its driver that lends (`memory.LENDS`) and
+  WSL2's driver that didn't answer, taken for one that lends (`memory.UNANSWERED`), left out of
+  ComfyUI's console for the nodes' own lines, once: `tests/test_machine.py`);
   `tests/test_release.py`
   the card freed at the end, on Cancel between steps and on an error, and `strays` finding
   nothing on the real `Models.place` and `release` over test_held's toy models, and the models
