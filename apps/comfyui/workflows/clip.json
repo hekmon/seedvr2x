@@ -18,7 +18,14 @@
       "flags": {},
       "order": 0,
       "mode": 0,
-      "inputs": [],
+      "inputs": [
+        {
+          "name": "model_dir",
+          "type": "STRING",
+          "shape": 7,
+          "link": null
+        }
+      ],
       "outputs": [
         {
           "name": "models",
@@ -33,7 +40,6 @@
       },
       "widgets_values": [
         "Sharp 7B, float16 (16.5 GB, 0.02%)",
-        "",
         "auto"
       ]
     },
@@ -232,6 +238,12 @@
           "name": "images",
           "type": "IMAGE",
           "link": 10
+        },
+        {
+          "name": "model_dir",
+          "type": "STRING",
+          "shape": 7,
+          "link": null
         }
       ],
       "outputs": [
@@ -253,8 +265,7 @@
       },
       "widgets_values": [
         "detect",
-        0.3,
-        ""
+        0.3
       ]
     },
     {

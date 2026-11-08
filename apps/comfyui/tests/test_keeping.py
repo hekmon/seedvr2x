@@ -226,6 +226,9 @@ def test_unload_models_under_a_cached_models_output_reads_the_files_again_and_sa
 def test_the_models_node_reads_nothing(machine: StandIn, tmp_path) -> None:
     from comfyui import nodes
 
+    # Only that the files are there, by name: the headers are the upscale node's to read.
+    for name in (INT8, plans.VAE_FILE):
+        (tmp_path / name).write_bytes(b"x")
     out = execute(
         nodes.Models,
         model=plans.DIT_LABELS[INT8],

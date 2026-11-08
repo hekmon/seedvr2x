@@ -56,6 +56,12 @@ KEEP = plans.LABELS["keep_in_ram_between_runs"]
 FOLDER = plans.LABELS["model_dir"]
 
 
+def folder_input(node: str = MODELS) -> str:
+    """The model folder as the nodes name it in a sentence: an optional input, never a widget
+    (the user, 2026-11-08), so the way out is to wire it or unwire it."""
+    return f'the "{FOLDER}" input of {node}'
+
+
 class Refused(Exception):
     """A run seedvr2x's nodes refuse, or one that can't go on: the message says what and the way
     out, in the nodes' terms. ComfyUI shows it on the node."""
@@ -88,7 +94,7 @@ def say(setting: Setting, node: str = MODELS) -> str:
     if name == "vae_model":
         return "the VAE file"
     if name == "model_dir":
-        return f"{FOLDER} in {node}"
+        return folder_input(node)
     if name == "cuts":
         return "a cut list, which the nodes don't take"
     if name == "compile":
@@ -107,7 +113,7 @@ _FILES = {"int8": "the int8 file", "the dynamic GGUF": "the dynamic GGUF file"}
 
 def _smaller(smaller: Sequence[pull.Smaller], model_dir: bool) -> str:
     """The way out of the smaller files that plan the run, named as the Models node lists them:
-    the file by its kind and size, the node it is chosen in; with a model folder set, the file
+    the file by its kind and size, the node it is chosen in; with a model folder wired, the file
     must be there under its name."""
     if not smaller:
         return ""
@@ -117,7 +123,7 @@ def _smaller(smaller: Sequence[pull.Smaller], model_dir: bool) -> str:
     way = f"choose {' or '.join(named)} in {MODELS}, which plans this run"
     if model_dir:
         names = ", ".join(each.name for each in smaller)
-        way += f" (with a {FOLDER} set there, the file must be in it: {names})"
+        way += f" (with a folder wired to {folder_input()}, the file must be in it: {names})"
     return way
 
 
@@ -390,6 +396,22 @@ def _host_memory(error: HostMemoryError, keep: bool) -> str:
     )
 
 
+def _not_in_folder(file: str, node: str) -> str:
+    return (
+        f"{file} is not in the folder wired to {folder_input(node)}: put the file there under"
+        " that name, or unwire the input to use Hugging Face's cache, where seedvr2x fetches its"
+        " files"
+    )
+
+
+def not_a_folder(value: str, node: str = MODELS) -> Refused:
+    """A value of the model folder input that names no folder that exists."""
+    return Refused(
+        f'"{value}" is not a folder: wire a folder that holds seedvr2x\'s model files to'
+        f" {folder_input(node)}, or unwire the input to use Hugging Face's cache"
+    )
+
+
 def _again(error: ModelError, model_dir: bool, node: str = MODELS) -> str:
     """The library's message of a damaged or changed file, which ends "fetch it again", with the
     way to do it in the nodes' terms where the file is one of seedvr2x's own (pinned, in its own
@@ -403,8 +425,8 @@ def _again(error: ModelError, model_dir: bool, node: str = MODELS) -> str:
         return text
     if model_dir:
         way = (
-            f"replace it with seedvr2x's own file ({pull.url(error.file)}), or leave {FOLDER}"
-            f" empty in {node} to use Hugging Face's cache"
+            f"replace it with seedvr2x's own file ({pull.url(error.file)}), or unwire"
+            f" {folder_input(node)} to use Hugging Face's cache"
         )
     else:
         way = (
@@ -421,11 +443,7 @@ def _model_files(error: ModelError, model_dir: bool, node: str = MODELS) -> str:
     if isinstance(error, ModelsRefused):
         return "\n".join(_model_files(part, model_dir, node) for part in error.parts)
     if isinstance(error, ModelMissing):
-        return (
-            f"{error.file or 'a model file'} is not in the folder set as {FOLDER} in {node}:"
-            f" put the file there under that name, or leave {FOLDER} empty to use Hugging Face's"
-            " cache, where seedvr2x fetches its files"
-        )
+        return _not_in_folder(error.file or "a model file", node)
     if isinstance(error, ModelNotPinned):
         if error.figure == "size" and isinstance(error.found, int):
             found = f"size {error.found:,} bytes, where seedvr2x's has {error.expected:,} bytes"
@@ -440,15 +458,15 @@ def _model_files(error: ModelError, model_dir: bool, node: str = MODELS) -> str:
         source = f" ({pull.url(error.file)})" if error.file in pull.PINNED else ""
         return (
             f"{error.file} in the {FOLDER} is not seedvr2x's own file ({found}): replace it with"
-            f" seedvr2x's file{source}, or leave {FOLDER} empty in {node} to use Hugging Face's"
+            f" seedvr2x's file{source}, or unwire {folder_input(node)} to use Hugging Face's"
             " cache"
         )
     if isinstance(error, ModelUnreachable) and error.why == "offline":
         return (
             f"{error.file or 'a model file'} is not in Hugging Face's cache ({pull.cache()}) and"
             " Hugging Face's offline mode is on (HF_HUB_OFFLINE is set). seedvr2x fetches its"
-            " files once, at the first run: unset HF_HUB_OFFLINE and restart ComfyUI, or set"
-            f" {FOLDER} in {node} to a folder that has them"
+            " files once, at the first run: unset HF_HUB_OFFLINE and restart ComfyUI, or"
+            f" wire a folder that has them to {folder_input(node)}"
         )
     if isinstance(error, ModelDamaged | ModelChanged):
         return _again(error, model_dir, node)
@@ -612,8 +630,4 @@ def cuts_not_a_list() -> Refused:
 
 
 def detector_missing(name: str) -> Refused:
-    return Refused(
-        f"{name} is not in the folder set as {FOLDER} in {CUTS}: put the file there under"
-        f" that name, or leave {FOLDER} empty to use Hugging Face's cache, where seedvr2x fetches"
-        " its files"
-    )
+    return Refused(_not_in_folder(name, CUTS))

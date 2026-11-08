@@ -53,7 +53,7 @@ import torch
 from comfy.model_patcher import ModelPatcher
 
 from seedvr2x import blockswap, memory, model, peaks, pull, waiting, weights
-from seedvr2x.errors import PlanRefused, Refusal
+from seedvr2x.errors import ModelError, ModelMissing, ModelsRefused, PlanRefused, Refusal
 from seedvr2x.memory import Reading
 from seedvr2x.model import Models
 from seedvr2x.passes import HELD, ModelPlan
@@ -61,7 +61,7 @@ from seedvr2x.pull import ModelFiles
 from seedvr2x.weights import Architecture
 
 from . import plans, words
-from .progress import FAILED, FREEING, STOPPED, Preparing, file_size
+from .progress import FAILED, FREEING, STOPPED, Downloading, Preparing, file_size
 
 logger = logging.getLogger("seedvr2x_comfyui.models")
 
@@ -617,6 +617,15 @@ def _prepare(
     needed. A refusal is worded for the nodes (words.refusal). The bytes of a download are told to
     `preparing`, which shows them on the node."""
     try:
+        if handle.directory is None:
+            # The Models node fetched what was missing when it ran, and ComfyUI keeps its output
+            # between prompts: a file the cache has lost since is fetched here, said before it is.
+            for name in (handle.dit, plans.VAE_FILE):
+                if name in pull.PINNED and pull.cached(name) is None:
+                    logger.info(
+                        "%s is no longer in Hugging Face's cache: downloading it again",
+                        plans.short_label(name),
+                    )
         files = pull.resolve(
             handle.directory,
             handle.dit,
@@ -635,6 +644,82 @@ def _prepare(
         return files, machine.dit_model(dit)
     except Refusal as error:
         raise words.refusal(error, model_dir=bool(handle.model_dir)) from error
+
+
+def model_folder(value: str | None, node: str = words.MODELS) -> str:
+    """The model folder the Models node's optional input gave, as the Handle holds it: "" for
+    Hugging Face's cache. Whitespace and one pair of double quotes around the value are taken off
+    (Windows' "Copy as path" adds the quotes); a value empty after that is the same as an unwired
+    input, said at INFO (an empty string from a primitive node would otherwise read as a folder
+    named ""); one that is no existing folder is refused (words.not_a_folder), naming `node`."""
+    if value is None:
+        return ""
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        text = text[1:-1].strip()
+    if not text:
+        logger.info("the model folder given is empty: Hugging Face's cache is used")
+        return ""
+    if not Path(text).is_dir():
+        raise words.not_a_folder(text, node)
+    return text
+
+
+def said_where(folder: Path | None, names: tuple[str, ...], downloaded: set[str]) -> None:
+    """One INFO line for each of the model files, where it is and how large: a file of the cache
+    by its pin's size (the cache holds nothing else under seedvr2x's names), a file of a folder by
+    its own (one of another size is refused by its pin when the upscale node checks it): the
+    cache's directory, which HF_HOME moves, or the model folder `folder`."""
+    for name in names:
+        pin = pull.PINNED.get(name)
+        if folder is not None:
+            path = folder / name
+            size = path.stat().st_size if path.is_file() else 0
+        else:
+            size = 0 if pin is None else pin.size
+        if folder is not None:
+            where = f"in the model folder: {folder}"
+        else:
+            how = "downloaded into" if name in downloaded else "in"
+            where = f"{how} Hugging Face's cache: {pull.cache()}; HF_HOME moves it"
+        logger.info("%s, %s, %s", plans.short_label(name), plans.size_text(size), where)
+
+
+def provide(handle: Handle, show: Callable[[str], None]) -> None:
+    """The files the Models node's choice needs, there when it has run: with a model folder, the
+    DiT's file and the VAE's present in it, nothing downloaded and nothing read; without, what
+    Hugging Face's cache lacks of them downloaded into it (the bytes on a bar of the node's own,
+    its one short line told to `show`; ComfyUI's Cancel honoured as the upscale nodes' downloads
+    are, progress.Preparing). Where each is is said in the console. The files' headers and pins
+    are checked by the upscale node, which reads them (`_prepare`). A refusal is worded for the
+    nodes (words.refusal), the Models node's."""
+    names = (handle.dit, plans.VAE_FILE)
+    downloaded: set[str] = set()
+    try:
+        folder = handle.directory
+        if folder is not None:
+            missing: list[ModelError] = [
+                ModelMissing(f"{folder / name}: {weights.MISSING}", file=name)
+                for name in names
+                if not (folder / name).is_file()
+            ]
+            if missing:
+                raise missing[0] if len(missing) == 1 else ModelsRefused(missing)
+        else:
+            absent = {name for name in names if pull.cached(name) is None}
+            downloading = Downloading(
+                show, plans.file_label, expected={name: pull.PINNED[name].size for name in absent}
+            )
+            pull.resolve(
+                None, handle.dit, plans.VAE_FILE, detector=False, progress=downloading.download
+            )
+            # A Cancel pressed during a download reported from another thread is still pending:
+            # honoured here, on the node's own thread (progress.Preparing).
+            management.throw_exception_if_processing_interrupted()
+            downloaded = absent
+    except Refusal as error:
+        raise words.refusal(error, model_dir=handle.directory is not None) from error
+    said_where(handle.directory, names, downloaded)
 
 
 def _attention(machine: Machine, requested: str | None) -> str:

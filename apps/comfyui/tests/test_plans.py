@@ -5,6 +5,7 @@ refused in the nodes' words) by the planners the upscale nodes make."""
 import asyncio
 import inspect
 import re
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -44,11 +45,20 @@ def schema_inputs(node: type[io.ComfyNode]) -> dict[str, Any]:
     return {each.id: each for each in node.GET_SCHEMA().inputs}
 
 
-def test_the_models_node_gives_a_light_handle() -> None:
+def test_the_models_node_gives_a_light_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models_folder = tmp_path / "models"
+    models_folder.mkdir()
+    for name in ("seedvr2x_ema_7b_sharp_int8_convrot.safetensors", plans.VAE_FILE):
+        (models_folder / name).write_bytes(b"x")
     spec = schema_inputs(nodes.Models)
     assert spec["model"].default == "Sharp 7B, float16 (16.5 GB, 0.02%)"
     assert spec["model"].options == list(plans.DIT_LABELS.values())
-    assert spec["model_dir"].default == "" and not spec["model_dir"].multiline
+    # The folder is an optional input and no widget: no default, nothing to fill in.
+    assert spec["model_dir"].optional and spec["model_dir"].force_input
+    assert spec["model_dir"].io_type == "STRING"
+    assert list(spec) == ["model", "keep_in_ram_between_runs", "model_dir"]
     # auto, on, off: auto first and the default; the handle carries the mode, nothing is read.
     keep = spec["keep_in_ram_between_runs"]
     assert (
@@ -57,11 +67,11 @@ def test_the_models_node_gives_a_light_handle() -> None:
     (handle,) = execute(
         nodes.Models,
         model="Sharp 7B, int8 (8.3 GB, 0.86%)",
-        model_dir=" /models ",
+        model_dir=f" {models_folder} ",
         keep_in_ram_between_runs="off",
     ).args
     assert handle == models.Handle(
-        "seedvr2x_ema_7b_sharp_int8_convrot.safetensors", "/models", "off"
+        "seedvr2x_ema_7b_sharp_int8_convrot.safetensors", str(models_folder), "off"
     )
     assert models.Handle("a").directory is None and models.Handle("a").keep == "auto"
     assert str(models.Handle("a", "/m").directory) == "/m"
@@ -76,7 +86,12 @@ def test_the_models_nodes_labels_placeholder_and_tooltips_say_what_they_are() ->
     folder = spec["model_dir"]
     # ComfyUI_frontend 1.57.6 draws no placeholder in a single-line STRING: the tooltip says it.
     assert folder.display_name == "model folder" and "placeholder" not in folder.as_dict()
-    assert folder.tooltip.startswith("Leave empty to download the files from Hugging Face")
+    assert folder.tooltip.startswith("Optional. A folder that has seedvr2x's model files")
+    assert "Not connected: Hugging Face's cache, shared with seedvr2x's command line" in (
+        folder.tooltip
+    )
+    assert "Nothing is downloaded from a folder" in folder.tooltip
+    assert "Connect any string node" in folder.tooltip
     # What the folder must hold, by the files' names, every DiT file's name made by its rule.
     assert plans.VAE_FILE in folder.tooltip and plans.DEFAULT_DIT in folder.tooltip
     for name in plans.DIT_LABELS:
@@ -637,8 +652,11 @@ def test_the_hidden_node_id_is_read_from_the_executors_clone_of_the_class() -> N
     clone = nodes.UpscaleImage.PREPARE_CLASS_CLONE({io.Hidden.unique_id: "17"})
     assert nodes._node_id(clone) == "17"  # pyright: ignore[reportPrivateUsage]
     # A hidden value the schema doesn't ask for is not handed over.
+    tile_clone = nodes.Tile.PREPARE_CLASS_CLONE({io.Hidden.unique_id: "17"})
+    assert tile_clone.hidden is not None and tile_clone.hidden.unique_id is None
+    # The Models node asks for it: its status line and its download's bar are on its node.
     models_clone = nodes.Models.PREPARE_CLASS_CLONE({io.Hidden.unique_id: "17"})
-    assert models_clone.hidden is not None and models_clone.hidden.unique_id is None
+    assert nodes._node_id(models_clone) == "17"  # pyright: ignore[reportPrivateUsage]
 
 
 ROOM = plans.Room("a card", 40 * GIB, 0, 20 * GIB, False, 40 * GIB, host=48 * GIB)

@@ -65,6 +65,27 @@ def file_label(name: str) -> str:
     return f"the {model.replace('Sharp', 'sharp')} ({kind})"
 
 
+def short_label(name: str) -> str:
+    """A model file as the Models node's status line and the console's lines about the files name
+    it: "Sharp 7B int8", "7B float16", "Sharp 7B dynamic GGUF", "VAE", "shot detector"; any other
+    file by its name."""
+    if name == VAE_FILE:
+        return "VAE"
+    if name == pull.DETECTOR:
+        return "shot detector"
+    label = DIT_LABELS.get(name)
+    return name if label is None else label.split(" (")[0].replace(", ", " ")
+
+
+def size_text(count: int) -> str:
+    """A file's size as the console says it: pull.gigabytes from 0.1 GB ("8.3 GB"), megabytes
+    from 0.1 MB ("30.5 MB": the shot detector's file, where pull.gigabytes gives bytes), else the
+    bytes."""
+    if count >= 100_000_000:
+        return pull.gigabytes(count)
+    return f"{count / 1e6:.1f} MB" if count >= 100_000 else f"{count:,} bytes"
+
+
 # The settings of an upscale node. The numbers the plan makes (each pass's tile, the blocks
 # swapped, a clip's window length) are optional sockets of seedvr2x's own types, each given by a
 # value node of its own (the user's Desktop test, 2026-11-05: a widget whose 0 meant auto let a

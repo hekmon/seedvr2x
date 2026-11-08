@@ -33,7 +33,7 @@ from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, override
 
 import comfy.model_management as management
 import numpy as np
@@ -645,6 +645,13 @@ def amount(done: int, total: int) -> str:
     return f"{done / 1e6:.1f} of {total / 1e6:.1f} MB"
 
 
+def amount_short(done: int, total: int) -> str:
+    """The same in the form the Models node's one short line takes: "3.1/8.3 GB", "12.1/30.5 MB"."""
+    if total >= 100_000_000:
+        return f"{done / 1e9:.1f}/{total / 1e9:.1f} GB"
+    return f"{done / 1e6:.1f}/{total / 1e6:.1f} MB"
+
+
 @dataclass
 class Preparing:
     """The download of seedvr2x's files and their reading into memory on one bar, in bytes, each
@@ -700,11 +707,17 @@ class Preparing:
                 self._send(line)
 
     def _send(self, line: str) -> None:
+        self.show(self._text(line))
+        self._move()
+
+    def _text(self, line: str) -> str:
+        return f"{line}\n{spoken(wall(self.now() - self.started))} so far"
+
+    def _move(self) -> None:
         total = sum(each[1] for each in self.downloads.values())
         total += max(self.announced, sum(each[1] for each in self.reads.values()))
         done = sum(each[0] for each in self.downloads.values())
         done += sum(each[0] for each in self.reads.values())
-        self.show(f"{line}\n{spoken(wall(self.now() - self.started))} so far")
         if self.bar is None:
             # Made at the first byte, when every download's size has been told (fetch tells them
             # all before the first) and the reading's is announced: the total holds from there.
@@ -712,6 +725,31 @@ class Preparing:
                 return
             self.bar = ProgressBar(total)
         self.bar.update_absolute(done, total)
+
+
+@dataclass
+class Downloading(Preparing):
+    """The Models node's downloads: Preparing's bar and Cancel, in bytes, with the one short line
+    the node shows ("downloading 3.1/8.3 GB": every download together, in the total's unit) in
+    place of a line for each file and the time, which the node's line has no room for (about 40
+    characters, the user, 2026-11-08). Nothing is read into memory here. `expected`: the sizes of
+    the files about to be downloaded, by name (their pins'), so that the line's total is whole
+    from the first, before pull.fetch has told every size."""
+
+    expected: dict[str, int] = field(default_factory=dict[str, int])
+
+    @override
+    def download(self, name: str, done: int, total: int) -> None:
+        self.downloads[name] = (done, total)
+        sizes = {**self.expected, **{each: size for each, (_, size) in self.downloads.items()}}
+        self._tell(
+            "downloading "
+            + amount_short(sum(each[0] for each in self.downloads.values()), sum(sizes.values()))
+        )
+
+    @override
+    def _text(self, line: str) -> str:
+        return line
 
 
 def scanned(

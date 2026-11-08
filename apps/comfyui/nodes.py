@@ -15,9 +15,10 @@ What the V3 schema changes for a node, read in ComfyUI v0.44.0:
   `comfy.model_management.throw_exception_if_processing_interrupted` raises when Cancel was
   pressed, as for any node. progress.py says how the nodes use them.
 
-- seedvr2x Models: the DiT file by a name a user reads, a model directory, and whether the weights
-  stay in RAM between runs (auto, on, off). Gives a light handle (models.Handle); nothing is read
-  here.
+- seedvr2x Models: the DiT file by a name a user reads, whether the weights stay in RAM between
+  runs (auto, on, off) and, as an optional input, a model folder (unwired: Hugging Face's cache,
+  where what is missing is downloaded here, on a bar of the node's). Gives a light handle
+  (models.Handle); no file is read here.
 - seedvr2x Cuts: the shot detector on a clip's frames (or the clip taken as one shot), giving the
   cut list Upscale Video takes and the text of the cuts and the possible cuts.
 - seedvr2x Upscale Image and seedvr2x Upscale Video: the pictures and the models' handle, then
@@ -104,9 +105,10 @@ class Models(io.ComfyNode):
             display_name="seedvr2x Models",
             category=CATEGORY,
             description=(
-                "Chooses seedvr2x's model file and where the model files are read from. Nothing is"
-                " loaded here: the upscale nodes load the files, check them and fit them to your"
-                " graphics card."
+                "Chooses seedvr2x's model file and where the model files are read from, and"
+                " downloads what Hugging Face's cache lacks of them (once, while this node's"
+                " inputs stay as they are). Nothing is loaded here: the upscale nodes load the"
+                " files, check them and fit them to your graphics card."
             ),
             inputs=[
                 io.Combo.Input(
@@ -126,22 +128,6 @@ class Models(io.ComfyNode):
                     " Hugging Face into its cache where missing, always the same version of the"
                     " file.",
                 ),
-                io.String.Input(
-                    "model_dir",
-                    default="",
-                    multiline=False,
-                    display_name=plans.LABELS["model_dir"],
-                    tooltip="Leave empty to download the files from Hugging Face the first time"
-                    " they are needed, into its cache, where seedvr2x's command line finds them"
-                    " too. To use files you already have, give their folder, and nothing is"
-                    f" downloaded: it must have the VAE, {plans.VAE_FILE} (which turns images into"
-                    " what the model works on, and back), and the model file under seedvr2x's"
-                    f" name for it: {plans.DEFAULT_DIT} for {plans.DIT_LABELS[plans.DEFAULT_DIT]};"
-                    " _int8_convrot.safetensors or _dyn.gguf in place of _fp16.safetensors for"
-                    " the int8 and dynamic GGUF files; no _sharp for the 7B. These are the names"
-                    " seedvr2x's command line reads from a folder too; they are not in ComfyUI's"
-                    " own models folders.",
-                ),
                 io.Combo.Input(
                     "keep_in_ram_between_runs",
                     options=list(plans.KEEP_MODES),
@@ -159,6 +145,25 @@ class Models(io.ComfyNode):
                     " reads the files again. ComfyUI's Unload models frees it too, and under"
                     " ComfyUI's --disable-smart-memory nothing is kept.",
                 ),
+                # An optional input and no widget (the user, 2026-11-08): an empty widget makes a
+                # user think something must be filled in; an input drawn apart reads as optional
+                # at once. Any string node gives it a folder, ComfyUI's own String node among them.
+                io.String.Input(
+                    "model_dir",
+                    optional=True,
+                    force_input=True,
+                    display_name=plans.LABELS["model_dir"],
+                    tooltip="Optional. A folder that has seedvr2x's model files under their"
+                    f" names: the VAE, {plans.VAE_FILE} (which turns images into what the model"
+                    " works on, and back), and the model file under seedvr2x's name for it:"
+                    f" {plans.DEFAULT_DIT} for {plans.DIT_LABELS[plans.DEFAULT_DIT]};"
+                    " _int8_convrot.safetensors or _dyn.gguf in place of _fp16.safetensors for"
+                    " the int8 and dynamic GGUF files; no _sharp for the 7B. These are the names"
+                    " seedvr2x's command line reads from a folder too. Connect any string node"
+                    " to it, ComfyUI's String node for one. Nothing is downloaded from a folder."
+                    " Not connected: Hugging Face's cache, shared with seedvr2x's command line,"
+                    " where the files are downloaded the first time they are needed.",
+                ),
             ],
             outputs=[
                 ModelsType.Output(
@@ -168,15 +173,24 @@ class Models(io.ComfyNode):
                     " upscale nodes. Nothing is loaded yet.",
                 )
             ],
+            hidden=[io.Hidden.unique_id],
         )
 
     @classmethod
     def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
-        cls, model: str, model_dir: str, keep_in_ram_between_runs: str
+        cls, model: str, keep_in_ram_between_runs: str, model_dir: str | None = None
     ) -> io.NodeOutput:
-        return io.NodeOutput(
-            models_module.Handle(DIT_BY_LABEL[model], model_dir.strip(), keep_in_ram_between_runs)
+        """The handle, once its files are there. The node's one status line (about 40
+        characters, no name: the title has it) is the download's bytes while one runs, then the
+        file and whether it is kept in RAM; the files' places go to the console."""
+        show = _shower(_node_id(cls))
+        handle = models_module.Handle(
+            DIT_BY_LABEL[model], models_module.model_folder(model_dir), keep_in_ram_between_runs
         )
+        models_module.provide(handle, show)
+        kept = "kept" if models_module.decide_keeping(handle).kept else "not kept"
+        show(f"{plans.short_label(handle.dit)} \u00b7 {kept} in RAM")
+        return io.NodeOutput(handle)
 
 
 # ---- What the upscale nodes share ----------------------------------------------------------------
@@ -223,7 +237,10 @@ def _show(text: str, node: str | None) -> None:
     by the next)."""
     import server
 
-    instance = server.PromptServer.instance
+    # ComfyUI's PromptServer has no `instance` until its server is made (server.py sets it in
+    # __init__): a node run without one (a script, the smoke test) says nothing rather than fail
+    # with an AttributeError that would hide the node's own error.
+    instance = getattr(server.PromptServer, "instance", None)
     if instance is not None and node is not None:
         instance.send_progress_text(text, node)
 
@@ -1006,15 +1023,17 @@ class Cuts(io.ComfyNode):
                     " own windows. A lower value finds more cuts, with more false ones."
                     " Not used in one shot mode.",
                 ),
+                # An optional input and no widget, as seedvr2x Models' (the user, 2026-11-08).
                 io.String.Input(
                     "model_dir",
-                    default="",
-                    multiline=False,
+                    optional=True,
+                    force_input=True,
                     display_name=plans.LABELS["model_dir"],
-                    tooltip="Leave empty to download the detector's file, transnetv2.safetensors,"
-                    " from Hugging Face the first time it is needed, into its cache. To use a"
-                    " file you already have, give the folder that has it under that name; the"
-                    " same folder as seedvr2x Models' can have it too. Not used in one shot mode.",
+                    tooltip="Optional. A folder that has the detector's file, under its name,"
+                    f" {pull.DETECTOR}; the same folder as seedvr2x Models' can have it too."
+                    " Connect any string node to it, ComfyUI's String node for one. Not"
+                    " connected: Hugging Face's cache, where the file is downloaded the first"
+                    " time it is needed. Not used in one shot mode.",
                 ),
             ],
             outputs=[
@@ -1036,7 +1055,7 @@ class Cuts(io.ComfyNode):
 
     @classmethod
     def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
-        cls, images: torch.Tensor, mode: str, threshold: float, model_dir: str
+        cls, images: torch.Tensor, mode: str, threshold: float, model_dir: str | None = None
     ) -> io.NodeOutput:
         if images.ndim != 4 or images.shape[0] < 1:
             raise words.frames_missing()
@@ -1053,7 +1072,9 @@ class Cuts(io.ComfyNode):
                 raise words.Refused(f"threshold {threshold!r}: must be a number")
             if not 0 < threshold <= 1:
                 raise words.Refused(f"threshold {threshold}: must be above 0 and at most 1")
-            found = cls._probabilities(images, model_dir.strip(), _shower(_node_id(cls)))
+            found = cls._probabilities(
+                images, models_module.model_folder(model_dir, words.CUTS), _shower(_node_id(cls))
+            )
             cuts = shotcuts.detected(found, float(threshold))
             text = plans.cuts_text(
                 count, float(threshold), cuts, shotcuts.possible(found, float(threshold))
@@ -1086,13 +1107,17 @@ class Cuts(io.ComfyNode):
         name, pin = pull.DETECTOR, pull.PINNED[pull.DETECTOR]
         hashes = pull.Hashes()
         try:
+            downloaded: set[str] = set()
             if directory is None:
+                if pull.cached(name) is None:
+                    downloaded.add(name)
                 preparing = progress.Preparing(show, plans.file_label)
                 path = pull.fetch({name: pin}, progress=preparing.download)[name]
             else:
                 path = directory / name
                 if not path.is_file():
                     raise words.detector_missing(name)
+            models_module.said_where(directory, (name,), downloaded)
             cache = None if directory is not None else pull.cache()
             pull.check_pin(name, path, pin, hashes, cache, "detector", load=True)
             if getattr(device, "type", "") != "cuda" or not torch.cuda.is_available():

@@ -17,10 +17,12 @@ model loads.
   the [model card](../../models/hf/README.md) gives it (how far its stored weights are from
   ByteDance's original, the median over the 7B's 288 large matrices): `Sharp 7B, float16
   (16.5 GB, 0.02%)` (the default), `Sharp 7B, int8 (8.3 GB, 0.86%)`, `Sharp 7B, dynamic GGUF
-  (4.8 GB, 7.55%)`, and the regular 7B in each. It also chooses where the files are read from
-  (`model folder`: empty for Hugging Face's cache, or a folder) and whether the model stays in
-  RAM between runs: `auto`, `on` or `off` ([Memory](#memory)). Nothing is loaded here: the first
-  upscale run loads.
+  (4.8 GB, 7.55%)`, and the regular 7B in each. It downloads what Hugging Face's cache lacks of the
+  model file and the VAE when it runs, once ([Model files](#model-files)), and says on the node
+  the file chosen and whether it is kept in RAM. It also chooses whether the model stays in RAM
+  between runs: `auto`, `on` or `off` ([Memory](#memory)). Its optional input `model folder`,
+  unconnected by default, reads the files from a folder you give instead of the cache. Nothing is
+  loaded here: the first upscale run loads.
 - **seedvr2x Cuts** finds where a clip changes scene ([Cuts and shots](#cuts-and-shots)): it takes
   the clip's frames, and gives the cut list that Upscale Video needs and a text of the cuts.
 - **seedvr2x Upscale Image** upscales each picture of a batch on its own, to the output's short
@@ -67,8 +69,8 @@ seedvr2x Cuts has two modes:
   runs, and on the processor where there is none, and frees its memory after. `threshold` is how
   sure the detector must be that a frame starts a new shot: 0.3 by default, the command line's.
   A cut found for nothing only gives a shot its own windows, so the default errs toward cutting.
-  `model folder` is where to read the detector's file from instead of the cache, as in
-  seedvr2x Models.
+  Its optional input `model folder` is where to read the detector's file from instead of the
+  cache, as in seedvr2x Models.
 - `one shot` runs no detector: the whole clip is one shot, for a clip you know has no cut.
 
 Its `text` output, also shown on the node, lists each cut by the frame its shot starts at, counted
@@ -130,10 +132,15 @@ The node shows how far it has got, in what ComfyUI gives a node:
 - **The preview** is the newest frame decoded, as ComfyUI's samplers show their steps, once for each
   few frames of a clip and once for each picture of a batch, at ComfyUI's preview size
   (`--preview-size`, 512 by default).
-- **Before the upscale**, downloading seedvr2x's files and reading them into memory have a bar of
-  their own, in bytes, with a line each ("downloading the sharp 7B (float16): 4.2 of 16.5 GB",
-  "reading the sharp 7B (float16) into memory: 9.0 of 16.5 GB"); the bar starts again at 0 for the
-  upscale. seedvr2x Cuts shows the frames it has scanned.
+- **Before the upscale**, the downloads are seedvr2x Models': a bar of its own, in bytes, and one
+  short line on the node ("downloading 3.1/8.3 GB"), then the file chosen and whether it is kept
+  ("Sharp 7B int8 · kept in RAM"); ComfyUI keeps the node's output, so this happens once for as
+  long as the node's inputs stay as they are. The upscale node's bar starts with the reading of
+  the files into memory, in bytes, with a line each ("reading the sharp 7B (float16) into memory:
+  9.0 of 16.5 GB"), and again at 0 for the upscale; if a file has gone from the cache since
+  seedvr2x Models ran, the upscale node says so in ComfyUI's console and downloads it again on
+  that bar. seedvr2x Cuts shows the frames it has scanned, and downloads its detector's file on
+  its own bar.
 - **ComfyUI's console** has the rest, each of seedvr2x's lines beginning with `[seedvr2x]`, the
   library's included, so that they read apart from other nodes' lines, which are left as they are.
 - **Cancel** stops the run after the tile or the window being made, or the piece of a file being
@@ -165,17 +172,37 @@ pip install "diffusers>=0.42" omegaconf rotary-embedding-torch
 ## Model files
 
 The files are seedvr2x's own conversions, from [hekmon/seedvr2x](https://huggingface.co/hekmon/seedvr2x)
-at a revision pinned in the code, each checked by its pinned size and SHA-256 before it is used. The
-first run downloads the model file chosen and the VAE (0.5 GB) into Hugging Face's cache, once:
-`~/.cache/huggingface/hub`, or `$HF_HOME/hub`, or the directory `HF_HUB_CACHE` names. Set `HF_HOME`
-before starting ComfyUI to put the cache on another disk. The command line finds the same files
-there ([its README](../seedvr2x/README.md#model-files)).
+at a revision pinned in the code, each checked by its pinned size and SHA-256 before it is used.
+They are no files ComfyUI's loaders take, so they are not in its `models/` folders (its own SeedVR2
+files sit there and are not seedvr2x's): they stay in Hugging Face's cache, where one copy serves
+every seedvr2x app, the command line and the image server included ([the command line's
+README](../seedvr2x/README.md#model-files)).
 
-Not ComfyUI's `models/` folders: its own SeedVR2 files sit there and are not seedvr2x's. To read
-the files from a folder instead, give it in `model folder`: they are read there by name, nothing
-downloaded: the VAE, `seedvr2x_ema_vae_fp16.safetensors`, and the model file chosen, under its name
-in the repository (`seedvr2x_ema_7b_sharp_fp16.safetensors` for the default), the same files and
-names the command line reads from a folder.
+- **What they take.** The model file chosen: 16.5 GB for float16, 8.3 GB for int8, 4.8 GB for the
+  dynamic GGUF; the VAE, 0.5 GB; seedvr2x Cuts' shot detector, 30.5 MB.
+- **Where they are.** On Windows `%USERPROFILE%\.cache\huggingface\hub`, on Linux
+  `~/.cache/huggingface/hub`; or `hub` under the directory `HF_HOME` names, or the directory
+  `HF_HUB_CACHE` names. ComfyUI's console says where each file is when seedvr2x Models runs
+  ("Sharp 7B int8, 8.3 GB, in Hugging Face's cache: ...").
+- **Downloaded when missing.** seedvr2x Models downloads what the cache lacks of the model file
+  and the VAE when it runs, with its bar and its line, and again only if its inputs change or the
+  cache loses a file. With `HF_HUB_OFFLINE` set nothing is downloaded and the node says so.
+- **Moving the cache.** Set `HF_HOME` before ComfyUI starts, to a folder on a disk with room for
+  the files. For ComfyUI Desktop on Windows, in the user environment variables (Settings, System,
+  About, Advanced system settings, Environment Variables; or `setx HF_HOME D:\hf` in a terminal),
+  then restart ComfyUI. For the portable build, a line `set HF_HOME=D:\hf` before the line that
+  starts python in `run_nvidia_gpu.bat`. On Linux, in the shell that starts ComfyUI
+  (`HF_HOME=/data/hf python main.py`). Files already in the old cache are not moved: copy the
+  `models--hekmon--seedvr2x` folder of its `hub` into the new one, or let the node download them
+  again.
+- **Using a folder instead.** Connect a string node (ComfyUI's String node, for one) holding the
+  folder's path to seedvr2x Models' `model folder` input; quotes around the path (Windows' "Copy as
+  path" adds them) and spaces at its ends are taken off, and an empty value is the same as
+  nothing connected. The files are read there by name, nothing downloaded: the VAE,
+  `seedvr2x_ema_vae_fp16.safetensors`, and the model file chosen, under its name in the repository
+  (`seedvr2x_ema_7b_sharp_fp16.safetensors` for the default), the same files and names the command
+  line reads from a folder. A path that is no folder, or a folder lacking one of the files, is
+  refused by the node, saying which.
 
 **On Windows.** Without Windows' Developer Mode, huggingface_hub can't make the links its cache is
 built of: it copies the files instead, and says so once in ComfyUI's console, in a warning that

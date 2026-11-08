@@ -183,12 +183,9 @@ def test_seedvr2x_widgets_are_those_of_the_schema_at_their_defaults(name: str) -
             else:
                 assert isinstance(value, str)
         if node["type"] == "seedvr2xCuts":
-            assert [widget.id for widget, _ in saved if widget] == [
-                "mode",
-                "threshold",
-                "model_dir",
-            ]
-            assert values == ["detect", shotcuts.THRESHOLD, ""]
+            # The model folder is an optional input and no widget: no saved value for it.
+            assert [widget.id for widget, _ in saved if widget] == ["mode", "threshold"]
+            assert values == ["detect", shotcuts.THRESHOLD]
         elif node["type"] != "seedvr2xModels":
             # No widget of a number the plan makes: the workflow shows the plan's own choices.
             by_id_ = {widget.id: value for widget, value in saved if widget is not None}
@@ -206,6 +203,7 @@ def test_seedvr2x_widgets_are_those_of_the_schema_at_their_defaults(name: str) -
             assert by_id_["plan_only"] is False and by_id_["resolution"] == 1080
         else:
             assert values[-1] == "auto", "keep in RAM between runs is auto"
+            assert len(values) == 2, "the model folder is no widget: the cache, unwired"
     assert seen == {"picture": 2, "clip": 3}[name]
 
 

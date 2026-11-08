@@ -260,6 +260,7 @@ def test_a_memory_refusal_names_the_smaller_files_that_plan_it_and_the_resolutio
     assert "no resolution fits" in text and "close programs that use the graphics card" in text
     with_dir = str(words.refusal(error, smaller=smaller[1:], model_dir=True))
     assert "must be in it: seedvr2x_ema_7b_sharp_dyn.gguf" in with_dir
+    assert 'with a folder wired to the "model folder" input of seedvr2x Models' in with_dir
     assert "choose" not in str(words.refusal(error))
 
 
@@ -383,22 +384,33 @@ def test_the_model_files_refusals_name_the_nodes_settings_and_ways() -> None:
         name: str(words.refusal(error, model_dir=name != "model: not pinned"))
         for name, error in models_refused().items()
     }
-    assert "is not in the folder set as model folder in seedvr2x Models" in said["model: missing"]
+    assert (
+        'is not in the folder wired to the "model folder" input of seedvr2x Models'
+        in said["model: missing"]
+    )
+    assert "unwire the input to use Hugging Face's cache" in said["model: missing"]
+    assert "leave" not in said["model: missing"] and "empty" not in said["model: missing"]
     assert "the model in seedvr2x Models: not one of" in said["model: unknown"]
-    assert "give model folder in seedvr2x Models with a directory" in said["model: unknown"]
+    assert (
+        'give the "model folder" input of seedvr2x Models with a directory'
+        in said["model: unknown"]
+    )
     # From Hugging Face's cache: the file is fetched again once deleted from it, the cache named.
     assert "Delete it from Hugging Face's cache (" in said["model: not pinned"]
     assert "the next run fetches it again" in said["model: not pinned"]
     assert "hf download" not in said["model: not pinned"]
     # From a folder: the copy there is not the one seedvr2x pins.
     assert "in the model folder is not seedvr2x's own file" in said["model: not pinned, directory"]
-    assert "leave model folder empty in seedvr2x Models" in said["model: not pinned, directory"]
+    assert (
+        'unwire the "model folder" input of seedvr2x Models to use Hugging Face\'s cache'
+        in said["model: not pinned, directory"]
+    )
     assert (
         "HF_HUB_OFFLINE" in said["model: offline"]
         and "fetches its files once" in said["model: offline"]
     )
     assert "HF_HUB_OFFLINE" not in said["model: unreachable"]
-    assert "give model folder in seedvr2x Models" in said["model: unreachable"]
+    assert 'give the "model folder" input of seedvr2x Models' in said["model: unreachable"]
     assert said["model: several"].count("\n") == 1
     host = str(words.refusal(refusals()["host copies"], keep=True))
     assert "need 15.00 GiB of your computer's RAM" in host and "4.00 GiB are available" in host
@@ -514,7 +526,7 @@ def test_a_damaged_pinned_file_in_a_directory_keeps_the_way_too(tmp_path: Path) 
     assert all(isinstance(each, ModelDamaged) for each in error.parts)
     text = str(words.refusal(error, model_dir=True))
     assert text.count("replace it with seedvr2x's own file (https://huggingface.co/") == 2
-    assert "leave model folder empty in seedvr2x Models to use Hugging Face's cache" in text
+    assert 'unwire the "model folder" input of seedvr2x Models to use Hugging Face\'s cache' in text
     assert "; fetch it again" not in text and " --" not in text
 
 
@@ -537,7 +549,10 @@ def test_files_missing_from_a_folder_are_worded_for_the_model_folder(tmp_path: P
     )
     lines = str(words.refusal(error, model_dir=True)).splitlines()
     assert len(lines) == 2
-    assert all("is not in the folder set as model folder in seedvr2x Models" in x for x in lines)
+    assert all(
+        'is not in the folder wired to the "model folder" input of seedvr2x Models' in x
+        for x in lines
+    )
     assert " --" not in "".join(lines)
 
 
@@ -580,7 +595,8 @@ def test_a_cache_the_network_stays_out_of_is_worded_with_the_way_to_set_the_mode
     error = refused_by(None)
     assert isinstance(error, ModelUnreachable) and error.why == "offline"
     text = str(words.refusal(error))
-    assert "HF_HUB_OFFLINE" in text and "set model folder in seedvr2x Models" in text
+    assert "HF_HUB_OFFLINE" in text
+    assert 'wire a folder that has them to the "model folder" input of seedvr2x Models' in text
     assert " --" not in text
 
 

@@ -88,9 +88,10 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          takes the Cuts node's cut list, a required input of its own type, and
                          a quality widget: the model's runs over each shot; the settings are the
                          upscale nodes' widgets, the plan's numbers their optional sockets of
-                         seedvr2x's own types, no Tuning node) and ComfyUI's
-                         calls (the bar and text it gets from progress.py, Cancel, the plan said
-                         on the node, plan only); the one
+                         seedvr2x's own types, no Tuning node; the Models and Cuts nodes'
+                         model folder an optional STRING input with no widget, `force_input`)
+                         and ComfyUI's calls (the bar and text it gets from progress.py, Cancel,
+                         the plan said on the node, plan only); the one
                          module that imports `comfy_api` (unstable)
   models.py plans.py     the files, the models kept in pinned memory and the one registration
                          with ComfyUI's model manager, a run's room and placement, keep in RAM
@@ -98,7 +99,8 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          the plan in the nodes' words
   progress.py            what the nodes show while they run: the upscale's bar as its expected
                          time, the text on the node (the plan, where the run is, the time), the
-                         previews, the download and the reading of the files on one bar, the Cuts
+                         previews, the download and the reading of the files on one bar (the
+                         Models node's downloads on a bar of their own, one short line), the Cuts
                          node's scan; on the library's callbacks, which only observe; a thread
                          for the text alone (the time each second between events); the units
                          named for the library's waits on the GPU, ComfyUI's Cancel their check
@@ -1320,8 +1322,25 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   weights and scripted probabilities (the cut list and the text of the cuts and the
   possible cuts, one shot mode running no detector, the threshold, the file found in a folder or
   fetched by its pin, the detector closed after, the alpha left out, its refusals, its list into
-  Upscale Video, its file's refusals naming seedvr2x Cuts and its own model folder, sizes with
-  separators); `tests/test_plans.py`
+  Upscale Video, its file's refusals naming seedvr2x Cuts and its own "model folder" input
+  (unwire it for Hugging Face's cache, or wire a folder), sizes with separators; the folder an
+  optional input with `force_input` and no widget, unwired or empty (quotes and spaces taken off)
+  the cache and the empty one said, a value that is no folder refused naming seedvr2x Cuts, the
+  console line of the detector's file with its size and its place, found, downloaded or in the
+  folder); `tests/test_models_node.py` seedvr2x Models as the user sees it: the missing files
+  downloaded on a bar of the node's own in bytes (one bar of both downloads, never back, full at
+  the end) with one status line of at most 40 characters and no "seedvr2x" in it ("downloading
+  3.1/8.8 GB", whole from the first by the pins' sizes, then "Sharp 7B int8 · kept in RAM" or
+  "· not kept in RAM" by `decide_keeping`; the short label of each DiT file), nothing downloaded
+  with a folder, a file missing from the folder refused at this node (one line a file, in the
+  nodes' words naming the "model folder" input), a value that is no folder refused, quotes, spaces
+  and an empty value, the console lines of each file's place and size (`said_where`: in Hugging
+  Face's cache with `HF_HOME` named, downloaded into it, or in the model folder; each line
+  `[seedvr2x]` once, no `seedvr2x:` of its own), a download refused when offline worded for this node, Cancel
+  on the node's thread and from the downloader's (left pending, honoured when the download
+  returns, no end line), and the upscale node downloading again a file the cache lost since the
+  Models node ran, saying so before it downloads (cache mode only: a folder never asks the cache);
+  `tests/test_plans.py`
   the DiT files' names, the inputs (the pictures first, then the models, the widgets, then the
   plan's numbers as optional sockets of seedvr2x's own types, no value standing for auto, each
   type given by its value node alone: Tile, Blocks Swapped and Window Length on the planner's
@@ -1331,7 +1350,7 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   label and a tooltip, none in the library's terms; the colour correction a BOOLEAN, split or
   none, `quality` a combo (standard, enhanced, maximum) on Upscale Video alone, its tooltip's
   points and the plan's quality line (the level and its runs, a short shot's missing runs not
-  counted), the seed's fixed control; the Models node's model, folder and RAM tooltips; a value the
+  counted), the seed's fixed control; the Models node's model, folder (an optional input: no default, no widget) and RAM tooltips; a value the
   prompt holds or a link gives refused in the nodes' words at queue time and at the node's
   start, an unwired one not given), the settings' pins
   reaching the plan exactly, the text's lines, the V3 registration (the entrypoint, the seven
