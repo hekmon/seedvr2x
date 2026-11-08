@@ -514,7 +514,7 @@ def early(card: int, used: int | None = None) -> Reading:
     figure NVML gave kept in the reading (`nvml`) for the plan's words to say it, with what
     programs hold (`used`, card_state) for the freeing it counts on. The
     allocator is not chosen yet (startup) and the driver not asked: behind WSL2's device the run
-    is taken for held, as startup takes a driver that doesn't answer, the free memory the
+    and on Windows itself the run is taken for held, as startup takes them, the free memory the
     driver reports to the process counted as the card's (the smaller of the two figures, as
     reading takes it), torch's own allocator with expandable segments unless the environment's
     setting says otherwise (_allocator, as startup reads it); elsewhere the driver refuses and
@@ -522,7 +522,7 @@ def early(card: int, used: int | None = None) -> Reading:
     startup's, and a run's own reading comes later (DESIGN.md, Memory planner, A plan shapes the
     output a little, decided on 2026-10-28: "the room is read through NVML ... NVML only")."""
     free = max(card - CONTEXT, 0)
-    if not paravirtual():
+    if not (paravirtual() or windows()):
         return Reading(free, None, free, False, nvml=card, nvml_used=used)
     given = next((os.environ[name] for name in VARIABLES if os.environ.get(name)), None)
     native, segments = _allocator(EXPANDABLE if given is None else given)
@@ -635,7 +635,21 @@ def startup() -> str:
     and isn't disturbed. What was found is said in the log, a warning where it spills. No
     answer there (probe) is taken for a driver that spills: it is Windows', which gave what
     the card didn't have every time it was asked, and a run held for nothing loses memory, a
-    run not held where it should be loses its frames."""
+    run not held where it should be loses its frames.
+
+    On Windows itself the driver is taken for one that lends, unasked (design's ruling for the
+    Windows baton, 2026-11-08: counted as lending unless a reading on the machine says otherwise):
+    the probe's answer is not what a run meets there. Measured in ComfyUI's process
+    on an RTX 5090 (driver 621.01, WDDM, the desktop on the card, its policy at "Prefer No Sysmem
+    Fallback", 2026-11-08): a lone request past the card was refused, under torch's own allocator
+    and under cudaMallocAsync alike, but a run's cudaMallocAsync pool held 32.06 to 32.50 GiB of a
+    31.82 GiB card, its decode's slices going from 1.7 to 51 s, and with a browser drawing on the
+    card the decode met "CUDA error: out of memory" through an event's query, which ComfyUI's own
+    unloading then met again: the abort the nodes' first Windows run met at a free. Planned for a
+    driver that refuses, the run had left nothing beside the pool, which held 3.7 GiB over the
+    encode's allocated peak and 5.2 to 5.6 over the decode's (26.88 GiB, the plan's 28.03 above
+    it); planned held, each step keeps its allocator's reserve (peaks.reserve) under the smaller
+    of the driver's and NVML's figures, less HELD_BACK."""
     global _spills, _native, _segments, _limit, _left, _footing, _planned, _plan_s_limit, _base
     global _reserve, _kept
     _spills, _limit, _left, _footing, _planned = False, None, HELD_BACK, None, None
@@ -659,6 +673,9 @@ def startup() -> str:
                 logger.debug("%s", found.said())
             else:
                 logger.info("%s", found.said())
+    elif windows():
+        _spills = True
+        logger.warning("%s", LENDS)
     # An empty setting is no setting, and goes from the environment. torch takes the first of
     # the two variables that is set, empty or not: left there, an empty PYTORCH_CUDA_ALLOC_CONF
     # would hide a PYTORCH_ALLOC_CONF that names an allocator, and itself names none, which is
@@ -668,7 +685,9 @@ def startup() -> str:
         if os.environ.get(name) == "":
             del os.environ[name]
     given = next((os.environ[name] for name in VARIABLES if name in os.environ), None)
-    chosen = EXPANDABLE if _spills else ASYNC
+    # On Windows torch has no expandable segments (_allocator): cudaMallocAsync, whose pool each
+    # step's reserve counts (peaks.reserve), rather than torch's own allocator without them.
+    chosen = EXPANDABLE if _spills and not windows() else ASYNC
     if given is None:
         os.environ[VARIABLES[0]] = chosen
     # torch's own allocator is its default too, when the environment's setting names none.
@@ -716,7 +735,8 @@ def startup() -> str:
             plans,
             HELD_BACK_UNREAD / GIB,
         )
-        if not _native:
+        # The default (given None) is said by the lines above; the environment's own, below.
+        if given is not None and not _native:
             # The user's own allocator stands; said, since the hold then holds less.
             logger.warning(
                 "the allocator is the environment's, %s: torch's limit counts what torch has"
@@ -724,7 +744,7 @@ def startup() -> str:
                 " so the card can still be passed; unset it for torch's own allocator",
                 given,
             )
-        elif not _segments:
+        elif given is not None and not _segments and not windows():
             # The user's own setting of torch's allocator stands, without the segments a held
             # run takes by default (EXPANDABLE): said, since a step short of room is then
             # refused where they slow it down and run it (DESIGN.md, Allocator, decided on
@@ -758,7 +778,9 @@ def _allocator(setting: str) -> tuple[bool, bool]:
     isn't of numbers; and a key or a value missing at a colon ("backend:") as it is imported.
     Until 2026-10-16 the backend was read by a substring, so that "backend: native" passed for
     another allocator, the run then unchecked (check), and "backend:cudaMallocAsync,backend:
-    native" for torch's own (a review)."""
+    native" for torch's own (a review). On Windows the segments are never expandable: torch's
+    Windows build has none ("expandable_segments not supported on this platform", torch 2.12.1,
+    an RTX 5090, 2026-11-08), and runs its own allocator without them, whatever the setting says."""
     tokens: list[str] = []
     word = ""
     for char in setting:
@@ -779,7 +801,7 @@ def _allocator(setting: str) -> tuple[bool, bool]:
         elif key == "expandable_segments":
             segments = value == "True"
     native = backend != ASYNC.partition(":")[2]
-    return native, native and segments
+    return native, native and segments and not windows()
 
 
 @contextmanager
@@ -1579,6 +1601,11 @@ def _read_all(index: int, busy: bool = False) -> tuple[int, ...] | str:
 def paravirtual() -> bool:
     """Whether the GPU is reached through WSL2's device: Windows' driver under a Linux process."""
     return os.path.exists(PARAVIRTUAL)
+
+
+def windows() -> bool:
+    """Whether the process runs on Windows itself, its driver Windows' own (startup)."""
+    return sys.platform == "win32"
 
 
 def probe(index: int = 0, library: str | None = None) -> Driver | None:

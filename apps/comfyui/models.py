@@ -805,7 +805,8 @@ def _allocator_note(machine: Machine) -> None:
     ComfyUI's --disable-cuda-malloc and PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True, set
     before ComfyUI starts, ComfyUI setting no segments of its own (impl-nodes' reading of
     v0.44.0). Torch's own allocator without the segments plans with the 4.5 GiB reserve alone,
-    and a step short of room fails there where the segments slow it down."""
+    and a step short of room fails there where the segments slow it down. On Windows, whose torch
+    has no segments, the allocator ComfyUI runs is said with no way to them."""
     if not machine.spills():
         return
     if "lends" not in _told:
@@ -815,7 +816,28 @@ def _allocator_note(machine: Machine) -> None:
             " (Windows' shared GPU memory), which is slow; seedvr2x's plan leaves room on the card"
         )
     allocator = machine.allocator()
-    if allocator == "cudaMallocAsync":
+    if memory.windows():
+        # Torch's Windows build has no expandable segments (memory._allocator): under its own
+        # allocator a step short of room fails, as ComfyUI's --disable-cuda-malloc did on an RTX
+        # 5090 with 8.02 GiB held unused at a 1080p decode (2026-11-08), so cudaMallocAsync,
+        # ComfyUI's default, is the one to run, the plan leaving its pool room step by step.
+        if "allocator" in _told:
+            return
+        _told.add("allocator")
+        if allocator == "cudaMallocAsync":
+            logger.info(
+                "seedvr2x: ComfyUI runs torch on cudaMallocAsync, whose memory holds more of the"
+                " card than it uses: seedvr2x's plan leaves room for it beside each step"
+            )
+        else:
+            logger.warning(
+                "seedvr2x: ComfyUI runs torch's own allocator, which has no expandable segments"
+                " on Windows: a step short of room fails there, and the plan keeps %.1f GiB of the"
+                " card free beside the model's work. ComfyUI's default, cudaMallocAsync (ComfyUI"
+                " started without --disable-cuda-malloc), leaves the model more",
+                memory.RESERVE / memory.GIB,
+            )
+    elif allocator == "cudaMallocAsync":
         _once(
             "allocator",
             "seedvr2x: this driver lends system memory where the card is full, and ComfyUI runs"

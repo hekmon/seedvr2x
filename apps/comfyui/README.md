@@ -241,7 +241,10 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   environment variable `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, set before ComfyUI
   starts (ComfyUI sets no segments of its own; without them torch's own allocator plans with
   4.5 GiB of the card kept free beside the model's work, and a step short of room fails where the
-  segments slow it down and run it). The nodes say which applies once, in the console, where the
+  segments slow it down and run it). On Windows itself, torch has no expandable segments, and the
+  driver is taken for one that lends: keep ComfyUI's default, cudaMallocAsync, for which the plan
+  leaves each step its room (torch's own allocator there keeps 4.5 GiB of the card free and still
+  fails where a step is short). The nodes say which applies once, in the console, where the
   driver lends system memory. The nodes set no limit on torch's memory: ComfyUI's process is
   shared with its other nodes, and a limit set there cannot be taken back.
 - **A card too small** is refused before any model loads, with the way out in the nodes' own

@@ -618,6 +618,62 @@ def test_a_linux_driver_is_asked_nothing(
     assert not caplog.messages and not loaded
 
 
+def test_windows_itself_is_taken_for_a_driver_that_lends_unasked(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # On Windows itself (no WSL2 device): taken for a driver that lends, the probe not asked
+    # (its lone request was refused natively where a run's cudaMallocAsync pool went past the
+    # card: memory.startup), the warning said, and the plan's reading held to the smaller of the
+    # driver's figure and NVML's through Windows' libraries, less HELD_BACK.
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(memory.sys, "platform", "win32")
+    asked: list[str] = []
+    monkeypatch.setattr(memory, "probe", lambda *args: asked.append("probe"))
+    card, nvml = Card(30 * GIB, spills=False), Nvml({NAMED: 28 * GIB})
+
+    def load(name: str) -> Any:
+        return {memory.NVML_WINDOWS[0]: nvml, memory.CUDA_WINDOWS: card}[name]
+
+    monkeypatch.setattr(memory.ctypes, "CDLL", load)
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
+    memory.startup()
+    assert not asked and memory.spills()
+    # The hold's and the environment's allocator's lines follow, the command line's words (the
+    # nodes leave them out of ComfyUI's console: comfyui/models.py, _startup).
+    assert {record.levelname for record in caplog.records} == {"WARNING"}
+    assert caplog.messages[0] == memory.LENDS and len(caplog.messages) == 3
+    found = memory.reading(30 * GIB)
+    assert found.held and found.card == 28 * GIB and found.allocator == memory.POOL
+    assert found.counted == 28 * GIB - memory.HELD_BACK
+    # A resume's early reading, before torch: held too, as behind WSL2's device.
+    assert memory.early(20 * GIB).held
+
+
+def test_windows_without_a_setting_runs_cudamallocasync_and_says_nothing_of_the_environment(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The CLI's and the server's default on Windows: cudaMallocAsync, torch having no segments
+    # there; nothing said of an allocator "of the environment's" that the user didn't set.
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(memory.sys, "platform", "win32")
+    monkeypatch.setattr(memory.ctypes, "CDLL", lambda name: Nvml({NAMED: 28 * GIB}))
+    assert memory.startup() == "backend:cudaMallocAsync"
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:cudaMallocAsync"
+    assert caplog.messages[0] == memory.LENDS
+    assert not [m for m in caplog.messages if "environment's" in m or "expandable" in m]
+    assert memory.reading(30 * GIB).allocator == memory.POOL
+
+
+def test_windows_has_no_expandable_segments(monkeypatch: pytest.MonkeyPatch) -> None:
+    # torch's Windows build: "expandable_segments not supported on this platform", its own
+    # allocator run without them (torch 2.12.1, 2026-11-08): read as PLAIN, never SEGMENTS.
+    setting = "backend:native,expandable_segments:True"
+    assert memory._allocator(setting) == (True, True)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(memory.sys, "platform", "win32")
+    assert memory._allocator(setting) == (True, False)  # pyright: ignore[reportPrivateUsage]
+    assert memory._allocator("backend:cudaMallocAsync") == (False, False)  # pyright: ignore[reportPrivateUsage]
+
+
 def test_a_driver_that_refuses_behind_wsl_changes_nothing(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

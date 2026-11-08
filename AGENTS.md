@@ -817,6 +817,19 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   figure. `core/tests/test_memory.py` holds the names asked in order, the probe's library and the
   INFO line once; `probe.NVML_WINDOWS` is the same tuple. `library_fixtures.no_card_failed` clears
   the reasons said before each test, so that each test's first is at INFO.
+- Windows itself taken for a driver that lends (`memory.windows`, `memory.startup`; the nodes'
+  first Windows runs, 2026-11-07 and 08): unasked, so that a run is held to the smaller of the
+  driver's and NVML's figures, less `HELD_BACK`, and each step keeps its allocator's reserve
+  (`peaks.reserve`): planned for a driver that refuses, the nodes' 1080p clip left nothing beside
+  cudaMallocAsync's pool, which went past the card in ComfyUI's process (`startup`'s docstring has
+  the figures). The expandable segments are never read as on there, torch's Windows build having
+  none (`_allocator`), and the nodes' allocator note says what applies on Windows
+  (`comfyui/models.py`, `_allocator_note`); without a setting of the user's, the CLI and the
+  server run cudaMallocAsync there. `core/tests/test_memory.py` holds the startup on Windows (not
+  asked, the warning, the reading held under the pool, a resume's early reading held, the default
+  allocator with nothing said of the environment's) and `apps/comfyui/tests/test_machine.py` the
+  note on Windows for both allocators. A resume's early reading on Windows is NVML's alone, which
+  there counts what is resident: PROVISIONAL, the CLI on Windows being the next baton's.
 - The one clock (`seedvr2x/clock.py`): `tests/test_clock.py` holds it on fake monotonic and wall
   readers, nothing sleeping (`Readers`, `Pace`): the ratio of the wall to the run's clock before and
   after its minimum span, steps of the wall told from drift (a few seconds either way, an hour set,

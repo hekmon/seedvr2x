@@ -146,6 +146,36 @@ def test_torchs_own_allocator_without_expandable_segments_is_told_the_nodes_way_
     assert not [line for line in caplog.messages if "disable-cuda-malloc" in line]
 
 
+@pytest.mark.parametrize("allocator", ["cudaMallocAsync", "native"])
+def test_on_windows_the_allocator_is_said_with_no_way_to_expandable_segments(
+    machine: StandIn,
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    allocator: str,
+) -> None:
+    # Torch's Windows build has no expandable segments (memory._allocator): cudaMallocAsync,
+    # ComfyUI's default, is said at INFO, the plan leaving its pool room; torch's own allocator
+    # (--disable-cuda-malloc) is warned of, with ComfyUI's default as the way, once.
+    monkeypatch.setattr(memory.sys, "platform", "win32")
+    machine.lends = True
+    machine.held_card = 32 * GIB
+    machine.allocator_name = allocator
+    machine.expandable = False
+    with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui.models"):
+        run_image(handle(tmp_path))
+        run_image(handle(tmp_path))
+    said = [r for r in caplog.records if "ComfyUI runs torch" in r.getMessage()]
+    assert len(said) == 1
+    assert not [line for line in caplog.messages if "expandable_segments:True" in line]
+    if allocator == "cudaMallocAsync":
+        assert said[0].levelno == logging.INFO and "leaves room for it" in said[0].getMessage()
+    else:
+        assert said[0].levelno == logging.WARNING
+        assert "no expandable segments on Windows" in said[0].getMessage()
+        assert "without --disable-cuda-malloc" in said[0].getMessage()
+
+
 def test_the_lending_driver_is_told_in_the_nodes_words_once(
     machine: StandIn, tmp_path, caplog: pytest.LogCaptureFixture
 ) -> None:
