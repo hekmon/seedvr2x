@@ -30,7 +30,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from seedvr2x import peaks, sampling, tiling
+from seedvr2x import model, peaks, sampling, tiling
 from seedvr2x.errors import HostShort
 from seedvr2x.frames import output_size
 from seedvr2x.memory import Reading
@@ -253,20 +253,25 @@ def upscale(
     # The run each frame is taken from, as the run's first frame in the clip.
     taken = np.asarray(taken_from(count, level))
     try:
-        for number, each in enumerate(runs, 1):
-            if step is not None and len(runs) > 1:
-                step("run", number, len(runs))
-            _run(
-                *(models, frames, each.offset, target, clip_seed, output),
-                *(window, encode_tiles, decode_tiles, correct, step, start, taken == each.offset),
-                tile,
-                tail_frames,
-            )
+        with model.marking(models.device):
+            for number, each in enumerate(runs, 1):
+                if step is not None and len(runs) > 1:
+                    step("run", number, len(runs))
+                _run(
+                    *(models, frames, each.offset, target, clip_seed, output),
+                    *(window, encode_tiles, decode_tiles, correct, step, start),
+                    taken == each.offset,
+                    tile,
+                    tail_frames,
+                )
     except BaseException as error:
         # Whatever stopped the clip, a step's cancel included: the frames of the calls it passed
         # through hold the slice being corrected on the device, and would keep it for as long as
-        # the exception is kept (decode_shot's slices are closed already, shot_pass._slices).
-        traceback.clear_frames(error.__traceback__)
+        # the exception is kept (decode_shot's slices are closed already, shot_pass._slices). Not
+        # on a failed card: what they hold stays with the error, whose holder keeps it, since a
+        # free there would report the error again (model.unless_failed).
+        traceback_ = error.__traceback__
+        model.unless_failed(models.device, lambda: traceback.clear_frames(traceback_))
         raise
     return output
 
@@ -381,5 +386,5 @@ def _merged(
     finally:
         # The generator holds the noise and the latent: closed at once, a step's stop included.
         if isinstance(sampled, Generator):
-            sampled.close()
+            model.unless_failed(models.device, sampled.close)
     return merge_windows(windows, layout)

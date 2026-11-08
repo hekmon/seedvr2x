@@ -10,7 +10,7 @@ import pytest
 import server
 from comfy.utils import ProgressBar
 from comfyui import models, progress
-from library_fixtures import no_driver_asked, one_to_one_clock  # noqa: F401
+from library_fixtures import no_card_failed, no_driver_asked, one_to_one_clock  # noqa: F401
 from stand_ins import cpu_models  # noqa: F401
 from standins import machine  # noqa: F401
 

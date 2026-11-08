@@ -26,7 +26,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from seedvr2x import clock, memory, peaks
+from seedvr2x import clock, memory, peaks, waiting
 from seedvr2x.errors import Refusal, Setting
 
 
@@ -62,6 +62,15 @@ def no_driver_asked(
 @pytest.fixture(autouse=True)
 def one_to_one_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(clock, "pace", clock.Pace(lambda: 0.0, lambda: 0.0))
+
+
+@pytest.fixture(autouse=True)
+def no_card_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No card marked failed or abandoned before a test (waiting.fail, waiting.abandoned): the
+    marks are the process's, and a test that raises a CUDA error on purpose marks card 0, which
+    the stand-ins' CPU device is (model.card_index), for every test after it."""
+    monkeypatch.setattr(waiting, "_failed", {})
+    monkeypatch.setattr(waiting, "_abandoned", set())
 
 
 @pytest.fixture

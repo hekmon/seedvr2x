@@ -75,6 +75,10 @@ FREEING = (
 # is marked (waiting.abandoned) and the next run is refused (words.card_stopped).
 STOPPED = "the card stopped answering: restart ComfyUI"
 
+# What the node says once a CUDA error other than out of memory failed the card (waiting.fail):
+# nothing on it is freed or run again in the process (models.session).
+FAILED = "the graphics card failed: restart ComfyUI"
+
 # How often the time on the node is said between two events, in seconds (the user, 2026-11-06).
 TICK = 1.0
 

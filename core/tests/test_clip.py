@@ -345,6 +345,46 @@ def test_a_step_that_raises_leaves_no_decode_open_and_nothing_alive(
     assert clean.shape == (LONG, 48, 80, 3)
 
 
+@pytest.mark.parametrize("tiled", [False, True])
+def test_a_cuda_error_leaves_the_decode_open_and_its_frames_held(
+    models: model.Models, monkeypatch: pytest.MonkeyPatch, tiled: bool
+) -> None:
+    # On a card a CUDA error failed, a free reports the error again (under cudaMallocAsync it
+    # aborts the process): the card is marked, the decode is not closed, the frames the error
+    # went through are not cleared, and the VAE's causal memory stays (model.failed).
+    stand_in_dit(monkeypatch)
+    watched = Watched(monkeypatch)
+    error = RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    def step(each: str, done: int, total: int) -> None:
+        if each == "decode" and (done >= 2 or total == 1):
+            raise error
+
+    with pytest.raises(RuntimeError) as caught:
+        upscale(
+            models,
+            clip_of(LONG),
+            window=5,
+            correct=True,
+            decode_tiles=TILES if tiled else None,
+            step=step,
+        )
+    assert caught.value is error and model.failed(models.device)
+    assert not watched.closed(), "a decode closed, or its slices freed, on a failed card"
+    memories = [
+        module.memory
+        for module in models.runner.vae.modules()
+        if getattr(module, "memory", None) is not None
+    ]
+    assert tiled or memories, "the causal memory of the untiled decode is kept"
+    frames = []
+    traceback = caught.value.__traceback__
+    while traceback is not None:
+        frames.append(traceback.tb_frame)
+        traceback = traceback.tb_next
+    assert any(frame.f_locals for frame in frames[1:]), "the frames' locals are kept"
+
+
 def test_a_window_stopped_by_its_step_is_not_kept(
     models: model.Models, monkeypatch: pytest.MonkeyPatch
 ) -> None:

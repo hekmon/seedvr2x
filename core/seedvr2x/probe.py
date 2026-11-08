@@ -61,7 +61,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from seedvr2x import memory, weights
+from seedvr2x import memory, waiting, weights
 from seedvr2x.errors import Refusal
 
 if TYPE_CHECKING:
@@ -682,7 +682,9 @@ def _runners(
 
 def _run(names: tuple[str, ...], run: Callable[[], list[Result]]) -> list[Result]:
     """One check's results; a kernel that raises is a failed check with the message kept, but an
-    out-of-memory error, which says nothing of the kernel, goes on up uncached."""
+    out-of-memory error, which says nothing of the kernel, goes on up uncached, and so does a CUDA
+    error other than out of memory (waiting.cuda_failed), which says the card failed: cached, it
+    would refuse the environment for good, and the checks after it would run on that card."""
     import torch
 
     try:
@@ -690,6 +692,8 @@ def _run(names: tuple[str, ...], run: Callable[[], list[Result]]) -> list[Result
     except torch.OutOfMemoryError:
         raise
     except (RuntimeError, ValueError, AssertionError, ImportError) as error:
+        if waiting.cuda_failed(error):
+            raise
         logger.warning("the probe's check of %s raised: %s", ", ".join(names), error)
         return [
             Result(name, None, 0.0, "", False, _now(), f"{type(error).__name__}: {error}")

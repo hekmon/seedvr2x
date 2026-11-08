@@ -23,6 +23,16 @@ would wait on it. The mark is per card, by CUDA's index, and only a release on t
 waits all completed clears it, no other wait: a card that answered one wait may not answer the
 next, and a process that ran on several cards keeps each one's state apart.
 
+A CUDA error other than torch's OutOfMemoryError (cuda_failed: a "CUDA error: out of memory" a
+kernel met is one) marks its card too, failed (fail, failed), whether a wait met it or the caller
+did, and no release clears that mark: the card's state is untrusted from then on, and under
+cudaMallocAsync a tensor's free is itself a call to CUDA, which reports the error again inside
+torch's deleter, where it cannot raise and so aborts the process (the nodes on Windows,
+2026-11-07: "Fatal Python error: Aborted" at a free of the VAE's causal memory, no message before
+it). So whoever would free on that card leaves it as it is, as far as seedvr2x's code goes: the
+library's passes keep what they hold (model.unless_failed), and an app keeps the error, whose frames
+hold the rest, for the process's life; the process is for restarting.
+
 Importing it imports no torch."""
 
 import faulthandler
@@ -104,6 +114,9 @@ _stacks_written = False
 # The cards (CUDA's indices) on which a wait was ended by an exception past its bound, or inside a
 # release, and no release has completed since.
 _abandoned: set[int] = set()
+# The cards (CUDA's indices) a CUDA error other than out of memory was met on, with its text's first
+# line; never cleared (fail).
+_failed: dict[int, str] = {}
 
 
 def bound(estimate: float | None) -> float | None:
@@ -159,10 +172,11 @@ def releasing(index: int = 0) -> Generator[None]:
         yield
     finally:
         _named.releasing = before
-    # Only reached where the block ended without an exception.
+    # Only reached where the block ended without an exception. A failed card stays marked (fail).
     if not block.ended:
         with _lock:
-            _abandoned.discard(index)
+            if index not in _failed:
+                _abandoned.discard(index)
 
 
 @contextmanager
@@ -182,7 +196,8 @@ def wait(done: Callable[[], bool], poll: float, index: int = 0) -> None:
     between two calls. Past its unit's bound (bound), the wait is said once at WARNING, with NVML's
     reading of card `index` (CUDA's numbering) and the way out, every thread's stack after the
     first such line of the process, and it goes on; its end is then said too. done is an
-    event's query: it raises where CUDA reports an error. The thread's check (check) is called
+    event's query: it raises where CUDA reports an error, which marks card `index` failed (fail)
+    where it is one other than out of memory (cuda_failed). The thread's check (check) is called
     after each sleep, and what it raises ends the wait."""
     global _ended
     current: Unit | None = getattr(_named, "unit", None)
@@ -216,6 +231,8 @@ def wait(done: Callable[[], bool], poll: float, index: int = 0) -> None:
             if release is not None:
                 release.ended = True
                 _abandoned.add(release.index)
+        if cuda_failed(error):
+            fail(index, error)
         raise
     finally:
         with _lock:
@@ -252,6 +269,29 @@ def abandoned(index: int = 0) -> bool:
     waits all completed, by no other wait, and never by another card's."""
     with _lock:
         return index in _abandoned
+
+
+def fail(index: int, error: BaseException) -> None:
+    """Mark card `index` (CUDA's numbering) failed by `error`, a CUDA error other than out of
+    memory (cuda_failed; ValueError for another): abandoned too (abandoned), so that nothing waits
+    on it or gives work back to it, and never cleared, a release included. The first error's text is
+    kept (failed); the error itself is not, its frames being its holder's (the module's
+    docstring)."""
+    if not cuda_failed(error):
+        raise ValueError(f"not a CUDA error other than out of memory: {error!r}")
+    text = str(error).strip().splitlines()
+    with _lock:
+        _abandoned.add(index)
+        _failed.setdefault(index, text[0] if text else type(error).__name__)
+
+
+def failed(index: int = 0) -> str | None:
+    """The first line of the CUDA error that marked card `index` failed (fail), None where none
+    did. Nothing on that card may be freed or waited on again in the process: under
+    cudaMallocAsync a free reports the error again and aborts the process (the module's
+    docstring)."""
+    with _lock:
+        return _failed.get(index)
 
 
 def ended() -> Ended | None:

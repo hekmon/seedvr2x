@@ -650,3 +650,44 @@ def test_a_wait_that_raised_and_was_caught_in_a_release_keeps_the_mark(world: Wo
         fake.now = 0.0
         waiting.wait(fake.until(5.0), 1.0)
     assert not waiting.abandoned(0)
+
+
+# ---- A card a CUDA error failed ---------------------------------------------------------------
+
+ILLEGAL = "CUDA error: an illegal memory access was encountered"
+
+
+def test_a_cuda_error_from_the_query_marks_the_card_failed_whatever_the_bound(world: World) -> None:
+    # No unit, no bound: the error alone marks its card, with its text's first line, and only it.
+    def done() -> bool:
+        raise RuntimeError(f"{ILLEGAL}\nCUDA kernel errors might be asynchronously reported")
+
+    with pytest.raises(RuntimeError):
+        waiting.wait(done, 0.01, index=1)
+    assert waiting.failed(1) == ILLEGAL and waiting.abandoned(1)
+    assert waiting.failed(0) is None and not waiting.abandoned(0)
+
+
+def test_out_of_memory_and_other_errors_mark_nothing(world: World) -> None:
+    torch = pytest.importorskip("torch")
+    for error in (torch.OutOfMemoryError("CUDA out of memory"), ValueError("not CUDA's")):
+
+        def done(raised: BaseException = error) -> bool:
+            raise raised
+
+        with pytest.raises(type(error)):
+            waiting.wait(done, 0.01)
+    assert waiting.failed(0) is None and not waiting.abandoned(0)
+    with pytest.raises(ValueError, match="not a CUDA error"):
+        waiting.fail(0, ValueError("no"))
+
+
+def test_a_failed_card_stays_marked_through_a_release_that_completes(world: World) -> None:
+    fake = world.clock
+    waiting.fail(0, RuntimeError(ILLEGAL))
+    waiting.fail(0, RuntimeError("CUDA error: unspecified launch failure"))
+    assert waiting.failed(0) == ILLEGAL, "the first error's text is kept"
+    with waiting.releasing():
+        fake.now = 0.0
+        waiting.wait(fake.until(2.0), 1.0)
+    assert waiting.abandoned() and waiting.failed(0) == ILLEGAL

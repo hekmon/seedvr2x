@@ -28,7 +28,7 @@ import torch
 import torch.nn.functional as functional
 from safetensors.torch import load
 
-from seedvr2x import weights
+from seedvr2x import waiting, weights
 from seedvr2x.pull import Hashes
 from seedvr2x.transnetv2.transnetv2_pytorch import TransNetV2
 
@@ -54,6 +54,10 @@ BATCH = 4
 # The frames of decoded video shrunk at a time (shrink): 8 frames of 1080p are 200 MB of float32
 # and their channels-first copy another 200 MB, where the whole clip is the caller's to hold.
 SHRINK_CHUNK = 8
+
+
+# The models of detectors closed on a failed card (Detector.close), held for the process's life.
+_left: list[torch.nn.Module] = []
 
 
 class Detector:
@@ -191,8 +195,17 @@ class Detector:
         models' own load would have brought anyway. On the GPU box, the free memory was 94.50 GiB
         with CUDA initialised and 94.34 after two detections, torch's counters at 0 both times
         (2026-10-09): 0.16 GiB of the libraries' own; a budget read then is the smaller one, on
-        the safe side. The detector takes nothing more after; close again does nothing."""
+        the safe side. The detector takes nothing more after; close again does nothing.
+
+        On a card a CUDA error other than out of memory failed (waiting.fail), found so or met by
+        the poll that comes first, nothing is freed: the model is kept for the process's life
+        (_left), since under cudaMallocAsync a free there reports the error again inside torch's
+        deleter and aborts the process (waiting.py's docstring)."""
         if self._model is None:
+            return
+        if self._device.type == "cuda" and not self._settled():
+            _left.append(self._model)
+            self._model = None
             return
         self._model = None
         self._held = np.empty((0, HEIGHT, WIDTH, 3), np.uint8)
@@ -209,6 +222,21 @@ class Detector:
                 peak / 2**30,
                 torch.cuda.memory_reserved(self._device) / 2**20,
             )
+
+    def _settled(self) -> bool:
+        """The card not failed, its work waited for; a CUDA error other than out of memory met
+        there marks it (waiting.fail) and gives False."""
+        index = self._device.index or 0
+        if waiting.failed(index) is not None:
+            return False
+        try:
+            torch.cuda.synchronize(self._device)
+        except Exception as error:
+            if not waiting.cuda_failed(error):
+                raise
+            waiting.fail(index, error)
+            return False
+        return True
 
     def __enter__(self) -> Self:
         return self

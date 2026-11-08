@@ -54,7 +54,7 @@ from comfy.utils import ProgressBar
 from comfy_api.latest import ComfyExtension, io
 from comfy_execution.graph_utils import ExecutionBlocker
 
-from seedvr2x import clip, frames, peaks, pull, shotcuts, still, still_plan
+from seedvr2x import clip, frames, peaks, pull, shotcuts, still, still_plan, waiting
 from seedvr2x import detector as shot_detector
 from seedvr2x.errors import Refusal
 from seedvr2x.memory import Reading
@@ -1074,7 +1074,14 @@ class Cuts(io.ComfyNode):
         checked against its pin, loaded onto the card ComfyUI runs on (the processor where that
         is not a card), run (the frames scanned on a bar of their own, a batch at a time, and
         ComfyUI's Cancel honoured between batches) and given back. Three channels of the images:
-        an alpha is of no use to it."""
+        an alpha is of no use to it. On a card a CUDA error failed (waiting.fail) it is refused at
+        its start, as the upscale nodes are; one it meets marks the card, and nothing is emptied
+        from torch's cache after it (the detector keeps its model: detector.Detector.close)."""
+        device = management.get_torch_device()
+        card = (device.index or 0) if getattr(device, "type", "") == "cuda" else 0
+        failed = waiting.failed(card)
+        if failed is not None:
+            raise words.card_failed(failed, earlier=True)
         directory = Path(model_dir) if model_dir else None
         name, pin = pull.DETECTOR, pull.PINNED[pull.DETECTOR]
         hashes = pull.Hashes()
@@ -1088,7 +1095,6 @@ class Cuts(io.ComfyNode):
                     raise words.detector_missing(name)
             cache = None if directory is not None else pull.cache()
             pull.check_pin(name, path, pin, hashes, cache, "detector", load=True)
-            device = management.get_torch_device()
             if getattr(device, "type", "") != "cuda" or not torch.cuda.is_available():
                 device = torch.device("cpu")
             with shot_detector.Detector(path, device, hashes=hashes) as found:
@@ -1099,8 +1105,16 @@ class Cuts(io.ComfyNode):
                 )
         except Refusal as error:
             raise words.refusal(error, model_dir=directory is not None, node=words.CUTS) from error
+        except BaseException as error:
+            if not waiting.cuda_failed(error):
+                raise
+            # The error and its frames kept for the process's life (models._failures), and worded.
+            waiting.fail(card, error)
+            models_module._failures.append(error)  # pyright: ignore[reportPrivateUsage]
+            raise words.card_failed(waiting.failed(card) or str(error)) from error
         finally:
-            management.soft_empty_cache()
+            if waiting.failed(card) is None:
+                management.soft_empty_cache()
 
 
 # ---- The value nodes: a setting of the plan's, its range, step and description -------------------

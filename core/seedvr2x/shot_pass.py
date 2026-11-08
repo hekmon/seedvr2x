@@ -290,16 +290,21 @@ def sample_windows(
     window is asked for, and again where the DiT's work on the shot ends: the generator
     exhausted, closed (clip.py closes it, run.py drops it, the calibration's is dropped after its
     one window) or left by a raise. A shot's windows share their shapes, and a run of many shot
-    lengths would otherwise hold a table for each; no VAE pass after the windows finds one."""
+    lengths would otherwise hold a table for each; no VAE pass after the windows finds one. A
+    CUDA error other than out of memory marks the card failed and leaves the tables as they are
+    (model.marking, model.unless_failed)."""
     if layout[-1][1] != latent.shape[0]:
         raise ValueError(f"windows {layout} over a latent of {latent.shape[0]}")
     model.forget_rope_tables()
     try:
-        noise, latent = sampling.drawn(models, latent, seed)
-        for s, e in layout[start:]:
-            yield sampling.window(models, noise[s:e], latent[s:e])
+        with model.marking(models.device):
+            noise, latent = sampling.drawn(models, latent, seed)
+            for s, e in layout[start:]:
+                yield sampling.window(models, noise[s:e], latent[s:e])
     finally:
-        model.forget_rope_tables()
+        # Never on a failed card: the tables' free would report the error again
+        # (model.unless_failed).
+        model.unless_failed(models.device, model.forget_rope_tables)
 
 
 def merge_windows(sampled: list[Tensor], layout: Sequence[tuple[int, int]]) -> Tensor:
@@ -397,7 +402,10 @@ def _slices(
 
     The latents are decoded from system memory, a slice's alone on the device at a time
     (model.decode_sliced): latents given on the device are copied to system memory first, in
-    their own layout, as units' files keep them; the device's stay their holder's to free."""
+    their own layout, as units' files keep them; the device's stay their holder's to free. A
+    CUDA error other than out of memory in the block, the decode's or its consumer's, marks the
+    card failed and leaves the decode open, holding what it holds (model.marking,
+    model.unless_failed)."""
     model.synchronize(merged.device)
     latent = merged.to("cpu")
     if tiles is None:
@@ -406,11 +414,14 @@ def _slices(
         store = tiling.InMemory() if store is None else store
         slices = tiling.decode_tiled(models, latent, tiles, store, tile_step)
     try:
-        yield slices
+        with model.marking(models.device):
+            yield slices
     finally:
         # A generator, as both decodes are; a plain iterator in their place has nothing to close.
+        # Never on a failed card: closing frees the decode's memory, whose free would report the
+        # error again (model.unless_failed).
         if isinstance(slices, Generator):
-            slices.close()
+            model.unless_failed(models.device, slices.close)
 
 
 def _decoded(

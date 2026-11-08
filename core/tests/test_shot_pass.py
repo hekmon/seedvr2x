@@ -29,7 +29,7 @@ from test_tiling import (
     same,
 )
 
-from seedvr2x import model, sampling, shot_pass, shot_plan, tiling
+from seedvr2x import model, sampling, shot_pass, shot_plan, tiling, waiting
 from seedvr2x.frames import output_size, padded_length, padded_size
 from seedvr2x.passes import Tiles
 from seedvr2x.shot_pass import (
@@ -550,6 +550,81 @@ def test_untiled_decode_failing_clears_its_memory(stand_in: model.Models) -> Non
     assert kept == [True]  # in the middle of the pass, its memory kept
     assert vae.carry.memory is None
     del raised
+
+
+ILLEGAL = "CUDA error: an illegal memory access was encountered"
+
+
+def test_the_decode_polls_the_card_before_it_frees_its_memory(
+    stand_in: model.Models, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # After the last frames are written, the card is polled with the decode's causal memory still
+    # held (model.decode_sliced's own poll, then model.unless_failed's), so that a kernel's failure
+    # comes back as an exception before any free.
+    count = 13
+    latent, vae = shot_latent(count), cast(Any, stand_in).runner.vae
+    events: list[tuple[str, bool]] = []
+
+    def synchronize(device: torch.device) -> None:
+        events.append(("poll", vae.carry.memory is not None))
+
+    def write(frames: npt.NDArray[np.float32]) -> None:
+        events.append(("write", vae.carry.memory is not None))
+
+    monkeypatch.setattr(model, "synchronize", synchronize)
+    decode_shot(stand_in, latent, count, LARGE, write)
+    last = max(i for i, (kind, _) in enumerate(events) if kind == "write")
+    assert events[last + 1] == ("poll", True), events[last:]
+    assert vae.carry.memory is None and waiting.failed(0) is None
+
+
+@pytest.mark.parametrize("tiled", [False, True])
+@pytest.mark.parametrize("where", ["a poll", "the writer"])
+def test_a_cuda_error_marks_the_card_and_leaves_the_decodes_memory_held(
+    stand_in: model.Models, monkeypatch: pytest.MonkeyPatch, where: str, tiled: bool
+) -> None:
+    # Under cudaMallocAsync a free on a card a kernel failed reports the error again inside
+    # torch's deleter and aborts the process: the card is marked, and what the decode holds when
+    # the error comes stays held, the decode left open and the error's frames holding it all
+    # (waiting.fail, model.unless_failed). The poll is the first made while a pass holds its causal
+    # memory: inside a tile's pass where the decode is tiled (whose own `finally` runs as the
+    # error unwinds, before any outer block sees it), the consumer's otherwise.
+    count = 13
+    latent, vae = shot_latent(count), cast(Any, stand_in).runner.vae
+    held: list[bool] = []
+
+    def synchronize(device: torch.device) -> None:
+        # Once met, the error comes back at every later call, as CUDA's sticky errors do.
+        if held or (where == "a poll" and vae.carry.memory is not None):
+            if not held:
+                held.append(True)
+            raise RuntimeError(ILLEGAL)
+
+    def write(frames: npt.NDArray[np.float32]) -> None:
+        if where == "the writer":
+            held.append(vae.carry.memory is not None)
+            raise RuntimeError(ILLEGAL)
+
+    monkeypatch.setattr(model, "synchronize", synchronize)
+    with pytest.raises(RuntimeError, match="illegal memory access") as raised:
+        decode_shot(stand_in, latent, count, LARGE, write, tiles=TILES if tiled else None)
+    assert waiting.failed(0) == ILLEGAL and model.failed(stand_in.device)
+    assert held == [held[0]] and (vae.carry.memory is not None) == held[0]
+    # A tiled decode writes once every tile's pass has ended, its memory cleared then.
+    assert held[0] == (where == "a poll" or not tiled)
+    del raised
+
+
+def test_out_of_memory_frees_the_decode_and_marks_nothing(stand_in: model.Models) -> None:
+    count = 13
+    latent, vae = shot_latent(count), cast(Any, stand_in).runner.vae
+
+    def write(frames: npt.NDArray[np.float32]) -> None:
+        raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 3.03 GiB")
+
+    with pytest.raises(torch.OutOfMemoryError):
+        decode_shot(stand_in, latent, count, LARGE, write)
+    assert vae.carry.memory is None and waiting.failed(0) is None and not waiting.abandoned(0)
 
 
 def test_the_tail_is_on_for_the_decode_and_off_after_even_a_raise(

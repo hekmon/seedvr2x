@@ -61,7 +61,7 @@ from seedvr2x.pull import ModelFiles
 from seedvr2x.weights import Architecture
 
 from . import plans, words
-from .progress import FREEING, STOPPED, Preparing, file_size
+from .progress import FAILED, FREEING, STOPPED, Preparing, file_size
 
 logger = logging.getLogger("seedvr2x_comfyui.models")
 
@@ -428,6 +428,11 @@ _probed: dict[tuple[str, str], float | None] = {}
 # which wait on the card that stopped answering, as the hang of 2026-11-06 did (DESIGN.md,
 # Allocator). The process is for restarting.
 _left_on_card: list[Models] = []
+# The CUDA errors other than out of memory that failed a card (waiting.fail), each with its
+# traceback, whose frames hold the tensors the run had on the card: kept for the process's life,
+# since their free would report the error again, which under cudaMallocAsync aborts the process
+# (the nodes on Windows, 2026-11-07: "Fatal Python error: Aborted" at a free).
+_failures: list[BaseException] = []
 
 
 def _hold(models: Models) -> None:
@@ -451,6 +456,7 @@ def reset() -> None:
     _probed.clear()
     _told.clear()
     _left_on_card.clear()
+    _failures.clear()
 
 
 def kept(handle: Handle) -> Entry | None:
@@ -927,9 +933,34 @@ def session[T](
     `preparing`: where the bytes of a download of seedvr2x's files and of their reading into memory
     are told (progress.Preparing), for the node to show; observing only."""
     restore_rng = rng_states()
+    # A card an earlier run failed refuses this one at its start (_session), with nothing to keep.
+    before = _machine
+    earlier = before is not None and waiting.failed(model.card_index(before.device)) is not None
     try:
         with _session(handle, attention, planner, plan_only, clip, preparing) as run:
             yield run
+    except BaseException as error:
+        made = _machine
+        if made is None or earlier:
+            raise
+        card = model.card_index(made.device)
+        if waiting.cuda_failed(error):
+            # Met before the run's own handling (the card's reading, the probe, the load): marked
+            # here, so that the next run is refused.
+            waiting.fail(card, error)
+        failed = waiting.failed(card)
+        if failed is None:
+            raise
+        # The card failed, whatever exception arrived here (another may have replaced the CUDA
+        # error on its way out).
+        # The error and its frames kept, nothing they hold freed (_failures); the node, the
+        # console and ComfyUI's error say what failed and the way out.
+        _failures.append(error)
+        refused = words.card_failed(failed)
+        logger.error("seedvr2x: %s", str(refused))
+        if preparing is not None:
+            preparing.show(FAILED)
+        raise refused from error
     finally:
         restore_rng()
 
@@ -946,6 +977,11 @@ def _session[T](
     """session, less the random generators."""
     machine_ = machine()
     card = model.card_index(machine_.device)
+    failed = waiting.failed(card)
+    if failed is not None:
+        # Nothing is read from the card, placed, freed or waited on: an earlier run's CUDA error
+        # failed it (waiting.fail).
+        raise words.card_failed(failed, earlier=True)
     # Process-wide until runs go to other cards: models left on any card refuse every run.
     if waiting.abandoned(card) or _left_on_card:
         # Nothing is read from the card, placed or waited on: an earlier run left a wait on the
@@ -1085,15 +1121,23 @@ def _session[T](
         try:
             yield run
         except BaseException as error:
-            # The frames of the node and the passes the error went through hold the models and
-            # their tensors on the card: cleared before the models are given up, whether the
-            # error is the node's, a Cancel between its steps or a refusal.
-            _clear_frames(error)
+            if waiting.cuda_failed(error):
+                # A CUDA error other than out of memory: the card is marked before anything
+                # below frees on it, and the frames keep what they hold (_failures).
+                waiting.fail(card, error)
+            if waiting.failed(card) is None:
+                # The frames of the node and the passes the error went through hold the models
+                # and their tensors on the card: cleared before the models are given up, whether
+                # the error is the node's, a Cancel between its steps or a refusal.
+                _clear_frames(error)
             raise
         finally:
             run.over()
-    except BaseException:
+    except BaseException as error:
         ended = True
+        if waiting.cuda_failed(error):
+            # Placing or loading the models met it: marked before the release below.
+            waiting.fail(card, error)
         raise
     finally:
         # After a wait on the GPU that was abandoned, nothing here waits on the card: the kept
@@ -1119,21 +1163,31 @@ def _session[T](
                 if models is not None:
                     _hold(models)
                     logger.warning(
-                        "seedvr2x: the models of this run are left on the card: a wait on the GPU"
-                        " was abandoned, and giving them back would wait on it again; restart"
-                        " ComfyUI"
+                        "seedvr2x: the models of this run are left on the card: %s; restart"
+                        " ComfyUI",
+                        "a wait on the GPU was abandoned, and giving them back would wait on it"
+                        " again"
+                        if waiting.failed(card) is None
+                        else "the card failed, and giving them back would free memory there",
                     )
                 models = None
             else:
-                if models is not None and ended:
+                if models is not None:
                     # Nothing below goes through the poll: the models' finalizers
                     # (blockswap.HostCopy's cudaHostUnregister, in gc.collect) and torch's cache
-                    # (soft_empty_cache) synchronise in C. The device's work is waited for first,
-                    # in the poll, so that a card that stopped answering in a kind's first unit
-                    # (no bound, no mark) can be left by a second Cancel.
+                    # (soft_empty_cache) synchronise in C, and their frees report a kernel's
+                    # failure where it can't raise (under cudaMallocAsync, an abort). The device's
+                    # work is waited for first, in the poll, at a run's end too: a failure comes
+                    # back here as a CUDA error, which marks the card (waiting.wait), and a card
+                    # that stopped answering in a kind's first unit (no bound, no mark) can be
+                    # left by a second Cancel.
                     try:
-                        with _freeing(show), waiting.releasing(card):
-                            model.synchronize(machine_.device)
+                        with waiting.releasing(card), model.marking(machine_.device):
+                            if ended:
+                                with _freeing(show):
+                                    model.synchronize(machine_.device)
+                            else:
+                                model.synchronize(machine_.device)
                     finally:
                         if waiting.abandoned(card):
                             _hold(models)

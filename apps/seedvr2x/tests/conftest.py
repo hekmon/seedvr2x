@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
-from library_fixtures import no_driver_asked, one_to_one_clock  # noqa: F401
+from library_fixtures import no_card_failed, no_driver_asked, one_to_one_clock  # noqa: F401
 
 import timing
 from media import ffmpeg, fingerprint

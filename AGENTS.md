@@ -781,6 +781,34 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   `tests/test_service.py` the estimates and the units named, `tests/test_web.py` /health's `stalled`
   (503, a ready server only, ready again after) and the gauge of the longest wait,
   `tests/test_metrics.py` its family.
+- A card a CUDA error failed (`waiting.fail`, `waiting.failed`, `model.marking`, `model.unless_failed`;
+  the nodes on Windows, 2026-11-07: "Fatal Python error: Aborted" at a free, where under
+  cudaMallocAsync a tensor's free reports a pending error inside torch's deleter, which aborts:
+  shown alone on the RTX 5090, a device-side assert then a `del`, exit code 3; torch's own
+  allocator frees silently and the error comes at the next synchronise): a CUDA error other than
+  torch's `OutOfMemoryError` (`waiting.cuda_failed`: a "CUDA error: out of memory" a kernel met is
+  one) marks its card, abandoned too and never cleared. From then on nothing seedvr2x controls
+  frees, closes or waits on that card: each free on an error's way out first asks the card
+  (`model.unless_failed`: the poll, where a pending error comes back and marks it), since a generator's
+  own `finally` runs as the error unwinds through its consumer, before any outer block has seen
+  it. Frees inside a forward pass before the error surfaces, ComfyUI's own clean-up and the
+  interpreter's exit are not seedvr2x's. A decode's normal end polls the card before its causal
+  memory is freed (`model.decode_sliced`); `synchronize` marks an error its event's record or
+  query meets; `Models.release` polls before its first free; the environment probe passes such an
+  error up uncached (`probe._run`), and the detector's close keeps its model on a failed card.
+  `core/tests/test_waiting.py` holds the mark (a wait's error, no bound needed; out of memory and
+  other errors unmarked; a completed release leaving it); `tests/test_shot_pass.py` a poll after
+  the last write with the memory held, a CUDA error at a poll inside a tile's pass or the
+  consumer's, or in the writer, tiled or not, leaving what the decode held and marking the card,
+  out of memory freeing as before; `tests/test_clip.py` the decode left open and the frames kept;
+  `tests/test_env_probe.py` the probe's. `library_fixtures.no_card_failed` (autouse in the four
+  projects) clears the marks before each test. The nodes (`apps/comfyui/tests/test_card_failed.py`): the error kept with its frames
+  (`models._failures`), the models held, ComfyUI's cache not emptied, the error's first line on
+  the node (`progress.FAILED`), at ERROR in the console and in ComfyUI's error with the restart
+  (`words.card_failed`), every later run refused at its start with nothing read, a CUDA error at
+  a run's end poll holding models not kept, out of memory freeing as before; the Cuts node
+  refused on a failed card and marking one (`tests/test_cuts_node.py`). The CLI's and the
+  server's CUDA errors still end their process (`main.py`, `service.py`).
 - The one clock (`seedvr2x/clock.py`): `tests/test_clock.py` holds it on fake monotonic and wall
   readers, nothing sleeping (`Readers`, `Pace`): the ratio of the wall to the run's clock before and
   after its minimum span, steps of the wall told from drift (a few seconds either way, an hour set,

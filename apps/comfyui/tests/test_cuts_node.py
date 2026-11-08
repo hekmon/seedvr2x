@@ -6,17 +6,18 @@ import re
 from pathlib import Path
 from typing import Any
 
+import comfy.model_management as management
 import numpy as np
 import numpy.typing as npt
 import pytest
 import server
 import torch
-from comfyui import nodes, plans, words
+from comfyui import models, nodes, plans, words
 from standins import PICTURE, RESOLUTION, StandIn, execute, handle, upscale_video
 from test_detector import untrained_weights
 
 from seedvr2x import detector as shot_detector
-from seedvr2x import pull, shotcuts
+from seedvr2x import pull, shotcuts, waiting
 from seedvr2x.errors import ModelDamaged, ModelUnreachable
 from seedvr2x.shots import Shot
 from seedvr2x.weights import AGAIN
@@ -297,3 +298,23 @@ def test_the_node_has_the_cuts_and_text_outputs_and_a_hidden_id() -> None:
     assert inputs["threshold"].default == shotcuts.THRESHOLD == 0.3
     assert inputs["threshold"].io_type == "FLOAT" and inputs["threshold"].round is False
     assert inputs["model_dir"].display_name == "model folder"
+
+
+def test_a_failed_card_refuses_the_cuts_node_and_a_cuda_error_marks_it(
+    weights_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A CUDA error the detector meets marks the card, the error kept and worded, torch's cache
+    # left alone; the node is then refused at its start, as the upscale nodes are
+    # (words.card_failed; seedvr2x/waiting.py's fail).
+    def failing(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    monkeypatch.setattr(shot_detector, "probabilities", failing)
+    emptied = len(management.empties)
+    with pytest.raises(words.Refused, match="the graphics card failed: CUDA error: an illegal"):
+        run_cuts(clip_images(20), model_dir=str(weights_dir))
+    assert waiting.failed(0) is not None and len(management.empties) == emptied
+    assert len(models._failures) == 1  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(words.Refused, match="failed during an earlier seedvr2x run"):
+        run_cuts(clip_images(20), model_dir=str(weights_dir))
+    models.reset()

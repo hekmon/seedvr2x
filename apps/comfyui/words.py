@@ -548,6 +548,23 @@ def card_stopped() -> Refused:
     )
 
 
+def card_failed(error: str, earlier: bool = False) -> Refused:
+    """The card failed with a CUDA error other than out of memory (`error`, its first line;
+    waiting.fail): nothing on it is freed or run again in ComfyUI's process, since under ComfyUI's
+    cudaMallocAsync a free there reports the error again and ends the process at once. Said by the
+    run the error stopped, and by every later run at its start (`earlier`)."""
+    if earlier:
+        return Refused(
+            f"the graphics card failed during an earlier seedvr2x run ({error}), and nothing on it"
+            " can be freed or run again inside this ComfyUI: restart ComfyUI, then run again."
+            " Nothing was read from the card and nothing was run"
+        )
+    return Refused(
+        f"the graphics card failed: {error}. seedvr2x leaves everything on the card as it is,"
+        " since freeing memory there could end ComfyUI at once: restart ComfyUI, then run again"
+    )
+
+
 def transparent() -> Refused:
     return Refused(
         "the image has transparent pixels, which seedvr2x refuses: the model would redraw the"

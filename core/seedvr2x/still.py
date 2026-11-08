@@ -101,11 +101,14 @@ def sampled(models: Models, latent: Tensor, seed: int) -> Tensor:
     models.enter("dit")
     model.forget_rope_tables()
     try:
-        noise, latent = sampling.drawn(models, latent, seed)
-        out = sampling.window(models, noise, latent)
-        del noise, latent
+        with model.marking(models.device):
+            noise, latent = sampling.drawn(models, latent, seed)
+            out = sampling.window(models, noise, latent)
+            del noise, latent
     finally:
-        model.forget_rope_tables()
+        # Never on a failed card: the tables' free would report the error again
+        # (model.unless_failed).
+        model.unless_failed(models.device, model.forget_rope_tables)
     # decode_shot's start: the window's output leaves the device for system memory, and is
     # decoded from there (shot_pass._slices). Here before the decode's phase is entered, so that a
     # picture waiting for the VAE holds nothing on the device.
@@ -137,16 +140,17 @@ def decoded(
     )
     height, width = output_size(target)
     try:
-        # One frame: one slice. Cropped to the target's even sides, dropping the padding, as
-        # shot_pass._decoded crops, (1, H', W', C) in [-1, 1] unclamped, on the device.
-        chunk = next(slices).permute(1, 2, 3, 0)[:1, :height, :width]
-        if chunk.shape[0] != 1:
-            raise RuntimeError(f"{chunk.shape[0]} frames decoded for a picture of one")
+        with model.marking(models.device):
+            # One frame: one slice. Cropped to the target's even sides, dropping the padding, as
+            # shot_pass._decoded crops, (1, H', W', C) in [-1, 1] unclamped, on the device.
+            chunk = next(slices).permute(1, 2, 3, 0)[:1, :height, :width]
+            if chunk.shape[0] != 1:
+                raise RuntimeError(f"{chunk.shape[0]} frames decoded for a picture of one")
     finally:
         # A generator, as both decodes are; closing it clears the VAE's causal memory and the
-        # tiles' scratch at once (shot_pass._slices).
+        # tiles' scratch at once (shot_pass._slices). Never on a failed card (model.unless_failed).
         if isinstance(slices, Generator):
-            slices.close()
+            model.unless_failed(models.device, slices.close)
     # As shot_pass.finite checks it, before the correction and the post-processing; the picture's
     # frame is the one part. Polled first, as finite is: the check's copy to the CPU would wait in
     # C for the whole decode, out of a stop's reach (waiting.py).

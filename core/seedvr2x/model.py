@@ -15,7 +15,8 @@ import functools
 import logging
 import os
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -148,14 +149,20 @@ class Models:
         never answer. The models are left as they were, with no phase and no plan, so that `enter`
         refuses them. A later `place` sends them back, waiting in the poll, which says what it
         waits for and which an app's check can leave; whether to place them again is the app's:
-        the nodes refuse the next run instead (DESIGN.md, Allocator, the hang of 2026-11-06)."""
+        the nodes refuse the next run instead (DESIGN.md, Allocator, the hang of 2026-11-06). A
+        card marked failed by a CUDA error (waiting.fail) is abandoned too, and never placed on
+        again: the models are left as they are for the process's life (waiting.py's docstring)."""
         self._held("release")
         index = card_index(self.device)
         if waiting.abandoned(index):
+            error = waiting.failed(index)
             logger.warning(
-                "the models are not sent back to their pinned copies: a wait on the GPU was"
-                " abandoned and every step of it would wait on the card again; the next run"
-                " sends them back"
+                "the models are not sent back to their pinned copies: %s",
+                "a wait on the GPU was abandoned and every step of it would wait on the card"
+                " again; the next run sends them back"
+                if error is None
+                else f"the card failed ({error}) and every step of it would free memory there,"
+                " which can end the process; the process is for restarting",
             )
             self.phase = None
             self.model_plan = None
@@ -163,6 +170,9 @@ class Models:
         # Its waits are a release's (waiting.releasing): one a Cancel ends marks the card, and a
         # release that completes clears the mark.
         with waiting.releasing(index):
+            # The card polled before the first free (forget, in _send_back): a pending CUDA error
+            # comes back here and marks it (synchronize), the models left as they were.
+            synchronize(self.device)
             self._send_back()
             _move_buffers(self.runner.dit, _to_host)
             _move_buffers(self.runner.vae, _to_host)
@@ -623,10 +633,12 @@ def synchronize(device: torch.device) -> None:
     waiting.wait, which keeps when it began and says once when it lasts past its unit's bound."""
     if device.type != "cuda":
         return
-    done = torch.cuda.Event()
-    done.record()
-    # Timed, and said where it lasts past its unit's bound (waiting.py).
-    waiting.wait(done.query, 0.01, _index(device))
+    # The event's record reports an earlier launch's error too: marked as the query's is.
+    with marking(device):
+        done = torch.cuda.Event()
+        done.record()
+        # Timed, and said where it lasts past its unit's bound (waiting.py).
+        waiting.wait(done.query, 0.01, _index(device))
 
 
 def _index(device: torch.device) -> int:
@@ -638,6 +650,48 @@ def card_index(device: torch.device) -> int:
     """The card `device` is, in the numbering of waiting.abandoned: CUDA's index, 0 for a device
     that is no card (the tests' stand-ins on the CPU make no wait on one)."""
     return _index(device) if device.type == "cuda" else 0
+
+
+def failed(device: torch.device) -> bool:
+    """Whether the card `device` is (card_index) was marked failed by a CUDA error other than out of
+    memory (waiting.fail): nothing on it may be freed, closed or waited on again in the process,
+    since under cudaMallocAsync a free reports the error again inside torch's deleter, which
+    aborts the process (waiting.py's docstring). Read from the mark alone, no CUDA call."""
+    return waiting.failed(card_index(device)) is not None
+
+
+def unless_failed(device: torch.device, free: Callable[[], None]) -> None:
+    """Call `free` (a decode's memory cleared, a generator closed, a traceback's frames cleared)
+    unless the card `device` is failed: found so (failed), or by the poll that comes first
+    (synchronize), where a pending CUDA error other than out of memory comes back and marks it.
+    For the frees on an error's way out: a generator's own `finally` runs as the error unwinds
+    through its consumer, before any block outside has seen the error, so each free asks the card
+    itself. Another exception from the poll (a Ctrl-C, an app's check: a second Cancel) frees as
+    before, then goes on."""
+    if failed(device):
+        return
+    try:
+        synchronize(device)
+    except BaseException as error:
+        if waiting.cuda_failed(error):
+            waiting.fail(card_index(device), error)
+            return
+        free()
+        raise
+    free()
+
+
+@contextmanager
+def marking(device: torch.device) -> Generator[None]:
+    """The with block's CUDA error other than out of memory (waiting.cuda_failed) marks the card
+    `device` is failed (waiting.fail) as it leaves, before any `finally` outside the block frees
+    what it holds; the error goes on. Out of memory and every other exception pass unmarked."""
+    try:
+        yield
+    except BaseException as error:
+        if waiting.cuda_failed(error):
+            waiting.fail(card_index(device), error)
+        raise
 
 
 def set_seed(seed: int) -> None:
@@ -713,27 +767,35 @@ def encode_sliced(models: Models, slices: Iterable[Tensor], frames: int) -> Iter
     ValueError when the slices don't follow encode_slices or aren't in the VAE's dtype.
 
     One pass of the causal encoder, with a memory of its own from its first slice to its last,
-    cleared whatever ends it: a tiled encode makes one such pass per tile, over the tile's crop
-    of every slice (seedvr2x/tiling.py)."""
+    cleared whatever ends it but a CUDA error other than out of memory, which marks the card failed
+    and leaves the memory as it is (marking, failed): a tiled encode makes one such pass per tile,
+    over the tile's crop of every slice (seedvr2x/tiling.py)."""
     vae = models.runner.vae
     sizes = encode_slices(models, frames)
-    given = 0
     try:
-        for index, x in enumerate(slices):
-            if index >= len(sizes) or x.shape[1] != sizes[index]:
-                raise ValueError(f"slice {index} of {x.shape[1]} frames, the VAE takes {sizes}")
-            if next(vae.parameters()).dtype != x.dtype:
-                raise ValueError(f"input {x.dtype}, VAE {next(vae.parameters()).dtype}")
-            if len(sizes) == 1:
-                state = MemoryState.DISABLED
-            else:
-                state = MemoryState.INITIALIZING if index == 0 else MemoryState.ACTIVE
-            yield vae._encode(x.unsqueeze(0), memory_state=state)
-            given += 1
-        if given != len(sizes):
-            raise ValueError(f"{given} slices, the VAE takes {sizes}")
+        with marking(models.device):
+            yield from _encoded(vae, slices, sizes)
     finally:
-        _forget(vae)
+        # Never on a failed card: the memory's free would report the error again (unless_failed).
+        unless_failed(models.device, lambda: _forget(vae))
+
+
+def _encoded(vae: Any, slices: Iterable[Tensor], sizes: list[int]) -> Iterator[Tensor]:
+    """encode_sliced's pass, its memory left to encode_sliced to clear."""
+    given = 0
+    for index, x in enumerate(slices):
+        if index >= len(sizes) or x.shape[1] != sizes[index]:
+            raise ValueError(f"slice {index} of {x.shape[1]} frames, the VAE takes {sizes}")
+        if next(vae.parameters()).dtype != x.dtype:
+            raise ValueError(f"input {x.dtype}, VAE {next(vae.parameters()).dtype}")
+        if len(sizes) == 1:
+            state = MemoryState.DISABLED
+        else:
+            state = MemoryState.INITIALIZING if index == 0 else MemoryState.ACTIVE
+        yield vae._encode(x.unsqueeze(0), memory_state=state)
+        given += 1
+    if given != len(sizes):
+        raise ValueError(f"{given} slices, the VAE takes {sizes}")
 
 
 def mode(moments: Tensor) -> Tensor:
@@ -990,28 +1052,38 @@ def decode_sliced(
     contiguous tensor.
 
     One pass of the causal decoder, with a memory of its own from its first slice to its last,
-    cleared when the generator ends, is closed or fails: a tiled decode makes one such pass per
+    cleared when the generator ends, is closed or fails, the card polled first where it ends
+    (synchronize); a CUDA error other than out of memory, there or in a slice, marks the card
+    failed and leaves the memory as it is (marking, failed). A tiled decode makes one such pass per
     tile, over the tile's crop of the latent (seedvr2x/tiling.py)."""
     vae = models.runner.vae
     decodable(models, latent)
     sizes = latent_slices(models, latent.shape[0])
     if len(sizes) == 1:
-        yield vae._decode(_slice_input(models, latent[:, rows, columns]))[0]
+        with marking(models.device):
+            yield vae._decode(_slice_input(models, latent[:, rows, columns]))[0]
         return
     try:
-        start = 0
-        for size in sizes:
-            z = _slice_input(models, latent[start : start + size, rows, columns])
-            if start == 0:
-                # numz's first slice is a concatenation, the first latent and the slice after it
-                # (attn_video_vae.py:1284): a tensor of its own, in the memory torch gives one.
-                z = torch.cat((z[:, :, :1], z[:, :, 1:]), dim=2)
-                yield vae._decode(z, memory_state=MemoryState.INITIALIZING)[0]
-            else:
-                yield vae._decode(z, memory_state=MemoryState.ACTIVE)[0]
-            start += size
+        with marking(models.device):
+            start = 0
+            for size in sizes:
+                z = _slice_input(models, latent[start : start + size, rows, columns])
+                if start == 0:
+                    # numz's first slice is a concatenation, the first latent and the slice after
+                    # it (attn_video_vae.py:1284): a tensor of its own, in the memory torch gives
+                    # one.
+                    z = torch.cat((z[:, :, :1], z[:, :, 1:]), dim=2)
+                    yield vae._decode(z, memory_state=MemoryState.INITIALIZING)[0]
+                else:
+                    yield vae._decode(z, memory_state=MemoryState.ACTIVE)[0]
+                start += size
+            # The card polled before the memory is freed: a kernel's failure comes back here as
+            # an exception with its text, which marks the card (marking), rather than from the
+            # free, where under cudaMallocAsync it aborts the process (waiting.py's docstring).
+            synchronize(models.device)
     finally:
-        _forget(vae)
+        # Never on a failed card: the memory's free would report the error again (unless_failed).
+        unless_failed(models.device, lambda: _forget(vae))
 
 
 def _slice_input(models: Models, latents: Tensor) -> Tensor:

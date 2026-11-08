@@ -690,6 +690,20 @@ def test_an_out_of_memory_error_says_nothing_of_the_kernel_and_is_not_cached(
     assert not cache.exists()
 
 
+def test_a_cuda_error_says_the_card_failed_and_is_not_cached(
+    stand_in_environment: dict[str, str], monkeypatch: pytest.MonkeyPatch, cache: Path
+) -> None:
+    # A CUDA error other than out of memory says nothing of the kernel either, but that the card
+    # failed: cached as a failed check, it would refuse the environment for good.
+    def failed(*args: Any) -> Any:
+        raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    monkeypatch.setattr(int8, "product", failed)
+    with pytest.raises(RuntimeError, match="illegal memory access"):
+        sdpa(weights.DIT_7B_INT8, cache)
+    assert not cache.exists()
+
+
 # --- the real card ---
 
 

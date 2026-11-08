@@ -196,6 +196,13 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
 - **A card that stopped answering needs ComfyUI restarted.** Besides the nodes, ComfyUI's own
   release of its cache after the run waits on the card too, so no node can free it: only a new
   ComfyUI has a card that answers.
+- **A graphics card that failed needs ComfyUI restarted too.** A CUDA error other than running
+  out of memory (an illegal memory access, a "CUDA error: out of memory" that a kernel met) leaves
+  the card's state untrusted, and under ComfyUI's cudaMallocAsync freeing memory there can end
+  ComfyUI's process at once, with no message. So the nodes free nothing on that card: the node
+  says "the graphics card failed" with CUDA's own words, ComfyUI's console says it too, and every
+  later run is refused at its start until ComfyUI is restarted. Running out of memory (torch's
+  "out of memory" error) is not a failure: the card is freed as after any error.
 - **ComfyUI's image.** The output is its `IMAGE`, float32, and its savers write 8 bits or lossy
   video. The command line writes 16-bit PNG and lossless masters, with seedvr2x's record in each
   output; the nodes write no file and carry no record.
