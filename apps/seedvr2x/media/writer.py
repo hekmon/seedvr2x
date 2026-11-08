@@ -79,6 +79,26 @@ TAIL_LINES = 20
 TAIL_WIDTH = 300
 
 
+# The process groups of the segment commands running (CommandWriter), for end_commands: a
+# process the stop's watcher ends (stop.Watch) never unwinds to CommandWriter.abort, and its
+# ffmpeg dies with it (PDEATHSIG) while the user's shell group would run on to its end of
+# file, finishing a truncated file at the segment's path beside the resume's own command.
+_GROUPS: set[int] = set()
+_GROUPS_LOCK = threading.Lock()
+
+
+def end_commands() -> None:
+    """SIGKILL the process group of every segment command running: what ending the process
+    from the stop's watcher takes of them, with no main thread and no wait (main._flush). The
+    unwinding's own stop (CommandWriter._stop: SIGTERM, then SIGKILL after STOP_GRACE) has
+    removed each it stopped."""
+    with _GROUPS_LOCK:
+        groups = list(_GROUPS)
+    for group in groups:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(group, signal.SIGKILL)
+
+
 @dataclass(frozen=True)
 class Tags:
     """The source's primaries and transfer, which the output declares as they are: copied, never
@@ -702,6 +722,8 @@ class CommandWriter(Writer):
                 stderr=subprocess.STDOUT,
                 process_group=0,
             )
+            with _GROUPS_LOCK:
+                _GROUPS.add(self._shell.pid)
         except BaseException as error:
             Writer.abort(self)
             if isinstance(error, OSError):
@@ -748,6 +770,7 @@ class CommandWriter(Writer):
             self.abort()
             raise
         self._shell.wait()
+        self._forget_group()
         return self.written
 
     def abort(self) -> None:
@@ -842,6 +865,11 @@ class CommandWriter(Writer):
         finally:
             self._signal(signal.SIGKILL)
             self._shell.wait()
+            self._forget_group()
+
+    def _forget_group(self) -> None:
+        with _GROUPS_LOCK:
+            _GROUPS.discard(self._shell.pid)
 
     def _signal(self, number: int) -> None:
         with contextlib.suppress(ProcessLookupError):

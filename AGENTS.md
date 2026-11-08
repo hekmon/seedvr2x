@@ -790,6 +790,38 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   a guard each: `HAS_SIGUSR1` (both apps' `main.py`) for the stacks on SIGUSR1, Windows having
   no such signal; the statuses 130 and 143 (128 plus the signal) and ffmpeg's end with the
   parent (`PDEATHSIG`) are POSIX's, said in comments, their Windows twins a later baton's.
+- A stop at once that needs no main thread (`stop.Watch`, around `main(owns_process=True)`
+  alone; DESIGN.md, Allocator, "Out of the stop's reach"): a main thread held in one call in C
+  answers no Python handler, so the C handler's byte on `signal.set_wakeup_fd` (a non-blocking
+  pipe) is read by a daemon thread, and each Python handler of SIGINT and SIGTERM (`Stop._handle`,
+  `_terminated`, `interrupted` for Python's own Ctrl-C) writes an ACK byte (`answered`) into the
+  same pipe, so that the unanswered signals are counted in the pipe's own order, no clock. A stop
+  at once (SIGTERM; Ctrl-C after a first one unanswered, a Stop asked, or no Stop in force)
+  asked while another is unanswered ends the process from the thread: `main._flush` (work
+  directories, locks, logging, streams: bounded, 5 s, so a logging lock held by the main thread
+  can't hold the stop), one ERROR line (`stopped at once (SIGTERM), asked again before the main
+  thread answered the first: it had been held in one call ..., at FILE:LINE in FUNCTION; ...`),
+  `os._exit(143 or 130)`, exactly once with `main._end` (`stop.ending`, whichever asks first;
+  the other waits for the exit). The same thread samples the main thread's stack once a second
+  (the select's timeout, a sampling period and no grace period) and, past its unit's
+  `waiting.bound` in one frame and instruction and outside `waiting.wait` (which says its own),
+  says the stall's line once per hold (`waiting.held`, the unit read through
+  `waiting.unit_of(ident)`). The one guard is `stop.WATCHED` (`os.name == "posix"`; Windows'
+  `set_wakeup_fd` takes a socket: a later baton's); off it, off the main thread, or with the
+  wakeup descriptor another's, there is no pipe and no thread, said at debug. A process ended
+  from the thread leaves the partial segment (a file or a PNG directory) and no cleanup of the
+  writers: ffmpeg dies with its parent (PDEATHSIG), a segment command's process group is killed
+  (`media/writer.end_commands`, from `main._flush`; `tests/test_segment_cmd.py`), and the
+  resume's checks (the writers' partial paths, `resume.leftovers`) are those of a SIGKILL;
+  `_unmake` and `_unlock` run one at a time (`main._CLEANING`), the watcher's and main's own. `tests/test_stop.py`: DRIVER's mode
+  `held` (the step held in the interpreter's own lock acquired twice, through ctypes: no signal
+  ends it and no Python runs) with a unit of 0.01 s and `waiting.FLOOR` of 1 s: one SIGTERM ends
+  nothing, two end it with 143 and Ctrl-C three times with 130 within 30 s, the line, the job's
+  files and the resume as if uninterrupted, for an FFV1 job and a PNG one; the stall's line naming
+  the frame and followed by the stacks; mode `wait` (a wait polling in the same frame) said by
+  `waiting` alone; the `Watch` class in process, bytes written to its pipe (the classification of
+  the stops, the ACK's order, once with `main._end` in both orders, the guard, the descriptor and
+  signal handlers given back, a real signal answered by a responsive main thread never counted).
 - Every thread's stack on SIGUSR1: `command` registers `faulthandler` (all threads, to stderr,
   not chained) in the CLI and the image server; `tests/test_stop.py` sends it inside a slow step,
   the main thread in Python's sleep and in C calls (libc's `usleep`, mode `c-call`): the main

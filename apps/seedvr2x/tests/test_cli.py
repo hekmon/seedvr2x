@@ -95,6 +95,7 @@ def test_every_logger_is_named_for_its_layer() -> None:
         "cli.planner",
         "cli.run",
         "cli.scratch",
+        "cli.stop",
         "cli.stills",
         "cli.timing",
     }

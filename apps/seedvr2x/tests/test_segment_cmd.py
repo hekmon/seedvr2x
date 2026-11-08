@@ -119,6 +119,26 @@ def has_encoder(name: str) -> bool:
     return any(line.split()[1:2] == [name] for line in listed.stdout.splitlines())
 
 
+def test_the_watchers_ending_kills_the_commands_running(tmp_path: Path) -> None:
+    # A process the stop's watcher ends (stop.Watch, main._flush) never unwinds to
+    # CommandWriter.abort, and its ffmpeg dies with it while the command's group would run on:
+    # end_commands kills each registered group at once. A command that ended is no longer there.
+    path = tmp_path / "segment.mkv"
+    with CommandWriter(COPY, path, "yuv420p10le", 64, 48, RATE, BT709) as writer:
+        writer.write(frames_of(2, 64, 48))
+    assert writer_module._GROUPS == set()  # pyright: ignore[reportPrivateUsage]
+    held = CommandWriter("sleep 300 && cat > {out}", path, "yuv420p10le", 64, 48, RATE, BT709)
+    try:
+        group = held._shell.pid  # pyright: ignore[reportPrivateUsage]
+        assert writer_module._GROUPS == {group}  # pyright: ignore[reportPrivateUsage]
+        assert members(group)
+        writer_module.end_commands()
+        assert gone(group)
+    finally:
+        held.abort()
+    assert writer_module._GROUPS == set()  # pyright: ignore[reportPrivateUsage]
+
+
 def members(group: int) -> list[int]:
     """The processes of a process group still running: zombies, ended and waiting for their
     parent to read their status, are not."""

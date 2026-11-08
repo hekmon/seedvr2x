@@ -7,6 +7,7 @@ out of its reach, else the segment being written would end early."""
 
 import contextlib
 import json
+import logging
 import os
 import re
 import signal
@@ -14,7 +15,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from stop import (
     Stop,
     Stopped,
     Terminated,
+    Watch,
     deadline,
     late,
     terminable,
@@ -56,7 +58,14 @@ TESTS = Path(__file__).resolve().parent
 # - type-error: the same with a TypeError, not a CUDA error (impl-stop's R2 hung in Python's
 #   teardown after one);
 # - type-error-plain: the TypeError on a process that never used CUDA;
-# - c-call: the step's 2 s spent in C calls (libc's usleep), not in Python's sleep.
+# - c-call: the step's 2 s spent in C calls (libc's usleep), not in Python's sleep;
+# - wait: stall, with the wait's unit named with an estimate of 0.01 s and waiting.FLOOR lowered
+#   to 1 s, so that the wait says its own line after a second (and the watcher none);
+# - held: the step held in one call in C for ever that no signal ends and no Python code runs
+#   in (the interpreter's own lock, acquired twice, the second retried on EINTR), as a sync on a
+#   stalled card holds the main thread: only stop.Watch's thread can answer. Its unit is named
+#   with an estimate of 0.01 s and waiting.FLOOR lowered to 1 s, so that the stall's line comes
+#   after a second.
 DRIVER = r"""
 import atexit, ctypes, os, sys, time, weakref
 sys.path.insert(0, sys.argv[1])
@@ -68,7 +77,7 @@ slow = sys.argv[2]
 mode = os.environ.get("STOP_MODE", "")
 libc = ctypes.CDLL(None)
 
-HANGS = ("stall", "atexit", "finalizer", "cuda-error", "type-error")
+HANGS = ("stall", "atexit", "finalizer", "cuda-error", "type-error", "wait")
 if mode in HANGS:
     from seedvr2x import waiting
     waiting.cuda_used = lambda: True
@@ -80,8 +89,18 @@ def inside(name):
     if name == slow:
         # A wait's modes say IN from inside the wait (hang): a signal sent between this line and
         # the wait would find no wait to name.
-        if mode not in ("stall", "atexit", "finalizer"):
+        if mode not in ("stall", "atexit", "finalizer", "held", "wait"):
             print(f"IN {name}", file=sys.stderr, flush=True)
+        if mode == "held":
+            from seedvr2x import waiting
+            waiting.FLOOR = 1.0
+            waiting.unit(name, 0.01)
+            # Said from another thread once the main one is in the call: a signal sent before
+            # would find it running Python, which answers it.
+            import threading
+            say = {"file": sys.stderr, "flush": True}
+            threading.Timer(0.3, print, (f"IN {name}",), say).start()
+            held()
         if mode == "c-call":
             # 2 s in C calls (usleep), where a signal finds the main thread.
             end = time.monotonic() + 2
@@ -94,7 +113,18 @@ def inside(name):
             return
         time.sleep(2)
 
+def held():
+    # CDLL releases the GIL for the call; PyThread_*_lock are the interpreter's own exports.
+    libc.PyThread_allocate_lock.restype = ctypes.c_void_p
+    libc.PyThread_acquire_lock.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lock = libc.PyThread_allocate_lock()
+    libc.PyThread_acquire_lock(lock, 1)
+    libc.PyThread_acquire_lock(lock, 1)
+
 def hang():
+    if mode == "wait":
+        waiting.FLOOR = 1.0
+        waiting.unit(slow, 0.01)
     said = []
     def never():
         if not said:
@@ -242,11 +272,16 @@ def upscale(
     mode: str = "",
     *,
     within: float | None = None,
+    after: str | None = None,
+    delay: float = 0.0,
+    form: str = "gbrp16le",
 ) -> tuple[int, list[str], str]:
     """Run the job into output, the signals sent to its process group from inside the step slow
     (DRIVER, hanging as `mode` says), 0.3 s apart; its status, the steps it called, its stderr.
     With `within`, the process is killed that many seconds after the last signal (the step
-    itself, with none) if it has not ended, and the test fails saying so."""
+    itself, with none) if it has not ended, and the test fails saying so. With `after`, the
+    signals wait for the first line containing it (the stall's line of a held step) instead of
+    the step's own, and `delay` seconds more. `form` is --format."""
     process = subprocess.Popen(
         [
             *(sys.executable, "-c", DRIVER, str(TESTS), slow),
@@ -255,7 +290,7 @@ def upscale(
             *("--cuts", "cuts.txt", "--window", "5", "--min-segment", "0.12"),
             # The stand-in's frames say which they are (test_cli_run.py), read back as the RGB
             # planes written (indexes).
-            *("--color-correction", "none", "--format", "gbrp16le"),
+            *("--color-correction", "none", "--format", form),
         ],
         stderr=subprocess.PIPE,
         text=True,
@@ -276,7 +311,10 @@ def upscale(
     try:
         for line in process.stderr:
             lines.append(line)
-            if line.startswith(f"IN {slow}"):
+            if (line.startswith(f"IN {slow}") and after is None) or (
+                after is not None and after in line
+            ):
+                time.sleep(delay)
                 for number in signals:
                     # SIGUSR1 to seedvr2x alone: ffmpeg's default for it is to end.
                     if number == signal.SIGUSR1:
@@ -471,6 +509,340 @@ def test_an_error_without_cuda_keeps_pythons_traceback_and_status(job: Path) -> 
     assert found == 1, text
     assert "TypeError: a bug in the run" in text
     assert "the process ends without waiting for the GPU" not in text
+
+
+# A stop at once that needs no main thread (stop.Watch; DESIGN.md, Allocator, "Out of the stop's
+# reach"): the main thread held in one call in C that no signal ends (mode held), where Python's
+# handlers never run. One signal ends nothing; the repeated one ends the process from the
+# watcher's thread, the job's partial segment left for the same command to make again.
+ASKED_AGAIN = (
+    r"^\d\d:\d\d:\d\d .*stopped at once \({how}\), asked again before the main thread answered"
+    r" the first: it had been held in one call(?: for {spoken})?, at <string>:\d+ in held;"
+)
+
+
+def png_segments(directory: Path) -> list[int]:
+    """The frames of each PNG segment of the job `out`, by directory."""
+    segments = sorted(p for p in (directory / "out").iterdir() if p.name.startswith("seg_"))
+    return [len(list(p.glob("*.png"))) for p in segments if p.is_dir()]
+
+
+@pytest.mark.parametrize(
+    ("signals", "status", "how"),
+    [
+        ((signal.SIGTERM, signal.SIGTERM), 143, "SIGTERM"),
+        # The first stops after the unit, which a main thread held can't do; the second is the
+        # stop at once; the third is asked again.
+        ((signal.SIGINT, signal.SIGINT, signal.SIGINT), 130, "Ctrl-C"),
+    ],
+)
+@pytest.mark.parametrize("form", ["gbrp16le", "png"])
+def test_a_stop_asked_again_ends_a_held_main_thread_from_another_thread(
+    job: Path, signals: tuple[int, ...], status: int, how: str, form: str
+) -> None:
+    found, calls, text = upscale(
+        *(job, "out", "decode 0", signals), mode="held", within=ENDS_WITHIN, form=form
+    )
+    assert found == status, text
+    assert re.search(ASKED_AGAIN.format(how=re.escape(how), spoken=SPOKEN), text, re.M), text
+    # Said once, and the process ended: no traceback, no unwinding line of the main thread.
+    assert text.count("stopped at once") == 1, text
+    assert calls == UNINTERRUPTED[:5]
+    assert progress(job) == ([False, False], [1, 1, 0])
+    # The same command, as if never interrupted: the windows kept, the decode made again, the
+    # partial segment (the file or the directory of PNGs) left by the killed process taken away.
+    if form == "png":
+        status, calls, text = upscale(job, "out", form=form)
+        assert status == 0, text
+        assert calls == ["decode 0", "decode 3", *UNINTERRUPTED[6:]]
+        assert progress(job)[0] == [True, True]
+        assert png_segments(job) == [4, 21]
+        assert [p.name for p in (job / "out").iterdir() if "partial" in p.name] == []
+    else:
+        resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])
+
+
+def test_one_signal_ends_nothing_of_a_held_main_thread(job: Path) -> None:
+    # Python's handler can't run, so the one SIGTERM is unanswered, and a watcher that ended the
+    # process on it would end it on a stop that only asked once.
+    with pytest.raises(pytest.fail.Exception, match="still running"):
+        upscale(*(job, "out", "decode 0", (signal.SIGTERM,)), mode="held", within=3)
+
+
+def test_a_main_thread_held_in_one_call_gets_the_stalls_line(job: Path) -> None:
+    found, _, text = upscale(
+        *(job, "out", "decode 0", (signal.SIGTERM, signal.SIGTERM)),
+        mode="held",
+        within=ENDS_WITHIN,
+        after="the main thread has been held in one call",
+    )
+    assert found == 143, text
+    stall = re.search(
+        r"^\d\d:\d\d:\d\d WARNING decode 0: the main thread has been held in one call for"
+        rf" {SPOKEN}, at <string>:\d+ in held, the whole unit estimated at [\d.]+ s; no error has"
+        r" been raised; (?:NVML [^;]+); seedvr2x goes on waiting: [^;]*;"
+        r" if the main thread answers nothing, SIGTERM twice or Ctrl-C three times ends the"
+        r" process from another thread; every thread's stack follows$",
+        text,
+        re.M,
+    )
+    assert stall is not None, text
+    # The stacks follow the line, the main thread's in the call.
+    assert text.index("Current thread 0x") > stall.end()
+    assert re.search(ASKED_AGAIN.format(how="SIGTERM", spoken=SPOKEN), text, re.M), text
+    # The stop's own line says it had been held, the stall's the main thread has been.
+    assert text.count("the main thread has been held in one call for") == 1
+
+
+def test_a_main_thread_in_a_wait_says_its_own_line_not_the_watchers(job: Path) -> None:
+    # A wait on the GPU polls (waiting.wait) and says its own; its frame is the same at every
+    # sample (the sleep), which the watcher must not take for a hold.
+    found, _, text = upscale(
+        *(job, "out", "decode 0", (signal.SIGTERM,)),
+        mode="wait",
+        within=ENDS_WITHIN,
+        after="a wait on the GPU has lasted",
+        delay=3.5,
+    )
+    assert found == 143, text
+    assert "a wait on the GPU has lasted" in text
+    assert "the main thread has been held" not in text
+
+
+class Leaving:
+    """A Watch's leave, recording the statuses instead of ending the test's process."""
+
+    def __init__(self) -> None:
+        self.statuses: list[int] = []
+        self.finished = 0
+
+    def leave(self, status: int) -> None:
+        self.statuses.append(status)
+
+    def finish(self) -> None:
+        self.finished += 1
+
+
+def until(condition: Callable[[], bool], seconds: float = 10.0) -> None:
+    """Wait for a thread's work, polled; the failure says so."""
+    end = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < end, "the watcher did not get there"
+        time.sleep(0.01)
+
+
+@pytest.fixture
+def leaving() -> Leaving:
+    return Leaving()
+
+
+def test_the_watcher_ends_a_stop_at_once_asked_again(
+    leaving: Leaving, caplog: pytest.LogCaptureFixture
+) -> None:
+    with Watch(leaving.finish, "the way out", leave=leaving.leave) as watch:
+        assert watch.active
+        os.write(watch.write, bytes([signal.SIGTERM]))
+        # Unanswered, one stop at once ends nothing.
+        until(lambda: watch._pending == [signal.SIGTERM])  # pyright: ignore[reportPrivateUsage]
+        assert leaving.statuses == []
+        os.write(watch.write, bytes([signal.SIGTERM]))
+        until(lambda: leaving.statuses != [])
+    assert leaving.statuses == [143]
+    assert leaving.finished == 1
+    assert "stopped at once (SIGTERM), asked again before the main thread answered" in caplog.text
+
+
+def test_an_answer_clears_what_it_follows(leaving: Leaving) -> None:
+    # The handler's byte is in the pipe's own order with the signals, so a stop answered before
+    # the watcher read it, or after, is the same: the next is a first.
+    with Watch(leaving.finish, leave=leaving.leave) as watch:
+        for _ in range(3):
+            os.write(watch.write, bytes([signal.SIGTERM, stop_module.ACK]))
+        os.write(watch.write, bytes([signal.SIGTERM]))
+        until(lambda: watch._pending == [signal.SIGTERM])  # pyright: ignore[reportPrivateUsage]
+        assert leaving.statuses == []
+
+
+def test_ctrl_c_is_a_stop_at_once_when_asked_after_a_first_or_with_no_stop(
+    leaving: Leaving,
+) -> None:
+    with Watch(leaving.finish, leave=leaving.leave) as watch:
+        # No Stop in force: Python's KeyboardInterrupt, a stop at once; the second ends it.
+        os.write(watch.write, bytes([signal.SIGINT]))
+        until(lambda: watch._hard)  # pyright: ignore[reportPrivateUsage]
+        assert leaving.statuses == []
+        os.write(watch.write, bytes([signal.SIGINT]))
+        until(lambda: leaving.statuses != [])
+    assert leaving.statuses == [130]
+    # A Stop in force and not asked: the first only stops after the unit, the second is the stop
+    # at once, the third is asked again.
+    other = Leaving()
+    with Stop(), Watch(other.finish, leave=other.leave) as watch:
+        os.write(watch.write, bytes([signal.SIGINT]))
+        until(lambda: watch._pending == [signal.SIGINT])  # pyright: ignore[reportPrivateUsage]
+        assert not watch._hard  # pyright: ignore[reportPrivateUsage]
+        os.write(watch.write, bytes([signal.SIGINT]))
+        until(lambda: watch._hard)  # pyright: ignore[reportPrivateUsage]
+        assert other.statuses == []
+        os.write(watch.write, bytes([signal.SIGINT]))
+        until(lambda: other.statuses != [])
+    assert other.statuses == [130]
+
+
+@pytest.mark.skipif(
+    SIGINT_IGNORED, reason="SIGINT ignored as pytest started (a job started with &): no Ctrl-C"
+)
+def test_signals_a_responsive_main_thread_answers_are_never_asked_again(leaving: Leaving) -> None:
+    before = signal.getsignal(signal.SIGINT)
+    assert before is signal.default_int_handler
+    with Watch(leaving.finish, leave=leaving.leave) as watch:
+        # Python's own Ctrl-C handler is wrapped so that it answers too.
+        assert signal.getsignal(signal.SIGINT) is stop_module.interrupted
+        with pytest.raises(KeyboardInterrupt):
+            os.kill(os.getpid(), signal.SIGINT)
+            time.sleep(5)
+        with Stop() as stop:
+            with pytest.raises(Terminated):
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(5)
+            os.kill(os.getpid(), signal.SIGINT)
+            assert stop.asked
+            with pytest.raises(KeyboardInterrupt):
+                os.kill(os.getpid(), signal.SIGINT)
+                time.sleep(5)
+        with terminable(), pytest.raises(Terminated):
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(5)
+        # Seven signals, each answered; the watcher has read them all once a later byte it is
+        # given comes back as the state it leaves.
+        os.write(watch.write, bytes([signal.SIGTERM]))
+        until(lambda: watch._pending == [signal.SIGTERM])  # pyright: ignore[reportPrivateUsage]
+        assert leaving.statuses == []
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_the_process_is_ended_once_by_whoever_asks_first(leaving: Leaving) -> None:
+    with Watch(leaving.finish, leave=leaving.leave) as watch:
+        stop_module.ending()  # the main thread is ending the process: main._end
+        os.write(watch.write, bytes([signal.SIGTERM, signal.SIGTERM, signal.SIGTERM]))
+        until(lambda: watch._hard)  # pyright: ignore[reportPrivateUsage]
+        time.sleep(0.2)
+        assert leaving.statuses == []
+        assert leaving.finished == 0
+    # The watcher ends the process first: main._end waits for its exit (a leave that has not
+    # returned yet, as os._exit does not).
+    exit_now = threading.Event()
+    other = Leaving()
+
+    def slow_leave(status: int) -> None:
+        other.leave(status)
+        exit_now.wait(10)
+
+    with Watch(other.finish, leave=slow_leave) as watch:
+        os.write(watch.write, bytes([signal.SIGTERM, signal.SIGTERM]))
+        until(lambda: other.statuses != [])
+        waits = threading.Thread(target=stop_module.ending, daemon=True)
+        waits.start()
+        waits.join(0.3)
+        assert waits.is_alive()
+        assert other.finished == 1
+        exit_now.set()
+        # The fake leave returns, the watcher stands down: the test's exit must not wait.
+        until(lambda: stop_module._ender is None)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_no_watcher_where_the_platform_has_none(
+    monkeypatch: pytest.MonkeyPatch, leaving: Leaving
+) -> None:
+    monkeypatch.setattr(stop_module, "WATCHED", False)
+    threads = {thread.name for thread in threading.enumerate()}
+    with Watch(leaving.finish, leave=leaving.leave) as watch:
+        assert not watch.active
+        assert watch.write == -1
+        assert {thread.name for thread in threading.enumerate()} == threads
+        # The process as it was: no wakeup descriptor given.
+        assert signal.set_wakeup_fd(-1) == -1
+        stop_module.answered()  # nothing to tell, nothing raised
+    assert leaving.statuses == []
+
+
+def test_the_wakeup_descriptor_and_the_thread_are_given_back(leaving: Leaving) -> None:
+    with Watch(leaving.finish, leave=leaving.leave) as watch:
+        assert watch.active
+        assert signal.set_wakeup_fd(watch.write, warn_on_full_buffer=False) == watch.write
+    assert signal.set_wakeup_fd(-1) == -1
+    assert "stop-watch" not in {thread.name for thread in threading.enumerate()}
+    assert stop_module._ack is None  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_thread_held_in_one_call_is_said_once_per_hold(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The sampler on a thread that waits on an event (one frame, one instruction): past its
+    # unit's bound the line comes once, naming the frame; a thread inside a wait says none; a
+    # thread that moves resets the hold, and the line comes again after the next.
+    from seedvr2x import waiting
+
+    monkeypatch.setattr(waiting, "FLOOR", 0.2)
+    monkeypatch.setattr(waiting, "_stacks_written", True)  # no stacks into the test's stderr
+    release, entered = threading.Event(), threading.Event()
+    ident: list[int] = []
+
+    def held_there() -> None:
+        ident.append(threading.get_ident())
+        waiting.unit("segment 2/5's decode", 0.01)
+        entered.set()
+        release.wait()
+        waiting.clear()
+
+    thread = threading.Thread(target=held_there)
+    thread.start()
+    entered.wait()
+    caplog.set_level(logging.WARNING)
+    leaving = Leaving()
+    with Watch(leaving.finish, "the app's words", leave=leaving.leave, every=0.05, thread=ident[0]):
+        until(lambda: "held in one call" in caplog.text)
+        time.sleep(0.4)
+        release.set()
+    thread.join()
+    lines = [r.getMessage() for r in caplog.records if "held in one call" in r.getMessage()]
+    assert len(lines) == 1
+    assert lines[0].startswith(
+        "segment 2/5's decode: the main thread has been held in one call for"
+    )
+    # The innermost Python frame: the event's wait, where the thread's call is held.
+    assert re.search(r", at threading\.py:\d+ in wait, the whole unit estimated at ", lines[0])
+    assert lines[0].endswith("; the app's words")
+
+
+def test_a_thread_in_a_wait_is_not_held(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from seedvr2x import waiting
+
+    monkeypatch.setattr(waiting, "FLOOR", 0.05)
+
+    done = threading.Event()
+    ident: list[int] = []
+    entered = threading.Event()
+
+    def poll() -> None:
+        ident.append(threading.get_ident())
+        waiting.unit("a unit", 0.01)
+        entered.set()
+        waiting.wait(done.is_set, 0.01)
+        waiting.clear()
+
+    waiting_thread = threading.Thread(target=poll)
+    waiting_thread.start()
+    entered.wait()
+    caplog.set_level(logging.WARNING)
+    leaving = Leaving()
+    with Watch(leaving.finish, leave=leaving.leave, every=0.02, thread=ident[0]):
+        time.sleep(0.5)
+        done.set()
+    waiting_thread.join()
+    assert "held in one call" not in caplog.text
 
 
 AT = datetime(2026, 10, 10, 22, 0, tzinfo=UTC)

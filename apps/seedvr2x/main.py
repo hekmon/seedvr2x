@@ -12,6 +12,7 @@ import shlex
 import shutil
 import signal
 import sys
+import threading
 import time
 import warnings
 from bisect import bisect_right
@@ -248,7 +249,23 @@ def main(argv: list[str] | None = None, *, owns_process: bool = False) -> int:
     """Run seedvr2x with argv (sys.argv[1:] when None) and return the exit status. With
     owns_process (command alone sets it), a stop at once (a second Ctrl-C, SIGTERM) and a CUDA
     error other than out of memory end the process once their own work is done (_end), and
-    main never returns from them."""
+    main never returns from them. There too a thread watches for a stop at once that needs no
+    main thread (stop.Watch): a main thread held in one call in C, which answers no signal."""
+    if not owns_process:
+        return _main(argv, owns_process)
+    with stopping.Watch(_flush, WATCH_ALSO):
+        return _main(argv, owns_process)
+
+
+# What a stall's line says of the repeated signal (waiting.held), in the command's words; the
+# Ctrl-C is counted as stop.Watch counts it (the first only stops after the unit).
+WATCH_ALSO = (
+    "if the main thread answers nothing, SIGTERM twice or Ctrl-C three times ends the process"
+    " from another thread"
+)
+
+
+def _main(argv: list[str] | None, owns_process: bool) -> int:
     # Hugging Face's telemetry off unless the user set it (DESIGN.md, Weights). huggingface_hub
     # reads the variable once, when imported (constants.py:244-248 in 1.33.0), by seedvr2x/pull.py's
     # lookup in the cache or by diffusers, which the vendored model imports: both after this line,
@@ -355,13 +372,26 @@ def _end(status: int) -> NoReturn:
     (media/ffmpeg.py: PDEATHSIG, POSIX's; on Windows the kernel has no such call, and nothing
     here decides what os._exit leaves of them: a later baton's). The writers and readers
     were stopped by the unwinding (media/writer.py's abort, run.Inputs)."""
+    # Once, with the stop watcher's own ending (stop.Watch), whichever gets here first.
+    stopping.ending()
+    _flush()
+    os._exit(status)
+
+
+def _flush() -> None:
+    """What ending the process takes besides os._exit, and needs no main thread (stop.Watch runs
+    it from its thread): the segment commands running killed (media/writer.end_commands: the
+    unwinding that stops them never comes from there), the work directories removed, the locks
+    released, the lines logged and print's buffers flushed."""
+    from media.writer import end_commands
+
+    end_commands()
     _unmake()
     _unlock()
     logging.shutdown()
     for stream in (sys.stdout, sys.stderr):
         with suppress(Exception):
             stream.flush()
-    os._exit(status)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -3832,18 +3862,26 @@ def _lock(directory: Path) -> None:
 _MADE: list[Path] = []
 
 
+# _unmake's and _unlock's, which the stop's watcher may run (_flush) while the main thread,
+# leaving its C call at that moment, runs them in main's finally: one at a time, so that no
+# directory is removed and no descriptor closed twice (a descriptor's number reused between).
+_CLEANING = threading.Lock()
+
+
 def _unmake() -> None:
     import contextlib
 
-    while _MADE:
-        with contextlib.suppress(OSError):  # the job's files are there, or the directory gone
-            _MADE.pop().rmdir()
+    with _CLEANING:
+        while _MADE:
+            with contextlib.suppress(OSError):  # the job's files are there, or the directory gone
+                _MADE.pop().rmdir()
 
 
 def _unlock() -> None:
-    _LOCKED.clear()
-    while _LOCKS:
-        os.close(_LOCKS.pop())
+    with _CLEANING:
+        _LOCKED.clear()
+        while _LOCKS:
+            os.close(_LOCKS.pop())
 
 
 @dataclass(frozen=True)

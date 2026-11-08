@@ -1765,19 +1765,29 @@ flag, as any resume; another GPU alone is no change to it, its assembly being ff
   the process then ends without waiting for its work, which a stalled card might never finish:
   `stopped at once (SIGTERM); the process ends without waiting for the GPU`, or `..., 34 min 12 s
   into a wait on the GPU; ...` where the stop came inside one.
+- **If the process does not answer** (the main thread held in one call to the driver, on a
+  stalled card, answers no signal): ask again. SIGTERM twice, or Ctrl-C three times (the first
+  stops after the unit, the second at once), ends the process from another thread, `stopped at
+  once (SIGTERM), asked again before the main thread answered the first: it had been held in one
+  call for 3 min 2 s, at ...`, exit 143 or 130. The unit in progress is lost and made again by
+  the same command; every unit done is kept. Not on Windows yet.
 - **A CUDA error** other than out of memory ends the run the same way, exit 1, its line saying so:
   every unit done is kept, and the same command resumes.
 - **With `--segment-cmd`,** a stop at once ends your command too: its process group gets SIGTERM,
   then SIGKILL after 5 s, with a line meanwhile, `the segment command was sent SIGTERM: it has 5 s
   to end before SIGKILL; Ctrl-C again kills it at once`. Its file is discarded. A single Ctrl-C
-  lets it finish its segment.
+  lets it finish its segment. Where the process is ended from another thread (a stop asked again
+  while the main thread answers nothing, below), the command's process group gets SIGKILL at
+  once.
 - Either way the GPU is freed entirely, no ffmpeg is left running, and the same command resumes.
 - **A wait on the GPU that lasts** more than four times its unit's estimate, and at least a
   minute, is said once, the run going on: `WARNING segment 2/5's decode and write: a wait on the
   GPU has lasted 4 min 10 s, the whole unit estimated at 17.9 s; CUDA has reported no error;
   NVML reads the card 6% busy at P8, ...`, then every thread's stack, the first time. A slow card
   and a stalled one look the same from here, so seedvr2x waits; a stop at once keeps every unit
-  done, and `the wait on the GPU ended after ...` says it if it ends. Units with no estimate yet
+  done, and `the wait on the GPU ended after ...` says it if it ends. The same line comes for a
+  main thread held in one call outside a wait (`the main thread has been held in one call for ...,
+  at FILE:LINE in FUNCTION`), with the repeated signal as its way out. Units with no estimate yet
   (the calibration's) say nothing.
 - **SIGUSR1** (`kill -USR1 PID`) prints every thread's stack to stderr; the run goes on.
 - **A value that isn't a number** (NaN, infinity) coming out of the model stops the run, with

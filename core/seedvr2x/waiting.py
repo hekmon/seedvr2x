@@ -108,6 +108,10 @@ sleep: Callable[[float], None] = time.sleep
 
 _named = threading.local()
 _lock = threading.Lock()
+# The unit each thread's waits are part of, by thread (get_ident), beside the thread-local one: a
+# thread that watches the main thread (the CLI's stop.Watch) reads the main thread's unit, which
+# only its own thread-local can't give.
+_units: dict[int, Unit] = {}
 _running: dict[int, _Running] = {}
 _ended: Ended | None = None
 _stacks_written = False
@@ -127,12 +131,36 @@ def bound(estimate: float | None) -> float | None:
 
 def unit(name: str, estimate: float | None, way: str = WAY) -> None:
     """Name the unit the calling thread's waits are part of from now on (Unit)."""
-    _named.unit = Unit(name, estimate, way)
+    _set(Unit(name, estimate, way))
 
 
 def clear() -> None:
     """No unit named for the calling thread's waits from now on: they say nothing."""
-    _named.unit = None
+    _set(None)
+
+
+def _set(current: Unit | None) -> None:
+    _named.unit = current
+    key = threading.get_ident()
+    with _lock:
+        if current is None:
+            _units.pop(key, None)
+        else:
+            _units[key] = current
+
+
+def unit_of(thread: int) -> Unit | None:
+    """The unit named for thread `thread`'s waits (threading.get_ident), None for none. For
+    another thread's reading: held (below) is said on its behalf."""
+    with _lock:
+        return _units.get(thread)
+
+
+def waiting_in(thread: int) -> bool:
+    """Whether thread `thread` (threading.get_ident) is inside a wait (wait) now: it then says its
+    own long wait, and no other thread need say that it is held."""
+    with _lock:
+        return thread in _running
 
 
 def check(hook: Callable[[], None] | None) -> None:
@@ -188,7 +216,7 @@ def named(name: str, estimate: float | None, way: str = WAY) -> Generator[None]:
     try:
         yield
     finally:
-        _named.unit = before
+        _set(before)
 
 
 def wait(done: Callable[[], bool], poll: float, index: int = 0) -> None:
@@ -336,14 +364,11 @@ def cuda_failed(error: BaseException) -> bool:
     )
 
 
-def _say(current: Unit, seconds: float, index: int) -> None:
-    global _stacks_written
+def _reading(index: int) -> str:
     # Imported here: memory imports nothing of torch at its import either, but this module is
     # model.py's and blockswap.py's, and memory's NVML reading is needed only now.
     from seedvr2x import memory
 
-    estimate = current.estimate
-    assert estimate is not None
     try:
         found = memory.activity(index)
     except Exception as error:
@@ -351,13 +376,49 @@ def _say(current: Unit, seconds: float, index: int) -> None:
         logger.debug("the card's activity can't be read: %r", error)
         found = None
     if found is None:
-        reading = "NVML gives no reading of the card"
-    else:
-        state = "an unknown performance state" if found.state == 32 else f"P{found.state}"
-        reading = (
-            f"NVML reads the card {found.busy}% busy at {state}, {found.used / 2**30:.2f} GiB"
-            " held by its programs"
-        )
+        return "NVML gives no reading of the card"
+    state = "an unknown performance state" if found.state == 32 else f"P{found.state}"
+    return (
+        f"NVML reads the card {found.busy}% busy at {state}, {found.used / 2**30:.2f} GiB"
+        " held by its programs"
+    )
+
+
+def held(current: Unit, seconds: float, where: str, also: str = "", index: int = 0) -> None:
+    """Say once, at WARNING, that a thread has been held in one call for `seconds` (the run's own
+    seconds) at `where` (the frame, as the watcher names it), outside any wait (wait says its own
+    long wait): its unit as `current` names it, whose estimate is needed, NVML's reading of card
+    `index`, the unit's way out and `also`, the app's own words for what a watcher can do, and
+    every thread's stack after the process's first such line, a wait's included. The watcher's
+    (stop.Watch) call: a call in C that CUDA holds (a sync on a stalled card) is no wait that
+    polls, and no Python code runs in that thread to say so."""
+    global _stacks_written
+    estimate = current.estimate
+    assert estimate is not None
+    reading = _reading(index)
+    stacks = not _stacks_written
+    _stacks_written = True
+    logger.warning(
+        "%s: the main thread has been held in one call for %s, at %s, the whole unit estimated at"
+        " %s; no error has been raised; %s; seedvr2x goes on waiting: %s%s%s",
+        current.name,
+        clock.spoken(clock.spent(seconds)),
+        where,
+        _seconds(clock.wall(estimate)),
+        reading,
+        current.way,
+        f"; {also}" if also else "",
+        "; every thread's stack follows" if stacks else "",
+    )
+    if stacks:
+        _stacks()
+
+
+def _say(current: Unit, seconds: float, index: int) -> None:
+    global _stacks_written
+    estimate = current.estimate
+    assert estimate is not None
+    reading = _reading(index)
     stacks = not _stacks_written
     _stacks_written = True
     logger.warning(

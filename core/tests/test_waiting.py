@@ -83,6 +83,7 @@ def world(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> 
     monkeypatch.setattr(waiting, "_abandoned", set())
     monkeypatch.setattr(waiting, "_stacks_written", False)
     monkeypatch.setattr(waiting, "_running", {})
+    monkeypatch.setattr(waiting, "_units", {})
     waiting.clear()
     waiting.check(None)
     yield state
@@ -347,6 +348,53 @@ def test_units_are_per_thread(world: World, caplog: pytest.LogCaptureFixture) ->
     fake.now = 0.0
     waiting.wait(fake.until(130.0), 10.0)
     assert "has lasted 2 min 10 s" in warnings(caplog)[0]
+
+
+def test_another_thread_reads_a_threads_unit_and_whether_it_waits(world: World) -> None:
+    # What a watcher of the main thread reads (stop.Watch): the unit named in that thread, kept
+    # beside the thread-local one, given back by named() and cleared by clear(); inside a wait
+    # or not.
+    ident = threading.get_ident()
+    assert waiting.unit_of(ident) is None and not waiting.waiting_in(ident)
+    waiting.unit(UNIT, 30.0)
+    seen: list[object] = []
+    thread = threading.Thread(target=lambda: seen.append(waiting.unit_of(ident)))
+    thread.start()
+    thread.join(5.0)
+    assert seen == [waiting.Unit(UNIT, 30.0)]
+    with waiting.named("inner", 5.0):
+        assert waiting.unit_of(ident) == waiting.Unit("inner", 5.0)
+    assert waiting.unit_of(ident) == waiting.Unit(UNIT, 30.0)
+
+    def inside() -> bool:
+        assert waiting.waiting_in(ident)
+        return True
+
+    waiting.wait(inside, 0.1)
+    assert not waiting.waiting_in(ident)
+    waiting.clear()
+    assert waiting.unit_of(ident) is None
+
+
+def test_a_thread_held_in_one_call_is_said_by_its_watcher(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    unit = waiting.Unit(UNIT, 30.0, "press Ctrl-C twice")
+    waiting.held(unit, 130.0, "run.py:210 in decode", "SIGTERM twice ends it", index=1)
+    waiting.held(unit, 140.0, "run.py:210 in decode")
+    said = warnings(caplog)
+    assert said == [
+        f"{UNIT}: the main thread has been held in one call for 2 min 10 s, at run.py:210 in"
+        " decode, the whole unit estimated at 30.0 s; no error has been raised; NVML reads the"
+        " card 6% busy at P8, 27.18 GiB held by its programs; seedvr2x goes on waiting: press"
+        " Ctrl-C twice; SIGTERM twice ends it; every thread's stack follows",
+        f"{UNIT}: the main thread has been held in one call for 2 min 20 s, at run.py:210 in"
+        " decode, the whole unit estimated at 30.0 s; no error has been raised; NVML reads the"
+        " card 6% busy at P8, 27.18 GiB held by its programs; seedvr2x goes on waiting: press"
+        " Ctrl-C twice",
+    ]
+    # The stacks once for the process, shared with a wait's line.
+    assert world.asked == [1, 0] and world.stacks == 1
 
 
 def test_named_gives_back_the_unit_before(world: World, caplog: pytest.LogCaptureFixture) -> None:
