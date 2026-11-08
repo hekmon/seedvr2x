@@ -164,7 +164,8 @@ never requires it.
 - Windows and macOS: Linux first, since inference is mostly a Linux world. Both come in
   v0.2.0, first-class (the user: Windows on 2026-10-24, macOS with it and both first-class on
   2026-11-04, ComfyUI's nodes needing them). Windows starts with an analysis of:
-  - FlashAttention 2 and `torch.compile`'s Triton there (SDPA works everywhere)
+  - `torch.compile`'s Triton there (FlashAttention 2 is gone since 2026-11-08: SDPA, the one
+    kernel, works everywhere)
   - the driver spilling VRAM into system memory instead of failing (numz enforces the physical
     limit for this), which the planner must prevent. A Windows driver does it under WSL too,
     where seedvr2x runs today (see [Allocator](#allocator)), and Windows itself does it in
@@ -328,7 +329,15 @@ seedvr2x/                the repository
       node for every download): it gives seedvr2x Cuts the shot detector's file too, and the
       card, once GPU selection chooses one, will be chosen on it alone and carried to Cuts and
       the upscale nodes. A change on it makes Cuts scan again, ComfyUI keying a node's cache by
-      its ancestors' inputs: a few seconds, accepted.
+      its ancestors' inputs: a few seconds, accepted. It reads no weights: an upscale node reads
+      them when it runs, after its plan, which places them (two upscale nodes on one Models
+      node share one read where the weights are kept in RAM; another DiT chosen frees the kept
+      set before the new one is read), as both nodes' tooltips say since the user's third test
+      (2026-11-08: plan only's "no model is loaded" read as the Models node's work undone). The
+      read in seedvr2x Models was weighed that day and kept out: ComfyUI runs a cached node
+      once, so the upscale nodes would read again wherever the kept weights are gone (keep in
+      RAM off, ComfyUI's Unload models, another DiT between), plan only would read the files
+      for nothing, and a plan refused for the input would come after the read.
     - seedvr2x Cuts: seedvr2x's shot detector on the clip's frames, detecting with a threshold,
       its file from seedvr2x Models' output (no mode and no folder of its own since 2026-11-08:
       a clip taken as one shot is Upscale Video's with no cut list wired); its cut list is
@@ -336,7 +345,11 @@ seedvr2x/                the repository
       possible cuts (the user, 2026-11-05: a short
       clip of 3 or 4 shots is handled as the CLI handles a film), each with its probability in
       ComfyUI's console and their count on the node ("2 shots · 1 possible cut below 0.30"),
-      its text output gone since 2026-11-08 (Progress, below). The frames are
+      its text output gone since 2026-11-08 (Progress, below); the cut list's own text is the
+      console's, so that ComfyUI's Preview as Text wired to it shows the cuts (the user's third
+      test, 2026-11-08: it showed the shots' repr); no STRING output: the text, of as many
+      lines as the cuts take, shows in the user's own preview node, not in seedvr2x's status
+      box. The frames are
       ComfyUI's, already decoded, shrunk to the detector's 48×27 in torch (antialiased
       bicubic), with no ffmpeg. Checked before the node relied on them (impl-nodes,
       2026-11-06): on nine films of 240 frames, the study's own sources not at hand, the cuts
@@ -361,9 +374,10 @@ seedvr2x/                the repository
       the RTX 5090 a clip of three shots, and a 35-frame shot at maximum, gave the CLI's frames
       bit for bit (impl-nodes, 2026-11-06).
     - Each upscale node shows as widgets the choices a user keeps at their default: the
-      output's resolution, the attention kernel, the colour correction (a toggle, on `split`,
-      off `none`), the seed (ComfyUI's own, fixed) and "plan only" (a Tuning node first
-      specified would only have forwarded them). The plan's numbers are optional inputs of
+      output's resolution, the colour correction (a toggle, on `split`, off `none`), the seed
+      (ComfyUI's own, fixed) and "plan only" (a Tuning node first specified would only have
+      forwarded them; the attention kernel's widget went on 2026-11-08 with FlashAttention 2).
+      The plan's numbers are optional inputs of
       seedvr2x's own types, with no widget: each pass's tile, the blocks swapped, a clip's
       window length. Unconnected, the plan chooses, and its text says what it chose;
       connected, the value is pinned (the user's review of the nodes in ComfyUI Desktop,
@@ -387,7 +401,10 @@ seedvr2x/                the repository
       nothing and reading no weight, and stops what follows it, as the CLI's `--plan` does: a
       button could not know the input's size before the nodes ahead of it have run. Each node
       says its plan in ComfyUI's console, whole: what each "auto" became and the host memory it
-      counts (the input's frames, the output's, the weights kept) beside the card's. On the
+      counts (the input's frames, the output's, the weights kept) beside the card's, its first
+      line the sizes with the upscale factor by the short sides since the user's third test
+      ("320x240 to 1440x1080 (x4.5, resolution 1080)", to two decimals; the command line's lines
+      of the output's size say it too, `frames.factor_said`). On the
       node, since 2026-11-08, a line of it under "plan only" ("plan: window 41 frames · decode
       1088 px · encode 1024 px" over "whole plan in the console"), and none otherwise.
     - Progress (the user, 2026-11-06): ComfyUI gives a node one bar, one text box replaced at
@@ -410,8 +427,11 @@ seedvr2x/                the repository
       a line, each beginning "[seedvr2x]" (the library's too, set in the nodes' process
       alone): the plan whole, the cuts, each refusal, each run's frames; the library's checks
       of the model files there at DEBUG, the Models node saying one line a file, and the
-      command line's warning of a driver that lends left out for the nodes' own line (WSL2's
-      other one with the next pass that touches the nodes). Built so on 2026-11-08
+      command line's warnings of a driver that lends left out for the nodes' own line (WSL2's
+      other one too since impl-fa2out), which says what seedvr2x does first, then why, NVIDIA's
+      setting named as measured: on Windows a run's memory went past the card even with "Prefer
+      No Sysmem Fallback", under WSL2 whatever the setting (the user's third test, 2026-11-08,
+      the setting off: the line had read as a contradiction). Built so on 2026-11-08
       (impl-nodes-5, then impl-nodes-6 after the user's test), tests holding every form; a
       refusal keeps ComfyUI's error dialog, the node saying "refused: see the error". The
       read into
@@ -505,8 +525,11 @@ seedvr2x/                the repository
     choice of no cache and no download (the user, 2026-11-08: how the folder got its files
     is not seedvr2x's concern): every file from it alone, one it lacks refused where it is
     needed, the DiT's and the VAE's at seedvr2x Models, the detector's at seedvr2x Cuts, with
-    the way to fetch it (impl-nodes-6 took the detector from the cache there, fetched when
-    missing: decided against the same day, to be built with the next pass). With no folder,
+    the way to fetch it, built so the same day by impl-fa2out (impl-nodes-6 had taken the
+    detector from the cache there): Cuts refuses a detector's file the folder lacks, or one gone
+    since Models ran, naming the file, the folder and its URL, and seedvr2x Models says nothing
+    of it, Cuts being perhaps unwired; with a folder, nothing is fetched and the cache is not
+    read. With no folder,
     a detector that can't be had is said at WARNING without refusing the models (Cuts tries
     again, or refuses in Models' words), and seedvr2x Models fetches what the cache lacks
     when it runs, on its own bar, and its console line names each file, its
@@ -877,10 +900,25 @@ connect through files.
     (`src/optimization/performance`).
   - **Logging:** `VideoDiffusionInfer` logs through numz's `Debug` object, which seedvr2x's
     runtime supplies as a logging adapter.
-  - **Attention:** FlashAttention 2 when installed, else SDPA; any other mode is an error
-    ([why](research/docs/attention.md)). SDPA's run is said at INFO, neutrally (since
-    2026-11-08: a warning read as a problem, where since the lean attention the two take the
-    same memory and about the same time); FlashAttention 2's by the plan's and the load's lines.
+  - **Attention:** PyTorch's SDPA, the one kernel since 2026-11-08 (decided with the user, who
+    asked why FlashAttention 2 was kept: no gain measured), any other mode an error. Attention
+    is 4 to 9% of the DiT's time at SeedVR2's window lengths, 2.1 to 13.5% by the FLOP model
+    ([attention.md](research/docs/attention.md)), so that no kernel can make the DiT faster
+    than that share; SDPA, FlashAttention 2 and SageAttention 2 and 3 gave the DiT the same
+    time within 1.5% there (the 96 GB card, numz's code, 1080p and 4K, under the run-to-run
+    drift), SageAttention 3 never running (windows of unequal lengths fall back to
+    SageAttention 2) and SageAttention taking up to 3 GiB more; on the lean attention the two
+    kernels peak alike to the MiB and SDPA ran as fast or faster in the two steps timed on
+    the RTX 5090 ([Allocator](#allocator), Small cards). FlashAttention 2 was a long build
+    per GPU generation, no dependency, and a second set of references. Built that day
+    (impl-fa2out): its branch gone from the vendored 7B and 3B (`FlashAttentionVarlen`,
+    numz's name, runs SDPA and refuses any other mode), from the library and from the apps,
+    no plan or load line naming a kernel; the nodes' attention widget gone (a workflow saved
+    before has its value shifted into the next widget, ComfyUI applying a node's values by
+    position: its upscale nodes are added again); the plan matrix's 4,760 cases planning
+    byte for byte; the record, the image server's info and a job's environment keep their
+    attention field, constant `sdpa`, so that an output made before says what made it. The
+    documents say why, as a strength: nothing to build, nothing lost.
   - **Conv3d:** numz's workaround is removed. It called `torch.cudnn_convolution` directly,
     because plain Conv3d takes ≈ 3× the memory with torch ≥ 2.9 and cuDNN ≥ 9.10.2
     ([environment.md](research/docs/environment.md)).
@@ -2674,7 +2712,8 @@ holds nothing personal.
   - the DiT's and the VAE's files, by their file names alone (a path would put the user's
     directories in every output), with their SHA-256;
   - the seed, the colour correction, the encode's and the decode's tiles (0 for untiled), and
-    the attention kernel as the plan names it (`flash_attn_2`, `sdpa`);
+    the attention kernel, `sdpa` (constant since 2026-11-08, SDPA being the one kernel: an
+    output made before with `flash_attn_2` says so);
   - for a video, its window cap in latents (0 for one window per shot), `--quality`,
     `--compile`, and its cuts: the threshold they were detected at, or the SHA-256 of the list
     `--cuts` named.
@@ -3064,10 +3103,9 @@ library's four modules.
     container run as the host's user (`--user`). Or a model directory read-only, with
     `--model-dir`. Both bind mounts ran on the RTX 5090 (2026-11-04), nothing written in the
     read-only cache.
-  - No FlashAttention 2 (PyPI has its source only, a long build per GPU generation): SDPA, which
-    the plan counts. FA2 gives the DiT the same time within 1.5%, under the run-to-run drift,
-    attention being 4 to 9% of it ([attention.md](research/docs/attention.md), the 96 GB card,
-    videos); the card checks it on pictures.
+  - SDPA, the one kernel of every app since 2026-11-08 ([Attention](#vendored-model-code)); the
+    image never had FlashAttention 2 (PyPI has its source only, a long build per GPU
+    generation).
 - **Tests:** on the CPU with stand-in models, over real sockets on localhost; on the card by
   hand (the RTX 5090, 2026-11-04) and with the batch; no `-m gpu` test of its own yet.
 
@@ -3285,7 +3323,9 @@ first pass, whose shots are its input, and before the models load:
       card (1 to 70 latents at 1080p, 1 to 17 at 4K; 0.017 to 0.131 GiB under the bound) and 16
       on an RTX 5090 (1 to 21 at 1080p, 1 to 5 at 4K; 0.0009 to 0.105), which reads 0.02 to 0.03
       GiB over the first card at the same windows and sets the constant: the 29 alone give 0.124
-      GiB, which the desktop card's 4 latents of 4K pass by 0.016.
+      GiB, which the desktop card's 4 latents of 4K pass by 0.016. Since the lean attention
+      (2026-11-06, below) the two kernels peak alike and share one fit, and since 2026-11-08
+      SDPA is the one kernel.
     - The 15.87 GiB hold the DiT's weights (15.35) and the VAE's (0.47), which numz keeps on
       the GPU in its DiT phase. A swapped block takes its 0.42 GiB off, but for the two blocks
       in the slots (see [BlockSwap, rewritten](#blockswap-rewritten)), and the VAE sent away
@@ -3492,7 +3532,11 @@ first pass, whose shots are its input, and before the models load:
       less is refused, naming `--resolution 2144`.
     - Under SDPA that window takes 23.47 GiB of free VRAM, a peak of 22.87 GiB (22.80 measured
       on the 96 GB card) and the margin: a 24 GB card is refused 4K without FlashAttention 2. No
-      window goes under 5 latents to make the room.
+      window goes under 5 latents to make the room. Both figures are the plain attention's:
+      since the lean attention and the reserve by the step (2026-11-06) the planner plans a 4K
+      shot in 11.63 GiB free (impl-fa2out's review, 2026-11-08: a 240-frame shot, 36 blocks
+      swapped), and since 2026-11-08 SDPA is the one kernel. The CLI's README and MANUAL still
+      give the old figures: the pre-release pass of the documents mends them.
     - A shot's length no longer bounds the DiT's phase (2026-10-16): with the noise drawn in
       system memory, that card plans a 4K shot of any length (2,661 latents and 10,000 tested),
       and no refusal names a cut. A long shot is bounded by the host's memory alone, its refusal
@@ -3717,7 +3761,6 @@ first pass, whose shots are its input, and before the models load:
   - the card, its free memory and the budget
   - the padded size and the tokens per latent
   - the shots and the longest one; the window cap, the shots that run in one window, the joins
-  - the attention backend
   - the swapped blocks and the pinned host memory, with the longest shot's part of the
     system memory and the moment it is held
   - the tiles and their grid, and the scratch of the longest tiled shot
@@ -4335,7 +4378,12 @@ run in one line, before the models load as after.
     to say the kernel a run took and the one its references were made with, and to skip each
     case naming both where they differ, as a card without references skips; references under
     SDPA, the kernel most users run, are made at the next GPU session, so that the gate holds
-    both.
+    both. Superseded on 2026-11-08 by SDPA alone (Vendored model code, Attention), never
+    built: milestone 1's references made again under SDPA on the RTX 5090 (impl-fa2out, on main
+    666a6cb), the regression passing against them on main's code (12, one skipped by its own
+    rule) and on the final code (13 of 13), FlashAttention 2's set kept beside them under a
+    name that says so; the 96 GB card's are still FlashAttention 2's, to make again when it is
+    back.
   - The watcher's open points stay so: a main thread that answered the first stop and then
     hangs in that stop's own cleaning is not covered (the signals are ignored from the stop's
     line on); the frame named is the innermost Python one; its NVML reading is card 0's
@@ -4371,7 +4419,10 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
   - settings, with the SHA-256 of the models and of seedvr2x's own files. Any code change
     refuses a resume, even a comment.
   - environment, compared on resume:
-    - torch, CUDA, cuDNN, GPU, attention backend, FlashAttention and ffmpeg
+    - torch, CUDA, cuDNN, GPU, attention backend and ffmpeg (the backend constant, `sdpa`, since
+      2026-11-08: a job recorded with FlashAttention 2 differs there, though one begun before
+      that change is refused first as another job, by its code's hash; FlashAttention's own
+      entry gone: nothing imports it, so it can't shape an output)
     - a fingerprint of the conversion chain: the SHA-256 of 19 test conversions of fixed
       frames, run in one ffmpeg process at every start (40–100 ms). They cover the decode's
       zscale chain at every input depth, chroma subsampling, matrix, range and siting, and
@@ -4390,7 +4441,8 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
           `_distutils_hack` from `distutils-precedence.pth`, unless
           `SETUPTOOLS_USE_DISTUTILS=stdlib`. The run itself imports no setuptools, and
           counting the hook would make the record depend on that variable.
-      - flash-attn, which is not a declared dependency
+      - flash-attn, until 2026-11-08 (not a declared dependency, and imported by nothing since:
+        a stray install refuses no resume)
       - torch's runtime libraries, loaded without being imported: the distributions it
         requires (through extras) that ship a shared library other than a Python extension
         module, since an extension module is loaded only by an import. On the pinned stack,
@@ -4402,7 +4454,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
       record. Known limits:
       - As for any version record, third-party code shadowed on `PYTHONPATH` or installed
         editable isn't seen changing.
-      - An import from outside the closure, flash-attn aside, is neither recorded nor warned
+      - An import from outside the closure is neither recorded nor warned
         of, so a dependency the code imports must be declared. With uv's exact sync, only
         dev-group packages can be installed outside the closure.
       - Environment markers other than extras aren't evaluated: another platform's or Python
@@ -4422,8 +4474,8 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
   - plan: what shapes the output (the window cap, the tiles and their overlap, the compile
     flags), compared on resume, and what doesn't, for information (see
     [Memory planner](#memory-planner)): among it the memory the plan was made in, what the
-    driver reported and what the whole card had, the attention backend and the longest
-    shot's part of the system memory
+    driver reported and what the whole card had, and the longest shot's part of the system
+    memory (the attention backend too until 2026-11-08)
   - `environment_changes`: each change accepted with `--accept-env-change`. It records when,
     each field that changed with its values before and after (the driver included, for
     information), and how many segments, shots and windows were already made.
@@ -4620,7 +4672,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 |---|---|
 | `input` (a video, an image or a directory) | one video, or one still picture told by its content; a directory refused |
 | `--output` | `-o`, required: a `.mkv` path gives the finished file, any other path a directory of segments; for a picture, a new `.png` or `.webp` file; no default directory |
-| `--attention_mode` | dropped: FA2 when installed, else SDPA |
+| `--attention_mode` | dropped: SDPA, the one kernel since 2026-11-08 (FA2 when installed before); no kernel measured faster |
 | `--color_correction` | `split` (seedvr2x's own, beyond numz's `lab`) by default; `none` available; numz's `lab`, `wavelet`, `wavelet_adaptive`, `hsv` and `adain` dropped |
 | `--input_noise_scale` | dropped (numz's own addition, only degrades) |
 | `--latent_noise_scale` | dropped from v1 (ByteDance uses 0; corrected version possibly later as an experiment, see bug 08) |
@@ -5190,9 +5242,6 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   first. Both constants on a card with nothing else on it. The other bits seen once after a
   window had passed the card. And the Windows side: a desktop took 0.44 to 0.58 GiB back and
   forth within minutes, and gave up 455 MiB at once as the card filled.
-- **SDPA's surplus** (see [Memory planner](#memory-planner)): where the 5% more a token
-  come from, FlashAttention 2 being no dependency and SDPA what most machines run; with it
-  a 24 GB card is refused 4K.
 - **The load through WSL's file bridge.** One read serves the 7B's file at 253 MB/s from an NVMe
   drive on the Windows side, a load of 75 s; two or more at once, 480 MB/s and 42 to 43 s. A
   patch reading each tensor in four pieces is held, level on a Linux NVMe drive; not measured on
@@ -5215,9 +5264,9 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   ([compile.md](research/docs/compile.md)). Left for it:
   - the VAE untiled at 1080p and on 4K's 1536 to 2048-px tiles: which tiles a compiled VAE
     may take on 48 to 96 GB cards;
-  - the DiT above 22 latents and in long windows (76 and more), with FlashAttention 2 and
-    SDPA: whether its compile pays on large cards, and whether the jump at 20 latents is
-    SDPA's;
+  - the DiT above 22 latents and in long windows (76 and more), under SDPA, the one kernel
+    since 2026-11-08: whether its compile pays on large cards, and what the jump at 20
+    latents is;
   - the convolutions in the graph: 21–23% faster at 768-px tiles, but a first call 1.4 to
     1.6 times plain's peak, its cause not isolated. Measured on that card, by tile and for
     the first call and the next (the user, 2026-10-24: the planner is seedvr2x's own, no
