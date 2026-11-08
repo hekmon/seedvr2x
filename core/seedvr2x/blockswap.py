@@ -25,6 +25,7 @@ bytes, so that a part moves in one copy, and a module's parameters are views int
 buffer holds those bytes at the time: the host copy, a buffer on the device, or a slot.
 """
 
+import ctypes
 import hashlib
 import json
 import logging
@@ -698,17 +699,60 @@ def host(
     return parts
 
 
+def _windows_available(kernel32: Any = None) -> int | None:
+    """The physical memory Windows has available, in bytes, or None where the call fails (said at
+    debug: the callers' own warning that the memory is unread is the user's line). Source:
+    kernel32's GlobalMemoryStatusEx, which fills a MEMORYSTATUSEX (dwLength, dwMemoryLoad,
+    ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile, ullTotalVirtual,
+    ullAvailVirtual, ullAvailExtendedVirtual) once dwLength holds its size; ullAvailPhys is what
+    Task Manager calls "Available" (standby, free and zeroed pages). `kernel32` is the library
+    object, loaded here by default and replaced by the tests."""
+
+    class Status(ctypes.Structure):
+        _fields_ = (
+            ("dwLength", ctypes.c_uint32),
+            ("dwMemoryLoad", ctypes.c_uint32),
+            ("ullTotalPhys", ctypes.c_uint64),
+            ("ullAvailPhys", ctypes.c_uint64),
+            ("ullTotalPageFile", ctypes.c_uint64),
+            ("ullAvailPageFile", ctypes.c_uint64),
+            ("ullTotalVirtual", ctypes.c_uint64),
+            ("ullAvailVirtual", ctypes.c_uint64),
+            ("ullAvailExtendedVirtual", ctypes.c_uint64),
+        )
+
+    status = Status()
+    status.dwLength = ctypes.sizeof(Status)
+    # WinDLL, WinError and get_last_error are ctypes' on Windows alone, and its stubs say so: by
+    # getattr, so that pyright, which reads the module for Linux, takes the calls.
+    try:
+        if kernel32 is None:
+            kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)  # noqa: B009
+        done = kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+    except (OSError, AttributeError) as error:
+        logger.debug("the system memory available is unread: kernel32 failed: %s", error)
+        return None
+    if not done:
+        reason = getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())  # noqa: B009
+        logger.debug("the system memory available is unread: GlobalMemoryStatusEx: %s", reason)
+        return None
+    return int(status.ullAvailPhys)
+
+
 def available(proc: Path = Path("/proc"), cgroups: Path = Path("/sys/fs/cgroup")) -> int | None:
-    """The host memory this process can still take, in bytes: what the kernel estimates
-    available (MemAvailable of /proc/meminfo), or less in a container held to a limit, where
-    /proc/meminfo is the host's and knows nothing of it: what is left under the nearest limit
-    of its control group and of the groups above it. A group's limit is cgroup v2's memory.max
-    or memory.high (past which the kernel reclaims from it and slows it down), v1's
-    memory.limit_in_bytes; what it holds, memory.current (v1: memory.usage_in_bytes) less its
-    file cache (memory.stat's active_file and inactive_file; v1: total_ of each), which the
-    kernel gives back when asked, as MemAvailable counts the host's: a model file just hashed
-    is 16 GiB of it. None where nothing can be read. The planner counts the job's host memory
-    with it before the load (shot_plan.py)."""
+    """The host memory this process can still take, in bytes. On Windows, the physical memory
+    available (GlobalMemoryStatusEx, Task Manager's "Available"; `proc` and `cgroups` unused). On
+    Linux, what the kernel estimates available (MemAvailable of /proc/meminfo), or less in a
+    container held to a limit, where /proc/meminfo is the host's and knows nothing of it: what
+    is left under the nearest limit of its control group and of the groups above it. A group's
+    limit is cgroup v2's memory.max or memory.high (past which the kernel reclaims from it and
+    slows it down), v1's memory.limit_in_bytes; what it holds, memory.current (v1:
+    memory.usage_in_bytes) less its file cache (memory.stat's active_file and inactive_file; v1:
+    total_ of each), which the kernel gives back when asked, as MemAvailable counts the host's:
+    a model file just hashed is 16 GiB of it. None where nothing can be read. The planner counts
+    the job's host memory with it before the load (shot_plan.py)."""
+    if sys.platform == "win32":
+        return _windows_available()
     left: list[int] = []
     try:
         for line in (proc / "meminfo").read_text().splitlines():

@@ -2274,6 +2274,76 @@ def test_the_memory_available_is_a_container_s_limit_too(tmp_path: Path) -> None
     assert blockswap.available(tmp_path / "none", tmp_path / "none") is None
 
 
+class FakeKernel32:
+    """kernel32 for `available` on Windows: GlobalMemoryStatusEx fills the structure it is
+    handed by reference, as the API does, and returns its status (0: failed)."""
+
+    def __init__(self, avail: int, status: int = 1) -> None:
+        self.avail, self.status, self.length, self.calls = avail, status, None, 0
+
+    def GlobalMemoryStatusEx(self, reference: Any) -> int:
+        self.calls += 1
+        structure = reference._obj
+        self.length = structure.dwLength
+        structure.ullAvailPhys = self.avail
+        return self.status
+
+
+def test_the_memory_available_on_windows_is_the_physical_memory_kernel32_gives(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = FakeKernel32(7_000_000_001)
+    monkeypatch.setattr(blockswap, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(blockswap.ctypes, "WinDLL", lambda *a, **k: fake, raising=False)
+    # A /proc that would give another figure: it is not read on Windows.
+    cgroup_tree(tmp_path, 1000, "0::/\n", {})
+    assert blockswap.available(tmp_path / "proc", tmp_path / "sys") == 7_000_000_001
+    assert fake.calls == 1
+    # dwLength set to the structure's size before the call: 2 * 4 + 7 * 8 bytes.
+    assert fake.length == 64
+
+
+def test_a_failed_windows_call_gives_no_figure_and_says_why_at_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake = FakeKernel32(5, status=0)
+    monkeypatch.setattr(blockswap, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(blockswap.ctypes, "WinDLL", lambda *a, **k: fake, raising=False)
+    monkeypatch.setattr(
+        blockswap.ctypes, "WinError", lambda code: OSError(f"error {code}"), raising=False
+    )
+    monkeypatch.setattr(blockswap.ctypes, "get_last_error", lambda: 5, raising=False)
+    caplog.set_level("DEBUG", logger=blockswap.logger.name)
+    assert blockswap.available() is None
+    assert [r.levelname for r in caplog.records] == ["DEBUG"]
+    assert "GlobalMemoryStatusEx" in caplog.messages[0]
+
+
+def test_a_kernel32_that_cant_be_loaded_gives_no_figure_and_says_why_at_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def refused(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("kernel32 not found")
+
+    monkeypatch.setattr(blockswap, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(blockswap.ctypes, "WinDLL", refused, raising=False)
+    caplog.set_level("DEBUG", logger=blockswap.logger.name)
+    assert blockswap.available() is None
+    assert [r.levelname for r in caplog.records] == ["DEBUG"]
+    assert caplog.messages[0].endswith("kernel32 failed: kernel32 not found")
+
+
+def test_the_memory_available_on_linux_reads_proc_and_never_kernel32(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = FakeKernel32(1)
+    monkeypatch.setattr(blockswap, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(blockswap.ctypes, "WinDLL", lambda *a, **k: fake, raising=False)
+    cgroup_tree(tmp_path, 1000, "0::/\n", {"memory.stat": ""})
+    assert blockswap.available(tmp_path / "proc", tmp_path / "sys") == 1000 * 1024
+    assert fake.calls == 0
+
+
 @pytest.mark.parametrize(
     ("swapped", "said", "nothing"),
     [

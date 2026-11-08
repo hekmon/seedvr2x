@@ -449,7 +449,11 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   (the one read, below), a file cut short refused in safetensors' words, and, `-m gpu`, a real
   GGUF file's blocks swapped giving the bits of the DiT loaded whole, and `HostCopy`'s two
   platforms by their calls with the platform faked (Windows: the anonymous `mmap.mmap(-1,
-  length)` with no POSIX flag; Linux: `MAP_PRIVATE | MAP_ANONYMOUS` and `MADV_DONTFORK`);
+  length)` with no POSIX flag; Linux: `MAP_PRIVATE | MAP_ANONYMOUS` and `MADV_DONTFORK`), and
+  `available()`'s two the same way (Windows: `ullAvailPhys` of a fake kernel32's
+  GlobalMemoryStatusEx, `dwLength` set to the structure's 64 bytes, /proc never read, a failed
+  call or a kernel32 that can't be loaded None with its reason at debug; Linux: /proc as before,
+  kernel32 never called);
   `tests/test_peaks.py` and
   `tests/test_still_plan.py` the GGUF DiT's figures by its own blocks (`peaks.leaving_blocks`)
   and the smaller files' line in a picture's plan; `tests/test_pull.py` the pins and
