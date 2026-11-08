@@ -49,8 +49,8 @@ Each upscale node takes `images` first (Upscale Video then takes `cuts`), then `
 The numbers the plan makes are optional inputs: [Setting a value yourself](#setting-a-value-yourself).
 
 Each upscale node makes its plan at run time, where the input's size and the card are known, and
-says it whole in ComfyUI's console; the node itself shows one short line saying where the run is
-([While it runs](#while-it-runs)). The nodes have no text output: the plan and the cuts are read in
+says it whole in ComfyUI's console; the node itself shows two short lines, where the run is and
+its time ([While it runs](#while-it-runs)). The nodes have no text output: the plan and the cuts are read in
 the console. The plan is made for the card as it would be without ComfyUI's own models.
 
 ## Cuts and shots
@@ -112,29 +112,32 @@ The node shows how far it has got, in what ComfyUI gives a node:
   size. It starts from the speed seedvr2x measured on an RTX 5090, and as soon as the node has made
   a unit of one kind (an encode tile, a window, a decode tile) it uses your computer's own speed
   for that kind and spreads the rest of the bar over what is left; it never goes back.
-- **The text on the node** is one short line, at most 40 characters, a progress hint and never a
-  log (ComfyUI squeezes the box when the node shows a preview, and a longer text has to be
-  scrolled). It moves when a tile, a window or a few frames are done, and its time each second
-  between them, so that a long window's line does not stand still. A line that would be longer
-  than 40 characters drops a part: the word `shot` or `picture` first (`2/4 · run 3/4 · window
-  2/3 · ~3 min left`), then the run (the bar counts the runs), then the time left, the run
-  coming back where the time can't fit anyway; never the step:
+- **The text on the node** is two short lines at most, a progress hint and never a log
+  (ComfyUI's box holds two lines, and a longer text has to be scrolled). The first says where the
+  run is and what it does, whole: widen the node to read a long one. The second is the time, at
+  most 40 characters: the time so far until the first window is done, then the time left. The
+  text moves when a tile, a window or a few frames are done, and its time each second between
+  them, so that a long window's text does not stand still:
 
-  | State | Line |
-  | --- | --- |
-  | the node starts | `planning…` |
-  | downloading, reading the files | `downloading 3.1/8.3 GB`, `reading 2.0/8.8 GB` |
-  | a clip, encoding | `shot 2/4 · encoding`, `shot 2/4 · encode tile 3/6` |
-  | a clip, the model | `shot 2/4 · window 2/3 · ~3 min left` (before the first window is done, the time so far: `1 min 5 s`) |
-  | a clip, decoding | `shot 2/4 · decoding 60/118`, `shot 2/4 · decode tile 2/4` |
-  | enhanced or maximum | `run 3/4 · window 2/3 · ~3 min left`, and with several shots `2/4 · run 3/4 · window 2/3 · ~3 min left`, the word `shot` making room |
-  | a picture of a batch | `picture 3/8 · encode tile 2/4`, `picture 3/8 · upscaling`, `picture 3/8 · decoding` |
-  | finished | `480 frames in 4 min 32 s`, `8 pictures in 41 s` |
-  | plan only | `plan: window 41 frames · decode 1088 px`, `plan: encode 1024 px · decode 1088 px` |
-  | seedvr2x Cuts | `scanning: 64/120 frames`, `2 shots · 1 possible cut below 0.30`, `one shot: 120 frames` |
+  | State | First line | Second line |
+  | --- | --- | --- |
+  | the node starts | `planning…` | |
+  | downloading, reading the files | `downloading 3.1/8.3 GB`, `reading 2.0/8.8 GB` | the time left at the bytes' speed |
+  | a clip, encoding | `shot 2/4 · encoding`, `shot 2/4 · tile 3/6 · encoding` | `6 s elapsed · estimating time left` |
+  | a clip, the model | `shot 2/4 · window 2/3 · upscaling` (one window: `shot 2/4 · upscaling`) | `~38 min left` |
+  | a clip, decoding | `shot 2/4 · frames 60/118 · decoding`, `shot 2/4 · tile 2/4 · decoding` | `~12 min left` |
+  | enhanced or maximum | `run 3/4 · window 2/3 · upscaling`, and with several shots `shot 2/4 · run 3/4 · window 2/3 · upscaling` | `~3 min left` |
+  | a picture of a batch | `picture 3/8 · tile 2/4 · encoding`, `picture 3/8 · upscaling`, `picture 3/8 · tile 1/4 · decoding` | `~45 s left` |
+  | the GPU does not answer | the line it was on | `GPU not answering for 3 min` |
+  | plan only | `plan: window 41 frames · decode 1088 px · encode 1024 px`, `plan: encode 1024 px · decode 1088 px` | `whole plan in the console` |
+  | finished | `480 frames in 4 min 32 s`, `8 pictures in 41 s` | |
+  | seedvr2x Cuts | `scanning 64/120 frames`, `2 shots · 1 possible cut below 0.30`, `one shot: 120 frames` | |
 
   A clip of one shot has no shot part, and a run part is there only at enhanced and maximum. The
-  time left is rough: seconds under a minute, whole minutes under an hour.
+  time is rough: the time so far in seconds under a minute, then in whole minutes (whole hours
+  past 1,000 minutes, whole days past 1,000 hours); the time left in seconds under a minute,
+  whole minutes under an hour, then hours and minutes. A download's or a reading's time left is
+  at the speed its bytes have come since their first.
 - **ComfyUI's console** has the rest, each of seedvr2x's lines beginning with `[seedvr2x]`, the
   library's included, so that they read apart from other nodes' lines, which are left as they are:
   the plan whole before a run (with `plan only`, the same), the cuts with their probabilities and
@@ -145,7 +148,8 @@ The node shows how far it has got, in what ComfyUI gives a node:
   once, in the console, with the way out in the nodes' terms.
 - **A wait that lasts.** Once the node has made one unit of a kind, it knows how long the next
   should take. If the card has not answered for more than four times that (and at least a
-  minute), the node says `GPU not answering for 3 min` (the minutes it has waited), and ComfyUI's
+  minute), the node's second line says `GPU not answering for 3 min` (the minutes it has waited),
+  under the line it was on, and ComfyUI's
   console says it with the card's reading and the way out. The wait is not given up on its own: a
   slow card (shared with a game) answers in the end, and the line goes back to normal. Cancel leaves
   the wait. If the card has stopped answering, though, the work queued on it can't be undone inside
@@ -164,9 +168,9 @@ The node shows how far it has got, in what ComfyUI gives a node:
 - **The preview** is the newest frame decoded, as ComfyUI's samplers show their steps, once for each
   few frames of a clip and once for each picture of a batch, at ComfyUI's preview size
   (`--preview-size`, 512 by default).
-- **Before the upscale**, the downloads are seedvr2x Models': a bar of its own, in bytes, and one
-  short line on the node ("downloading 3.1/8.3 GB"), then the file chosen and whether it is kept
-  ("Sharp 7B int8 · kept in RAM"); ComfyUI keeps the node's output, so this happens once for as
+- **Before the upscale**, the downloads are seedvr2x Models': a bar of its own, in bytes, and on
+  the node the bytes ("downloading 3.1/8.3 GB") over the time left at their speed, then one line,
+  the file chosen and whether it is kept ("Sharp 7B int8 · kept in RAM"); ComfyUI keeps the node's output, so this happens once for as
   long as the node's inputs stay as they are. The upscale node's bar starts with the reading of
   the files into memory, in bytes ("reading 2.0/8.8 GB"), and again at 0 for the upscale; if a
   file has gone from the cache since seedvr2x Models ran, the upscale node says so in ComfyUI's

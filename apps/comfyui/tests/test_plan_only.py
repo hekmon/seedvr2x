@@ -11,7 +11,7 @@ import server
 import torch
 from comfy.utils import ProgressBar
 from comfy_execution.graph_utils import ExecutionBlocker
-from comfyui import console, models, nodes, plans, words
+from comfyui import console, models, nodes, plans, progress, words
 from standins import (
     GIB,
     PICTURE,
@@ -57,10 +57,13 @@ def test_a_picture_plan_only_says_the_plan_and_blocks_what_follows_the_picture(
     assert text.startswith("plan (plan only): 2 images")
     assert "plan only: nothing is loaded and ComfyUI's models stay as they are" in text
     instance = server.PromptServer.instance
-    # The node says "planning…" and then the plan's main numbers in one short line; the plan is
-    # in the console.
+    # The node says "planning…" and then the plan's main numbers over where the rest is: the plan
+    # is in the console.
     assert instance is not None and instance.texts[0] == ("planning\u2026", "12")
-    assert [each for each, _ in instance.texts[1:]] == ["plan: encode whole \u00b7 decode whole"]
+    assert [each for each, _ in instance.texts[1:]] == [
+        f"plan: encode whole \u00b7 decode whole\n{progress.IN_THE_CONSOLE}"
+    ]
+    assert progress.IN_THE_CONSOLE == "whole plan in the console"
     assert console.prefixed(text) in caplog.messages
     nothing_was_done(machine)
     assert models.kept(handle(tmp_path)) is None
@@ -77,7 +80,8 @@ def test_a_clip_plan_only_says_the_plan_and_blocks_the_frames(machine: StandIn, 
     assert instance is not None
     assert [each for each, _ in instance.texts] == [
         "planning\u2026",
-        "plan: window 17 frames \u00b7 decode whole",
+        "plan: window 17 frames \u00b7 decode whole \u00b7 encode whole\n"
+        + progress.IN_THE_CONSOLE,
     ]
     nothing_was_done(machine)
 

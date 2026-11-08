@@ -30,12 +30,12 @@ What the V3 schema changes for a node, read in ComfyUI v0.44.0:
   console, then the library's pass over the pictures or the frames in memory; a clip's, one pass
   for each shot of its cut list (a required input of seedvr2x's own type, a clip's fact), the
   plan made once for the longest shot's windows. With "plan only" the node stops there: the plan
-  is in the console, the node's line says its main numbers and what follows its pictures is not
-  run.
+  is in the console, the node's first line says its main numbers and what follows its pictures
+  is not run.
 
-A node's text box is one short status line (progress.py), never a log: what a node has to say
-besides goes to ComfyUI's console through the module's logger, and a refusal shows "refused: see
-the error" on the node (_refusing), its text in ComfyUI's error and once in the console.
+A node's text box is a status of two lines at most (progress.py), never a log: what a node has to
+say besides goes to ComfyUI's console through the module's logger, and a refusal shows "refused:
+see the error" on the node (_refusing), its text in ComfyUI's error and once in the console.
 
 V3 classes hold no state (the executor runs `execute` on a clone of the class, and ignores
 `__init__`): what the nodes keep between runs, the weights in RAM, is in models.py's registry.
@@ -187,9 +187,9 @@ class Models(io.ComfyNode):
     def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
         cls, model: str, keep_in_ram_between_runs: str, model_dir: str | None = None
     ) -> io.NodeOutput:
-        """The handle, once its files are there. The node's one status line (about 40
-        characters, no name: the title has it) is the download's bytes while one runs, then the
-        file and whether it is kept in RAM; the files' places go to the console."""
+        """The handle, once its files are there. The node's text (no name: the title has it) is
+        the download's bytes over its time while one runs, then one line, the file and whether it
+        is kept in RAM; the files' places go to the console."""
         show = _shower(_node_id(cls))
         with _refusing(show):
             handle = models_module.Handle(
@@ -630,7 +630,11 @@ class UpscaleImage(io.ComfyNode):
                     ),
                 )
                 if plan_only:
-                    show(plans.picture_line(tiles, made.models.swapped))
+                    show(
+                        progress.status(
+                            plans.picture_line(tiles, made.models.swapped), progress.IN_THE_CONSOLE
+                        )
+                    )
                     return _plan_only()
                 # The bar over the batch's expected time (progress.Progress), the text and a preview
                 # a picture.
@@ -889,7 +893,7 @@ class UpscaleVideo(io.ComfyNode):
                     ),
                 )
                 if plan_only:
-                    show(plans.clip_line(made))
+                    show(progress.status(plans.clip_line(made), progress.IN_THE_CONSOLE))
                     return _plan_only()
                 moving = progress.Progress(
                     progress.clip_passes(

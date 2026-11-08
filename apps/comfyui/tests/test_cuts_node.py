@@ -306,8 +306,8 @@ def test_the_node_shows_the_scan_then_the_shots_and_the_possible_cuts_in_one_lin
     with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui"):
         run_cuts(clip_images(100), model_dir=str(weights_dir), unique_id="3")
     assert shown_on("3") == [
-        "scanning: 50/100 frames",
-        "scanning: 100/100 frames",
+        "scanning 50/100 frames",
+        "scanning 100/100 frames",
         "3 shots \u00b7 1 possible cut below 0.30",
     ]
     # The console has the cuts with their probabilities and the possible cut, without a lead.

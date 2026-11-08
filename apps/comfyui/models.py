@@ -708,7 +708,7 @@ def provide(handle: Handle, show: Callable[[str], None]) -> None:
     """The files the Models node's choice needs, there when it has run: with a model folder, the
     DiT's file and the VAE's present in it, nothing downloaded and nothing read; without, what
     Hugging Face's cache lacks of them downloaded into it (the bytes on a bar of the node's own,
-    its one short line told to `show`; ComfyUI's Cancel honoured as the upscale nodes' downloads
+    its lines told to `show`; ComfyUI's Cancel honoured as the upscale nodes' downloads
     are, progress.Preparing). Where each is is said in the console. The files' headers and pins
     are checked by the upscale node, which reads them (`_prepare`). A refusal is worded for the
     nodes (words.refusal), the Models node's."""

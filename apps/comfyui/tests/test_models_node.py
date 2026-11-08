@@ -16,7 +16,7 @@ import server
 import torch
 from comfy.utils import ProgressBar
 from comfyui import console, models, nodes, plans, progress, words
-from standins import PICTURE, RESOLUTION, StandIn, execute, upscale_image
+from standins import PICTURE, RESOLUTION, StandIn, execute, upscale_image, where
 
 from seedvr2x import pull
 from seedvr2x.errors import ModelUnreachable
@@ -83,7 +83,7 @@ class Cache:
         )
 
 
-def test_the_missing_files_are_downloaded_on_a_bar_of_the_nodes_with_one_short_line(
+def test_the_missing_files_are_downloaded_on_a_bar_of_the_nodes_with_their_time_under_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cache = Cache(monkeypatch)
@@ -97,12 +97,15 @@ def test_the_missing_files_are_downloaded_on_a_bar_of_the_nodes_with_one_short_l
     assert set(bar.totals) == {total} and bar.updates[-1] == total
     assert bar.updates == sorted(bar.updates), "never back"
     texts = node_texts("4")
-    # One line, at most 40 characters, no name (the node's title has it), the bytes of all the
-    # downloads together in the total's unit.
-    assert all("\n" not in text and len(text) <= 40 for text in texts), texts
+    # Two lines while it downloads, no name (the node's title has it): the bytes of all the
+    # downloads together in the total's unit, over the time (tests/test_lines.py holds its
+    # forms); one line at the end.
+    assert all(text.count("\n") == 1 for text in texts[:-1]), texts
     assert all("seedvr2x" not in text for text in texts)
-    assert texts[0] == f"downloading 0.0/{total / 1e9:.1f} GB"
-    assert f"downloading 3.1/{total / 1e9:.1f} GB" in texts[:-1]
+    assert (
+        texts[0] == f"downloading 0.0/{total / 1e9:.1f} GB\n0 s elapsed \u00b7 estimating time left"
+    )
+    assert f"downloading 3.1/{total / 1e9:.1f} GB" in [where(text) for text in texts[:-1]]
     assert texts[-1] == "Sharp 7B int8 · kept in RAM"
 
 
@@ -298,7 +301,7 @@ def test_cancel_stops_a_download_and_one_reported_elsewhere_is_honoured_when_it_
     assert not any("kept in RAM" in text for text in node_texts("4")), "no end line after Cancel"
 
 
-def test_the_downloading_line_is_one_line_in_the_totals_unit() -> None:
+def test_the_downloading_line_is_in_the_totals_unit() -> None:
     assert progress.amount_short(3_100_000_000, 8_800_000_000) == "3.1/8.8 GB"
     assert progress.amount_short(12_100_000, 30_482_632) == "12.1/30.5 MB"
     shown: list[str] = []
@@ -306,7 +309,7 @@ def test_the_downloading_line_is_one_line_in_the_totals_unit() -> None:
     downloading.download(INT8, 0, SIZES[0])
     downloading.download(VAE, 0, SIZES[1])
     downloading.download(INT8, 4_000_000_000, SIZES[0])
-    assert shown[-1] == f"downloading 4.0/{sum(SIZES) / 1e9:.1f} GB"
+    assert where(shown[-1]) == f"downloading 4.0/{sum(SIZES) / 1e9:.1f} GB"
 
 
 # ---- The upscale node: a file the cache lost since the Models node ran ---------------------------

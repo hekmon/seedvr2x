@@ -7,19 +7,19 @@ ComfyUI v0.44.0 (frontend 1.57.6) gives a node, read in its sources:
   last is throttled out (utils.py: a 0.5% step and 100 ms are needed), so a bar that starts again
   at 0 is a new ProgressBar.
 - One text box on the node: PromptServer.send_progress_text(text, node_id), replaced at each
-  message and kept until the job ends. The frontend squeezes it when the node also has a preview,
-  and a longer text must then be scrolled: it holds ONE short status line of at most LIMIT
-  characters (the node's default width, the user, 2026-11-08), a progress hint and never a log;
-  everything else goes to ComfyUI's console through the nodes' loggers. The queue's overall bar
-  counts nodes, which nothing here drives.
+  message and kept until the job ends. The frontend (1.57.6) keeps the box 58 px high, two lines,
+  and a longer text must then be scrolled, so a running node's status is two lines at most, a
+  progress hint and never a log (the user, 2026-11-08): the first where the run is and what it
+  does, never trimmed (a user who wants it whole widens the node), the second the time, at most
+  LIMIT characters (the node's default width). Everything else goes to ComfyUI's console through
+  the nodes' loggers. The queue's overall bar counts nodes, which nothing here drives.
 - One preview a node, the newest: the third argument of update_absolute, a tuple (format, a PIL
   image, the largest side), as the sampler nodes send it (latent_preview.py), which the server
   shrinks to fit that side (server.py, send_image). The side is ComfyUI's --preview-size
   (comfy.cli_args, 512 by default): the limit is kept, never lifted.
 (Described, not copied: ComfyUI is GPL-3.0.)
 
-The status line (line, Progress): "shot 2/4 · window 2/3 · ~3 min left", its parts in priority
-order, the lowest dropped until it fits whatever the numbers (fitted).
+The status (Progress): "shot 2/4 · window 2/3 · upscaling" over "~3 min left" (status, times).
 
 The bar is the upscale's expected time, not a count of steps (Progress): the units of the plan,
 every tile of the encode, every window of the DiT and every tile of the decode of every shot or
@@ -97,23 +97,50 @@ PLANNING = "planning\u2026"
 # What a refused run's node says; the refusal's text is in ComfyUI's error and in the console.
 REFUSED = "refused: see the error"
 
-# The longest text a node shows: its default width in characters (the user, 2026-11-08), and the
-# separator of a line's parts (U+00B7).
+# The longest second line a node shows: its default width in characters (the user, 2026-11-08),
+# and the separator of a line's parts (U+00B7). The first line has no limit.
 LIMIT = 40
 SEPARATOR = " \u00b7 "
 
+# The second line of a plan only: the plan is the console's.
+IN_THE_CONSOLE = "whole plan in the console"
 
-def fitted(*variants: Sequence[str | None]) -> str:
-    """The first of `variants` that fits LIMIT, each the parts of a line in order (None parts
-    left out), joined by SEPARATOR: a caller lists its line whole, then without its lowest
-    priority parts, down to the one it never drops. If even the last is too long it is cut to
-    LIMIT with an ellipsis, so that no line passes LIMIT whatever the numbers."""
-    text = ""
-    for parts in variants:
-        text = SEPARATOR.join(each for each in parts if each)
-        if len(text) <= LIMIT:
-            return text
-    return text[: LIMIT - 1] + "\u2026"
+# The second line until the time left is estimated.
+ESTIMATING = "estimating time left"
+
+
+def status(first: str, second: str) -> str:
+    """A running node's two lines: `first` where the run is and what it does, `second` its time
+    (at most LIMIT characters, by the forms below)."""
+    return f"{first}\n{second}"
+
+
+def line(*parts: str | None) -> str:
+    """A line of `parts` in order, None and empty parts left out, joined by SEPARATOR."""
+    return SEPARATOR.join(each for each in parts if each)
+
+
+def elapsed(seconds: float) -> str:
+    """The time spent, as the second line says it before the time left is estimated, in one
+    whole unit: "6 s", "14 min", past 1,000 minutes "17 h", past 1,000 hours "42 d", so that
+    "14 min elapsed · estimating time left" keeps within LIMIT (clock.spoken's "14 min 5 s"
+    would pass it by a character)."""
+    total = round(seconds)
+    if total < 60:
+        return f"{total} s"
+    if total < 1000 * 60:
+        return f"{total // 60} min"
+    if total < 1000 * 3600:
+        return f"{total // 3600} h"
+    return f"{total // 86_400} d"
+
+
+def times(spent: float, left: float | None) -> str:
+    """The second line: "6 s elapsed · estimating time left" until `left` is known, then the
+    time left ("~38 min left"). Within LIMIT for any time up to 99,999 days (38 characters)."""
+    if left is None:
+        return line(f"{elapsed(spent)} elapsed", ESTIMATING)
+    return time_left(left)
 
 
 def time_left(seconds: float) -> str:
@@ -197,7 +224,7 @@ class Pass:
     # the shot, both from 1 as a user counts, and what Progress.run looks it up by.
     shot: int = 1
     run: int = 1
-    # What the status line counts: the shots of the clip (or the pictures of the batch, "picture")
+    # What the status counts: the shots of the clip (or the pictures of the batch, "picture")
     # and this shot's runs.
     of: int = 1
     runs: int = 1
@@ -345,11 +372,11 @@ class Progress:
     pass's tail (the sums divided, the slices written and corrected) belongs to it. An untiled
     decode moves the bar by the frames written, the others by their unit.
 
-    The text, replaced at each message: the one status line (`_line`) saying which shot (or
-    picture) and run and how far it has got, then the time (so far, and the time left once the
-    first window has been measured, which says the DiT's rate too), never longer than LIMIT
-    characters. The plan is in the console, not here. The preview: the newest frame decoded, once
-    per slice (`decoded`).
+    The text, replaced at each message: two lines (`_text`), the first saying which shot (or
+    picture) and run, the unit and its count and what it does ("shot 2/4 · tile 3/6 · encoding"),
+    the second the time: so far, and the time left once the first window has been measured,
+    which says the DiT's rate too. The plan is in the console, not here. The preview: the newest
+    frame decoded, once per slice (`decoded`).
 
     Between events the time moves on: `running` starts a Ticker, a thread that says the text again
     each second (`tick`), so that a long window's text never stands still. The node's thread and
@@ -358,9 +385,9 @@ class Progress:
     The waits on the GPU. Each event names the unit that follows it for the library's waits
     (waiting.unit), with the estimate that unit should take once a unit of its kind is measured,
     and none before: a wait of a unit with no estimate says nothing. A wait past its bound is
-    said by the library on ComfyUI's console with the way out (WAY), and by the line here
-    (`tick`) as "GPU not answering for 3 min". `running` also gives the waits ComfyUI's Cancel as
-    their check, so that a wait is left by Cancel.
+    said by the library on ComfyUI's console with the way out (WAY), and by the second line here
+    (`tick`) as "GPU not answering for 3 min", the first kept. `running` also gives the waits
+    ComfyUI's Cancel as their check, so that a wait is left by Cancel.
 
     `now` is the clock, injected for the tests; `show(text)` puts the text on the node."""
 
@@ -477,9 +504,7 @@ class Progress:
         self._finish(units, min(done, len(units) - 1) if done < total else 0)
         word = "encoding" if pass_ == "encode" else "decoding"
         number = min(done + 1, total)
-        # "decode tile 2/4", not "decoding, tile 2/4": 3 characters fewer, so that the time left
-        # still fits 40 beside a shot's place ("shot 2/4 · decode tile 2/4 · ~3 min left").
-        self._say(f"{pass_} tile {number}/{total}", f"{word}, tile {number} of {total}")
+        self._say(line(f"tile {number}/{total}", word), f"{word}, tile {number} of {total}")
 
     def encoded(self) -> None:
         """The pass's encode is made."""
@@ -501,7 +526,9 @@ class Progress:
             return
         decode = current.decode
         if len(decode) > 1:
-            self._say(f"decode tile 1/{len(decode)}", f"decoding, tile 1 of {len(decode)}")
+            self._say(
+                line(f"tile 1/{len(decode)}", "decoding"), f"decoding, tile 1 of {len(decode)}"
+            )
         else:
             self._say(*self._decoding(0, current.frames))
 
@@ -528,11 +555,13 @@ class Progress:
 
     @staticmethod
     def _decoding(written: int, total: int) -> tuple[str, str]:
-        """The decode's status, the line's and the console's: the frames written of the pass's,
-        none said for a pass of one frame (a picture)."""
+        """The decode's status, the line's and the console's: the frames written of the pass's
+        ("frames 60/118 · decoding"), none said for a pass of one frame (a picture)."""
         if total == 1:
             return "decoding", "decoding"
-        return f"decoding {written}/{total}", f"decoding, {written} of {total} frames"
+        return line(
+            f"frames {written}/{total}", "decoding"
+        ), f"decoding, {written} of {total} frames"
 
     def finish(self, what: str) -> None:
         """The run is over: the bar full, and `what` made with the time it took ("480 frames in
@@ -540,7 +569,7 @@ class Progress:
         with self._lock:
             self.finished = True
             self.bar.update_absolute(BAR, BAR)
-            self.show(fitted([f"{what} in {spoken(wall(self.now() - self.started))}"]))
+            self.show(f"{what} in {spoken(wall(self.now() - self.started))}")
 
     # -- Words -----------------------------------------------------------------------------------
 
@@ -548,7 +577,10 @@ class Progress:
         current = self.passes[self.pass_]
         count = len(current.windows)
         long = f"upscaling, window {made + 1} of {count}"
-        return ("upscaling" if current.noun == "picture" else f"window {made + 1}/{count}"), long
+        # A phase done in one piece says the action alone: a picture's window, a shot's only one.
+        return (
+            "upscaling" if count == 1 else line(f"window {made + 1}/{count}", "upscaling")
+        ), long
 
     def _finish(self, units: list[Unit], through: int) -> None:
         """The first `through` units of the list are made now, the unfinished ones among them
@@ -577,31 +609,19 @@ class Progress:
         management.throw_exception_if_processing_interrupted()
 
     def _text(self) -> str:
-        """The node's one line: where the run is and the time, or, while a wait on the GPU is past
-        its bound, that the GPU is not answering and for how long (the console has the library's
-        own line and the way out)."""
-        lasted = waiting.longest() if waiting.stalled() else None
-        if lasted is not None:
-            return fitted([f"GPU not answering for {max(1, int(wall(lasted) // 60))} min"])
+        """The node's two lines: where the run is, its shot (or picture) where there are several,
+        its run where there are several, the unit and what it does, never trimmed; then the time,
+        or, while a wait on the GPU is past its bound, that the GPU is not answering and for how
+        long (the console has the library's own line and the way out)."""
         current = self.passes[self.pass_]
         place = f"{current.noun} {current.shot}/{current.of}" if current.of > 1 else None
-        bare = f"{current.shot}/{current.of}" if current.of > 1 else None
         run = f"run {current.run}/{current.runs}" if current.runs > 1 else None
-        time_ = self._time()
-        # Each part kept as long as a line of 40 can hold it: the word of the place goes first
-        # ("2/4" for "shot 2/4": the node's kind says what it counts), then the run (the bar
-        # counts the runs), then the time (what a user waits on), the run coming back where the
-        # time can't fit anyway; the step is never dropped.
-        return fitted(
-            [place, run, self.step, time_],
-            [bare, run, self.step, time_],
-            [bare, self.step, time_],
-            [place, run, self.step],
-            [bare, run, self.step],
-            [place, self.step],
-            [bare, self.step],
-            [self.step],
-        )
+        lasted = waiting.longest() if waiting.stalled() else None
+        if lasted is not None:
+            second = f"GPU not answering for {max(1, int(wall(lasted) // 60))} min"
+        else:
+            second = self._time()
+        return status(line(place, run, self.step), second)
 
     def tick(self) -> None:
         """The text again, the time moved on: said by the Ticker between two events. Nothing
@@ -647,11 +667,10 @@ class Progress:
             waiting.clear()
 
     def _time(self) -> str:
-        """The line's time part: the time so far, and once a window has been measured the time
-        left instead ("~3 min left")."""
-        if self.made["window"][1] > 0:
-            return time_left(wall(self.left()))
-        return spoken(wall(self.now() - self.started))
+        """The second line: the time so far, and once a window has been measured the time left
+        instead ("~3 min left") (times)."""
+        left = wall(self.left()) if self.made["window"][1] > 0 else None
+        return times(wall(self.now() - self.started), left)
 
 
 def _wait(stopped: threading.Event, seconds: float) -> None:
@@ -724,15 +743,16 @@ def amount_short(done: int, total: int) -> str:
 @dataclass
 class Preparing:
     """The download of seedvr2x's files and their reading into memory on one bar, in bytes, and the
-    node's one short line for each ("downloading 3.1/8.3 GB": every download's bytes together, in
-    the total's unit; "reading 2.0/8.8 GB": the reading's), no time on it, which the line has no
-    room for (the user, 2026-11-08). Each file is named in the console, once, when its first byte
-    is told. It is told by pull.fetch (download) and by the load (read). The bar's total is the
-    downloads' and the reading's together and does not change once the first byte is told:
-    will_read announces the reading's before the first download (the session does, from the pins'
-    sizes), and fetch tells every download's size before its first byte. It makes its bar when
-    the first byte is told, so that a run with nothing to download and models kept in memory has
-    none; the upscale's bar starts again at 0 and is another (Progress).
+    node's two lines for each: "downloading 3.1/8.3 GB" (every download's bytes together, in the
+    total's unit) or "reading 2.0/8.8 GB" (the reading's), over the time (times): spent until the
+    bytes' rate is measured, then the time left at that rate (`_left`). Each file is named in the
+    console, once, when its first byte is told. It is told by pull.fetch (download) and by the
+    load (read). The bar's total is the downloads' and the reading's together and does not change
+    once the first byte is told: will_read announces the reading's before the first download (the
+    session does, from the pins' sizes), and fetch tells every download's size before its first
+    byte. It makes its bar when the first byte is told, so that a run with nothing to download
+    and models kept in memory has none; the upscale's bar starts again at 0 and is another
+    (Progress).
 
     `expected`: the sizes of the files about to be downloaded, by name (their pins'), so that the
     line's total is whole from the first, before pull.fetch has told every size.
@@ -755,6 +775,16 @@ class Preparing:
     expected: dict[str, int] = field(default_factory=dict[str, int])
     started: float = field(init=False)
     thread: int = field(init=False)
+    # The bytes' rate of each kind ("downloading", "reading"), measured from each file's first
+    # report of bytes: `starts`, when the kind's first such report came; `bases`, each file's bytes
+    # at its first such report, which the rate leaves out. A download's first report is pull.fetch's
+    # 0 before any connection, and a resumed one's first bytes are those already on disk, told at
+    # once (huggingface_hub's bar starts at the resume's size: review M1 of impl-nodes-6, 6.0 of
+    # 8.3 GB on disk read "~1 s left" where 36 s were), so neither is counted as come at the rate.
+    starts: dict[str, float] = field(init=False, default_factory=dict[str, float])
+    bases: dict[str, dict[str, int]] = field(
+        init=False, default_factory=dict[str, dict[str, int]]
+    )
 
     def __post_init__(self) -> None:
         self.started = self.now()
@@ -770,8 +800,10 @@ class Preparing:
         self.downloads[name] = (done, total)
         sizes = {**self.expected, **{each: size for each, (_, size) in self.downloads.items()}}
         self._tell(
-            "downloading "
-            + amount_short(sum(each[0] for each in self.downloads.values()), sum(sizes.values()))
+            "downloading",
+            self.downloads,
+            sum(each[0] for each in self.downloads.values()),
+            sum(sizes.values()),
         )
 
     def read(self, name: str, done: int, total: int) -> None:
@@ -779,21 +811,44 @@ class Preparing:
             logger.info("reading %s into memory", self.labels(name))
         self.reads[name] = (done, total)
         read_total = max(self.announced, sum(each[1] for each in self.reads.values()))
-        self._tell(
-            "reading " + amount_short(sum(each[0] for each in self.reads.values()), read_total)
-        )
+        self._tell("reading", self.reads, sum(each[0] for each in self.reads.values()), read_total)
 
-    def _tell(self, line: str) -> None:
+    def _left(
+        self, kind: str, files: dict[str, tuple[int, int]], done: int, total: int
+    ) -> float | None:
+        """The seconds left of `kind` at the rate its bytes came since the kind's first report of
+        bytes, each file's bytes at its own first such report left out (`bases`); None until a
+        later report has brought more bytes in more time."""
+        moment = self.now()
+        bases = self.bases.setdefault(kind, {})
+        for name, (bytes_, _) in files.items():
+            if bytes_ > 0 and name not in bases:
+                bases[name] = bytes_
+                self.starts.setdefault(kind, moment)
+        start = self.starts.get(kind)
+        came = sum(files[name][0] - base for name, base in bases.items())
+        if start is None or moment <= start or came <= 0:
+            return None
+        return max(total - done, 0) * (moment - start) / came
+
+    def _tell(self, kind: str, files: dict[str, tuple[int, int]], done: int, total: int) -> None:
         if threading.get_ident() == self.thread:
-            self._send(line)
+            self._send(kind, files, done, total)
             management.throw_exception_if_processing_interrupted()
             return
         with management.interrupt_processing_mutex:
             if not management.processing_interrupted():
-                self._send(line)
+                self._send(kind, files, done, total)
 
-    def _send(self, line: str) -> None:
-        self.show(fitted([line]))
+    def _send(self, kind: str, files: dict[str, tuple[int, int]], done: int, total: int) -> None:
+        left = self._left(kind, files, done, total)
+        spent = self.now() - self.started
+        self.show(
+            status(
+                f"{kind} {amount_short(done, total)}",
+                times(wall(spent), None if left is None else wall(left)),
+            )
+        )
         self._move()
 
     def _move(self) -> None:
@@ -816,7 +871,7 @@ def scanned(bar: ProgressBar, show: Callable[[str], None]) -> Callable[[int, int
 
     def tell(done: int, total: int) -> None:
         bar.update_absolute(done, total)
-        show(fitted([f"scanning: {done}/{total} frames"]))
+        show(f"scanning {done}/{total} frames")
         management.throw_exception_if_processing_interrupted()
 
     return tell

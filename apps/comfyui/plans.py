@@ -20,7 +20,7 @@ from seedvr2x.shot_plan import Pins as ShotPins
 from seedvr2x.still_plan import PictureTiles, StillPlan
 from seedvr2x.still_plan import Pins as StillPins
 
-from .progress import SEPARATOR, fitted
+from .progress import line
 
 AUTO = "auto"
 
@@ -781,12 +781,12 @@ def cuts_text(
     return "\n".join(lines)
 
 
-# ---- The one line each node shows ----------------------------------------------------------------
+# ---- The lines the nodes show --------------------------------------------------------------------
 #
-# A node's text box is one status line of at most progress.LIMIT characters, no name (the node's
-# title has it), a progress hint and never a log (the user, 2026-11-08): the plan, the cuts and
-# the rest are in ComfyUI's console, through the texts above. Each line is made by progress.fitted
-# from its parts in priority order, the lowest dropped until it fits.
+# A node's text box is a progress hint of two lines at most, no name (the node's title has it),
+# never a log (the user, 2026-11-08): the plan, the cuts and the rest are in ComfyUI's console,
+# through the texts above. A first line is never trimmed: a user who wants it whole widens the
+# node (progress.py).
 
 
 def _tile_part(name: str, tiles: Tiles | None) -> str:
@@ -794,8 +794,8 @@ def _tile_part(name: str, tiles: Tiles | None) -> str:
 
 
 def _plan_line(parts: Sequence[str]) -> str:
-    """ "plan: " and as many of `parts` as fit, the last dropped first."""
-    return fitted(*(["plan: " + SEPARATOR.join(parts[:n])] for n in range(len(parts), 0, -1)))
+    """ "plan: " and `parts`, in their order of importance."""
+    return "plan: " + line(*parts)
 
 
 def _blocks(swapped: int) -> list[str]:
@@ -803,14 +803,16 @@ def _blocks(swapped: int) -> list[str]:
 
 
 def picture_line(tiles: PictureTiles, swapped: int) -> str:
-    """What a picture node with plan only shows: "plan: encode 1024 px \u00b7 decode 1088 px"."""
+    """The first line a picture node with plan only shows: "plan: encode 1024 px \u00b7 decode
+    1088 px" (progress.IN_THE_CONSOLE under it)."""
     return _plan_line(
         [_tile_part("encode", tiles.encode), _tile_part("decode", tiles.decode), *_blocks(swapped)]
     )
 
 
 def clip_line(plan: Plan) -> str:
-    """What a clip node with plan only shows: "plan: window 41 frames \u00b7 decode 1088 px"."""
+    """The first line a clip node with plan only shows: "plan: window 41 frames \u00b7 decode
+    1088 px \u00b7 encode 1024 px" (progress.IN_THE_CONSOLE under it)."""
     window = "one window" if plan.window is None else f"window {_frames(plan.window)}"
     return _plan_line(
         [
@@ -826,11 +828,11 @@ def cuts_line(shots_found: int, possible: int, threshold: float) -> str:
     """What the Cuts node shows once it has looked: "2 shots \u00b7 1 possible cut below 0.30"."""
     shot = f"{shots_found} shot{'' if shots_found == 1 else 's'}"
     if not possible:
-        return fitted([shot, "no possible cut"], [shot])
+        return line(shot, "no possible cut")
     cuts = f"{possible} possible cut{'' if possible == 1 else 's'}"
-    return fitted([shot, f"{cuts} below {threshold:.2f}"], [shot, cuts], [shot])
+    return line(shot, f"{cuts} below {threshold:.2f}")
 
 
 def one_shot_line(frames: int) -> str:
     """What the Cuts node shows for "one shot": "one shot: 120 frames"."""
-    return fitted([f"one shot: {frames} frames"])
+    return f"one shot: {frames} frames"

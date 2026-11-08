@@ -5,7 +5,6 @@ are tests/comfy_stand_in."""
 
 import inspect
 import logging
-import re
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -290,21 +289,24 @@ def plan_of(said: Said) -> str:
 PLAN_LEADS = ("plan: ", "plan (plan only): ")
 
 
-TIME = re.compile(r"(\d+ (s|min|h|d)( \d+ (s|min|h))?|~.* left)")
-
-
 def where(text: str) -> str:
-    """A status line without its time part, which is its last, or none where it did not fit."""
-    head, _, last = text.rpartition(progress.SEPARATOR)
-    return head if head and TIME.fullmatch(last) else text
+    """A status without its time: its first line (the whole text where it is one line)."""
+    return text.split("\n", 1)[0]
 
 
-def not_one_short_line(texts: list[str]) -> list[str]:
-    """The texts a node's text box must never get: over progress.LIMIT characters, on several
-    lines, or naming seedvr2x (the node's title does)."""
-    return [
-        text for text in texts if len(text) > progress.LIMIT or "\n" in text or "seedvr2x" in text
-    ]
+def not_a_status(texts: list[str]) -> list[str]:
+    """The texts a node's text box must never get: more than two lines, a second line over
+    progress.LIMIT characters, or naming seedvr2x (the node's title does). A first line has no
+    limit: a user who wants it whole widens the node (the user, 2026-11-08)."""
+    bad: list[str] = []
+    for text in texts:
+        lines = text.split("\n")
+        second = lines[1] if len(lines) == 2 else None
+        if len(lines) > 2 or second == "" or len(second or "") > progress.LIMIT:
+            bad.append(text)
+        elif "seedvr2x" in text:
+            bad.append(text)
+    return bad
 
 
 def inputs(settings: plans.Settings, *, video: bool = False) -> dict[str, Any]:

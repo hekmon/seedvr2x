@@ -90,7 +90,7 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          upscale nodes' widgets, the plan's numbers their optional sockets of
                          seedvr2x's own types, no Tuning node; the Models and Cuts nodes'
                          model folder an optional STRING input with no widget, `force_input`)
-                         and ComfyUI's calls (the bar and the one status line it gets from
+                         and ComfyUI's calls (the bar and the status of two lines it gets from
                          progress.py, Cancel, the plan said in the console, plan only, a
                          refusal's line: `_refusing`); no text outputs (the plan and the cuts are
                          the console's); the one module that imports `comfy_api` (unstable)
@@ -99,10 +99,12 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          auto/on/off against ComfyUI's cap; the inputs' values as pins and
                          the plan in the nodes' words
   progress.py            what the nodes show while they run: the upscale's bar as its expected
-                         time, the text on the node (ONE status line of at most 40 characters,
-                         `LIMIT`: where the run is and the time, made by `fitted`), the
-                         previews, the download and the reading of the files on one bar (the
-                         Models node's downloads on a bar of their own, one short line), the Cuts
+                         time, the text on the node (TWO lines at most: where the run is and
+                         what it does, never trimmed, over the time, at most 40 characters,
+                         `LIMIT`; `status`, `times`; one line at the end, for a refusal and the
+                         card's states), the previews, the download and the reading of the files
+                         on one bar (the Models node's downloads on a bar of their own), their
+                         bytes over the time left at their rate, the Cuts
                          node's scan; on the library's callbacks, which only observe; a thread
                          for the text alone (the time each second between events); the units
                          named for the library's waits on the GPU, ComfyUI's Cancel their check
@@ -1295,12 +1297,13 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   size, a run being a pass over the shot from its first frame with its own windows and tiles; a
   kind's cost the card's figure until its first unit is made, then the run's own, the rest spread
   again over what remains, monotone, full at the last unit only, an untiled decode moving it by
-  its frames written), the status line of each form, one line of at most 40 characters with no
-  name ("shot 2/4 · encode tile 3/6", "shot 2/4 · window 2/3 · ~3 min left", "run 3/4 ·
-  window 2/3" (a run part at enhanced and maximum only, a shot part for a clip of several shots
-  only), "shot 2/4 · decoding 60/118", "picture 3/8 · decode tile 2/4", "decoding" for one
-  picture; the time so far, and "~3 min left" only once a window is measured; "480 frames in 4 min
-  32 s" at the end with no plan before it; the box replaced and not appended to), the previews (one
+  its frames written), the status of each form, two lines with no name, the first where the run
+  is and what it does ("shot 2/4 · tile 3/6 · encoding", "shot 2/4 · window 2/3 · upscaling",
+  "run 3/4 · window 2/3 · upscaling" (a run part at enhanced and maximum only, a shot part for a
+  clip of several shots only), "shot 2/4 · frames 60/118 · decoding", "picture 3/8 · tile 2/4 ·
+  decoding", "decoding" for one picture), the second its time ("1 min elapsed · estimating time
+  left", and "~3 min left" only once a window is measured); "480 frames in 4 min 32 s" at the end,
+  one line with no plan before it; the box replaced and not appended to), the previews (one
   a decode slice or a picture, the newest frame, ComfyUI's preview size, a smaller frame at its
   own), the download and the reading on one bar of a constant total with their lines, Cancel as
   the real hook raises it (the stand-in bar clears the flag and raises) honoured on the node's
@@ -1320,7 +1323,8 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   that lasts, on the nodes (an event that never completes, `waiting.wait(lambda: False, ...)` on a
   fake wait clock):
   each event naming the next unit with its estimate once a unit of its kind is measured and none
-  before, the line "GPU not answering for 3 min" (whole minutes) and ComfyUI's console the
+  before, the second line "GPU not answering for 3 min" (whole minutes) under the first, kept,
+  and ComfyUI's console the
   library's own line with the way out (restart ComfyUI), the line normal again when it ends, Cancel
   leaving it at a poll, torch's cache not
   emptied and models not kept held rather than dropped after it (Unload models too), `running`
@@ -1343,7 +1347,7 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   the text back (none said before: cleared) and marking nothing, and one after a normal end with no
   check and no text; `tests/test_cuts_node.py` seedvr2x Cuts over the untrained detector's
   weights and scripted probabilities (the cut list, and the console's text of the cuts with their
-  probabilities and the possible cuts, without a lead; the node's line "scanning: 64/120 frames",
+  probabilities and the possible cuts, without a lead; the node's line "scanning 64/120 frames",
   "2 shots · 1 possible cut below 0.30", "one shot: 120 frames"; no text output; one shot mode
   running no detector, the threshold, the file found in a folder or
   fetched by its pin, the detector closed after, the alpha left out, its refusals, its list into
@@ -1354,8 +1358,8 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   console line of the detector's file with its size and its place, found, downloaded or in the
   folder); `tests/test_models_node.py` seedvr2x Models as the user sees it: the missing files
   downloaded on a bar of the node's own in bytes (one bar of both downloads, never back, full at
-  the end) with one status line of at most 40 characters and no "seedvr2x" in it ("downloading
-  3.1/8.8 GB", whole from the first by the pins' sizes, then "Sharp 7B int8 · kept in RAM" or
+  the end) with its bytes over their time and no "seedvr2x" in it ("downloading 3.1/8.8 GB",
+  whole from the first by the pins' sizes, then one line, "Sharp 7B int8 · kept in RAM" or
   "· not kept in RAM" by `decide_keeping`; the short label of each DiT file), nothing downloaded
   with a folder, a file missing from the folder refused at this node (one line a file, in the
   nodes' words naming the "model folder" input), a value that is no folder refused, quotes, spaces
@@ -1387,17 +1391,19 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   Unload models under a cached Models output said once, the Models node reading nothing;
   `tests/test_plan_only.py` the plan alone (the headers read and nothing loaded, registered or
   freed, an execution blocker for the pictures and nothing else, the plan in the console and the
-  node's "plan: window 17 frames · decode whole"); `tests/test_lines.py` every line the nodes can
-  send (the table of states: each upscale node's steps, end, "planning…", the files, the scan, plan
-  only, the Cuts node, the card's states, a wait that lasts, a refusal's `Refused.line`) in its
-  exact form with ordinary numbers and within 40 characters on one line with shots 1234/5678,
-  run 4/4, window 123/456, decoding 12345/23456, hours left and byte counts of 16 digits, the
-  parts dropped in order (the word of the place, then the run, then the time, the run coming back
-  where the time can't fit anyway; never the step), "planning…" emptied by an error or a Cancel
-  that is no refusal (a refusal shows its own line), and a step over
-  the limit cut with an ellipsis; `conftest.py`'s autouse `texts_are_one_short_line` fails any
-  test whose node texts (the stand-in server's record) pass 40 characters, hold a "\n" or name
-  seedvr2x, so that no path is missed; `tests/
+  node's "plan: window 17 frames · decode whole · encode whole" over "whole plan in the
+  console"); `tests/test_lines.py` every text the nodes can send (the table of states: each
+  upscale node's steps, end, "planning…", the files, the scan, plan only, the Cuts node, the
+  card's states, a wait that lasts, a refusal's `Refused.line`) in its exact form with ordinary
+  numbers, and with shots 1234/5678, run 4/4, window 123/456, frames 12345/23456, hours left, days
+  so far and byte counts of 16 digits: a running node's two lines, the first whole however long
+  (never trimmed), the second within 40 characters (the time so far in one whole unit, minutes
+  past a minute, hours past 1,000 minutes, days past 1,000 hours: "14 min elapsed · estimating
+  time left"), the end, a refusal, the card's states, the Models node's end and the Cuts node's
+  lines one line; "planning…" emptied by an error or a Cancel that is no refusal (a refusal shows
+  its own line); `conftest.py`'s autouse `texts_are_a_status` fails any test whose node texts
+  (the stand-in server's record) hold more than two lines, a second line over 40 characters or
+  empty, or name seedvr2x, so that no path is missed; `tests/
   test_words.py` every refusal class worded without "--", and the library's real refusals (a
   damaged or unpinned file in a cache and in a directory written there, the plan with tiny
   figures, the target check) worded with the way out; the four kinds of a plan (memory, host,

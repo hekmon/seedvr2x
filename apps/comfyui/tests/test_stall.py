@@ -18,7 +18,7 @@ import comfy.model_management as management
 import pytest
 import server
 from comfyui import console, models, plans, progress, words
-from standins import RESOLUTION, StandIn, handle
+from standins import RESOLUTION, StandIn, handle, where
 from standins import upscale_video as run_video
 from test_nodes import pictures
 from test_progress import (
@@ -184,8 +184,10 @@ def test_a_wait_past_its_bound_is_said_on_the_node_and_in_the_console_and_cancel
             waiting.wait(lambda: False, 10.0)
     # Under the bound the text said nothing of it; past it, how long and the way out.
     assert said["before"].startswith("shot 1/2 \u00b7 window 2/")
-    # One short line: how long, in whole minutes; the way out is the console's.
-    assert said["during"] == "GPU not answering for 1 min"
+    # The first line kept, where the run is; the second how long, in whole minutes; the way out
+    # is the console's.
+    assert said["during"] == f"{where(said['before'])}\nGPU not answering for 1 min"
+    assert where(said["before"]) == "shot 1/2 \u00b7 window 2/3 \u00b7 upscaling"
     # The library's own line, on ComfyUI's console (a WARNING of seedvr2x.waiting), names the unit
     # and the way out; the bar was never touched by the ticker.
     (console,) = stall_lines(caplog)
@@ -226,7 +228,9 @@ def test_the_text_goes_back_to_normal_when_the_wait_ends_by_itself(
 
         world.on_sleep = on_sleep
         waiting.wait(lambda: world.now >= 100.0, 10.0)
-        assert during[0] == "GPU not answering for 1 min", "said while it lasted"
+        assert (
+            during[0] == "shot 1/2 \u00b7 window 2/3 \u00b7 upscaling\nGPU not answering for 1 min"
+        ), "said while it lasted"
         cue.fire()
         assert "GPU not answering" not in shown[-1]
     assert not waiting.abandoned()
@@ -294,9 +298,8 @@ def test_a_node_stalled_in_a_window_says_so_and_cancel_leaves_it_and_gives_nothi
     with pytest.raises(management.InterruptProcessingException):
         run_video(h, plans.Settings(window=5), pictures(33), RESOLUTION, "9")
     assert "GPU not answering" not in happened["before"]
-    assert happened["during"] == "GPU not answering for 1 min"
+    assert happened["during"] == "window 2/3 \u00b7 upscaling\nGPU not answering for 1 min"
     assert happened["during"] in node_texts("9")
-    assert all(len(each) <= progress.LIMIT for each in node_texts("9"))
     (console,) = stall_lines(caplog)
     assert "upscaling, window 2 of" in console and "restart ComfyUI" in console
     assert waiting.abandoned()

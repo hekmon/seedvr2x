@@ -12,7 +12,7 @@ from comfy.utils import ProgressBar
 from comfyui import models, progress
 from library_fixtures import no_card_failed, no_driver_asked, one_to_one_clock  # noqa: F401
 from stand_ins import cpu_models  # noqa: F401
-from standins import machine, not_one_short_line  # noqa: F401
+from standins import machine, not_a_status  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -32,19 +32,19 @@ def comfy_as_new() -> Iterator[server.PromptServer]:
 
 
 @pytest.fixture(autouse=True)
-def texts_are_one_short_line(comfy_as_new: server.PromptServer) -> Iterator[None]:
-    """Every text any test's nodes sent to a node's text box is one status line of at most 40
-    characters with no name (the user, 2026-11-08: ComfyUI squeezes the box, and a longer text
-    must be scrolled): the check is on the server's record at the end of each test, so that no
-    path is missed. tests/test_lines.py holds the lines' forms."""
+def texts_are_a_status(comfy_as_new: server.PromptServer) -> Iterator[None]:
+    """Every text any test's nodes sent to a node's text box is two lines at most, the second of
+    at most 40 characters, with no name (the user, 2026-11-08: ComfyUI's box holds two lines,
+    and a longer text must be scrolled): the check is on the server's record at the end of each
+    test, so that no path is missed. tests/test_lines.py holds the lines' forms."""
     yield
     # None, or no attribute at all where a test runs a node without the server (as ComfyUI has
     # none until its server is made).
     instance = getattr(server.PromptServer, "instance", None)
     if instance is None:
         return
-    bad = not_one_short_line([text for text, _ in instance.texts])
-    assert not bad, f"node texts over {progress.LIMIT} characters, on several lines or named: {bad}"
+    bad = not_a_status([text for text, _ in instance.texts])
+    assert not bad, f"node texts of over two lines, a second over {progress.LIMIT}, or named: {bad}"
 
 
 @pytest.fixture(autouse=True)
