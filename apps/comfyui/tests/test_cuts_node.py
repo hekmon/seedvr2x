@@ -4,6 +4,7 @@ and the possible cuts, the detector's file the one seedvr2x Models provided (the
 alone, refused where the folder lacks it, or Hugging Face's cache's) found, checked and given
 back."""
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -51,7 +52,19 @@ def run_cuts(
     model_dir: str = "",
     unique_id: str | None = "7",
 ) -> tuple[tuple[Shot, ...], str]:
-    """The node run with a Models handle on `model_dir` ("": Hugging Face's cache)."""
+    """The node run with a Models handle on `model_dir` ("": Hugging Face's cache): its cut list's
+    shots and the console's text."""
+    found, said = run_cuts_value(images, threshold, model_dir, unique_id)
+    return found.shots, said
+
+
+def run_cuts_value(
+    images: torch.Tensor,
+    threshold: float = shotcuts.THRESHOLD,
+    model_dir: str = "",
+    unique_id: str | None = "7",
+) -> tuple[plans.CutList, str]:
+    """run_cuts' run, its output as the node gives it, plans.CutList."""
     with nodes_console() as said:
         out = execute(
             nodes.Cuts,
@@ -61,6 +74,7 @@ def run_cuts(
             threshold=threshold,
         )
     # The one text the node says whole: the cuts.
+    assert isinstance(out[0], plans.CutList), out[0]
     return out[0], said.messages[0] if said.messages else ""
 
 
@@ -346,13 +360,41 @@ def test_the_cut_list_it_gives_goes_into_upscale_video(
     """Cuts into Upscale Video: the shots found are the shots upscaled, covering the clip."""
     scripted(monkeypatch, {8: 0.9, 20: 0.7}, 33)
     frames = clip_images(33)
-    cuts, _ = run_cuts(frames, model_dir=str(weights_dir))
-    assert cuts == (Shot(0, 9), Shot(9, 21), Shot(21, 33))
+    cuts, _ = run_cuts_value(frames, model_dir=str(weights_dir))
+    assert cuts.shots == (Shot(0, 9), Shot(9, 21), Shot(21, 33))
+    # The node's own value, as ComfyUI hands it on: taken as the tuple of its shots was.
     _, plan = upscale_video(
         handle(tmp_path), plans.Settings(window=5), frames, RESOLUTION, cuts=cuts
     )
     assert "in 3 shots, each upscaled on its own" in plan
     assert "shot 2: frames 9 to 20 (12 frames): " in plan
+
+
+def test_the_cut_lists_text_is_the_consoles_and_no_json_so_preview_any_shows_it(
+    monkeypatch: pytest.MonkeyPatch, weights_dir: Path
+) -> None:
+    # ComfyUI's Preview Any (v0.44.0) shows json.dumps of a value and, where that raises, str():
+    # the cut list is no JSON value, and its str() is the console's text of the cuts, the same
+    # cuts_text, with the cuts' probabilities and the possible cuts.
+    values = {8: 0.9, 20: 0.7, 25: 0.2}
+    scripted(monkeypatch, values, 33)
+    found, said = run_cuts_value(clip_images(33), model_dir=str(weights_dir))
+    probabilities = np.zeros(33, np.float32)
+    for frame, value in values.items():
+        probabilities[frame] = value
+    threshold = shotcuts.THRESHOLD
+    expected = plans.cuts_text(
+        33,
+        threshold,
+        shotcuts.detected(probabilities, threshold),
+        shotcuts.possible(probabilities, threshold),
+    )
+    assert str(found) == said == found.text == expected
+    assert "cut at frame 9 (probability" in expected and "possible cut at frame" in expected
+    with pytest.raises(TypeError):
+        json.dumps(found)
+    tooltip = nodes.Cuts.GET_SCHEMA().outputs[0].tooltip or ""
+    assert "Preview as Text node (PreviewAny)" in tooltip
 
 
 def test_the_node_has_the_cuts_output_and_a_hidden_id() -> None:

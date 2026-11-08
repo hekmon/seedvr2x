@@ -22,10 +22,13 @@ before any model loads.
   says on the node the file chosen and whether it is kept in RAM. It also chooses whether the model
   stays in RAM between runs: `auto`, `on` or `off` ([Memory](#memory)). Its optional input `model
   folder`, unconnected by default, reads the files from a folder you give instead of the cache.
-  Nothing is loaded here: the first upscale run loads.
+  It reads no weights into memory: the upscale nodes and seedvr2x Cuts read the files when they
+  run.
 - **seedvr2x Cuts** finds where a clip changes scene ([Cuts and shots](#cuts-and-shots)): it takes
   the clip's frames and the output of seedvr2x Models (which provides the shot detector's file),
-  and gives the cut list that Upscale Video takes; the cuts are said in ComfyUI's console.
+  and gives the cut list that Upscale Video takes; the cuts are said in ComfyUI's console, and
+  ComfyUI's Preview as Text node (PreviewAny) wired to its output shows them too, each with its
+  probability.
 - **seedvr2x Upscale Image** upscales each picture of a batch on its own, to the output's short
   side given by `resolution` (1080 by default).
 - **seedvr2x Upscale Video** upscales a clip's frames shot by shot, each shot in sliding windows
@@ -44,7 +47,7 @@ each at its default:
 | attention | `auto` | FlashAttention 2 where ComfyUI's environment has it, else PyTorch's SDPA. |
 | colour correction | on (`split`) | On, `split`, keeps the input's overall colours and brightness with the model's fine detail; off, `none`, leaves the model's own colours, which can drift. |
 | seed | `42` | ComfyUI's seed with its control after generate, `fixed`. |
-| plan only | off | Make the plan, say it in the console, and stop: no model is loaded and the nodes after the images output do not run. |
+| plan only | off | Make the plan, say it in the console, and stop: the model's weights are not read into memory (seedvr2x Models finds the files; the upscale node reads them when it runs, after its plan), ComfyUI's loaded models stay, and the nodes after the images output do not run. |
 
 The numbers the plan makes are optional inputs: [Setting a value yourself](#setting-a-value-yourself).
 
@@ -317,10 +320,14 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   driver that lends system memory (0.5 GiB), not the two added; the plan says which set it, and
   raising `--reserve-vram` raises the room. The card is freed
   when the node ends, on Cancel and on an error too.
-- **A driver that lends system memory** (Windows, WSL2) borrows your computer's RAM where the card
-  is full, which Windows shows as "shared GPU memory", whatever NVIDIA's "CUDA - Sysmem Fallback
-  Policy" is set to. It slows a run, and ComfyUI's allocator decides how well the run is kept to
-  the card. Under its default, cudaMallocAsync (on its CUDA 13 builds), nothing slows and no bit
+- **A driver that lends system memory** (Windows, WSL2): seedvr2x's plan leaves room on the card,
+  because the driver can borrow your computer's RAM where the card is full, which Windows shows as
+  "shared GPU memory" and which slows a run. Turning NVIDIA's "CUDA - Sysmem Fallback Policy" to
+  "Prefer No Sysmem Fallback" does not keep a run on the card: on Windows, with that setting, a
+  single request past the card was refused, but a run's memory pool still went past it and its
+  decode slowed thirtyfold; under WSL2 the driver lends whatever the setting says. ComfyUI's
+  allocator decides how well the run is kept to the card. Under its default, cudaMallocAsync (on its
+  CUDA 13 builds), nothing slows and no bit
   of a picture moves, but it holds more of the card than it uses, which the plan counts: on an 8 GB
   card a picture fits either way, and a 1080p clip only under torch's own allocator with its
   expandable segments. That is ComfyUI's `--disable-cuda-malloc` launch option together with the

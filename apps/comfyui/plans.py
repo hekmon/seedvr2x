@@ -759,6 +759,28 @@ def cuts_text(
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class CutList:
+    """seedvr2x Cuts' output, which seedvr2x Upscale Video takes: the clip's shots, frames
+    [start, end) in order and covering the clip, as a tuple (a node's output is cached by
+    ComfyUI, and a list is a value a downstream node could change), and `text`, the console's
+    text of the cuts (cuts_text: the frames, the cuts found at the threshold with their
+    probabilities, the possible cuts), which str() gives, one source for both. ComfyUI's Preview
+    as Text node, PreviewAny (v0.44.0, comfy_extras/nodes_preview_any.py, read, not copied:
+    GPL-3.0), shows a string as
+    it is, a number by str(), anything else by json.dumps and, where that raises, by str(): a
+    dataclass is no JSON value, so the user's preview node shows this text, where it showed the
+    tuple's repr, "(Shot(start=0, end=65), ...)" (the user's third test, 2026-11-08). No STRING
+    output (DESIGN.md: the nodes give no text outputs): the text is in the user's own node, not
+    in seedvr2x's status line, so its many lines are fine there."""
+
+    shots: tuple[shots.Shot, ...]
+    text: str
+
+    def __str__(self) -> str:
+        return self.text
+
+
 # ---- The lines the nodes show --------------------------------------------------------------------
 #
 # A node's text box is a progress hint of two lines at most, no name (the node's title has it),

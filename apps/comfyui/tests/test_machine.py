@@ -204,18 +204,38 @@ def test_on_windows_the_allocator_is_said_with_no_way_to_expandable_segments(
         assert "without --disable-cuda-malloc" in said[0].getMessage()
 
 
+@pytest.mark.parametrize("on_windows", [True, False])
 def test_the_lending_driver_is_told_in_the_nodes_words_once(
-    machine: StandIn, tmp_path, caplog: pytest.LogCaptureFixture
+    machine: StandIn,
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    on_windows: bool,
 ) -> None:
+    # What seedvr2x does, then why, with NVIDIA's setting named by what was measured: no
+    # contradiction for a user who set "Prefer No Sysmem Fallback" as the README leads one to.
+    monkeypatch.setattr(memory, "windows", lambda: on_windows)
     machine.lends = True
     machine.held_card = 32 * GIB
     with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui.models"):
         run_image(handle(tmp_path))
         run_image(handle(tmp_path))
-    said = [line for line in caplog.messages if "borrows your computer's RAM" in line]
-    assert len(said) == 1 and "(Windows' shared GPU memory), which is slow" in said[0]
-    assert "seedvr2x's plan leaves room on the card" in said[0]
-    assert "reserve" not in said[0] and "torch" not in said[0]
+    said = [line for line in caplog.messages if "borrow your computer's RAM" in line]
+    assert len(said) == 1
+    (line,) = said
+    record = next(r for r in caplog.records if r.getMessage() == line)
+    assert record.levelno == logging.INFO
+    assert line.removeprefix("[seedvr2x] ").startswith(
+        "seedvr2x's plan leaves room on the card: this graphics driver can borrow your computer's"
+        " RAM when the card is full (Windows' shared GPU memory), which is slow, "
+    )
+    if on_windows:
+        assert line.endswith(
+            'even with NVIDIA\'s "CUDA - Sysmem Fallback Policy" at "Prefer No Sysmem Fallback"'
+        )
+    else:
+        assert line.endswith('under WSL2, whatever NVIDIA\'s "CUDA - Sysmem Fallback Policy" says')
+    assert "reserve" not in line and "torch" not in line
 
 
 def test_the_librarys_command_line_warnings_are_not_shown_in_comfyuis_process(

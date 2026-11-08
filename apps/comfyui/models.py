@@ -921,9 +921,22 @@ def _allocator_note(machine: Machine) -> None:
         return
     if "lends" not in _told:
         _told.add("lends")
+        # What seedvr2x does first, then why, NVIDIA's setting named by what was measured (the
+        # user, 2026-11-08, read the line as a contradiction of the setting the README leads to):
+        # on Windows with "Prefer No Sysmem Fallback", a lone request past the card was refused,
+        # but a run's cudaMallocAsync pool held 32.06 to 32.50 GiB of a 31.82 GiB card, its
+        # decode's slices going from 1.7 to 51 s (RTX 5090, 2026-11-08: memory.startup); under
+        # WSL2 the driver gave the memory whatever the setting, both times it was asked
+        # (2026-10-11: memory.probe).
+        setting = (
+            'even with NVIDIA\'s "CUDA - Sysmem Fallback Policy" at "Prefer No Sysmem Fallback"'
+            if memory.windows()
+            else 'under WSL2, whatever NVIDIA\'s "CUDA - Sysmem Fallback Policy" says'
+        )
         logger.info(
-            "this graphics driver borrows your computer's RAM when the card is full"
-            " (Windows' shared GPU memory), which is slow; seedvr2x's plan leaves room on the card"
+            "seedvr2x's plan leaves room on the card: this graphics driver can borrow your"
+            " computer's RAM when the card is full (Windows' shared GPU memory), which is slow,"
+            f" {setting}"
         )
     allocator = machine.allocator()
     if memory.windows():

@@ -112,11 +112,12 @@ class Models(io.ComfyNode):
             display_name="seedvr2x Models",
             category=CATEGORY,
             description=(
-                "Chooses seedvr2x's model file and where the model files are read from, and"
-                " downloads what Hugging Face's cache lacks of them, the shot detector's file"
-                " (about 30 MB, for seedvr2x Cuts) included (once, while this node's inputs stay"
-                " as they are). Nothing is loaded here: the other nodes load the files, check"
-                " them and fit them to your graphics card."
+                "Chooses seedvr2x's model file and where the model files are read from: it finds"
+                " the files and downloads what Hugging Face's cache lacks of them, the shot"
+                " detector's file (about 30 MB, for seedvr2x Cuts) included (once, while this"
+                " node's inputs stay as they are). It reads no weights into memory: the upscale"
+                " nodes and seedvr2x Cuts read the files when they run, check them and fit them"
+                " to your graphics card."
             ),
             inputs=[
                 io.Combo.Input(
@@ -407,10 +408,12 @@ def _plan_only_input() -> Any:
         "plan_only",
         default=False,
         display_name=plans.LABELS["plan_only"],
-        tooltip="Make the plan, say it in ComfyUI's console, and stop: no model is loaded,"
-        " ComfyUI's loaded models stay as they are, and the nodes connected to the images output"
-        " are skipped. The model files are found, and one missing from Hugging Face's cache is"
-        " downloaded.",
+        # "no model is loaded" read as seedvr2x Models' work undone (the user's third test,
+        # 2026-11-08): what is so, the files found by Models and their weights read by this node.
+        tooltip="Make the plan, say it in ComfyUI's console, and stop: the model's weights are"
+        " not read into memory (seedvr2x Models finds the files and downloads the missing ones;"
+        " this node reads them when it runs, after its plan), ComfyUI's loaded models stay as"
+        " they are, and the nodes connected to the images output are skipped.",
     )
 
 
@@ -682,9 +685,8 @@ class UpscaleImage(io.ComfyNode):
 
 type ClipPlan = tuple[Plan, Peaks]
 
-# The cut list Upscale Video takes, seedvr2x Cuts gives: the clip's shots, frames [start, end) in
-# order and covering the clip, as a tuple (a node's output is cached by ComfyUI, and a list is a
-# value a downstream node could change).
+# The cut list Upscale Video takes, seedvr2x Cuts gives: plans.CutList, the clip's shots and the
+# text of the cuts, which ComfyUI's Preview as Text node (PreviewAny) shows.
 CutsType = io.Custom("SEEDVR2X_CUTS")
 
 
@@ -717,7 +719,11 @@ def clip_planner(
 
 def _cut_list(cuts: object, frames_: int) -> tuple[Shot, ...]:
     """The cut list an input gave, held to the clip: shots from frame 0 to the clip's last, one
-    after the other with none between and none empty. Another list is for another clip."""
+    after the other with none between and none empty. Another list is for another clip. The input
+    is seedvr2x Cuts' plans.CutList, whose shots are taken; a tuple of shots, as the node took
+    before it, is taken as it is."""
+    if isinstance(cuts, plans.CutList):
+        cuts = cuts.shots
     if not isinstance(cuts, tuple) or not all(isinstance(each, Shot) for each in cuts):  # pyright: ignore[reportUnknownVariableType]
         raise words.cuts_not_a_list()
     found = cast(tuple[Shot, ...], cuts)
@@ -808,7 +814,7 @@ class UpscaleVideo(io.ComfyNode):
         seed: int,
         plan_only: bool,
         quality: str = plans.QUALITY_DEFAULT,
-        cuts: tuple[Shot, ...] | None = None,
+        cuts: plans.CutList | tuple[Shot, ...] | None = None,
         window: int | None = None,
         encode_tile: int | None = None,
         decode_tile: int | None = None,
@@ -1036,7 +1042,9 @@ class Cuts(io.ComfyNode):
                 CutsType.Output(
                     "cuts",
                     display_name="cuts",
-                    tooltip="The clip's shots, for seedvr2x Upscale Video's cuts input.",
+                    tooltip="The clip's shots, for seedvr2x Upscale Video's cuts input. Wired to"
+                    " ComfyUI's Preview as Text node (PreviewAny) too, it shows the cuts found,"
+                    " each with the detector's probability, and the possible cuts to check by eye.",
                 ),
             ],
             hidden=[io.Hidden.unique_id],
@@ -1061,13 +1069,14 @@ class Cuts(io.ComfyNode):
             found = cls._probabilities(images, models, show)
             cuts = shotcuts.detected(found, float(threshold))
             maybe = shotcuts.possible(found, float(threshold))
-            console.say(logger, logging.INFO, plans.cuts_text(count, float(threshold), cuts, maybe))
+            text = plans.cuts_text(count, float(threshold), cuts, maybe)
+            console.say(logger, logging.INFO, text)
             show(plans.cuts_line(len(cuts) + 1, len(maybe), float(threshold)))
             starts = [0, *(each.frame for each in cuts)]
             cut_list = tuple(
                 Shot(start, end) for start, end in zip(starts, [*starts[1:], count], strict=True)
             )
-            return io.NodeOutput(cut_list)
+            return io.NodeOutput(plans.CutList(cut_list, text))
 
     @staticmethod
     def _probabilities(

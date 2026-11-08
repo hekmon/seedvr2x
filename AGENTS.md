@@ -1383,7 +1383,10 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   (nothing written into a folder), a file the cache lacks (lost since Models ran, or never had)
   fetched with the INFO line before it on Cuts' own bar,
   the detector closed after, the alpha left out, its refusals, its list into
-  Upscale Video, its file's refusals worded for seedvr2x Models' "model folder" input (unwire it
+  Upscale Video (`plans.CutList`, the shots with the console's text of the cuts, which its str()
+  gives and json.dumps refuses, so that ComfyUI's Preview as Text (PreviewAny) shows that text, v0.44.0's order
+  read: JSON, then str(); the output's tooltip saying so), its file's refusals worded for seedvr2x
+  Models' "model folder" input (unwire it
   for Hugging Face's cache, or wire a folder), sizes with separators);
   `tests/test_models_node.py` seedvr2x Models as the user sees it: the missing files downloaded
   on a bar of the node's own in bytes (one bar of the three downloads, the shot detector's 30.5 MB
@@ -1427,6 +1430,9 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   `tests/test_keeping.py` keep in RAM auto/on/off against ComfyUI's cap (its MAX_PINNED_MEMORY
   or its rule), what is said, the first file's memory freed before the second is pinned,
   Unload models under a cached Models output said once, the Models node reading nothing;
+  `tests/test_plans.py` also plan only's tooltip (the weights not read into memory, the files
+  found by seedvr2x Models, read by the node after its plan) and Models' description (it finds and
+  fetches the files; the upscale nodes and Cuts read them);
   `tests/test_plan_only.py` the plan alone (the headers read and nothing loaded, registered or
   freed, an execution blocker for the pictures and nothing else, the plan in the console and the
   node's "plan: window 17 frames · decode whole · encode whole" over "whole plan in the
@@ -1447,8 +1453,11 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   figures, the target check) worded with the way out; the four kinds of a plan (memory, host,
   input, pin) worded from their facts and never by the library's sentence, in none of the library's
   terms, with the value node and the socket that take the number that fits, and a clip's host
-  refusal naming what the command line does instead; `tests/test_machine.py` the reading
-  shifted by ComfyUI's models, torch's allocator setting given to `memory.startup` and the
+  refusal naming what the command line does instead; `tests/test_machine.py` the driver that
+  lends said once at INFO, what seedvr2x does first and then why, NVIDIA's "CUDA - Sysmem Fallback
+  Policy" named by what was measured on each platform (on Windows even at "Prefer No Sysmem
+  Fallback", under WSL2 whatever it says), the reading shifted by ComfyUI's models, torch's
+  allocator setting given to `memory.startup` and the
   environment left as it was; `tests/test_process_state.py` torch's memory fraction never set
   and the global random generators as they were after a run; `tests/test_room.py` also the card
   read again after torch's cache is emptied; `tests/test_workflows.py` the two example workflows

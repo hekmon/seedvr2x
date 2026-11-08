@@ -93,7 +93,13 @@ def test_the_models_nodes_labels_placeholder_and_tooltips_say_what_they_are() ->
     # The shot detector's file too: a folder without it takes it from the cache, writes nothing.
     assert pull.DETECTOR in folder.tooltip
     assert "nothing is downloaded and Hugging Face's cache is not read" in folder.tooltip
-    assert "shot detector" in nodes.Models.GET_SCHEMA().description
+    description = nodes.Models.GET_SCHEMA().description
+    assert "shot detector" in description
+    # What this node does and what the others do (the user's third test, 2026-11-08).
+    assert "it finds the files and downloads what Hugging Face's cache lacks" in description
+    assert (
+        "It reads no weights into memory: the upscale nodes and seedvr2x Cuts read" in description
+    )
     assert "Connect any string node" in folder.tooltip
     # What the folder must hold, by the files' names, every DiT file's name made by its rule.
     assert plans.VAE_FILE in folder.tooltip and plans.DEFAULT_DIT in folder.tooltip
@@ -390,7 +396,10 @@ def test_plan_only_is_a_boolean_off_by_default_on_each_upscale_node() -> None:
     for node in (nodes.UpscaleImage, nodes.UpscaleVideo):
         plan_only = schema_inputs(node)["plan_only"]
         assert plan_only.io_type == "BOOLEAN" and plan_only.default is False
-        assert "no model is loaded" in plan_only.tooltip
+        assert "the model's weights are not read into memory" in plan_only.tooltip
+        assert "seedvr2x Models finds the files" in plan_only.tooltip
+        assert "this node reads them when it runs, after its plan" in plan_only.tooltip
+        assert "no model is loaded" not in plan_only.tooltip
 
 
 def settings_of(**inputs_: Any) -> plans.Settings:

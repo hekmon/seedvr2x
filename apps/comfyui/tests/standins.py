@@ -397,7 +397,7 @@ def upscale_video(
     unique_id: str | None = "1",
     *,
     plan_only: bool = False,
-    cuts: tuple[Shot, ...] | None = None,
+    cuts: "tuple[Shot, ...] | plans.CutList | None" = None,
     quality: str = "standard",
 ) -> tuple[Any, str]:
     """seedvr2x Upscale Video run as ComfyUI runs it: (the frames, the plan's text as the console
