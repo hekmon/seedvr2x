@@ -988,9 +988,9 @@ def test_the_tail_is_on_for_the_decode_alone_and_off_after(
         tail_frames=True,
     )
     # Not bit for bit at this shape: oneDNN picks its convolution algorithm by the tensor's shape
-    # (as test_tail_frames' fixture notes), so a frame's convolution and the slice's differ by a
-    # bfloat16 step (1/128 near 1) in a few values (2026-11-06: 8% of them, 0.0078 at the most);
-    # the equality at the shapes that hold it is test_tail_frames'.
+    # and its thread count (as test_tail_frames' fixture notes), so a frame's convolution and the
+    # slice's differ by a bfloat16 step (1/128 near 1) in a few values (2026-11-06: 8% of them,
+    # 0.0078 at the most); the equality, oneDNN's convolutions off, is test_tail_frames'.
     assert tail.shape == plain.shape
     assert np.abs(tail - plain).max() <= 2 / 128
     for each, flags in seen:

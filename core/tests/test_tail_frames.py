@@ -32,18 +32,21 @@ def models(
     cpu_models: model.Models,  # noqa: F811
     request: pytest.FixtureRequest,
 ) -> Iterator[model.Models]:
-    """cpu_models' VAE in the requested dtype, in models of its own. In float32 with oneDNN's
-    convolutions off for the test: oneDNN picks its algorithm by the tensor's shape, so that a
-    frame's convolution and the slice's differ by an ulp (8.2e-6 at most here, at 4 and 6
-    latents, 2026-11-06) where PyTorch's own kernels give the same bits; bfloat16, the pipeline's
-    dtype, is bit for bit under oneDNN as it runs, and slow without it."""
+    """cpu_models' VAE in the requested dtype, in models of its own, with oneDNN's convolutions
+    off for the test in both dtypes. oneDNN picks its algorithm by the tensor's shape and by the
+    threads it runs on, so that a frame's convolution and the slice's can differ by an ulp: in
+    float32 by 8.2e-6 at most here, at 4 and 6 latents (2026-11-06); in bfloat16 at the shipped
+    widths on 8 threads and not on 16 (2026-11-07). What these tests hold is the algorithm's, the
+    causal memory carried from frame to frame giving the slices' bits, which PyTorch's own
+    kernels gave on 4, 8 and 16 threads at the narrow and the shipped widths (2026-11-08);
+    oneDNN is the CPU's, and the pipeline decodes on the card."""
     dtype: torch.dtype = request.param
     made = pipeline_models(cpu_models)
     runner: Any = made.runner
     runner.vae = runner.vae.to(dtype)
     # The switch alone, not mkldnn.flags(), which also sets TF32's precision and warns of it.
     enabled = torch.backends.mkldnn.enabled
-    torch.backends.mkldnn.enabled = dtype != torch.float32
+    torch.backends.mkldnn.enabled = False
     try:
         yield made
     finally:

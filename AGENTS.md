@@ -1333,13 +1333,14 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   plan records it and a resume takes it as recorded, the key written only when it is on and
   every other plan's record as before; the room is planned again. `core/tests/
   test_tail_frames.py` holds the vendored `Decoder3D.tail_frames` on the CPU against the plain
-  decoder bit for bit, on `cpu_models`' VAE in float32 (with oneDNN's convolutions off for the
-  test: it picks its algorithm by tensor shape, so a frame's convolution and a slice's differ by
-  an ulp) and in bfloat16 (the pipeline's, bit for bit as it runs), in the slices
-  `model.latent_slices` cuts, the causal memory carried slice to slice and frame to frame, the
-  switch on and off again giving today's bits, a VAE without a decoder refused; the cards'
-  sizes are measured on the GPU (`research/scripts/tail_probe.py`, hold_probe.py with the tail
-  switched on), not here. `test_peaks.py` holds `tail_ratio` at each measured side and off
+  decoder bit for bit, on `cpu_models`' VAE in float32 and in bfloat16 (the pipeline's), in the
+  slices `model.latent_slices` cuts, the causal memory carried slice to slice and frame to
+  frame, the switch on and off again giving today's bits, a VAE without a decoder refused, all
+  with oneDNN's convolutions off (it picks its algorithm by tensor shape and by thread count, so
+  a frame's convolution and a slice's can differ by an ulp: bfloat16 at the shipped widths did
+  on 8 threads and not on 16; off, both dtypes hold at 4, 8 and 16 threads at both widths); the
+  cards' sizes are measured on the GPU (`research/scripts/tail_probe.py`, hold_probe.py with the
+  tail switched on), not here. `test_peaks.py` holds `tail_ratio` at each measured side and off
   them, the prediction at or over each measure, the ratio taken on the part above the weights,
   the colour correction's term untouched and the least room replacing the VAE floor alone;
   `test_shot_plan.py` the rungs in order over the cards, none taken where the plain plan fits
