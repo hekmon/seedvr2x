@@ -164,8 +164,9 @@ never requires it.
 - Windows and macOS: Linux first, since inference is mostly a Linux world. Both come in
   v0.2.0, first-class (the user: Windows on 2026-10-24, macOS with it and both first-class on
   2026-11-04, ComfyUI's nodes needing them). Windows starts with an analysis of:
-  - `torch.compile`'s Triton there (FlashAttention 2 is gone since 2026-11-08: SDPA, the one
-    kernel, works everywhere)
+  - `torch.compile`'s Triton there: none in PyTorch's Windows build, so `--compile` is refused
+    on Windows, saying why (built 2026-11-09, impl-win-2); FlashAttention 2 is gone since
+    2026-11-08, SDPA, the one kernel, working everywhere
   - the driver spilling VRAM into system memory instead of failing (numz enforces the physical
     limit for this), which the planner must prevent. A Windows driver does it under WSL too,
     where seedvr2x runs today (see [Allocator](#allocator)), and Windows itself does it in
@@ -2986,7 +2987,11 @@ library's four modules.
     time may swap blocks. For several, the plan's tiles first, then both VAE passes pinned to
     each tile side down to 512 px, the first plan that keeps the DiT whole and fits; the log
     names the tiles. Where the card can't free the reservation, the start is refused, naming
-    the most pictures at that size, and the largest size at that count, that would fit.
+    the most pictures at that size, and the largest size at that count, that would fit. The
+    search remembers the tiles' figures while it runs, and forgets them at its end (built
+    2026-11-09, impl-diet-3: a start refused for two 4K pictures on 22 GiB from 67 s to 28 s,
+    81 MiB held meanwhile, no plan moved; whole plans remembered would have saved 9%, 270 of
+    its 301 plans being distinct).
   - Its allocator is torch's own with expandable segments, a user's setting kept and
     `cudaMallocAsync` warned of: the cap must hold, which `cudaMallocAsync` went 2.06 GiB past
     ([Allocator](#allocator)).
@@ -4239,7 +4244,15 @@ run in one line, before the models load as after.
     minimal reproduction is the user's to send.
   - The CLI and the server on Windows itself are v0.2.0's: `cudaMallocAsync` their default
     there, a resume's early reading NVML's alone (what is resident: optimistic there,
-    provisional), untested natively.
+    provisional). The CLI's first landing, 2026-11-09 (impl-win-2): one lock for both
+    platforms (Windows on x86-64 beside Linux, torch's CUDA 13.0 wheels from the same index,
+    the Linux resolution unchanged), a `.gitattributes` keeping every file's bytes in a
+    checkout (Git for Windows' default turned 525 of 533 files into CRLF, which the vendored
+    code's check and TransNetV2's pin refused), the command starting there (`fcntl` imported
+    where a video's lock needs it) and writing a file whole (synced through a descriptor open
+    for writing, a directory left to the filesystem: before, a picture's write failed at its
+    end), its lending line in the nodes' order; a picture upscaled natively on the RTX 5090,
+    untiled and tiled, to PNG and WebP, its plan Linux's. A video there is impl-win-3's.
   - The detector's close waited on the card outside the poll (`torch.cuda.synchronize`), and
     nothing tested its close on a failed card: mended on 2026-11-08 (impl-nodes-5), its wait
     through the poll, the Cuts node's Cancel its check; a wait an exception ends, or a failed
@@ -4367,7 +4380,12 @@ run in one line, before the models load as after.
     for the copies it queued (`Models.enter`). SIGUSR1's stacks are behind a check that the
     platform has it; the statuses 128 + the signal, ffmpeg's end with its parent and the
     watcher (Windows' wakeup takes a socket) are POSIX's, their Windows twins the CLI's on
-    Windows, v0.2.0's.
+    Windows, v0.2.0's. Measured natively for them on 2026-11-09 (impl-win-2): ffmpeg's side
+    channels on named pipes (`pipe:N` fails there; a 1080p frame's 16 bits at 2.8 times
+    stdout's rate), children ended by a Job Object within 0.15 s of a killed parent, `uv run`
+    included, the wakeup on a socket's descriptor read while the main thread sits in C; and a
+    Ctrl-Break under `uv run` ends uv at once and leaves Python running, a Ctrl-C making uv
+    wait, which the CLI's stop there is to answer.
   Decided the same day, on its questions:
   - In a launch a single stop is not answered; the repeated one is the way, as decided. One
     set of RoPE tables for all blocks (fewer launches and less memory, where the blocks'
@@ -4383,7 +4401,12 @@ run in one line, before the models load as after.
     666a6cb), the regression passing against them on main's code (12, one skipped by its own
     rule) and on the final code (13 of 13), FlashAttention 2's set kept beside them under a
     name that says so; the 96 GB card's are still FlashAttention 2's, to make again when it is
-    back.
+    back. Windows gives bits of its own: a picture made natively differs from the same run
+    under WSL2 on the same card (54 to 57 dB PSNR, 21 to 93% of the samples), and Windows
+    repeats its own; torch's Windows wheel has no FlashAttention backend in SDPA, so another
+    kernel runs there (inferred, not isolated). Decided that day: Windows' references are to be
+    its own, per card, under a platform level of `SEEDVR2X_REFERENCE_DIR`, made with the video
+    path (impl-win-3), and the planner's DiT peaks measured again there for that backend.
   - The watcher's open points stay so: a main thread that answered the first stop and then
     hangs in that stop's own cleaning is not covered (the signals are ignored from the stop's
     line on); the frame named is the innermost Python one; its NVML reading is card 0's
