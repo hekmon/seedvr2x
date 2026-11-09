@@ -1444,9 +1444,12 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   a Cancel during that release leaving the mark kept: `tests/test_release.py`), models not kept waiting for the device in the
   poll first (`model.synchronize`) under the same text and second Cancel, a healthy release putting
   the text back (none said before: cleared) and marking nothing, and one after a normal end with no
-  check and no text; `tests/test_cuts_node.py` seedvr2x Cuts over the untrained detector's
-  weights and scripted probabilities (the cut list, and the console's text of the cuts with their
-  probabilities and the possible cuts, without a lead; the node's line "scanning 64/120 frames",
+  check and no text; `tests/test_cuts_node.py` seedvr2x Cuts (on a temporary HF_HOME, an
+  autouse fixture, `hugging_faces_cache`, offline: none reads the process's own Hugging Face
+  cache, which natively on Windows was one WSL had written, its links unreadable there) over
+  the untrained detector's weights and scripted probabilities (the cut list, and the console's
+  text of the cuts with their probabilities and the possible cuts, without a lead; the node's
+  line "scanning 64/120 frames",
   "2 shots · 1 possible cut below 0.30"; no text output; no mode and no folder input, the
   models handle required and refused if it is none (naming the node), the threshold, the file the
   handle's folder's alone where a folder is given (the user, 2026-11-08: a folder is the choice of

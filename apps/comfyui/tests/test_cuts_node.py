@@ -85,6 +85,45 @@ def run_cuts_value(
     return out[0], said.messages[0] if said.messages else ""
 
 
+@pytest.fixture(autouse=True)
+def hugging_faces_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Hugging Face's cache in a fresh directory of the test's, offline, as the command line's
+    processes have their own HF_HOME: no test here reads or writes the process's own cache. A
+    run natively on Windows read a cache that WSL had written, whose links Windows can't follow,
+    and failed. huggingface_hub resolves HF_HOME and HF_HUB_CACHE when it is imported (its
+    constants), so the environment is set and the constants with it, which pull.cache() and the
+    lookups read."""
+    from huggingface_hub import constants
+
+    home = tmp_path / "hf"
+    monkeypatch.setenv("HF_HOME", str(home))
+    monkeypatch.setenv("HF_HUB_CACHE", str(home / "hub"))
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(home / "hub"))
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)
+    return home / "hub"
+
+
+def test_the_cache_a_cuts_run_reads_is_the_tests_own(
+    monkeypatch: pytest.MonkeyPatch, weights_dir: Path, tmp_path: Path, hugging_faces_cache: Path
+) -> None:
+    # A run with no folder looks in Hugging Face's cache, the test's own: nothing there, the
+    # process's own cache never consulted.
+    seen: list[Path] = []
+    scripted(monkeypatch, {}, 6)
+
+    def fetch(pins: Any, download: Any = None, progress: Any = None) -> Any:
+        seen.append(pull.cache())
+        return {name: weights_dir / name for name in pins}
+
+    monkeypatch.setattr(pull, "fetch", fetch)
+    run_cuts(clip_images(12))
+    assert seen == [hugging_faces_cache]
+    assert hugging_faces_cache.is_relative_to(tmp_path)
+    assert pull.cached(pull.DETECTOR) is None, "the process's own cache is not consulted"
+
+
 @pytest.fixture
 def weights_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A folder holding the untrained detector's weights as transnetv2.safetensors, which are no
