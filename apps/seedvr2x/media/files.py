@@ -5,6 +5,7 @@ import contextlib
 import errno
 import logging
 import os
+import sys
 from pathlib import Path
 
 logger = logging.getLogger("cli.media.files")
@@ -75,7 +76,23 @@ def write_whole(path: Path, data: bytes) -> None:
 
 
 def _sync(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
+    flags = os.O_RDONLY
+    if sys.platform == "win32":
+        # Windows syncs a file through a descriptor open for writing (fsync is the C runtime's
+        # _commit: "Bad file descriptor" from a read-only one), and Python's os opens no
+        # directory there ("Permission denied"; both on native Windows, 2026-11-09): a directory
+        # is left to the filesystem, said once at debug.
+        if path.is_dir():
+            if not _UNSYNCED:
+                _UNSYNCED.append(path)
+                logger.debug(
+                    "%s: a directory isn't synced on Windows (os opens none): a power cut may"
+                    " lose what was last renamed into it",
+                    path,
+                )
+            return
+        flags = os.O_RDWR | os.O_BINARY
+    descriptor = os.open(path, flags)
     try:
         os.fsync(descriptor)
     except OSError as error:

@@ -3,7 +3,6 @@
 import argparse
 import datetime
 import faulthandler
-import fcntl
 import logging
 import math
 import os
@@ -3818,7 +3817,10 @@ def _lock(directory: Path) -> None:
     no file is added, and it goes with the process, however it ends. Once per directory: a
     .mkv path's work directory is locked from its start (_work), an output directory once its
     job is known (_run), and a second lock on the same directory, even this process's own,
-    would be refused, flock's locks being its descriptors'."""
+    would be refused, flock's locks being its descriptors'. fcntl is POSIX's: imported here, a
+    video job's, so that the command starts on Windows, where a picture needs no lock."""
+    import fcntl
+
     from media.files import make_directories
     from seedvr2x.errors import JobError
 

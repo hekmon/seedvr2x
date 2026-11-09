@@ -754,3 +754,28 @@ def test_the_help_names_pictures_png8_and_the_defaults(capsys: pytest.CaptureFix
     assert (
         "--plan [FILE]" in shown and "for a picture, --plan alone says the picture's plan" in shown
     )
+
+
+# The help where POSIX's own modules are missing, as on Windows: fcntl (the output directory's
+# lock, a video job's) and resource (a video run's memory reading) are imported where a video
+# needs them, never as the command starts.
+POSIX_ONLY = """
+import sys
+sys.modules["fcntl"] = None
+sys.modules["resource"] = None
+import main
+sys.exit(main.main(["--help"]))
+"""
+
+
+def test_the_help_needs_no_module_of_posix_alone(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", POSIX_ONLY],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("usage: seedvr2x ")

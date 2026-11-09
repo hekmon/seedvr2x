@@ -278,7 +278,13 @@ beside it; the `__init__.py` is seedvr2x's.
 - Linux x86_64 first (DESIGN.md: Linux first), and Windows on x86-64 beside it in the CLI's
   lock (its pyproject's `environments`): torch and torchvision from the same index, the CUDA
   packages and Triton Linux's alone as torch's own requirements mark them, every Linux pin the
-  same (the lock's Linux resolution diffed, 2026-11-09). The image server's lock is Linux's.
+  same (the lock's Linux resolution diffed, 2026-11-09). The image server's lock is Linux's. On
+  Windows the command starts and plans a picture (2026-11-09: `--help`, a picture's `--plan`;
+  `media/ffmpeg.py`'s check passed on a gyan.dev 9.0.1 build from a script with its child hook
+  left out, the processes' lifecycle on Windows not built): POSIX's own modules are imported
+  where a video needs them (`tests/test_cli.py`: the help without `fcntl` and `resource`), and a
+  file written whole is synced there through a descriptor open for writing, a directory left to
+  the filesystem (`tests/test_files.py`); a video there is not built.
 - Every file is checked out with the repository's bytes on every platform (`.gitattributes`:
   `* text=auto eol=lf`, binary types by name, the vendored trees `-text`). Git for Windows'
   default (`core.autocrlf=true`) turned 525 of the 533 files into CRLF, and `tools/vendor.py
