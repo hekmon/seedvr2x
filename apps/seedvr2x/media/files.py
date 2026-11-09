@@ -8,7 +8,53 @@ import os
 import sys
 from pathlib import Path
 
+from media.ffmpeg import MediaError
+
 logger = logging.getLogger("cli.media.files")
+
+# Windows' refusals of a rename over a file, or of its removal (winerror.h): ERROR_ACCESS_DENIED
+# for os.replace onto a file another program holds open, ERROR_SHARING_VIOLATION for os.unlink of
+# one. Measured natively (impl-win-2, 2026-11-09): a file another process held by open() or by a
+# map refused both until the holder ended, 2.96 s later in the test; 400 replaces and removals of
+# files nothing held met neither. Windows' own reason is said, never retried: how long another
+# program holds a file is its own. ERROR_ACCESS_DENIED is also Windows' answer to a read-only
+# file, a directory in the way and a folder it protects from this program (Controlled folder
+# access), so it is said with each (impl-win-3's review, 2026-11-09).
+SHARING_VIOLATION, ACCESS_DENIED = 32, 5
+HELD = (ACCESS_DENIED, SHARING_VIOLATION)
+
+
+class HeldFile(MediaError, PermissionError):
+    """A replace or a removal Windows refused (held): the file, what was refused and Windows'
+    reason. A PermissionError too, so that what caught a failed write's OSError still does."""
+
+
+def held(error: OSError, what: str = "") -> str | None:
+    """The words of a Windows refusal of a file's replace or removal (HELD), None for any other
+    error: the file (a rename's target, the file put in its place named too), `what` was refused
+    (else told by the error), Windows' reason, its likely causes, then the way out."""
+    winerror = getattr(error, "winerror", None)
+    if sys.platform != "win32" or winerror not in HELD:
+        return None
+    path = error.filename2 if error.filename2 is not None else error.filename
+    action = what or ("replace" if error.filename2 is not None else "change or remove")
+    if error.filename2 is not None and error.filename is not None:
+        action = f"{action} it with {os.path.basename(error.filename)}, beside it"
+    else:
+        action = f"{action} it"
+    causes = (
+        "another program has it open (a player, an editor, a file manager's preview): close it"
+        " there"
+        if winerror == SHARING_VIOLATION
+        else "another program may have it or the file beside it open (a player, an antivirus"
+        " scanning it), it may be read-only, or its folder one Windows protects from this program"
+        " (Controlled folder access): mend that"
+    )
+    return (
+        f"{path}: Windows refused to {action}: {error.strerror} (WinError {winerror}); {causes},"
+        " then run the same command again"
+    )
+
 
 # The first directory whose sync failed, said once.
 _UNSYNCED: list[Path] = []
@@ -40,9 +86,21 @@ def replace_whole(partial: Path, path: Path, stale: Path | None = None) -> None:
         for entry in partial.iterdir():
             _sync(entry)
     _sync(partial)
-    if stale is not None:
-        stale.unlink(missing_ok=True)
-    partial.replace(path)
+    try:
+        if stale is not None:
+            stale.unlink(missing_ok=True)
+    except OSError as error:
+        refused = held(error, "remove")
+        if refused is None:
+            raise
+        raise HeldFile(refused) from error
+    try:
+        partial.replace(path)
+    except OSError as error:
+        refused = held(error, "replace")
+        if refused is None:
+            raise
+        raise HeldFile(refused) from error
     _sync(path.parent)
 
 
@@ -60,7 +118,8 @@ def make_directories(path: Path) -> None:
 
 def write_whole(path: Path, data: bytes) -> None:
     """Write data to path, whole even after a power cut (replace_whole). A failure to write its
-    partial file or to put it in place (OSError) is raised as it is, the partial file removed
+    partial file or to put it in place (OSError, or HeldFile where Windows refused it while
+    another program held the file) is raised as it is, the partial file removed
     first where there is one, so that nothing of a write that failed stays beside path (design,
     2026-10-12; a review's finding of that day: a playlist that couldn't be put in place, a
     directory at its name, left plan.txt.cuts.m3u8.partial beside the cut list)."""
@@ -68,7 +127,7 @@ def write_whole(path: Path, data: bytes) -> None:
     try:
         partial.write_bytes(data)
         replace_whole(partial, path)
-    except OSError:
+    except (OSError, HeldFile):
         # The failure raised is the write's own, whatever the removal meets.
         with contextlib.suppress(OSError):
             partial.unlink()
@@ -109,3 +168,48 @@ def _sync(path: Path) -> None:
             )
     finally:
         os.close(descriptor)
+
+
+def lock_directory(directory: Path) -> int:
+    """Windows' twin of flock on a video's output directory (main._lock): a named mutex of the
+    directory's identity, its volume's serial number and its file id (os.stat's st_dev and
+    st_ino), whatever path names it, taken by this process at once or refused, BlockingIOError,
+    where another process holds it. No file is added to the directory, which resume and the
+    manifest's checks read whole, and the kernel releases it however the process ends: a
+    holder killed leaves it abandoned, which the next taker gets (measured natively on
+    2026-11-09: a second process's wait timed out, and after the holder's TerminateProcess the
+    next wait took it). In Global\\, so that another session's seedvr2x sees it too; there
+    another user's is refused to this one's opening (access denied), held too. OSError where
+    the filesystem gives the directory no identity (st_ino 0): main says it isn't locked. The
+    handle is the caller's, for unlock_directory. Machine-wide only: a directory on a share that
+    another machine's seedvr2x writes is not guarded, as flock isn't across NFS clients that
+    don't relay it."""
+    if sys.platform != "win32":
+        raise AssertionError("Windows' lock: main._lock takes flock elsewhere")
+    import _winapi
+
+    identity = os.stat(directory)
+    if not identity.st_ino:
+        raise OSError(errno.ENOTSUP, "its filesystem gives it no file id to lock it by")
+    name = f"Global\\seedvr2x-directory-{identity.st_dev:x}-{identity.st_ino:x}"
+    try:
+        mutex = _winapi.CreateMutexW(_winapi.NULL, False, name)
+    except PermissionError:
+        raise BlockingIOError(errno.EAGAIN, "held by another user's process") from None
+    if _winapi.WaitForSingleObject(mutex, 0) in (_winapi.WAIT_OBJECT_0, _winapi.WAIT_ABANDONED_0):
+        return mutex
+    _winapi.CloseHandle(mutex)
+    raise BlockingIOError(errno.EAGAIN, "held by another process")
+
+
+def unlock_directory(mutex: int) -> None:
+    """Release lock_directory's mutex and close it. From a thread other than the one that took
+    it (the stop's watcher, main._flush) the release is refused, ERROR_NOT_OWNER: the close of its
+    last handle frees it all the same."""
+    if sys.platform != "win32":
+        raise AssertionError("Windows' lock")
+    import _winapi
+
+    with contextlib.suppress(OSError):
+        _winapi.ReleaseMutex(mutex)
+    _winapi.CloseHandle(mutex)

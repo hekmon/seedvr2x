@@ -301,6 +301,19 @@ def _main(argv: list[str] | None, owns_process: bool) -> int:
         except Terminated as error:
             return _stopped_at_once("SIGTERM", 143, error, owns_process)
         except Exception as error:
+            # A file Windows wouldn't change while another program held it, where no refusal of
+            # the run's own said it (media.files.held: replace_whole's are HeldFile, refused with
+            # what is kept): its words, never a traceback; status 1, ended as below once CUDA was
+            # used.
+            from media.files import held
+
+            refused = held(error) if isinstance(error, OSError) else None
+            if refused is not None:
+                logger.error("%s", refused)
+                if owns_process and waiting.cuda_used():
+                    _ignore_stops()
+                    _end(1)
+                return 1
             # Any error once CUDA was used ends through here, not through Python's teardown,
             # which can wait on a stalled GPU forever (impl-stop's R2 hung there after a
             # TypeError; DESIGN.md, Allocator, "Out of the stop's reach"). The command's expected
@@ -3815,8 +3828,9 @@ def _settings(
 
 
 # The output directories this process holds locked (_lock), until main returns: their
-# descriptors, and the directories themselves.
+# descriptors (on Windows, their mutexes: _WINDOWS_LOCKS), and the directories themselves.
 _LOCKS: list[int] = []
+_WINDOWS_LOCKS: list[int] = []
 _LOCKED: list[Path] = []
 
 
@@ -3828,15 +3842,28 @@ def _lock(directory: Path) -> None:
     .mkv path's work directory is locked from its start (_work), an output directory once its
     job is known (_run), and a second lock on the same directory, even this process's own,
     would be refused, flock's locks being its descriptors'. fcntl is POSIX's: imported here, a
-    video job's, so that the command starts on Windows, where a picture needs no lock."""
-    import fcntl
-
-    from media.files import make_directories
+    video job's, so that the command starts on Windows, where a picture needs no lock. There the
+    lock is a named mutex of the directory's identity (media.files.lock_directory), refused and
+    warned about in the same words."""
+    from media.files import lock_directory, make_directories
     from seedvr2x.errors import JobError
 
     if directory in _LOCKED:
         return
     make_directories(directory)
+    if sys.platform == "win32":
+        try:
+            _WINDOWS_LOCKS.append(lock_directory(directory))
+        except BlockingIOError:
+            raise JobError(f"{directory}: another seedvr2x is writing it") from None
+        except OSError as error:
+            logger.warning(
+                "%s: not locked (%s); let one seedvr2x at a time write it", directory, error
+            )
+        _LOCKED.append(directory)
+        return
+    import fcntl
+
     descriptor = os.open(directory, os.O_RDONLY)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -3871,10 +3898,14 @@ def _unmake() -> None:
 
 
 def _unlock() -> None:
+    from media.files import unlock_directory
+
     with _CLEANING:
         _LOCKED.clear()
         while _LOCKS:
             os.close(_LOCKS.pop())
+        while _WINDOWS_LOCKS:
+            unlock_directory(_WINDOWS_LOCKS.pop())
 
 
 @dataclass(frozen=True)

@@ -1,11 +1,20 @@
 """media/files.py: a file written whole on Windows, against the C runtime's and Python's own
-limits there (files._sync), and Linux's way unchanged; no ffmpeg needed."""
+limits there (files._sync), and Linux's way unchanged; a file Windows won't replace while another
+program holds it refused in its words (files.held), and a video's directory lock there
+(files.lock_directory, main._lock); no ffmpeg needed. The cases named on_windows run natively."""
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+import main
 from media import files
+from media.ffmpeg import MediaError
+from seedvr2x.errors import JobError
+
+on_windows = pytest.mark.skipif(sys.platform != "win32", reason="Windows' own")
 
 
 def test_on_windows_a_file_is_synced_writable_and_a_directory_is_left_said_once(
@@ -37,6 +46,7 @@ def test_on_windows_a_file_is_synced_writable_and_a_directory_is_left_said_once(
     assert not list(tmp_path.glob("*.partial"))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a read-only fsync is Linux's")
 def test_on_linux_a_file_and_its_directory_are_synced_read_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -51,3 +61,155 @@ def test_on_linux_a_file_and_its_directory_are_synced_read_only(
     monkeypatch.setattr(files.os, "open", recording)
     files.write_whole(tmp_path / "a.png", b"picture")
     assert opened == [("a.png.partial", files.os.O_RDONLY), (tmp_path.name, files.os.O_RDONLY)]
+
+
+def windows_error(winerror: int, path: Path, target: Path | None = None) -> PermissionError:
+    """A PermissionError as Windows raises it, its winerror set by hand where Linux sets none."""
+    error = PermissionError(13, "The process cannot access the file", str(path), None, None)
+    if target is not None:
+        error.filename2 = str(target)
+    error.winerror = winerror  # type: ignore[misc]  # Windows' attribute, read by getattr
+    return error
+
+
+def test_a_held_file_is_said_with_its_name_and_windows_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = windows_error(32, tmp_path / "a.partial", tmp_path / "a.mkv")
+    if sys.platform != "win32":
+        assert files.held(error) is None  # Linux's: nothing of Windows'
+    monkeypatch.setattr(files.sys, "platform", "win32")
+    assert files.held(error) == (
+        f"{tmp_path / 'a.mkv'}: Windows refused to replace it with a.partial, beside it: The"
+        " process cannot access the file (WinError 32); another program has it open (a player,"
+        " an editor, a file manager's preview): close it there, then run the same command again"
+    )
+    removal = windows_error(32, tmp_path / "a.mkv")
+    said = files.held(removal)
+    assert said is not None and said.startswith(
+        f"{tmp_path / 'a.mkv'}: Windows refused to change or remove it: "
+    )
+    # Access denied is Windows' answer to more than a hold: each cause said, none promised.
+    denied = files.held(windows_error(5, tmp_path / "a.mkv"))
+    assert denied == (
+        f"{tmp_path / 'a.mkv'}: Windows refused to change or remove it: The process cannot access"
+        " the file (WinError 5); another program may have it or the file beside it open (a"
+        " player, an antivirus scanning it), it may be read-only, or its folder one Windows"
+        " protects from this program (Controlled folder access): mend that, then run the same"
+        " command again"
+    )
+    assert files.held(windows_error(2, tmp_path / "a.mkv")) is None
+    # Still an OSError where a failed write's was caught, and a MediaError where a run's is.
+    assert issubclass(files.HeldFile, PermissionError) and issubclass(files.HeldFile, MediaError)
+
+
+def test_a_replace_windows_refuses_is_held_file_and_write_whole_leaves_no_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(files.sys, "platform", "win32")
+    monkeypatch.setattr(files.os, "O_BINARY", 0x8000, raising=False)
+    target = tmp_path / "plan.txt"
+    target.write_bytes(b"before")
+
+    def refused(self: Path, other: Path) -> Path:
+        raise windows_error(5, self, Path(other))
+
+    monkeypatch.setattr(Path, "replace", refused)
+    with pytest.raises(files.HeldFile) as stopped:
+        files.write_whole(target, b"after")
+    assert str(stopped.value).startswith(f"{target}: Windows refused to replace it with ")
+    assert target.read_bytes() == b"before" and not list(tmp_path.glob("*.partial"))
+
+
+def test_a_second_lock_on_windows_is_refused_in_linuxs_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(main.sys, "platform", "win32")
+    monkeypatch.setattr(main, "_LOCKED", [])
+    monkeypatch.setattr(main, "_WINDOWS_LOCKS", [])
+
+    def taken(directory: Path) -> int:
+        raise BlockingIOError(11, "held by another process")
+
+    monkeypatch.setattr(files, "lock_directory", taken)
+    with pytest.raises(JobError) as refused:
+        main._lock(tmp_path / "out")  # pyright: ignore[reportPrivateUsage]
+    assert str(refused.value) == f"{tmp_path / 'out'}: another seedvr2x is writing it"
+
+    def unidentified(directory: Path) -> int:
+        raise OSError(95, "its filesystem gives it no file id to lock it by")
+
+    monkeypatch.setattr(files, "lock_directory", unidentified)
+    main._lock(tmp_path / "other")  # pyright: ignore[reportPrivateUsage]
+    assert f"{tmp_path / 'other'}: not locked (" in caplog.text
+    assert main._LOCKED == [tmp_path / "other"]  # pyright: ignore[reportPrivateUsage]
+
+
+# A process holding a path open, as another program does: it says "held" once it holds it, and
+# holds it until it is killed.
+HOLDER = """
+import sys, time
+held = open(sys.argv[1], "rb")
+print("held", flush=True)
+time.sleep(60)
+"""
+
+LOCKER = """
+import sys, time
+from pathlib import Path
+from media import files
+mutex = files.lock_directory(Path(sys.argv[1]))
+print("locked", flush=True)
+time.sleep(60)
+"""
+
+
+def holding(code: str, path: Path, said: str) -> "subprocess.Popen[str]":
+    # The interpreter itself: a venv's python.exe on Windows is a launcher whose Python is its
+    # child, still holding the path a moment after the launcher is killed.
+    interpreter = getattr(sys, "_base_executable", sys.executable)
+    holder = subprocess.Popen(
+        [interpreter, "-c", code, str(path)],
+        stdout=subprocess.PIPE,
+        text=True,
+        cwd=Path(main.__file__).parent,
+    )
+    assert holder.stdout is not None and holder.stdout.readline() == f"{said}\n"
+    return holder
+
+
+@on_windows
+def test_on_windows_a_file_another_program_holds_is_refused_not_retried(tmp_path: Path) -> None:
+    target = tmp_path / "seg_000001.mkv"
+    target.write_bytes(b"old")
+    holder = holding(HOLDER, target, "held")
+    try:
+        with pytest.raises(files.HeldFile) as stopped:
+            files.write_whole(target, b"new")
+        assert str(stopped.value).startswith(f"{target}: Windows refused to replace it with ")
+        assert "(WinError 5)" in str(stopped.value)
+        assert target.read_bytes() == b"old" and not list(tmp_path.glob("*.partial"))
+    finally:
+        holder.kill()
+        holder.wait()
+    files.write_whole(target, b"new")  # the holder gone, the same write goes through
+    assert target.read_bytes() == b"new"
+
+
+@on_windows
+def test_on_windows_a_directory_another_process_locked_is_refused_until_it_ends(
+    tmp_path: Path,
+) -> None:
+    locker = holding(LOCKER, tmp_path, "locked")
+    try:
+        with pytest.raises(BlockingIOError):
+            files.lock_directory(tmp_path)
+    finally:
+        locker.kill()
+        locker.wait()
+    # Killed, its mutex abandoned: the next taker has it, and a second take by the same process
+    # is main's to refuse (_LOCKED), as flock's of one descriptor.
+    mutex = files.lock_directory(tmp_path)
+    files.unlock_directory(mutex)
+    again = files.lock_directory(tmp_path)
+    files.unlock_directory(again)
