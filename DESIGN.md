@@ -346,11 +346,15 @@ seedvr2x/                the repository
       possible cuts (the user, 2026-11-05: a short
       clip of 3 or 4 shots is handled as the CLI handles a film), each with its probability in
       ComfyUI's console and their count on the node ("2 shots · 1 possible cut below 0.30"),
-      its text output gone since 2026-11-08 (Progress, below); the cut list's own text is the
-      console's, so that ComfyUI's Preview as Text wired to it shows the cuts (the user's third
-      test, 2026-11-08: it showed the shots' repr); no STRING output: the text, of as many
-      lines as the cuts take, shows in the user's own preview node, not in seedvr2x's status
-      box. The frames are
+      its text output gone since 2026-11-08 (Progress, below); the cut list's own text, what
+      ComfyUI's Preview as Text wired to it shows, is the cuts themselves, a line a cut ("Cut
+      #1 - 0:00:01.440 (frame 36)"; the user, 2026-11-08: a readable cut list, not the
+      console's text), the time the cut frame's at the clip's frame rate, in the command line's
+      form (`shotcuts.timecode`, moved to the library), counted from the clip's first frame
+      (ComfyUI's frames keep no timestamps); the rate an optional socket with no widget, which
+      Get Video Components' fps gives; unwired, the frame alone; a clip with no cut one line
+      (built 2026-11-09, impl-nodes-7). No STRING output: the text shows in the user's own
+      preview node, not in seedvr2x's status box. The frames are
       ComfyUI's, already decoded, shrunk to the detector's 48×27 in torch (antialiased
       bicubic), with no ffmpeg. Checked before the node relied on them (impl-nodes,
       2026-11-06): on nine films of 240 frames, the study's own sources not at hand, the cuts
@@ -434,8 +438,11 @@ seedvr2x/                the repository
       No Sysmem Fallback", under WSL2 whatever the setting (the user's third test, 2026-11-08,
       the setting off: the line had read as a contradiction). Built so on 2026-11-08
       (impl-nodes-5, then impl-nodes-6 after the user's test), tests holding every form; a
-      refusal keeps ComfyUI's error dialog, the node saying "refused: see the error". The
-      read into
+      refusal keeps ComfyUI's error dialog, the node saying "refused: see the error", its type
+      named there `seedvr2x.Refused` (ComfyUI names a custom node's module by its folder's path,
+      which showed the user's own folder) and the models handle among its inputs saying whether
+      a folder was given, never which (2026-11-09, impl-nodes-7; the traceback's file paths stay
+      ComfyUI's own). The read into
       RAM goes on the same bar first, by bytes (the download on the Models node's own since
       2026-11-08), and
       the Cuts node's by the frames scanned, Cancel honoured between its batches. The preview
@@ -479,11 +486,15 @@ seedvr2x/                the repository
       "GPU failed: restart ComfyUI", their sentences in the console and ComfyUI's error.
     - A clip is whole in RAM, as ComfyUI's Load Video gives it: the nodes stream nothing, keep
       nothing on disk and resume nothing. The plan counts the clip's frames in host memory and
-      refuses past it, saying what the CLI does instead: a film streamed shot by shot, never
-      held whole, resumed after a stop, written as lossless masters. ComfyUI's console says the
-      CLI once, when the nodes load, as seedvr2x's tool for whole films, by its place beside
-      the nodes (the user, 2026-11-05: the repository that brings the nodes brings it); never
-      at each run.
+      refuses past it, saying first what the CLI does instead: it streams the clip from its
+      file, shot by shot, never holding it whole, so that a clip of any length fits, resumes
+      after a stop and writes lossless masters (the user, 2026-11-08: the refusal named the CLI
+      without the one feature that fixes it; and no "film" in a user's text, a 4K clip of 360
+      frames taking 33.4 GiB of output already: built 2026-11-09, impl-nodes-7). ComfyUI's
+      console says the CLI once, when the nodes load, by its place beside the nodes (the user,
+      2026-11-05: the repository that brings the nodes brings it); never at each run. The
+      nodes' README opens with it: a clip must fit in RAM; the nodes are a convenience for
+      pictures and clips that fit, the command line seedvr2x's full tool.
     - No node saves: the nodes give ComfyUI's image, float32, which ComfyUI's savers or others
       write; a 16-bit PNG with seedvr2x's record is the CLI's. Writing no file, the nodes
       carry no record ([The record in each output](#the-record-in-each-output)).
@@ -2123,7 +2134,14 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   its group and a little before it, stamped on the group's last frame; its decoder splits the
   latent's channels into time steps twice, then convolves causally, so the three earlier
   frames are rebuilt back in time from a summary stamped at the group's end. The code shows
-  the wiring, not what training made of it.
+  the wiring, not what training made of it. Said to users where they pick the quality since
+  2026-11-09 (impl-nodes-7: Upscale Video's quality tooltip, the nodes' README, the CLI's
+  README and MANUAL): at `standard` one frame in four comes out closer to the original than
+  the three before it, and looks sharper (the measure and the eye kept apart, as "Every
+  fourth frame is the model's best" has them), the edges pulsing, most on line art, dark
+  scenes and motion, and `maximum` is the fix (the user, 2026-11-08, stepping a dark
+  animation at `standard`: its edges sharper and lighter every 4th frame; most users would
+  give up before finding the cause alone).
 - **What.** Run s, for s from 0 to 3, is fed the shot from its frame s; frame f is taken from
   run f mod 4, where it ends its group (frames 0 to 3 each a run's own first frame, a latent
   of its own). Each run is a whole one: its plan of windows, its padded end (step 1), its
