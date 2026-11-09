@@ -668,13 +668,32 @@ def _role(tensors: Mapping[str, TensorInfo], found: Architecture | None) -> Role
     return None
 
 
+# winerror.h's ERROR_CANT_ACCESS_FILE: Windows' answer for a link it can't follow (_read).
+CANT_ACCESS_FILE = 1920
+
+
 def _read(path: Path) -> dict[str, TensorInfo] | str:
     """The tensors of the safetensors file at path, as its header declares them, validated as the
     safetensors library validates a file (_parse); of the GGUF file at path (_gguf: GgufTensors);
     or what a file of another format is, in words (_other). Reads the fewest bytes: the header's
     length (8), then the header, never the data. Raises ModelError when the file is missing, not a
     regular file, empty, cut short or damaged."""
-    if not path.is_file():
+    try:
+        regular = path.is_file()
+    except OSError as error:
+        # A link the system can't follow, which pathlib raises rather than answers False for:
+        # natively on Windows, a symbolic link made under WSL, "The system cannot access the
+        # file" (WinError 1920, ERROR_CANT_ACCESS_FILE; impl-win-2, 2026-11-09), a raw traceback
+        # before. Windows' Python takes WSL's links for no symbolic link (another reparse tag),
+        # so the error tells it too (seen natively, 2026-11-09).
+        unfollowed = (
+            "; a symbolic link this system can't follow (one made under WSL, on Windows): the"
+            " file itself, or a hard link to it, will do"
+            if os.path.islink(path) or getattr(error, "winerror", None) == CANT_ACCESS_FILE
+            else ""
+        )
+        raise ModelUnreadable(f"{path}: {error.strerror}{unfollowed}", file=path.name) from None
+    if not regular:
         if os.path.lexists(path):
             raise ModelUnreadable(f"{path}: not a regular file", file=path.name)
         raise ModelMissing(f"{path}: {MISSING}", file=path.name)

@@ -3720,7 +3720,16 @@ def _host_available(
     from seedvr2x.shot_plan import ALLOWANCE_UNKNOWN_HOST
 
     available = blockswap.available(proc, cgroups)
-    if available is None:
+    if available is None and sys.platform == "win32":
+        # Windows reads no /proc: GlobalMemoryStatusEx's ullAvailPhys, its failure's reason at
+        # debug (blockswap.available).
+        logger.warning(
+            "Windows' GlobalMemoryStatusEx gave no reading of the system memory available, so the"
+            " plan can't check what it takes of it, nor size from it what a tiled shot's scratch"
+            " may take, which is then the shot's whole scratch, %d GiB at most",
+            ALLOWANCE_UNKNOWN_HOST // GIB,
+        )
+    elif available is None:
         logger.warning(
             "%s: no MemAvailable read there, nor a control group's limit under %s: the system"
             " memory available isn't known, so the plan can't check what it takes of it, nor"

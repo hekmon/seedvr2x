@@ -2868,3 +2868,45 @@ def test_a_kept_reservation_is_not_given_back_as_weights_leave(
     assert caplog.messages[-1] == (
         "torch's cache kept as weights leave the GPU: the reservation holds it"
     )
+
+
+@pytest.mark.parametrize("on_windows", [False, True], ids=["linux", "windows"])
+def test_torch_loaded_first_keeps_the_allocator_it_loaded_with(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, on_windows: bool
+) -> None:
+    # A 16-bit PNG's decoder (TorchCodec) imports torch before startup: torch then refuses a
+    # backend other than the one it parsed as it loaded, at its CUDA's first use ("Allocator
+    # backend parsed at runtime != allocator backend parsed at load time, cudaMallocAsync !=
+    # native", natively on Windows, 2026-11-09). Its own allocator stays the run's, said.
+    monkeypatch.setattr(memory, "_torch_loaded", lambda: True)
+    monkeypatch.setattr(memory, "windows", lambda: on_windows)
+    caplog.set_level(logging.INFO, logger="seedvr2x.memory")
+    memory.startup()
+    if on_windows:
+        assert not any(name in os.environ for name in memory.VARIABLES)
+        assert (memory._native, memory._segments) == (True, False)  # pyright: ignore[reportPrivateUsage]
+    else:
+        assert os.environ[memory.VARIABLES[0]] == memory.EXPANDABLE
+        assert (memory._native, memory._segments) == (True, True)  # pyright: ignore[reportPrivateUsage]
+    said = [r.getMessage() for r in caplog.records if "loaded before seedvr2x" in r.getMessage()]
+    assert said == [
+        "torch was loaded before seedvr2x chose its allocator (a 16-bit PNG's decoder loads it):"
+        " torch's own allocator, which it loaded with, is the run's, "
+        + (
+            "without expandable segments, which Windows' torch has none of"
+            if on_windows
+            else "its segments expandable"
+        )
+    ]
+
+
+def test_torch_loaded_first_changes_nothing_where_torch_s_own_allocator_is_chosen_anyway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Under WSL2 the choice is torch's own allocator with its segments, which a setting made
+    # after the import still takes: unchanged.
+    monkeypatch.setattr(memory, "_torch_loaded", lambda: True)
+    monkeypatch.setattr(memory, "paravirtual", lambda: True)
+    monkeypatch.setattr(memory, "probe", lambda: None)
+    memory.startup()
+    assert os.environ[memory.VARIABLES[0]] == memory.EXPANDABLE

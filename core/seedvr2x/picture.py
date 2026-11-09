@@ -10,7 +10,6 @@ picture the same way. Every refusal says why and what to do."""
 import io
 import logging
 import re
-import shlex
 import struct
 import zlib
 from collections import deque
@@ -21,7 +20,7 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-from seedvr2x.errors import PictureRefused, Refusal
+from seedvr2x.errors import PictureRefused, Refusal, shell_word
 
 logger = logging.getLogger(__name__)
 
@@ -744,8 +743,8 @@ def _too_large(name: str, error: Exception) -> PictureRefused:
         " memory), which seedvr2x leaves as it is",
         "Make a smaller copy of it first, in an image editor or with ffmpeg (at most 8192 pixels"
         " on a side), and upscale the copy:"
-        f" ffmpeg -i {shlex.quote(name)} -vf {shlex.quote(shrink)}"
-        f" {shlex.quote(f'{name}.small.png')}",
+        f" ffmpeg -i {shell_word(name)} -vf {shell_word(shrink)}"
+        f" {shell_word(f'{name}.small.png')}",
         pixels=pixels,
     )
 
@@ -765,8 +764,8 @@ def _transparent(name: str) -> PictureRefused:
         " colours hidden under them and fringe the edges",
         "Flatten it onto a background first, in an image editor (which keeps its colour"
         " profile), or at 8 bits onto white with"
-        f" ffmpeg (which drops it): ffmpeg -i {shlex.quote(name)} -vf {shlex.quote(graph)}"
-        f" -frames:v 1 {shlex.quote(f'{name}.flat.png')}",
+        f" ffmpeg (which drops it): ffmpeg -i {shell_word(name)} -vf {shell_word(graph)}"
+        f" -frames:v 1 {shell_word(f'{name}.flat.png')}",
     )
 
 
@@ -787,7 +786,7 @@ def _several_frames(name: str, fmt: str, frames: int, stream: bool = False) -> P
             " tiffsplit), and upscale each",
             frames=frames,
         )
-    video = shlex.quote(f"{name}.mkv")
+    video = shell_word(f"{name}.mkv")
     if stream:
         return _refused(
             name,
@@ -795,7 +794,7 @@ def _several_frames(name: str, fmt: str, frames: int, stream: bool = False) -> P
             what,
             "To upscale it as a video, make one of it first, choosing the rate"
             f" ({MJPEG_RATE} frames a second here): ffmpeg -f mjpeg -framerate {MJPEG_RATE}"
-            f" -i {shlex.quote(name)} -pix_fmt rgb24 -c:v ffv1 {video}",
+            f" -i {shell_word(name)} -pix_fmt rgb24 -c:v ffv1 {video}",
             frames=frames,
         )
     return _refused(
@@ -805,7 +804,7 @@ def _several_frames(name: str, fmt: str, frames: int, stream: bool = False) -> P
         "To upscale it as a video, make one of it first, choosing the rate"
         f" ({VIDEO_RATE} frames a second here; its transparency, if any, is dropped, the colours"
         " under it showing):"
-        f" ffmpeg -i {shlex.quote(name)} -vf fps={VIDEO_RATE},format=rgb24 -c:v ffv1 {video}",
+        f" ffmpeg -i {shell_word(name)} -vf fps={VIDEO_RATE},format=rgb24 -c:v ffv1 {video}",
         frames=frames,
     )
 
@@ -826,7 +825,7 @@ def _raw(name: str, why: str) -> PictureRefused:
 def _tiff16(name: str, icc: bool) -> PictureRefused:
     # ffmpeg 9.0 makes the PNG at 16 bits (rgb48 for colour, gray16 for grey, by the encoder's
     # own choice from the TIFF's pixel format) but carries no ICC profile into it.
-    command = f"ffmpeg -i {shlex.quote(name)} {shlex.quote(f'{name}.png')}"
+    command = f"ffmpeg -i {shell_word(name)} {shell_word(f'{name}.png')}"
     way = (
         f"Make a 16-bit PNG of it in an image editor, which keeps its colour profile (ffmpeg's"
         f" command, {command}, makes a PNG at 16 bits but drops the profile)"

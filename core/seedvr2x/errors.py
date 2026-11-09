@@ -8,6 +8,9 @@ server's, a node's widgets): it names each by a `Setting`, and the message is a 
 the application words one (`Say`), which `Refusal.words` calls; `str()` of the refusal is the
 library's own words (`plain`), for its logs, and names no option of any application."""
 
+import re
+import shlex
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -551,3 +554,17 @@ class TargetTooSmall(Refusal):
         self.resolution = resolution
         self.size = size
         self.least = least
+
+
+def shell_word(text: str) -> str:
+    """text as one word of a command a refusal advises (an ffmpeg command, huggingface_hub's
+    download), quoted for the shell the user runs it in: POSIX's, by shlex.quote; on Windows
+    cmd.exe's, which takes no single quotes, in double quotes where a character beyond letters,
+    digits and + = : . / \\ - would split or be read (a space, & ; [ ], % or ! that cmd may
+    expand, , and @ that PowerShell reads). A Windows name holds no double quote. The commands
+    are cmd's: PowerShell takes most of them as they are, and expands $ inside double quotes."""
+    if sys.platform != "win32":
+        return shlex.quote(text)
+    if text and re.fullmatch(r"[\w+=:./\\-]+", text, re.ASCII):
+        return text
+    return f'"{text}"'

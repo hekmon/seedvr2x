@@ -1048,6 +1048,47 @@ def test_missing(tmp_path: Path) -> None:
             weights.describe(path)
 
 
+def test_a_link_the_system_cant_follow_is_unreadable_never_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Natively on Windows a symbolic link made under WSL can't be followed: pathlib's is_file
+    # raises "The system cannot access the file" (WinError 1920) rather than answer, which ended a
+    # picture's plan in a traceback (impl-win-2, 2026-11-09; reproduced natively 2026-11-09).
+    target = tmp_path / "elsewhere.safetensors"
+    target.write_bytes(b"")
+    link = tmp_path / "seedvr2x_ema_7b_sharp_fp16.safetensors"
+    link.symlink_to(target)
+    plain = tmp_path / "seedvr2x_ema_vae_fp16.safetensors"
+    plain.write_bytes(b"")
+    real = Path.is_file
+
+    def inaccessible(self: Path, *, follow_symlinks: bool = True) -> bool:
+        if self.name.startswith("seedvr2x_"):
+            raise OSError(22, "The system cannot access the file", str(self))
+        return real(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "is_file", inaccessible)
+    assert refused(link, "dit") == (
+        f"{link}: The system cannot access the file; a symbolic link this system can't follow (one"
+        " made under WSL, on Windows): the file itself, or a hard link to it, will do"
+    )
+    assert refused(plain, "vae") == f"{plain}: The system cannot access the file"
+    # Windows' own error for a WSL link, which its Python takes for no symbolic link.
+    wsl = tmp_path / "seedvr2x_ema_7b_fp16.safetensors"
+    wsl.write_bytes(b"")
+
+    def unfollowable(self: Path, *, follow_symlinks: bool = True) -> bool:
+        error = OSError(22, "The system cannot access the file", str(self))
+        error.winerror = weights.CANT_ACCESS_FILE  # type: ignore[attr-defined]  # Windows' own
+        raise error
+
+    monkeypatch.setattr(Path, "is_file", unfollowable)
+    assert refused(wsl, "dit").endswith("the file itself, or a hard link to it, will do")
+    with pytest.raises(ModelError) as error:
+        weights.check(link, "dit")
+    assert type(error.value).__name__ == "ModelUnreadable"
+
+
 def test_cut_short(tmp_path: Path) -> None:
     # A download stopped: the data cut, then the header itself.
     path = write(tmp_path / "seedvr2x_ema_7b_sharp_fp16.safetensors", as_dtype("7b", "F16"))

@@ -15,7 +15,6 @@ import importlib
 import logging
 import os
 import re
-import shlex
 import shutil
 import sys
 import threading
@@ -39,6 +38,7 @@ from seedvr2x.errors import (
     ModelUnreadable,
     Say,
     Setting,
+    shell_word,
 )
 from seedvr2x.weights import Architecture, Role
 
@@ -830,8 +830,11 @@ def _pinned_name(file: ModelFile) -> str | None:
 def _command(name: str, cache: Path) -> str:
     """The command of huggingface_hub that downloads REPO's file name again into the cache at
     cache, whose copy is refused."""
-    command = shlex.join(
-        ["hf", "download", REPO, name, "--revision", REVISION, "--cache-dir", str(cache)]
+    command = " ".join(
+        map(
+            shell_word,
+            ["hf", "download", REPO, name, "--revision", REVISION, "--cache-dir", str(cache)],
+        )
     )
     return f"{command} --force-download"
 

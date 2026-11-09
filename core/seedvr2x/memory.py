@@ -651,6 +651,12 @@ def activity(index: int = 0) -> Activity | None:
     return None
 
 
+def _torch_loaded() -> bool:
+    """Whether torch is imported already (startup), which the CPU tests, torch imported in each,
+    answer no to (library_fixtures.no_driver_asked)."""
+    return "torch" in sys.modules
+
+
 def startup() -> str:
     """Ask the driver whether it refuses, once a run, before torch is imported, and set the
     allocator the run takes by default (VARIABLES, which the user's own setting overrides):
@@ -714,7 +720,22 @@ def startup() -> str:
     # On Windows torch has no expandable segments (_allocator): cudaMallocAsync, whose pool each
     # step's reserve counts (peaks.reserve), rather than torch's own allocator without them.
     chosen = EXPANDABLE if _spills and not windows() else ASYNC
-    if given is None:
+    if given is None and chosen == ASYNC and _torch_loaded():
+        # torch parsed the allocator's backend as it was loaded, and its CUDA refuses another at
+        # its first use: "Allocator backend parsed at runtime != allocator backend parsed at load
+        # time, cudaMallocAsync != native" (an INTERNAL ASSERT, torch 2.14.1 natively on Windows,
+        # a 16-bit PNG's run, whose decoder, TorchCodec, imports torch before this: impl-win-3,
+        # 2026-11-09). Its own allocator, which it loaded with, is the run's then, its segments
+        # expandable where torch has them (a setting torch reads at its first use), said.
+        chosen = "" if windows() else EXPANDABLE
+        logger.info(
+            "torch was loaded before seedvr2x chose its allocator (a 16-bit PNG's decoder loads"
+            " it): torch's own allocator, which it loaded with, is the run's, %s",
+            "without expandable segments, which Windows' torch has none of"
+            if windows()
+            else "its segments expandable",
+        )
+    if given is None and chosen:
         os.environ[VARIABLES[0]] = chosen
     # torch's own allocator is its default too, when the environment's setting names none.
     _native, _segments = _allocator(chosen if given is None else given)

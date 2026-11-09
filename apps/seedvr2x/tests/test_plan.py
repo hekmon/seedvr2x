@@ -216,6 +216,25 @@ def test_host_available(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> Non
     assert said.levelno == logging.WARNING
 
 
+def test_on_windows_no_reading_of_the_host_is_said_without_proc(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Windows reads GlobalMemoryStatusEx, not /proc/meminfo (blockswap.available): its warning
+    # names what failed there, never a path Windows has none of.
+    from seedvr2x import blockswap
+
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(blockswap, "available", lambda *places: None)
+    assert cli._host_available() is None  # pyright: ignore[reportPrivateUsage]
+    [said] = caplog.records
+    assert said.levelno == logging.WARNING and "/proc" not in said.getMessage()
+    assert said.getMessage() == (
+        "Windows' GlobalMemoryStatusEx gave no reading of the system memory available, so the"
+        " plan can't check what it takes of it, nor size from it what a tiled shot's scratch may"
+        " take, which is then the shot's whole scratch, 8 GiB at most"
+    )
+
+
 @pytest.mark.parametrize("text", ["0", "512", "576", "1024", "4096"])
 def test_tile(text: str) -> None:
     assert cli._tile(text) == int(text)  # pyright: ignore[reportPrivateUsage]

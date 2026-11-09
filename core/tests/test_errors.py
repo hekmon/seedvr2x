@@ -8,7 +8,7 @@ import pytest
 from library_fixtures import cli_say, cli_words
 from test_weights import as_dtype, write
 
-from seedvr2x import frames, picture, shot_plan, still_plan, weights
+from seedvr2x import errors, frames, picture, shot_plan, still_plan, weights
 from seedvr2x.errors import (
     SETTINGS,
     CompileRefused,
@@ -38,6 +38,31 @@ from seedvr2x.errors import (
 )
 
 KINDS = (PinRefused, MemoryShort, HostShort, InputTooLarge, CompileRefused)
+
+
+@pytest.mark.parametrize(
+    ("text", "posix", "windows"),
+    [
+        ("in.png", "in.png", "in.png"),
+        ("a b.png", "'a b.png'", '"a b.png"'),
+        ("C:\\x\\y z.png", "'C:\\x\\y z.png'", '"C:\\x\\y z.png"'),
+        ("D:\\cache", "'D:\\cache'", "D:\\cache"),
+        (
+            "split[a][b];[a]drawbox=c=white",
+            "'split[a][b];[a]drawbox=c=white'",
+            '"split[a][b];[a]drawbox=c=white"',
+        ),
+    ],
+)
+def test_a_command_advised_is_quoted_for_the_platforms_shell(
+    monkeypatch: pytest.MonkeyPatch, text: str, posix: str, windows: str
+) -> None:
+    # POSIX's sh takes shlex's single quotes; cmd.exe and PowerShell take none: double quotes
+    # there (a picture refusal's ffmpeg command, huggingface_hub's download).
+    monkeypatch.setattr(errors.sys, "platform", "linux")
+    assert errors.shell_word(text) == posix
+    monkeypatch.setattr(errors.sys, "platform", "win32")
+    assert errors.shell_word(text) == windows
 
 
 def test_a_setting_is_named_by_the_library_and_only_those() -> None:

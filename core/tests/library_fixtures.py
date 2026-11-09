@@ -50,6 +50,7 @@ def no_driver_asked(
     if request.node.get_closest_marker("gpu") is None:
         monkeypatch.setattr(memory, "paravirtual", lambda: False)
         monkeypatch.setattr(memory, "NVML", "libnvidia-ml.so.none-in-a-cpu-test")
+        monkeypatch.setattr(memory, "_torch_loaded", lambda: False)  # as a run's start finds it
         for name in memory.VARIABLES:
             monkeypatch.delenv(name, raising=False)
     state = (("_spills", False), ("_native", False), ("_limit", None), ("_footing", None))
