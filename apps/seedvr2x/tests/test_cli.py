@@ -185,6 +185,27 @@ def test_compile_help_says_what_it_gives_and_costs_with_no_figure(
         assert words in text
 
 
+def test_quality_help_says_the_pulse_the_measure_and_the_eye_apart(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # As the nodes' quality tooltip says it (impl-nodes-7; DESIGN.md, "Every fourth frame is the
+    # model's best"): closer to the original, what was measured, and looks sharper, what the eye
+    # sees, each said, neither from the other; no longer "softer", which put the eye's word on
+    # the measure.
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    text = _option_help(capsys.readouterr().out, "--quality")
+    for words in (
+        "rebuilds the last of each group closest to the original, so at standard one frame in"
+        " four comes out closer to the original than the three before it, and looks sharper",
+        "edges that pulse, most on line art, dark scenes and motion",
+        "maximum takes every frame from a run where it is rebuilt closest",
+        "2 or 4 times the GPU time, the same memory",
+    ):
+        assert words in text
+    assert "softer" not in text
+
+
 def test_accept_env_change_help_names_both_its_uses(capsys: pytest.CaptureFixture[str]) -> None:
     # The flag also takes a resume whose recorded shape no longer fits the memory free, planned
     # again for what is left (_run, planner.plan_again); its first use's words are kept.

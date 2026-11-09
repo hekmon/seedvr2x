@@ -67,7 +67,8 @@ apps/seedvr2x/          the seedvr2x command: distribution seedvr2x (setuptools)
                          and a resume's checks (planner.py), saving and resume, its environment
                          record
   stills.py              a still picture's run: its options, -o, plan, load, pass, PNG or WebP
-  media/                 I/O layer: ffprobe, ffmpeg pipes, FFV1 and PNG writers
+  media/                 I/O layer: ffprobe, ffmpeg pipes (its side channels: channel.py), FFV1
+                         and PNG writers
   tests/                 the CLI's, with levels.py and conftest.py
   tools/plan_lines.py    the plan matrix with the CLI's lines, on core's tools/plan_matrix.py
   pyproject.toml uv.lock .python-version LICENSE NOTICE
@@ -289,13 +290,47 @@ beside it; the `__init__.py` is seedvr2x's.
   lock (its pyproject's `environments`): torch and torchvision from the same index, the CUDA
   packages and Triton Linux's alone as torch's own requirements mark them, every Linux pin the
   same (the lock's Linux resolution diffed, 2026-11-09). The image server's lock is Linux's. On
-  Windows the command starts and plans a picture (2026-11-09: `--help`, a picture's `--plan`;
-  `media/ffmpeg.py`'s check passed on a gyan.dev 9.0.1 build from a script with its child hook
-  left out, the processes' lifecycle on Windows not built): POSIX's own modules are imported
-  where a video needs them (`tests/test_cli.py`: the help without `fcntl` and `resource`), and a
-  file written whole is synced there through a descriptor open for writing, a directory left to
-  the filesystem (`tests/test_files.py`); a video there is not built. `--compile` is refused
-  there, PyTorch's Windows build having no Triton (`tests/test_compile_cli.py`).
+  Windows the command upscales a picture and a video natively, the run, a resume and the
+  finished `.mkv` (impl-win-2 and impl-win-3, 2026-11-09, on the RTX 5090 with a gyan.dev 9.0.1
+  build of ffmpeg). What differs there, each the twin of a POSIX part:
+  - ffmpeg's side channels (a read's framehash and framemd5, the first pass's detector frames)
+    on named pipes of seedvr2x's own (`media/channel.py`: `pipe:N` takes no inherited handle
+    there; ffmpeg given `-y`, which takes the pipe for an existing file), Linux's `pass_fds` as
+    before;
+  - every child in a Job Object that kills them when seedvr2x ends (`media/ffmpeg.py`,
+    `_in_a_job`, PDEATHSIG's twin: `ends_with_us` returns None there, no preexec_fn); a
+    `--segment-cmd` run by cmd.exe (COMSPEC, `/d /v:off /s /c`: no AutoRun, no delayed
+    expansion), started suspended in a job of its own (`ffmpeg.contained`), which its stop ends at
+    once, `{out}` in double quotes and an output under a name holding `%` refused at the job's
+    start (`tests/test_segment_cmd_windows.py`);
+  - a video's directory lock a named mutex of the directory's volume and file id
+    (`files.lock_directory`: no file added, the kernel's however the process ends), refused in
+    flock's words; a file Windows won't replace or remove (WinError 32, a sharing violation:
+    another program has it open; 5, access denied: that, or read-only, or a protected folder,
+    each said) refused naming it and Windows' reason (`files.HeldFile`, a MediaError and a
+    PermissionError both, `files.held`, main's net), never retried; a scratch file still mapped
+    as its store ends, which Windows won't delete, removed at the next store
+    (`scratch._PENDING`, `tests/test_scratch.py`);
+  - the RAM line from the working set (`run._working_set`), the free space by
+    `shutil.disk_usage` and a scratch file's room by extending it (`files.free_space`,
+    `files.allocate`); POSIX's own modules, `fcntl` and `resource`, imported where Linux takes
+    them (`tests/test_cli.py`: the help without either);
+  - torch loaded before `memory.startup` (TorchCodec, for a 16-bit PNG) keeps the allocator it
+    loaded with: torch refuses another backend at its CUDA's first use (an internal assert,
+    `cudaMallocAsync != native`, met natively on 2026-11-09), so where `cudaMallocAsync` would
+    be chosen, torch's own allocator is said and taken instead, with its segments off Windows
+    (`memory._torch_loaded`, which `library_fixtures.no_driver_asked` answers no to;
+    `tests/test_memory.py`); the regression's plan comparison takes the platform's allocator
+    (`readings`);
+  - a file written whole synced through a descriptor open for writing, a directory left to the
+    filesystem (`tests/test_files.py`); the driver's version from `nvml.dll`
+    (`model.nvidia_driver`, the probe's reading); a model file the system can't follow (a WSL
+    link) refused as `ModelUnreadable`; the commands a refusal advises quoted for cmd
+    (`errors.shell_word`).
+  Not built there: Ctrl-C's and the stop's twins (the watcher, the statuses 130 and 143, a
+  segment command's grace), impl-win-4's (MANUAL.md, On Windows itself, says what a Ctrl-C
+  does today). `--compile` is refused there, PyTorch's Windows build having no Triton
+  (`tests/test_compile_cli.py`).
 - Every file is checked out with the repository's bytes on every platform (`.gitattributes`:
   `* text=auto eol=lf`, binary types by name, the vendored trees `-text`). Git for Windows'
   default (`core.autocrlf=true`) turned 525 of the 533 files into CRLF, and `tools/vendor.py
@@ -425,6 +460,14 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   subject they are, and in any process of its own.
 - `pytest -m gpu` runs the tests that need CUDA, never selected by default; run it in each
   directory, without `-n`: the tests share the one card.
+- **Windows' cases.** The tests of Windows' twins are named `on_windows` and skip elsewhere, each
+  beside a Linux half that holds its words with Windows faked (kernel32 and the platform):
+  `tests/test_channel.py`, `tests/test_files.py`, `tests/test_ends_with_us.py` and
+  `tests/test_segment_cmd_windows.py` (the CLI's). They run natively file by file (impl-win-3,
+  2026-11-09: all passing). The library's suite is never run natively until its synthetic model
+  files are sparse on NTFS (impl-win-2's native run filled the disk twice); the CLI's whole suite
+  natively, with its POSIX fakes (`#!/bin/sh` ffmpegs, `fcntl`, stand-ins that read Windows as a
+  driver that refuses, a test that signals its own process), is impl-win-4's.
 - **Where a test file sits.** `tests/test_x.py` is in the directory of the package it tests:
   `core/tests/` for the library's, `apps/seedvr2x/tests/` for the CLI's. File names are unique
   across the two, a helper being imported by name. A file that held both halves is two: the
@@ -671,7 +714,11 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   three pairs of VAE tiles. The references are per card, in `seedvr2x/<card>/` of
   `SEEDVR2X_REFERENCE_DIR` with a `cases.json` giving each case's size on that card, the inputs
   in `m1/`; they are SDPA's, made on 2026-11-08 on the RTX 5090 on main 666a6cb (the FlashAttention
-  2 ones moved aside, kept); a card with no directory skips every case, naming it, and one with a
+  2 ones moved aside, kept). Windows' are its own, under a platform level,
+  `seedvr2x/windows/<card>/` (`platform_level`; `tests/test_regression_cases.py`), made natively on
+  2026-11-09 on the RTX 5090 (impl-win-3), Windows' bits being its own (torch's Windows wheel has
+  no FlashAttention backend in SDPA, so another kernel runs there: inferred, not isolated); a card
+  with no directory skips every case, naming it, and one with a
   directory fails
   a case whose reference is missing, unless the card can't run it. A change that moves the
   output's bits is allowed with a measured reason, and remakes the references, said in its
@@ -844,7 +891,11 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   SIGKILLed alone, and its control with the hook replaced by none in that site's module, where they
   stay, the reader's and the writer's real ffmpeg (skipped without a build seedvr2x accepts), and
   the segment command's shell, left running by a kill, as DESIGN.md has it. `/proc` tells the
-  processes left, so Linux only.
+  processes left, so Linux only. Windows' twin (`_in_a_job`): on Linux, kernel32 faked (one job,
+  its kill-on-close limit and the extended limits' 144 bytes, a job that can't be made refused
+  saying which call); natively, a parent hard-killed (TerminateProcess) whose ffmpegs by Popen and
+  by subprocess.run and a cmd.exe's ffmpeg are gone, and the control without the job, where they
+  stay.
 - A stop at once ends the process (DESIGN.md, Allocator, the hang of 2026-11-06): the scripts
   are `main:command`, which call `main(owns_process=True)`; `main(argv)` returns its status in
   every other call, as the in-process tests take it. Where the process has used CUDA, a second

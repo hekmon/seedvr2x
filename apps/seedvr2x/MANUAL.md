@@ -61,6 +61,7 @@ What surprises a newcomer most:
 - [GPU memory](#gpu-memory)
 - [Small cards](#small-cards)
 - [Under WSL2](#under-wsl2)
+- [On Windows itself](#on-windows-itself)
 - [Why zscale is required](#why-zscale-is-required)
 - [Refused sources](#refused-sources)
 - [Colour and shape of the output](#colour-and-shape-of-the-output)
@@ -811,14 +812,22 @@ seedvr2x runs your command once per output segment:
 uv run seedvr2x film.mkv -o film.1080p.mkv --segment-cmd 'ffmpeg -i - -c:v libx265 -crf 16 {out}'
 ```
 
+On Windows itself, in cmd or PowerShell, the command in double quotes:
+
+```
+uv run seedvr2x film.mkv -o film.1080p.mkv --segment-cmd "ffmpeg -i - -c:v libx265 -crf 16 {out}"
+```
+
 - **Its input:** the segment on its standard input, lossless and tagged: the master's own
   stream, FFV1 in Matroska, in the master's format (`yuv420p10le` by default, so your encoder
   converts nothing), with its colour tags and its exact frame rate.
 - **Its output:** the file seedvr2x names, which `{out}` stands for. Write `{out}` bare, never
   in quotes: seedvr2x puts the name in, quoted for the shell. A command without `{out}` is
   refused.
-- **It is run by `/bin/sh`,** never parsed. Anything a shell runs will do, and a command that may
-  need mending is best kept in a script that the option names.
+- **It is run by `/bin/sh`,** never parsed; on Windows itself by cmd.exe, `{out}` put in in
+  double quotes there (an output whose path holds `%`, which cmd would expand, is refused).
+  Anything a shell runs will do, and a command that may need mending is best kept in a script
+  that the option names.
 - **Tried before any work,** at every start, a resume's included: the command is run on 5 black
   frames of the output's size, format and tags, in a scratch directory whose name holds a
   space, a quote and a dollar on purpose, so that a quoted `{out}` fails there and not hours
@@ -1386,6 +1395,34 @@ its start:
   Linux's disk, where the hash is the bound. The mount is the slow way in for a tiled pass's
   scratch file and the compile cache too. The trade-off is the room: 17 GB inside WSL2's virtual
   disk.
+
+## On Windows itself
+
+The command line runs natively on Windows on x86-64, pictures and videos alike: a job, its
+resume and its finished `.mkv`, as on Linux. Version 0.2.0 makes Windows first-class; until
+then, what differs:
+
+- **What it needs:** the same as on Linux, from Windows' own builds: an NVIDIA driver of the 580
+  series or later, and an ffmpeg and ffprobe of 7.1 or later on `PATH`, built with zscale (a
+  "full" build).
+- **Its output is Windows' own.** The same job gives slightly different bits on Windows than on
+  Linux or under WSL2, on the same card (most likely another attention kernel: PyTorch's
+  Windows build has no FlashAttention backend in SDPA), and the same bits every time on Windows.
+- **Ending it.** A single Ctrl-C stops the run, but not yet as on Linux: every ffmpeg seedvr2x
+  started gets it too and ends at once, so the step in progress fails, and the run stops with
+  an error line, `ERROR writing ... with ffmpeg: exit status 255; stopped: ... the same command
+  resumes`, and exit status 1, rather than after the unit with 130; every unit done is kept,
+  and the same command resumes (measured on 2026-11-09). `--until` stops before a unit as on
+  Linux. A process killed some other way (Task Manager, a crash) takes every ffmpeg it started
+  with it, and your `--segment-cmd`; its units done are kept, and the same command resumes.
+- **`--segment-cmd`** is run by cmd.exe, `{out}` in double quotes; a stop ends it at once, with
+  whatever it started, without the 5 seconds it gets on Linux.
+- **A file another program has open,** a segment or the finished file in a player, can't be
+  replaced or removed on Windows: seedvr2x stops, naming the file and Windows' reason. Close it
+  there, then run the same command again.
+- **A model folder of links made under WSL** can't be read by Windows: give the files
+  themselves, or hard links to them (`mklink /H`).
+- **`--compile`** is refused: PyTorch's Windows build has no Triton.
 
 ## Why zscale is required
 

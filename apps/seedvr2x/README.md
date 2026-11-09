@@ -69,8 +69,10 @@ Both start from the source, one video file, and differ only at the end.
 
 ## Requirements
 
-- **Linux**, x86_64, WSL2 included ([under WSL2](MANUAL.md#under-wsl2)). Windows and macOS, on
-  Apple's M chips, come in version 0.2.0.
+- **Linux**, x86_64, WSL2 included ([under WSL2](MANUAL.md#under-wsl2)). Windows itself, on
+  x86-64, upscales pictures and videos from the command line too, with what it doesn't have yet
+  said in the manual ([on Windows itself](MANUAL.md#on-windows-itself)); it and macOS, on
+  Apple's M chips, are first-class in version 0.2.0.
 - **An NVIDIA driver of the 580 series or later** (580.65.06 on Linux; under WSL2, the
   Windows driver), which PyTorch's CUDA 13.0 build needs, and a card that CUDA 13 supports:
   NVIDIA's release notes list them.

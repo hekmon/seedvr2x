@@ -577,11 +577,19 @@ def _parser() -> argparse.ArgumentParser:
         "--quality",
         choices=list(QUALITY),
         metavar="LEVEL",
+        # The pulse at standard said as the nodes say it (DESIGN.md, Open questions, "Every fourth
+        # frame is the model's best": a group of 4's last frame closest to the original on 8 of 8
+        # clips by VMAF and LPIPS; looking sharper is the user's eye, 2026-11-08, which the
+        # luma's Laplacian variance contradicts on 6 of 8): what was measured and what the eye
+        # sees apart, neither from the other.
         help="standard, enhanced or maximum: each shot run 1, 2 or 4 times, its latent grid shifted"
-        " a frame each time, and each frame taken from the run that rebuilds it best, for crisper"
-        " frames: the model rebuilds 3 frames of every 4 softer, with doubled lines on fast"
-        " motion; 2 or 4 times the GPU time, the same memory, and disk for the frames between"
-        " the runs; --plan says it before anything runs; see the manual (default: standard)",
+        " a frame each time, and each frame taken from the run that rebuilds it best. The model"
+        " packs a shot's frames in groups of 4 and rebuilds the last of each group closest to the"
+        " original, so at standard one frame in four comes out closer to the original than the"
+        " three before it, and looks sharper: edges that pulse, most on line art, dark scenes and"
+        " motion; maximum takes every frame from a run where it is rebuilt closest. 2 or 4 times"
+        " the GPU time, the same memory, and disk for the frames between the runs; --plan says it"
+        " before anything runs; see the manual (default: standard)",
     )
     # split, the colour study's winner, in place of numz's lab (DESIGN.md, Colour correction).
     parser.add_argument(
