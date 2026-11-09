@@ -925,9 +925,19 @@ def _video_arguments(args: argparse.Namespace) -> None:
     take the video's here, once, so that every reader below finds the value it always found and a
     job's settings and record are unchanged (a picture takes --resolution's default in stills.py);
     --plan without a file, the picture's (stills.BARE_PLAN), and a PNG format for a picture alone
-    or a .png or .webp name for the output are refused, as a video's."""
+    or a .png or .webp name for the output are refused, as a video's; and --compile on Windows."""
     from seedvr2x.errors import JobError
 
+    if args.compile and sys.platform == "win32":
+        # torch.compile makes the VAE's GPU code with Triton, which torch 2.14.1 requires on
+        # Linux alone: its Windows wheel lists none (the lock's torch, its triton marked
+        # sys_platform != 'win32'). Refused, never run plain in its place: design's ruling for
+        # the first Windows landing (2026-11-08), measured later (DESIGN.md, Windows and macOS,
+        # leaves torch.compile's Triton there to the analysis).
+        raise JobError(
+            "--compile: torch.compile makes the VAE's GPU code with Triton, which PyTorch's"
+            " Windows build doesn't have; on Windows, run without --compile"
+        )
     if args.plan is BARE_PLAN:
         raise JobError(
             "--plan alone: a video's plan writes its cut list, to the FILE it needs: --plan"

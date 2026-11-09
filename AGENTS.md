@@ -284,7 +284,8 @@ beside it; the `__init__.py` is seedvr2x's.
   left out, the processes' lifecycle on Windows not built): POSIX's own modules are imported
   where a video needs them (`tests/test_cli.py`: the help without `fcntl` and `resource`), and a
   file written whole is synced there through a descriptor open for writing, a directory left to
-  the filesystem (`tests/test_files.py`); a video there is not built.
+  the filesystem (`tests/test_files.py`); a video there is not built. `--compile` is refused
+  there, PyTorch's Windows build having no Triton (`tests/test_compile_cli.py`).
 - Every file is checked out with the repository's bytes on every platform (`.gitattributes`:
   `* text=auto eol=lf`, binary types by name, the vendored trees `-text`). Git for Windows'
   default (`core.autocrlf=true`) turned 525 of the 533 files into CRLF, and `tools/vendor.py

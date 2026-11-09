@@ -1531,3 +1531,54 @@ def test_the_run_names_the_unit_that_compiled_after_the_warm_up(
     assert record.getMessage().startswith(
         "shot 0's decode: the compiler compiled, or tried to compile, 1 more graph"
     )
+
+
+# ---- --compile on Windows ----------------------------------------------------------------------
+
+WINDOWS_REFUSAL = (
+    "--compile: torch.compile makes the VAE's GPU code with Triton, which PyTorch's Windows build"
+    " doesn't have; on Windows, run without --compile"
+)
+
+
+@pytest.mark.parametrize(("platform", "refused"), [("win32", True), ("linux", False)])
+def test_compile_is_refused_on_windows_with_a_video_s_arguments(
+    monkeypatch: pytest.MonkeyPatch, platform: str, refused: bool
+) -> None:
+    # A video's argument, refused with the others of a video's, before the source is looked at
+    # (main._run); the platform set around that check alone, so that no module imported meanwhile
+    # takes it for its own. On Linux the arguments pass, the video's defaults taken.
+    from argparse import Namespace
+
+    from seedvr2x.errors import JobError
+
+    args = Namespace(
+        compile=True,
+        plan=None,
+        format=None,
+        output=Path("out"),
+        resolution=None,
+        quality=None,
+        min_segment=None,
+    )
+    with monkeypatch.context() as windows:
+        windows.setattr(sys, "platform", platform)
+        if refused:
+            with pytest.raises(JobError) as error:
+                cli._video_arguments(args)  # pyright: ignore[reportPrivateUsage]
+            assert str(error.value) == WINDOWS_REFUSAL
+        else:
+            cli._video_arguments(args)  # pyright: ignore[reportPrivateUsage]
+    assert (args.resolution is None) is refused
+
+
+def test_the_lock_s_torch_needs_triton_on_linux_alone() -> None:
+    # The refusal's reason, as the lock resolves torch 2.14.1 for both platforms.
+    import tomllib
+
+    lock = tomllib.loads((Path(__file__).resolve().parent.parent / "uv.lock").read_text())
+    torch_entry = next((each for each in lock["package"] if each["name"] == "torch"), None)
+    assert torch_entry is not None, "no torch in the lock"
+    triton = next((each for each in torch_entry["dependencies"] if each["name"] == "triton"), None)
+    assert triton is not None, "torch's entry in the lock lists no triton"
+    assert triton.get("marker") == "sys_platform != 'win32'"
