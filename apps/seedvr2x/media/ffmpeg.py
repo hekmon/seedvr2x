@@ -7,6 +7,8 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -109,7 +111,117 @@ def _prctl() -> Callable[..., int]:
     return function
 
 
-def ends_with_us() -> Callable[[], None]:
+# A Job Object's limit that kills every process in the job when its last handle closes
+# (winnt.h's JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE), and SetInformationJobObject's class of the
+# extended limits that carry it (JobObjectExtendedLimitInformation).
+KILL_ON_JOB_CLOSE = 0x2000
+EXTENDED_LIMITS = 9
+
+
+class _BasicLimits(ctypes.Structure):
+    """winnt.h's JOBOBJECT_BASIC_LIMIT_INFORMATION."""
+
+    _fields_ = (
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    )
+
+
+class _Limits(ctypes.Structure):
+    """winnt.h's JOBOBJECT_EXTENDED_LIMIT_INFORMATION, its IO_COUNTERS as six counters: 144
+    bytes on x86-64."""
+
+    _fields_ = (
+        ("BasicLimitInformation", _BasicLimits),
+        ("IoInfo", ctypes.c_uint64 * 6),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    )
+
+
+def _kernel32() -> ctypes.CDLL:
+    """Windows' kernel32, its last error kept for each call."""
+    return ctypes.WinDLL("kernel32", use_last_error=True)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+
+
+# The Job Object seedvr2x put itself in (_in_a_job), never closed: closing its one handle would
+# end seedvr2x with its children. It closes when the process ends, however it ends.
+_JOB: list[int] = []
+_JOB_LOCK = threading.Lock()  # one job made, whichever thread starts the first child
+
+
+def _in_a_job() -> None:
+    """Put seedvr2x in a Job Object of its own that kills every process in it when the process
+    ends (KILL_ON_JOB_CLOSE), once, before its first child: Windows' twin of PR_SET_PDEATHSIG.
+    The children a process in a job starts are in it too, their own children as well: an
+    ffmpeg, a segment command's cmd.exe and what it starts. Measured natively (impl-win-2,
+    2026-11-09): a parent killed by TerminateProcess took ffmpeg, cmd.exe and cmd's ffmpeg with
+    it within 0.12 to 0.15 s, under `uv run` too; without a job they stayed. Python already sits
+    in a job at its start there (the console's or the launcher's), and a job inside it works
+    (nested jobs, Windows 8 and later). A process can't leave it: a child asking to break away
+    is refused (WinError 5), the limit that allows it not set. Raises MediaError saying why it
+    can't be made, rather than run children a killed seedvr2x would leave running."""
+    with _JOB_LOCK:
+        if not _JOB:
+            _JOB.append(_new_job())
+
+
+def _new_job() -> int:
+    """The Job Object of _in_a_job, seedvr2x in it: its handle."""
+    kernel32 = _kernel32()
+    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+    kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
+    kernel32.SetInformationJobObject.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    )
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.AssignProcessToJobObject.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise MediaError(_unjobbed("CreateJobObjectW", ctypes.get_last_error()))  # pyright: ignore[reportAttributeAccessIssue, reportUnknownArgumentType, reportUnknownMemberType]
+    limits = _Limits()
+    limits.BasicLimitInformation.LimitFlags = KILL_ON_JOB_CLOSE
+    for call, done in (
+        (
+            "SetInformationJobObject",
+            lambda: kernel32.SetInformationJobObject(
+                job, EXTENDED_LIMITS, ctypes.byref(limits), ctypes.sizeof(limits)
+            ),
+        ),
+        (
+            "AssignProcessToJobObject",
+            lambda: kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess()),
+        ),
+    ):
+        if not done():
+            error = ctypes.get_last_error()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownVariableType, reportUnknownMemberType]
+            kernel32.CloseHandle(job)
+            raise MediaError(_unjobbed(call, error))  # pyright: ignore[reportUnknownArgumentType]
+    return int(job)
+
+
+def _unjobbed(call: str, error: int) -> str:
+    return (
+        f"seedvr2x can't put itself in a Windows job that ends its ffmpeg with it: {call} failed"
+        f" ({ctypes.FormatError(error).strip()}, WinError {error}); without it, an ffmpeg would"  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+        " outlive a seedvr2x that was killed"
+    )
+
+
+def ends_with_us() -> Callable[[], None] | None:
     """A `preexec_fn` for every ffmpeg and ffprobe seedvr2x starts, which has it killed (SIGKILL)
     when seedvr2x dies: DESIGN.md, Output, Assembly (decided on 2026-10-12 for the assembly's:
     "ffmpeg's children of the assembly end with seedvr2x, where a killed seedvr2x leaves its join
@@ -122,13 +234,19 @@ def ends_with_us() -> Callable[[], None]:
     caller forks from seedvr2x's main thread, which is the process's life, or from a thread that
     waits for its child (media/scan.py, packets, run beside the decode). It is set after the
     fork, so a parent that died in between is not seen by the kernel: the child checks, and ends
-    itself. Linux only (DESIGN.md: Linux first); no other system is run, so no fallback.
+    itself.
+
+    On Windows, where Popen runs no preexec_fn, it returns None, seedvr2x having put itself in
+    a Job Object that ends its children with it (_in_a_job), once, before the first child.
 
     The function is resolved here, in the parent, and `prepare` only calls the function object
     it closes over: that removes from the child the dlsym lookup, the loader's lock and the
     CDLL attribute cache, which ctypes' lazy attribute lookup would use there (_prctl; design,
     baton 3, 2026-10-30); not all allocation, which a Python preexec_fn cannot avoid. The
     signal's number is taken here too, for the same reason."""
+    if sys.platform == "win32":
+        _in_a_job()
+        return None
     prctl = _prctl()
     kill = int(signal.SIGKILL)
     parent = os.getpid()

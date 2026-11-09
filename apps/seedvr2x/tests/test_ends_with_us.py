@@ -336,7 +336,7 @@ def test_prctl_is_resolved_in_the_parent_before_any_fork(monkeypatch: pytest.Mon
     ffmpeg._prctl.cache_clear()  # pyright: ignore[reportPrivateUsage]
     try:
         prepare = ffmpeg.ends_with_us()
-        assert recorder.looked_up == ["prctl"]
+        assert recorder.looked_up == ["prctl"] and prepare is not None
         prepare()  # the child's part, run here
         assert recorder.looked_up == ["prctl"]
         assert recorder.calls == [(ffmpeg.PR_SET_PDEATHSIG, int(signal.SIGKILL))]
@@ -349,6 +349,7 @@ def test_the_hook_holds_the_typed_c_function_not_the_library() -> None:
     # over (a CDLL there would look its attributes up again in the child).
     ffmpeg._prctl.cache_clear()  # pyright: ignore[reportPrivateUsage]
     prepare = ffmpeg.ends_with_us()
+    assert prepare is not None
     assert ffmpeg._prctl.cache_info().currsize == 1  # pyright: ignore[reportPrivateUsage]
     function = ffmpeg._prctl()  # pyright: ignore[reportPrivateUsage]
     assert function.argtypes == (ctypes.c_int, ctypes.c_ulong)  # pyright: ignore[reportFunctionMemberAccess]
@@ -651,3 +652,159 @@ def test_the_segment_commands_shell_is_not_hooked(tmp_path: Path) -> None:
         if child.poll() is None:
             child.kill()
             child.wait()
+
+
+# Windows' twin: seedvr2x in a Job Object of its own that kills its children when it ends
+# (media/ffmpeg.py, _in_a_job), no preexec_fn there.
+
+
+class FakeKernel32:
+    """kernel32's four calls of _in_a_job, recorded; `failing` names one made to fail."""
+
+    def __init__(self, failing: str = "") -> None:
+        self.calls: list[tuple[object, ...]] = []
+        self.failing = failing
+        for name in (
+            "CreateJobObjectW",
+            "SetInformationJobObject",
+            "GetCurrentProcess",
+            "AssignProcessToJobObject",
+            "CloseHandle",
+        ):
+            setattr(self, name, self._call(name))
+
+    def _call(self, name: str) -> object:
+        def call(*arguments: object) -> object:
+            if name == "SetInformationJobObject":
+                limits = arguments[2]._obj  # type: ignore[attr-defined]  # the byref's structure
+                arguments = (*arguments[:2], limits.BasicLimitInformation.LimitFlags, arguments[3])
+            self.calls.append((name, *arguments))
+            if name == self.failing:
+                return 0
+            return {"CreateJobObjectW": 77, "GetCurrentProcess": -1}.get(name, 1)
+
+        return call
+
+
+def on_windows_faked(monkeypatch: pytest.MonkeyPatch, kernel32: FakeKernel32) -> None:
+    monkeypatch.setattr(ffmpeg.sys, "platform", "win32")
+    monkeypatch.setattr(ffmpeg, "_kernel32", lambda: kernel32)
+    monkeypatch.setattr(ffmpeg, "_JOB", [])
+    # Windows' own, which Linux's ctypes lacks.
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)
+    monkeypatch.setattr(ctypes, "FormatError", lambda error: "Access is denied. ", raising=False)
+
+
+def test_on_windows_seedvr2x_puts_itself_in_one_job_that_kills_on_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel32 = FakeKernel32()
+    on_windows_faked(monkeypatch, kernel32)
+    assert ffmpeg.ends_with_us() is None and ffmpeg.ends_with_us() is None
+    assert ctypes.sizeof(ffmpeg._Limits) == 144  # pyright: ignore[reportPrivateUsage]
+    assert kernel32.calls == [
+        ("CreateJobObjectW", None, None),
+        ("SetInformationJobObject", 77, ffmpeg.EXTENDED_LIMITS, ffmpeg.KILL_ON_JOB_CLOSE, 144),
+        ("GetCurrentProcess",),
+        ("AssignProcessToJobObject", 77, -1),
+    ]
+    assert ffmpeg._JOB == [77]  # pyright: ignore[reportPrivateUsage]  # never closed
+
+
+@pytest.mark.parametrize("failing", ["CreateJobObjectW", "AssignProcessToJobObject"])
+def test_on_windows_a_job_that_cant_be_made_is_refused_saying_why(
+    monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    kernel32 = FakeKernel32(failing)
+    on_windows_faked(monkeypatch, kernel32)
+    with pytest.raises(MediaError) as refused:
+        ffmpeg.ends_with_us()
+    assert str(refused.value) == (
+        "seedvr2x can't put itself in a Windows job that ends its ffmpeg with it:"
+        f" {failing} failed (Access is denied., WinError 5); without it, an ffmpeg would"
+        " outlive a seedvr2x that was killed"
+    )
+    assert ffmpeg._JOB == []  # pyright: ignore[reportPrivateUsage]
+    closed = [call for call in kernel32.calls if call[0] == "CloseHandle"]
+    assert closed == ([] if failing == "CreateJobObjectW" else [("CloseHandle", 77)])
+
+
+# A parent that starts, the way seedvr2x's sites do, a real ffmpeg by Popen (the readers,
+# writers, the first pass), one by subprocess.run (the probes, the startup check, the counts:
+# in a thread, run waiting for it), and a cmd.exe whose ffmpeg is its child (the segment
+# command's shell): each ffmpeg runs a minute, its command line marked.
+WINDOWS_PARENT = """
+import subprocess, sys, threading, time
+from media import ffmpeg
+{control}
+marker = sys.argv[1]
+command = [
+    "ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-re", "-t", "60", "-f", "lavfi",
+    "-i", "testsrc2=size=64x64:rate=25", "-metadata", f"title={{marker}}", "-f", "null", "-",
+]
+subprocess.Popen(command, preexec_fn=ffmpeg.ends_with_us())
+threading.Thread(
+    target=subprocess.run, args=(command,), kwargs={{"preexec_fn": ffmpeg.ends_with_us()}},
+    daemon=True,
+).start()
+subprocess.Popen(
+    subprocess.list2cmdline(command), shell=True, preexec_fn=ffmpeg.ends_with_us()
+)
+print("started", flush=True)
+time.sleep(120)
+"""
+
+
+def marked(marker: str) -> list[tuple[str, int]]:
+    """The processes whose command line holds marker, by name and pid."""
+    query = (
+        "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*"
+        + marker
+        + "*' -and $_.Name -ne 'powershell.exe' } | ForEach-Object { $_.Name + ' ' + $_.ProcessId }"
+    )
+    out = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", query],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        check=True,
+    ).stdout
+    return [
+        (name, int(pid))
+        for name, pid in (line.rsplit(" ", 1) for line in out.splitlines() if line.strip())
+    ]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' Job Objects")
+@pytest.mark.parametrize("held", [True, False], ids=["in_a_job", "control_without"])
+def test_on_windows_a_killed_parent_leaves_none_of_its_children(tmp_path: Path, held: bool) -> None:
+    # The parent is ended by TerminateProcess (Popen.kill), as a crash or Task Manager ends it:
+    # in its job, its ffmpegs and cmd.exe go with it; the control, the job left out, shows that
+    # the test would see them left.
+    marker = f"seedvr2x-test-{os.getpid()}-{tmp_path.name}"
+    control = "" if held else "ffmpeg.ends_with_us = lambda: None"
+    script = tmp_path / "parent.py"
+    script.write_text(WINDOWS_PARENT.format(control=control))
+    parent = subprocess.Popen(
+        [sys.executable, str(script), marker],
+        stdout=subprocess.PIPE,
+        text=True,
+        cwd=SOURCE,
+        env={**os.environ, "PYTHONPATH": str(SOURCE)},
+    )
+    try:
+        assert parent.stdout is not None and parent.stdout.readline() == "started\n"
+        assert waited(lambda: len([n for n, _ in marked(marker) if n == "ffmpeg.exe"]) == 3)
+        assert [n for n, _ in marked(marker)].count("cmd.exe") == 1
+        parent.kill()
+        parent.wait(timeout=30)
+        if held:
+            assert waited(lambda: not marked(marker)), marked(marker)
+        else:
+            time.sleep(1.5)
+            assert [n for n, _ in marked(marker)].count("ffmpeg.exe") == 3
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+        for _, pid in marked(marker):
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
