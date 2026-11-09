@@ -52,6 +52,9 @@ from seedvr2x.weights import AGAIN
 from . import plans
 from .progress import FAILED, REFUSED, STOPPED
 
+# The module ComfyUI's error report names the nodes' exceptions by (Refused, plans.BadSetting).
+ERRORS_MODULE = plans.ERRORS_MODULE
+
 MODELS = "seedvr2x Models"
 CUTS = "seedvr2x Cuts"
 KEEP = plans.LABELS["keep_in_ram_between_runs"]
@@ -70,6 +73,14 @@ class Refused(Exception):
     The node's text box says `line`, one short line (the user, 2026-11-08) pointing at the
     error. `logged`: the console has the refusal already (models.session says a failed card at
     ERROR)."""
+
+    # ComfyUI's error report names an exception by its class's module and name (v0.44.0's
+    # execution.py, full_type_name, read, not copied: GPL-3.0), and a custom node's module is its
+    # folder's path, so a refusal showed the user's own folder there (the user's fourth test,
+    # 2026-11-08: "<their path>\custom_nodes\<folder>.words.Refused"): seedvr2x.Refused instead.
+    # The library's package doesn't hold the class, so a refusal can't be pickled: nothing in
+    # ComfyUI v0.44.0 pickles an exception (no process isolation; its caches are JSON).
+    __module__ = ERRORS_MODULE
 
     line: str = REFUSED
     logged: bool = False

@@ -79,6 +79,39 @@ def test_the_models_node_gives_a_light_handle(
     assert models.Handle("a", "/m", "on").key == models.Handle("a", "/m", "off").key
 
 
+def format_value(value: object) -> object:
+    """An input as ComfyUI's error report gives it (v0.44.0's execution.py, format_value, read,
+    not copied: GPL-3.0): None, a plain number or string as it is, anything else by str()."""
+    if value is None or isinstance(value, int | float | bool | str):
+        return value
+    return str(value)
+
+
+def test_the_handle_and_the_reports_inputs_name_no_folder_of_the_users(tmp_path: Path) -> None:
+    """ComfyUI's error report lists a failed node's inputs by format_value, the models handle by
+    str(): the dataclass's repr gave the model folder's path. The handle says whether a folder was
+    given, never which, the DiT's file and the mode kept (design, 2026-11-09)."""
+    dit = "seedvr2x_ema_7b_sharp_int8_convrot.safetensors"
+    for folder in ("/home/someone/models", "C:\\Users\\someone\\models"):
+        given = models.Handle(dit, folder, "on")
+        assert repr(given) == str(given) == f"Handle(dit={dit!r}, model_dir=<given>, keep='on')"
+        assert "someone" not in repr(given) and given.model_dir == folder
+    unwired = models.Handle(dit)
+    assert repr(unwired) == f"Handle(dit={dit!r}, model_dir=<not given>, keep='auto')"
+    # A node refused with a folder wired: its inputs, as the report formats them, hold no path.
+    folder = tmp_path / "someone's models"
+    inputs: dict[str, Any] = {
+        "images": torch.zeros(2, 8, 8, 3),
+        "models": models.Handle(dit, str(folder), "auto"),
+        "threshold": 2.0,
+    }
+    with pytest.raises(words.Refused):
+        execute(nodes.Cuts, "7", **inputs)
+    for name, value in inputs.items():
+        shown = format_value(value)
+        assert str(tmp_path) not in str(shown) and "someone" not in str(shown), (name, shown)
+
+
 def test_the_models_nodes_labels_placeholder_and_tooltips_say_what_they_are() -> None:
     """The user's Desktop test, 2026-11-05: the folder's id showed, the % unsaid, the RAM's
     choice unclear."""

@@ -3,11 +3,15 @@
 facts and the refusal's own words with the nodes' `say` for a setting, never an option of the
 command line."""
 
+import ast
+import importlib
 from pathlib import Path
 
+import comfyui
 import pytest
-from comfyui import plans, words
-from standins import GIB
+import torch
+from comfyui import models, nodes, plans, words
+from standins import GIB, execute
 
 from seedvr2x import clip, frames, peaks, pull, still_plan, weights
 from seedvr2x.errors import (
@@ -627,3 +631,42 @@ def test_a_plan_with_tiny_figures_is_refused_by_the_real_planner_in_the_nodes_wo
     # A window pin the planner can't take for a clip, and a host too small for its output.
     clip_error = clip_refusal(19 * GIB, 33, 64 * GIB, window=9, swap_blocks=0, encode_tile=512)
     assert "--" not in str(words.refusal(clip_error))
+
+
+def full_type_name(klass: type) -> str:
+    """The name ComfyUI's error report gives an exception by its class (v0.44.0's execution.py,
+    full_type_name, read, not copied: GPL-3.0): the class's module, a dot and its qualified name;
+    a builtin's qualified name alone."""
+    module = klass.__module__
+    return klass.__qualname__ if module == "builtins" else f"{module}.{klass.__qualname__}"
+
+
+def test_comfyuis_error_report_names_the_nodes_exceptions_seedvr2x_never_their_folder() -> None:
+    """A custom node's module is its folder's path in ComfyUI, so the report named a refusal
+    "<their path>\\custom_nodes\\<folder>.words.Refused" (the user's fourth test, 2026-11-08):
+    every exception class the nodes define, found in their source (their module no longer names
+    their file), is seedvr2x.<Name> there."""
+    folder = Path(comfyui.__file__).parent
+    found: dict[str, type] = {}
+    for path in sorted(folder.glob("*.py")):
+        name = "comfyui" if path.stem == "__init__" else f"comfyui.{path.stem}"
+        module = importlib.import_module(name)
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            if isinstance(node, ast.ClassDef):
+                value = getattr(module, node.name)
+                if isinstance(value, type) and issubclass(value, BaseException):
+                    found[node.name] = value
+    assert set(found) == {"Refused", "BadSetting"}
+    for name, klass in found.items():
+        assert full_type_name(klass) == f"seedvr2x.{name}"
+    # As a node raises it to ComfyUI: a value no Cuts takes.
+    with pytest.raises(words.Refused) as refused:
+        execute(
+            nodes.Cuts,
+            "7",
+            images=torch.zeros(2, 8, 8, 3),
+            models=models.Handle(plans.DEFAULT_DIT, ""),
+            threshold=2.0,
+        )
+    named = full_type_name(type(refused.value))
+    assert named == "seedvr2x.Refused" and "comfyui" not in named and "/" not in named

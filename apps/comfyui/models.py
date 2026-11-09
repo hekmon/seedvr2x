@@ -74,7 +74,7 @@ from .progress import (
 logger = logging.getLogger("seedvr2x_comfyui.models")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class Handle:
     """What seedvr2x Models gives and the upscale nodes take (the SEEDVR2X_MODELS type): the DiT's
     file by its pinned name, the directory the files are read from ("" for Hugging Face's cache)
@@ -86,6 +86,14 @@ class Handle:
     dit: str
     model_dir: str = ""
     keep: str = "auto"
+
+    def __repr__(self) -> str:
+        """The handle without the folder's path: ComfyUI's error report gives a node's inputs by
+        str() (v0.44.0's execution.py, format_value, read, not copied: GPL-3.0), so the
+        dataclass's own repr put the user's folder in a report a user may share (design,
+        2026-11-09). Whether a folder was given is said, never which."""
+        folder = "<given>" if self.model_dir else "<not given>"
+        return f"Handle(dit={self.dit!r}, model_dir={folder}, keep={self.keep!r})"
 
     @property
     def directory(self) -> Path | None:

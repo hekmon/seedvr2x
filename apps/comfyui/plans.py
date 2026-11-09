@@ -162,10 +162,17 @@ LABELS = {
 }
 
 
+# The module the nodes' exception classes are named by in ComfyUI's error report, which names a
+# class by its module and name (words.Refused): seedvr2x, never the nodes' folder's path.
+ERRORS_MODULE = "seedvr2x"
+
+
 class BadSetting(ValueError):
     """A value an input of the node does not take, worded for the node's user (it reaches the user
     as the node's refusal: at queue time for a value the prompt holds, at the node's start for one
     a link gives)."""
+
+    __module__ = ERRORS_MODULE
 
 
 # ---- The value nodes' grids, in the user's units -------------------------------------------------

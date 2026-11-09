@@ -116,7 +116,13 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          for the text alone (the time each second between events); the units
                          named for the library's waits on the GPU, ComfyUI's Cancel their check
   words.py               the nodes' words for each refusal, with the way out in ComfyUI's terms,
-                         and the short line the node shows for it (`Refused.line`)
+                         and the short line the node shows for it (`Refused.line`); the nodes'
+                         exception classes (`Refused`, `plans.BadSetting`) of the module
+                         `seedvr2x` (`ERRORS_MODULE`), so that ComfyUI's error report, which
+                         names a class by its module, never names the nodes' folder's path;
+                         `models.Handle`'s repr says whether a folder was given, never which,
+                         the report giving the inputs by str(); the traceback's file paths in
+                         the report are ComfyUI's own and stay
   console.py             "[seedvr2x] " before each of seedvr2x's lines in ComfyUI's console,
                          installed by `__init__.py` before anything else is imported; a text
                          of several lines said a line a record (`say`); the library's checks of
@@ -1520,7 +1526,13 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   its own line); `conftest.py`'s autouse `texts_are_a_status` fails any test whose node texts
   (the stand-in server's record) hold more than two lines, a second line over 40 characters or
   empty, or name seedvr2x, so that no path is missed; `tests/
-  test_words.py` every refusal class worded without "--", and the library's real refusals (a
+  test_words.py` every exception class the nodes define, found in their source, named
+  `seedvr2x.<Name>` as ComfyUI's error report builds the name (v0.44.0's `full_type_name`: the
+  module, a dot, the qualified name), a refusal a node raises among them, never the nodes'
+  folder's path (the traceback's file paths are ComfyUI's own and stay), and `tests/
+  test_plans.py` the models handle's repr saying whether a folder was given, never which, and a
+  refused node's inputs as the report formats them (`format_value`: str() of each) holding no
+  path; every refusal class worded without "--", and the library's real refusals (a
   damaged or unpinned file in a cache and in a directory written there, the plan with tiny
   figures, the target check) worded with the way out; the four kinds of a plan (memory, host,
   input, pin) worded from their facts and never by the library's sentence, in none of the library's
