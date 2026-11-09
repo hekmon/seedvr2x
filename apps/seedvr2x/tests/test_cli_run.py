@@ -6088,13 +6088,23 @@ def test_a_job_with_every_segment_made_asks_the_gpu_nothing_in_a_fresh_process(
     # take from its record to find no difference.
     monkeypatch.setattr(torch.backends.cudnn, "version", lambda: 1)
     work = tmp_path / ("one.mkv.work" if output == "one.mkv" else output)
-    if output == "one.mkv":
-        with monkeypatch.context() as full:
-            full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
-            assert upscale(tmp_path, source_path, output, *JOB) == 1
-        assert not (tmp_path / output).exists()
-    else:
-        assert upscale(tmp_path, source_path, output, *JOB) == 0
+    # The job is made in this process, and its environment recorded by the modules the process
+    # has imported (environment.imported reads sys.modules): those of the tests run in it before
+    # this one too. torchcodec, which the tests of a 16-bit colour PNG import (seedvr2x/picture.py)
+    # and no video run does, is hidden while the job runs, so that its record is a fresh process's
+    # as the run again's is. One after another, the suite ran no such test before this one; under
+    # pytest-xdist a worker may, and did (2026-11-08); torchcodec imported first in every worker,
+    # these two cases were the suite's only ones to fail.
+    with monkeypatch.context() as fresh:
+        for name in [each for each in sys.modules if each.partition(".")[0] == "torchcodec"]:
+            fresh.delitem(sys.modules, name)
+        if output == "one.mkv":
+            with monkeypatch.context() as full:
+                full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
+                assert upscale(tmp_path, source_path, output, *JOB) == 1
+            assert not (tmp_path / output).exists()
+        else:
+            assert upscale(tmp_path, source_path, output, *JOB) == 0
     watched = tmp_path / "watched.json"
     kept = written_as(work / "manifest.json")
     assert json.loads((work / "manifest.json").read_text())["environment"]["cudnn"] == 1

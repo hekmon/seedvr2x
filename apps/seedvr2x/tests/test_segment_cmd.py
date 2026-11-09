@@ -608,18 +608,26 @@ def test_ctrl_c_again_kills_the_command_at_once(
     # here during the 5 s wait: the group is killed at once, the shell reaped, nothing left.
     writer, shell, child = started(tmp_path, f"trap '' TERM; {TELL}; cat > {{out}}; wait")
     capfd.readouterr()
+    sent: list[float] = []
+
+    def ctrl_c() -> None:
+        sent.append(time.monotonic())
+        os.kill(os.getpid(), signal.SIGINT)
+
     with Stop() as stop:
         stop.asked = True  # the first Ctrl-C, which let the segment finish and then stopped
-        timer = threading.Timer(1.0, os.kill, (os.getpid(), signal.SIGINT))
-        start = time.monotonic()
+        timer = threading.Timer(1.0, ctrl_c)
         timer.start()
         try:
             with pytest.raises(KeyboardInterrupt):
                 writer.abort()
         finally:
             timer.cancel()
-    # 1 s of the timer's, then at once: well under the 5 s grace.
-    assert time.monotonic() - start < 2.5
+    # At once from the Ctrl-C, the 1.5 s it had after the timer's 1 s: well under the 5 s
+    # grace. Timed from the signal sent, which is what the claim is about, not from the timer's
+    # start, whose thread is the machine's to schedule: under pytest-xdist, the timer's start to
+    # the kill once took 2.62 s (2026-11-08), its share between the two not measured.
+    assert sent and time.monotonic() - sent[0] < 1.5
     assert gone(shell, 1.0) and child not in members(shell)
     assert list(writer.path.parent.iterdir()) == []
     assert NOTICE.fullmatch(capfd.readouterr().err)

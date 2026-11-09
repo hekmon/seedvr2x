@@ -120,6 +120,20 @@ def ffmpeg_memo(request: pytest.FixtureRequest) -> Iterator[None]:
     _Memo.on = True
 
 
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    # Under pytest-xdist each worker keeps its own memo, and so its own counts: a worker hands
+    # them to the controller, which says their sum (pytest_testnodedown).
+    output = getattr(session.config, "workeroutput", None)
+    if output is not None:
+        output["ffmpeg_memo"] = dict(_Memo.saved)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: object, error: object) -> None:
+    output: dict[str, dict[str, int]] = getattr(node, "workeroutput", {})
+    _Memo.saved.update(output.get("ffmpeg_memo", {}))
+
+
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
     terminalreporter.write_line(
         f"ffmpeg not started again for the same build: {_Memo.saved['listings']} listings,"

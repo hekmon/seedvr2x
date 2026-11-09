@@ -33,7 +33,8 @@ dependencies = [
 seedvr2x = "main:command"
 
 [dependency-groups]
-dev = ["gguf==0.19.0", "pyright[nodejs]", "pytest", "ruff"]
+# pytest-xdist runs the CLI's tests in workers, `-n 8` (AGENTS.md, Checks and Tests).
+dev = ["gguf==0.19.0", "pyright[nodejs]", "pytest", "pytest-xdist==3.8.0", "ruff"]
 
 # setuptools, not uv's backend, which packages folders only: the CLI is flat, its modules at the
 # app's root with no package folder (DESIGN.md, Repository and apps, step 2). Each is listed, and
