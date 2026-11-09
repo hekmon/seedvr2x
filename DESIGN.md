@@ -4270,7 +4270,21 @@ run in one line, before the models load as after.
     where a video's lock needs it) and writing a file whole (synced through a descriptor open
     for writing, a directory left to the filesystem: before, a picture's write failed at its
     end), its lending line in the nodes' order; a picture upscaled natively on the RTX 5090,
-    untiled and tiled, to PNG and WebP, its plan Linux's. A video there is impl-win-3's.
+    untiled and tiled, to PNG and WebP, its plan Linux's. A video there, built the same day
+    (impl-win-3): ffmpeg's side channels on named pipes of seedvr2x's own (the first instance
+    only, remote clients refused, 1 MiB buffers, the connection waiting on ffmpeg's process
+    too), seedvr2x and every child it starts in a Job Object that kills on close (PDEATHSIG's
+    twin), the directory's lock a named mutex of the directory's volume and file id (no file
+    added to the directory: a lock file would be foreign to the job's own listings; two
+    machines writing one directory on a share are not covered, as flock over a network has
+    its own limits), a file Windows won't replace or remove refused naming it and Windows'
+    reason, never retried, `--segment-cmd` in cmd.exe (/d /v:off) in a Job Object of its own;
+    milestone 1's input upscaled natively on the RTX 5090, killed after a window and resumed,
+    its frames the uninterrupted run's. Torch loaded before the allocator is chosen (a 16-bit
+    PNG's decoder imports it) keeps the allocator it loaded with, said at INFO, rather than a
+    still's decode moved after the card is asked. One Ctrl-C there reaches every ffmpeg on the
+    console too, so the step in progress fails and the run stops with exit 1, its units kept
+    (the stop's twins are impl-win-4's).
   - The detector's close waited on the card outside the poll (`torch.cuda.synchronize`), and
     nothing tested its close on a failed card: mended on 2026-11-08 (impl-nodes-5), its wait
     through the poll, the Cuts node's Cancel its check; a wait an exception ends, or a failed
@@ -4403,7 +4417,9 @@ run in one line, before the models load as after.
     stdout's rate), children ended by a Job Object within 0.15 s of a killed parent, `uv run`
     included, the wakeup on a socket's descriptor read while the main thread sits in C; and a
     Ctrl-Break under `uv run` ends uv at once and leaves Python running, a Ctrl-C making uv
-    wait, which the CLI's stop there is to answer.
+    wait, which the CLI's stop there is to answer. The children's end is built (impl-win-3:
+    a Job Object, a hard-killed run leaving no ffmpeg or cmd.exe); Ctrl-C's groups, the
+    watcher's socket, the statuses and a segment command's grace are impl-win-4's.
   Decided the same day, on its questions:
   - In a launch a single stop is not answered; the repeated one is the way, as decided. One
     set of RoPE tables for all blocks (fewer launches and less memory, where the blocks'
@@ -4425,6 +4441,12 @@ run in one line, before the models load as after.
     kernel runs there (inferred, not isolated). Decided that day: Windows' references are to be
     its own, per card, under a platform level of `SEEDVR2X_REFERENCE_DIR`, made with the video
     path (impl-win-3), and the planner's DiT peaks measured again there for that backend.
+    Built so the same day (impl-win-3): `seedvr2x/windows/<card>/` beside Linux's unchanged
+    `seedvr2x/<card>/`, the RTX 5090's made natively by the stack's own code (main's could not
+    run a video natively yet), milestone 1's gate 6 of 6 natively and Linux's still 6 of 6; the
+    DiT's peaks under Windows' SDPA, 15 windows, each at or under the fit (the tightest, 1
+    latent at 1080p, 0.9 MiB under, Linux's 1.2; Windows 0.3 to 6.1 MiB over Linux's, growing
+    with the window), so the fit is kept for both.
   - The watcher's open points stay so: a main thread that answered the first stop and then
     hangs in that stop's own cleaning is not covered (the signals are ignored from the stop's
     line on); the frame named is the innermost Python one; its NVML reading is card 0's
@@ -4641,7 +4663,8 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
   - Finished segments and kept units are skipped. A finished segment's size is checked against
     the manifest, and its frames by `seedvr2x verify` (see [Output](#output)). The input
     frames of skipped shots are reached through the frame index (see [Input](#input)).
-  - One seedvr2x at a time per directory (flock); a filesystem without locks is warned about.
+  - One seedvr2x at a time per directory (flock; on Windows a named mutex of the directory's
+    volume and file id, since 2026-11-09); a filesystem without locks is warned about.
     A filesystem that can't sync a directory is warned about once.
   - `--dump-frames` is refused inside the output directory.
 - **Stopping:**
@@ -5262,6 +5285,15 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   [Several runs of a shot](#several-runs-of-a-shot-an-option-for-quality)), two runs too.
   Milestone 7 (2026-10-28): over two long runs at `standard`, the user saw no ghost on the
   fast motion of 12 places in each.
+  Measured on the user's dark animation (impl-win-3, 2026-11-09; one clip of 240 frames, one
+  seed, x2 to 1080p): per group, the last frame's score over the three before it, less a plain
+  bicubic's own rhythm. The sharp 7B at `standard` pulses in its edges (the luma's gradient
+  about 2.4 points stronger, 42 of 59 groups), as the user saw; the regular 7B shows none in
+  its edges but 16% less Laplacian variance at the group's last frame; and `maximum` leaves a
+  rhythm too, the frames from the run that starts at the shot's first frame scoring higher in
+  48 to 49 of 59 groups (the runs differing by where they start: inferred). Measures, not
+  eyes: whether `maximum` takes the visible pulse away is the user's to see on the clips kept,
+  and the users' documents, which call it the fix (impl-nodes-7), follow what the eye finds.
 - **The VAE's room, by the frames** (see [Memory planner](#memory-planner), the budget).
   Measured by tile size on the 96 GB card (2026-10-16 to 18): every tile the 12 to 48 GB cards
   take, passes alone, six of them in whole runs, three decodes under expandable segments; a room
