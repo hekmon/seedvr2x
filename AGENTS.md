@@ -1053,11 +1053,14 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   it (`tests/test_planner.py`; `tests/test_cli_run.py`'s
   `test_the_drivers_figure_is_said_under_verbose`).
   The spilling driver's warnings are written out whole in `tests/test_memory.py`
-  (`LENDS_LINE`, `HOLDS_LINE`, and `PLAIN_HOLDS_LINE` for torch's own allocator without the
-  segments, which keeps the flat 4.5 GiB), not built from `memory`'s constants, so that a change
-  of wording fails the tests that compare them. `HOLDS_LINE` carries the autouse `round_figures`
-  fixture's figures, so `SHIPPED_HOLDS_LINE` is the line with the shipped ones (each step planned
-  with a reserve by its own peak), held by `test_the_shipped_holds_line_says_the_shipped_figures`,
+  (`HOLDS_LINE`, `PLAIN_HOLDS_LINE` for torch's own allocator without the segments, which keeps
+  the flat 4.5 GiB, then `LENDS_LINE_WSL2` and `LENDS_LINE_WINDOWS`: what seedvr2x does first,
+  then why, NVIDIA's setting named by what was measured on each platform, as the nodes say it,
+  each line's whole text at debug after it), not built from `memory`'s constants, so that a
+  change of wording fails the tests that compare them. `HOLDS_LINE` carries the autouse
+  `round_figures` fixture's figures, so `SHIPPED_HOLDS_LINE` is the line with the shipped ones
+  (each step planned with a reserve by its own peak), held by
+  `test_the_shipped_holds_line_says_the_shipped_figures`,
   and `SHIPPED_PLAIN_HOLDS_LINE` the plain allocator's, held by
   `test_the_plain_allocators_holds_line_keeps_its_4_5_gib`.
 - The calibration's measured lengths (`calibration.py`): `tests/test_timing.py`'s

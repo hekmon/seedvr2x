@@ -1316,8 +1316,8 @@ can catch, and the process aborts. So there, seedvr2x holds itself to the card, 
 its start:
 
 ```
-03:35:41 WARNING the GPU's driver lends system memory where the card is full (WSL2, Windows): a run that passes the card slows down, then fails without an error to catch
-03:35:41 WARNING seedvr2x holds itself to the card's own memory there: torch limited to the memory free less 0.5 GiB, and the plan in 4.5 GiB less; the manual's "Under WSL2" section says why
+03:35:41 WARNING seedvr2x holds itself to the card's own memory: torch limited to the memory free less 0.5 GiB, and each step planned with a reserve by its own peak
+03:35:41 WARNING the GPU's driver lends system memory where the card is full, under WSL2, whatever NVIDIA's "CUDA - Sysmem Fallback Policy" says: a run that passes the card slows down, then fails without an error to catch; the manual's "Under WSL2" section says why
 ```
 
 `--verbose` gives each in full, with the driver's own figures.
@@ -2096,8 +2096,8 @@ bar shows either way.
 03:34:15 seedvr2x_ema_7b_sharp_fp16.safetensors: reading its 15.3 GiB to check its SHA-256, about 1 min 24 s
 03:35:38 seedvr2x_ema_7b_sharp_fp16.safetensors: SHA-256 5eb47fdee4b620765573a697b6f82442234e7dc7aa0beeb3ba72fc63b917a817, in 82.6 s
 03:35:38 seedvr2x_ema_7b_sharp_fp16.safetensors: its size and SHA-256 as seedvr2x pins them, hekmon/seedvr2x at c14a2bc4
-03:35:41 WARNING the GPU's driver lends system memory where the card is full (WSL2, Windows): a run that passes the card slows down, then fails without an error to catch
-03:35:41 WARNING seedvr2x holds itself to the card's own memory there: torch limited to the memory free less 0.5 GiB, and the plan in 4.5 GiB less; the manual's "Under WSL2" section says why
+03:35:41 WARNING seedvr2x holds itself to the card's own memory: torch limited to the memory free less 0.5 GiB, and each step planned with a reserve by its own peak
+03:35:41 WARNING the GPU's driver lends system memory where the card is full, under WSL2, whatever NVIDIA's "CUDA - Sysmem Fallback Policy" says: a run that passes the card slows down, then fails without an error to catch; the manual's "Under WSL2" section says why
 03:35:41 clip.mkv: the first pass decodes its 12 MiB once, every frame, to count, time and index them and find the shots, and hashes the file meanwhile
 03:35:42 shot detector: TransNetV2 (transnetv2.safetensors) on cuda:0, 4 windows of 100 frames per forward
 03:35:43 clip.mkv: the shot detector scored 45 frames in 1.1 s of its own (41 fps), during a first pass of 1.4 s (33 fps)

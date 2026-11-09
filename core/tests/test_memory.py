@@ -29,27 +29,31 @@ HELD = "backend:native,expandable_segments:True"
 # figures of the autouse round_figures fixture, HELD_BACK 3.0 GiB and RESERVE 2.3 GiB, not the
 # shipped 0.5 and 4.5: SHIPPED_HOLDS_LINE is the shipped one, held by its own test. impl-v010,
 # 2026-10-31.
-LENDS_LINE = (
-    "the GPU's driver lends system memory where the card is full (WSL2, Windows): a run that"
-    " passes the card slows down, then fails without an error to catch"
+LENDS_LINE_WSL2 = (
+    "the GPU's driver lends system memory where the card is full, under WSL2, whatever NVIDIA's"
+    ' "CUDA - Sysmem Fallback Policy" says: a run that passes the card slows down, then fails'
+    ' without an error to catch; the manual\'s "Under WSL2" section says why'
+)
+LENDS_LINE_WINDOWS = (
+    "the GPU's driver lends system memory where the card is full, even with NVIDIA's"
+    ' "CUDA - Sysmem Fallback Policy" at "Prefer No Sysmem Fallback": a run that passes the'
+    " card slows down, then fails without an error to catch"
 )
 HOLDS_LINE = (
-    "seedvr2x holds itself to the card's own memory there: torch limited to the memory free"
-    " less 3.0 GiB, and each step planned with a reserve by its own peak; the manual's"
-    ' "Under WSL2" section says why'
+    "seedvr2x holds itself to the card's own memory: torch limited to the memory free"
+    " less 3.0 GiB, and each step planned with a reserve by its own peak"
 )
 PLAIN_HOLDS_LINE = (
-    "seedvr2x holds itself to the card's own memory there: torch limited to the memory free"
-    ' less 3.0 GiB, and the plan in 2.3 GiB less; the manual\'s "Under WSL2" section says why'
+    "seedvr2x holds itself to the card's own memory: torch limited to the memory free"
+    " less 3.0 GiB, and the plan in 2.3 GiB less"
 )
 SHIPPED_HOLDS_LINE = (
-    "seedvr2x holds itself to the card's own memory there: torch limited to the memory free"
-    " less 0.5 GiB, and each step planned with a reserve by its own peak; the manual's"
-    ' "Under WSL2" section says why'
+    "seedvr2x holds itself to the card's own memory: torch limited to the memory free"
+    " less 0.5 GiB, and each step planned with a reserve by its own peak"
 )
 SHIPPED_PLAIN_HOLDS_LINE = (
-    "seedvr2x holds itself to the card's own memory there: torch limited to the memory free"
-    ' less 0.5 GiB, and the plan in 4.5 GiB less; the manual\'s "Under WSL2" section says why'
+    "seedvr2x holds itself to the card's own memory: torch limited to the memory free"
+    " less 0.5 GiB, and the plan in 4.5 GiB less"
 )
 # The two figures a held run plans under, as measured (seedvr2x/memory.py's comments), read
 # before the tests put their own in their place (round_figures).
@@ -92,7 +96,10 @@ def test_a_card_unread_is_held_under_a_margin_of_its_own(
     caplog.set_level(logging.DEBUG, logger="seedvr2x")  # the whole warning is said at debug
     reported, card = round(30.2 * GIB), round(28.22 * GIB)
     startup(monkeypatch, Card(reported, spills=True))
-    assert caplog.messages[-1].endswith(
+    whole = next(
+        m for m in caplog.messages if m.startswith("seedvr2x holds itself to the card there")
+    )
+    assert whole.endswith(
         "read through NVML; where NVML doesn't answer, the driver's figure less 3.0 GiB"
     )
     caplog.set_level(logging.INFO, logger="seedvr2x")
@@ -641,7 +648,8 @@ def test_windows_itself_is_taken_for_a_driver_that_lends_unasked(
     # The hold's and the environment's allocator's lines follow, the command line's words (the
     # nodes leave them out of ComfyUI's console: comfyui/models.py, _startup).
     assert {record.levelname for record in caplog.records} == {"WARNING"}
-    assert caplog.messages[0] == memory.LENDS and len(caplog.messages) == 3
+    assert caplog.messages[1] == LENDS_LINE_WINDOWS and len(caplog.messages) == 3
+    assert caplog.messages[0].startswith("seedvr2x holds itself to the card's own memory: ")
     found = memory.reading(30 * GIB)
     assert found.held and found.card == 28 * GIB and found.allocator == memory.POOL
     assert found.counted == 28 * GIB - memory.HELD_BACK
@@ -659,7 +667,7 @@ def test_windows_without_a_setting_runs_cudamallocasync_and_says_nothing_of_the_
     monkeypatch.setattr(memory.ctypes, "CDLL", lambda name: Nvml({NAMED: 28 * GIB}))
     assert memory.startup() == "backend:cudaMallocAsync"
     assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:cudaMallocAsync"
-    assert caplog.messages[0] == memory.LENDS
+    assert caplog.messages[1] == LENDS_LINE_WINDOWS
     assert not [m for m in caplog.messages if "environment's" in m or "expandable" in m]
     assert memory.reading(30 * GIB).allocator == memory.POOL
 
@@ -720,9 +728,10 @@ def test_a_driver_that_leaves_other_programs_out_is_not_asked(
     # A run there is held, whether such a driver would have refused or not: held for nothing,
     # it loses memory; not held where it should be, its frames.
     assert startup(monkeypatch, Card(30 * GIB, spills=False), nvml) == HELD
-    # The warning is the line (memory.LENDS); the finding whole, with that, is the debug line.
-    assert memory.spills() and caplog.messages[0] == LENDS_LINE
-    assert "not asked for more" in caplog.messages[1] and caplog.records[1].levelname == "DEBUG"
+    # The warning is the line (memory.lends_line), said after the hold's; the finding whole is
+    # the debug line after it.
+    assert memory.spills() and caplog.messages[2] == LENDS_LINE_WSL2
+    assert "not asked for more" in caplog.messages[3] and caplog.records[3].levelname == "DEBUG"
     # The two figures within the request's extra of each other, or NVML silent: asked, as
     # before, by one request of what the driver reports and that extra.
     for free in (30 * GIB - OVER, 30 * GIB, 31 * GIB, None):
@@ -746,13 +755,14 @@ def test_on_a_driver_that_spills_torch_is_held(
     assert memory.spills() and os.environ["PYTORCH_CUDA_ALLOC_CONF"] == HELD
     # Each warning is a line, and the whole text of each is said at debug after it (decided on
     # 2026-10-28, built on 2026-10-29).
+    # What seedvr2x does first, then why (the nodes' order).
     assert [record.levelname for record in caplog.records] == [
         *("WARNING", "DEBUG", "WARNING", "DEBUG")
     ]
-    assert caplog.messages[0] == LENDS_LINE
-    assert "gives memory the card doesn't have" in caplog.messages[1]
-    assert caplog.messages[2] == HOLDS_LINE
-    assert caplog.messages[3] == (
+    assert "gives memory the card doesn't have" in caplog.messages[3]
+    assert caplog.messages[0] == HOLDS_LINE
+    assert caplog.messages[2] == LENDS_LINE_WSL2
+    assert caplog.messages[1] == (
         "seedvr2x holds itself to the card there: torch's own allocator, its segments expandable,"
         " limited to the memory free less 3.0 GiB, and plans each step with a reserve by its own"
         " peak; a run that passes the limit is refused."
@@ -1073,12 +1083,12 @@ def test_no_answer_behind_wsl_is_taken_for_a_driver_that_spills(
     assert startup(monkeypatch, Card(30 * GIB, spills=True, failing="cuInit")) == HELD
     assert memory.spills() and os.environ["PYTORCH_CUDA_ALLOC_CONF"] == HELD
     assert "can't be asked whether it refuses: cuInit" in caplog.messages[0]
-    assert caplog.messages[1] == (
+    assert caplog.messages[1].startswith("seedvr2x holds itself to the card's own memory: ")
+    assert caplog.messages[2] == (
         "the GPU is Windows', reached through WSL2, and its driver didn't say whether it refuses"
         " what the card can't hold: taken for one that gives system memory in its place, as"
-        " that driver did whenever it was asked"
+        ' that driver did whenever it was asked; the manual\'s "Under WSL2" section says why'
     )
-    assert caplog.messages[2].startswith("seedvr2x holds itself to the card's own memory there")
     assert memory.usable(30 * GIB) == 27 * GIB
     limits = held(monkeypatch, 20 * GIB)
     assert memory.hold("cuda:0") == 17 * GIB and limits == [17 / 32]
@@ -1303,7 +1313,7 @@ def test_the_environment_s_allocator_stands(
         m for m in caplog.messages if m.startswith("seedvr2x holds itself to the card there")
     ]
     assert whole.startswith(f"seedvr2x holds itself to the card there: {held_by}")
-    assert warnings_said[1].startswith("seedvr2x holds itself to the card's own memory there")
+    assert warnings_said[0].startswith("seedvr2x holds itself to the card's own memory: ")
     limits = held(monkeypatch, 20 * GIB)
     assert memory.hold("cuda:0") == 17 * GIB and limits == [17 / 32]
     held(monkeypatch, GIB)  # 1 GiB free where torch may take 17 more
@@ -2589,7 +2599,7 @@ def test_the_shipped_holds_line_says_the_shipped_figures(
         monkeypatch.setattr(memory, name, value)
     caplog.set_level(logging.INFO, logger="seedvr2x")
     assert startup(monkeypatch, Card(30 * GIB, spills=True), Nvml({NAMED: 20 * GIB})) == HELD
-    assert caplog.messages == [LENDS_LINE, SHIPPED_HOLDS_LINE]
+    assert caplog.messages == [SHIPPED_HOLDS_LINE, LENDS_LINE_WSL2]
 
 
 def test_the_plain_allocators_holds_line_keeps_its_4_5_gib(
@@ -2661,9 +2671,12 @@ def test_a_driver_that_spills_is_warned_of_in_a_line_each_at_every_start(
     caplog.set_level(logging.INFO, logger="seedvr2x")
     assert startup(monkeypatch, Card(30 * GIB, spills=True), Nvml({NAMED: 20 * GIB})) == HELD
     assert [r.levelname for r in caplog.records] == ["WARNING", "WARNING"]
-    assert caplog.messages[0] == LENDS_LINE
-    assert caplog.messages[1] == HOLDS_LINE
-    assert all(len(message) < 220 for message in caplog.messages)
+    assert caplog.messages[0] == HOLDS_LINE
+    assert caplog.messages[1] == LENDS_LINE_WSL2
+    # The lines name NVIDIA's setting since 2026-11-09 (248 characters under WSL2 then): each
+    # line of every platform under 260, the whole finding (501) still at debug alone.
+    lines = [*caplog.messages, LENDS_LINE_WINDOWS, memory.UNANSWERED]
+    assert all(len(message) < 260 for message in lines)
 
 
 # ---- A reservation kept (memory.keep, the image server's) ----------------------------------------

@@ -307,19 +307,39 @@ SEGMENTS, PLAIN, POOL = "segments", "plain", "pool"
 VARIABLES = ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF")
 
 
-# The first warning of a driver that lends system memory, as a line (Driver.said is the whole
-# finding, said at debug). PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md leaves the words open).
-LENDS = (
-    "the GPU's driver lends system memory where the card is full (WSL2, Windows): a run that"
-    " passes the card slows down, then fails without an error to catch"
-)
+# The warning of a driver that lends system memory, as a line (Driver.said is the whole finding,
+# said at debug), said after what seedvr2x does about it, NVIDIA's setting named by what was
+# measured (the nodes' order and words, the user, 2026-11-08): on Windows with "Prefer No Sysmem
+# Fallback" a lone request past the card was refused, but a run's cudaMallocAsync pool held 32.06
+# to 32.50 GiB of a 31.82 GiB card, its decode's slices going from 1.7 to 51 s (RTX 5090,
+# 2026-11-08); under WSL2 the driver gave the memory whatever the setting, both times it was asked
+# (2026-10-11: probe). LENDS opens the line on every platform, so that an app that says the lending
+# in its own words leaves it out by these words (the nodes'). PROVISIONAL (impl-v010, 2026-10-29:
+# DESIGN.md leaves the words open).
+LENDS = "the GPU's driver lends system memory where the card is full"
+CONSEQUENCE = "a run that passes the card slows down, then fails without an error to catch"
+
+
+def lends_line() -> str:
+    """The lending driver's warning on this platform (LENDS, then NVIDIA's setting as measured)."""
+    if windows():
+        return (
+            f'{LENDS}, even with NVIDIA\'s "CUDA - Sysmem Fallback Policy" at "Prefer No Sysmem'
+            f' Fallback": {CONSEQUENCE}'
+        )
+    return (
+        f'{LENDS}, under WSL2, whatever NVIDIA\'s "CUDA - Sysmem Fallback Policy" says:'
+        f' {CONSEQUENCE}; the manual\'s "Under WSL2" section says why'
+    )
+
+
 # The warning where the driver behind WSL2's device gave no answer (probe returned None): taken
 # for one that lends, as it did whenever it was asked (startup). A constant, as LENDS, so that an
 # app that says the lending in its own words leaves it out by these words (the nodes').
 UNANSWERED = (
     "the GPU is Windows', reached through WSL2, and its driver didn't say whether it refuses what"
     " the card can't hold: taken for one that gives system memory in its place, as that driver"
-    " did whenever it was asked"
+    ' did whenever it was asked; the manual\'s "Under WSL2" section says why'
 )
 
 
@@ -662,24 +682,26 @@ def startup() -> str:
     global _reserve, _kept
     _spills, _limit, _left, _footing, _planned = False, None, HELD_BACK, None, None
     _plan_s_limit, _base, _reserve, _kept = None, None, RESERVE, None
+    # Why the run is held, said after what seedvr2x does about it (below): each warning a line,
+    # the whole finding at debug after it.
+    why: list[tuple[str, str | None]] = []
     if paravirtual():
         found = probe()
         if found is None:
             _spills = True
-            logger.warning("%s", UNANSWERED)
+            why.append((UNANSWERED, None))
         else:
             _spills = found.spills
             if _spills:
                 # A line, the whole finding at debug (DESIGN.md, Architecture, What it prints,
                 # decided on 2026-10-28; built on 2026-10-29: 501 characters at every start,
                 # resumes included).
-                logger.warning("%s", LENDS)
-                logger.debug("%s", found.said())
+                why.append((lends_line(), found.said()))
             else:
                 logger.info("%s", found.said())
     elif windows():
         _spills = True
-        logger.warning("%s", LENDS)
+        why.append((lends_line(), None))
     # An empty setting is no setting, and goes from the environment. torch takes the first of
     # the two variables that is set, empty or not: left there, an empty PYTORCH_CUDA_ALLOC_CONF
     # would hide a PYTORCH_ALLOC_CONF that names an allocator, and itself names none, which is
@@ -721,9 +743,8 @@ def startup() -> str:
         # PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md asks "a line each, the manual
         # explaining" and leaves the words open).
         logger.warning(
-            "seedvr2x holds itself to the card's own memory there: torch limited to the memory"
-            ' free less %.1f GiB, and %s; the manual\'s "Under WSL2"'
-            " section says why",
+            "seedvr2x holds itself to the card's own memory: torch limited to the memory free less"
+            " %.1f GiB, and %s",
             HELD_BACK / GIB,
             planned,
         )
@@ -739,6 +760,10 @@ def startup() -> str:
             plans,
             HELD_BACK_UNREAD / GIB,
         )
+        for line, finding in why:
+            logger.warning("%s", line)
+            if finding is not None:
+                logger.debug("%s", finding)
         # The default (given None) is said by the lines above; the environment's own, below.
         if given is not None and not _native:
             # The user's own allocator stands; said, since the hold then holds less.

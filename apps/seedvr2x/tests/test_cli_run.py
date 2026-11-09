@@ -1238,8 +1238,9 @@ def test_a_driver_that_spills_is_planned_under_and_held(
     )
     assert recorded["budget"] == planned_in
     assert (
-        "the GPU's driver lends system memory where the card is full (WSL2, Windows): a run that"
-        " passes the card slows down, then fails without an error to catch"
+        "the GPU's driver lends system memory where the card is full, under WSL2, whatever"
+        ' NVIDIA\'s "CUDA - Sysmem Fallback Policy" says: a run that passes the card slows down,'
+        ' then fails without an error to catch; the manual\'s "Under WSL2" section says why'
     ) in caplog.text
     # The plan's card lines name each figure, where "92.50 GiB free" alone would be taken for
     # what the plan counts on, and "87.20 GiB free" for what the driver reports; what torch's

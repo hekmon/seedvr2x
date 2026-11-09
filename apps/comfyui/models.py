@@ -275,7 +275,7 @@ class CudaMachine:
 # say their own words, once (_allocator_note).
 _COMMAND_LINE_WORDS = (
     "the allocator is the environment's",
-    "seedvr2x holds itself to the card's own memory there",
+    "seedvr2x holds itself to the card's own memory",
     memory.LENDS,
     memory.UNANSWERED,
 )

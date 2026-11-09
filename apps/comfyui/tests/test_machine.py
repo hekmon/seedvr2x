@@ -252,13 +252,17 @@ def test_the_librarys_command_line_warnings_are_not_shown_in_comfyuis_process(
             "backend:cudaMallocAsync",
         )
         memory.logger.warning(
-            "seedvr2x holds itself to the card's own memory there: torch limited to the memory"
+            "seedvr2x holds itself to the card's own memory: torch limited to the memory"
             " free less %.1f GiB",
             1.0,
         )
         # The driver that lends, as memory.startup logs it (through "%s"): the nodes' own INFO
         # line says it (test_the_lending_driver_is_told_in_the_nodes_words_once).
-        memory.logger.warning("%s", memory.LENDS)
+        for windows in (True, False):
+            # Each platform's line (memory.lends_line), as memory.startup logs it.
+            with monkeypatch.context() as platform:
+                platform.setattr(memory, "windows", lambda windows=windows: windows)
+                memory.logger.warning("%s", memory.lends_line())
         # WSL2's driver that didn't answer, taken for one that lends: the same finding, said by
         # the nodes' own line too.
         memory.logger.warning("%s", memory.UNANSWERED)
