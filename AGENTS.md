@@ -275,7 +275,10 @@ beside it; the `__init__.py` is seedvr2x's.
   1's regression, below): torch and torchvision (CUDA 13.0 builds, from PyTorch's index),
   diffusers, rotary-embedding-torch and the rest. A bump can move the output's bits: it remakes
   the references, with the measured reason said in its commit (DESIGN.md).
-- Linux x86_64 only for now (DESIGN.md: Linux first).
+- Linux x86_64 first (DESIGN.md: Linux first), and Windows on x86-64 beside it in the CLI's
+  lock (its pyproject's `environments`): torch and torchvision from the same index, the CUDA
+  packages and Triton Linux's alone as torch's own requirements mark them, every Linux pin the
+  same (the lock's Linux resolution diffed, 2026-11-09). The image server's lock is Linux's.
 - Every file is checked out with the repository's bytes on every platform (`.gitattributes`:
   `* text=auto eol=lf`, binary types by name, the vendored trees `-text`). Git for Windows'
   default (`core.autocrlf=true`) turned 525 of the 533 files into CRLF, and `tools/vendor.py

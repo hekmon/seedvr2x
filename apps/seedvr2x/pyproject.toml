@@ -65,8 +65,12 @@ py-modules = [
 packages = ["media"]
 
 [tool.uv]
-# Linux first (DESIGN.md).
-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+# Linux first (DESIGN.md), and Windows on x86-64 beside it in the same lock: torch and torchvision
+# from the same index, every Linux pin as it was (DESIGN.md, Windows and macOS).
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
 # torch's CUDA support packages, at the versions numz's environment got from PyTorch's index:
 # resolved from PyPI, they came out newer (cuda-bindings 13.4.3, cuda-pathfinder 1.8.3,
 # nvidia-nvjitlink 13.4.92).
