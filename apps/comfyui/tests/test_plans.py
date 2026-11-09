@@ -368,6 +368,24 @@ def test_the_colour_correction_a_boolean_split_or_none() -> None:
     assert plans.Settings.of(color_correction=False).color_correction == "none"
 
 
+def test_no_text_of_the_nodes_says_film_and_upscale_video_names_the_command_lines_stream() -> None:
+    """The nodes are for pictures and clips that fit in RAM (the user, 2026-11-08): no "film" in
+    any label, tooltip or description, nor in the nodes' README; Upscale Video's description says
+    what the command line does for a clip that doesn't fit, it streams it."""
+    for node in nodes.NODES:
+        schema = node.GET_SCHEMA()
+        said = [schema.description]
+        for each in [*schema.inputs, *schema.outputs]:
+            said += [each.display_name, each.tooltip]
+        for text in said:
+            assert "film" not in (text or "").lower(), (schema.node_id, text)
+    readme = (Path(nodes.__file__).parent / "README.md").read_text(encoding="utf-8")
+    assert "film" not in readme.lower()
+    description = nodes.UpscaleVideo.GET_SCHEMA().description or ""
+    assert "streams the clip from its source file" in description
+    assert "a clip of any length fits" in description
+
+
 def test_quality_is_a_combo_of_the_levels_on_upscale_video_alone_in_a_users_words() -> None:
     from seedvr2x.shotruns import QUALITY
 

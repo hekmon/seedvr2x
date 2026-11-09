@@ -158,13 +158,21 @@ _WHERE = {
     "decode": "to turn the model's result back into images",
 }
 
-# What the clip's whole in RAM and the command line's way, said in the clip's host refusal. The
-# repository's folder, not a URL (the user, 2026-11-06).
-_FILMS = (
-    "These nodes keep a clip whole in RAM, as ComfyUI does any video. seedvr2x's command line, in"
-    " the repository's apps/seedvr2x beside these nodes (see its README), is the tool for a long"
-    " film: it reads it shot by shot and never keeps it whole, picks up again after a stop, and"
-    " writes lossless files."
+# Why the clip can't be had here, said in the clip's host refusal after its figures.
+_WHOLE = (
+    "These nodes hold a clip whole in RAM, its frames and its output, as ComfyUI holds any video"
+)
+
+# The clip's host refusal's first way out (the user, 2026-11-08: the refusal named the command
+# line without the one feature that fixes the error): the command line streams the clip, so a
+# clip of any length fits. No RAM figure is promised: the command line's follows the longest
+# shot and the models, not the clip's length (MANUAL.md, GPU memory, "Then the system memory").
+# The repository's folder, not a URL (the user, 2026-11-06).
+_STREAMS = (
+    "upscale it with seedvr2x's command line, which streams it: it reads the clip from its source"
+    " file and writes lossless files shot by shot, never holding it whole, so that its RAM follows"
+    " the longest shot and the models and a clip of any length fits (it is in this repository's"
+    " apps/seedvr2x folder, beside these nodes; its README says how to use it)"
 )
 
 
@@ -303,8 +311,10 @@ def _megapixels(pixels: int) -> str:
 def _host(error: HostShort, keep: bool, clip: ClipSize | None) -> Words:
     """A plan that takes more RAM than the computer has available. For a clip, whose output the
     plan takes off the memory available first (clip.plan), the sum is said (the output, held
-    whole, and the rest of the run's own) and what the command line does instead."""
+    whole, and the rest of the run's own), and the first way out is the command line's stream,
+    which fits a clip of any length; then the nodes' own."""
     ways = [
+        *([_STREAMS] if clip is not None else []),
         _host_way(keep),
         "lower resolution on this node, or give it fewer frames"
         if clip is not None
@@ -336,7 +346,7 @@ def _host(error: HostShort, keep: bool, clip: ClipSize | None) -> Words:
             " work (the parts of the model that wait in RAM, the longest shot's windows and the"
             f" tiles' working copies); {_gib(there)} are available ({_gib(total - there)} short)"
         )
-    return f"{said}. {_FILMS[:-1]}", ways
+    return f"{said}. {_WHOLE}", ways
 
 
 def _plan(

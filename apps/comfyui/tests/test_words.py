@@ -286,7 +286,9 @@ def test_a_clips_output_that_the_host_cant_hold_is_worded_with_the_hosts_figures
 
 def test_a_clip_the_host_cant_hold_is_told_what_the_command_line_does() -> None:
     """The clip's output and the run's own work summed, the input not counted (ComfyUI holds it
-    already, so it is out of the RAM available), and what seedvr2x's command line does instead."""
+    already, so it is out of the RAM available), and, first of the ways out, the command line's
+    one feature that fixes it: it streams the clip, so a clip of any length fits (the user,
+    2026-11-08); then the nodes' own ways."""
     error = clip_refusal(24 * GIB, 33, 1 * GIB)
     assert isinstance(error, HostShort) and error.need is not None and error.available is not None
     size = words.ClipSize(33, clip.output_bytes(33, TARGET))
@@ -295,16 +297,25 @@ def test_a_clip_the_host_cant_hold_is_told_what_the_command_line_does() -> None:
     assert text.startswith(f"This clip needs about {total / GIB:.2f} GiB of your computer's RAM")
     assert f"{size.output / GIB:.2f} GiB for the output, 33 frames kept whole" in text
     assert f"{(error.available + size.output) / GIB:.2f} GiB are available" in text
-    # What the command line does instead, by its place beside the nodes and not by an address.
+    assert "These nodes hold a clip whole in RAM, its frames and its output" in text
+    # The command line's stream the first way out, by its place beside the nodes and not by an
+    # address, and no RAM figure promised for it; then the nodes' own, as before.
+    reason, ways = text.split("\nYou can ", 1)
+    assert "command line" not in reason
+    first, *others = ways.split("; or ")
+    assert first.startswith("upscale it with seedvr2x's command line, which streams it")
     for part in (
-        "seedvr2x's command line",
         "apps/seedvr2x",
-        "shot by shot and never keeps it whole",
-        "picks up again after a stop",
-        "writes lossless files",
+        "shot by shot, never holding it whole",
+        "a clip of any length fits",
+        "its RAM follows the longest shot and the models",
+        "lossless files",
     ):
-        assert part in text, part
-    assert "http" not in text and "give it fewer frames" in text
+        assert part in first, part
+    assert "GiB" not in first and "GB" not in first
+    assert others[0].startswith("close programs") or others[0].startswith("set keep in RAM")
+    assert "give it fewer frames" in text and "http" not in text
+    assert "film" not in text.lower()
     # A picture's host refusal says none of it.
     picture_text = str(words.refusal(picture(24 * GIB, host=1 * GIB)))
     assert "command line" not in picture_text and "give it fewer images" in picture_text

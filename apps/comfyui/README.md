@@ -6,10 +6,16 @@ memory planner: a picture, a batch of pictures or the frames of a short clip ups
 on the card you have, with the plan said in ComfyUI's console and a refusal, where one is due,
 before any model loads.
 
+> **A clip must fit in RAM.** ComfyUI holds a clip whole, its frames and its output, and so do the
+> nodes: they don't stream and can't resume. The output alone, float32 RGB as ComfyUI holds
+> images, takes 24.9 MB a frame at 1080p and 99.5 MB at 4K (360 frames of 4K: 33.4 GiB), and a
+> clip the RAM can't hold is refused before any model loads. The nodes are a convenience, for
+> pictures and clips that fit; seedvr2x's full tool is [the command line](../seedvr2x/README.md),
+> beside them in `apps/seedvr2x`: it streams a clip of any length, resumes after a stop and writes
+> 16-bit lossless files.
+
 > **Not published yet.** The nodes are built and tested against ComfyUI v0.44.0 and are installed by
-> hand, as below; they are published with version 0.2.0 ([DESIGN.md](../../DESIGN.md)). Whole
-> films, resume and 16-bit output are [the command line's](../seedvr2x/README.md): the
-> `apps/seedvr2x` folder of this repository, beside these nodes.
+> hand, as below; they are published with version 0.2.0 ([DESIGN.md](../../DESIGN.md)).
 
 ## The nodes
 
@@ -286,14 +292,15 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
 
 ## Limits
 
-- **A clip is kept whole in RAM**, as ComfyUI keeps any video: about 100 MB a 4K frame in float32,
+- **A clip is kept whole in RAM**, as ComfyUI keeps any video: 99.5 MB a 4K frame in float32,
   the input's frames and the output's. ComfyUI has the input in memory before the node starts, so
   the node counts the output and its own work against the RAM that is available, and says the input
   beside them (the plan's `RAM` line); a clip that does not fit is refused before any model loads,
-  and the refusal says so. For a whole film, use [the command line](../seedvr2x/README.md): it
-  reads a film shot by shot and never keeps it whole, picks up again after a stop, and writes
-  lossless files (the `apps/seedvr2x` folder of this repository; ComfyUI's console says so once,
-  when the nodes load).
+  and the refusal says so. For a clip the RAM can't hold, use [the command
+  line](../seedvr2x/README.md): it streams the clip from its source file to lossless files shot by
+  shot, never holding it whole, so that a clip of any length fits, its RAM following the longest
+  shot and the models, and picks up again after a stop (the `apps/seedvr2x` folder of this
+  repository; ComfyUI's console says so once, when the nodes load).
 - **Nothing resumes.** A run that stops starts again.
 - **A card that stopped answering may need ComfyUI restarted.** When a second Cancel leaves the
   wait for the card, the next run asks the card, without waiting, whether it has finished its last

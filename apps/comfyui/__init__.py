@@ -32,8 +32,9 @@ __all__ = ["comfy_entrypoint"]
 # Said once, when ComfyUI loads the nodes, never at a run (the user, 2026-11-06): where the nodes
 # stop and the command line begins. The repository's folder and its README, no address.
 logging.getLogger("seedvr2x_comfyui").info(
-    "seedvr2x's nodes hold a clip whole in RAM, as ComfyUI does. For a whole film, seedvr2x's"
-    " command line is the tool: it reads a film shot by shot, resumes after a stop and writes"
-    " lossless files. It is in this repository's apps/seedvr2x folder, beside these nodes, and"
-    " its README says how to use it."
+    "seedvr2x's nodes hold a clip whole in RAM, as ComfyUI does. For a clip that doesn't fit in"
+    " RAM, seedvr2x's command line is the tool: it streams the clip from its source file to"
+    " lossless files shot by shot, never holding it whole, so that a clip of any length fits, and"
+    " resumes after a stop. It is in this repository's apps/seedvr2x folder, beside these nodes,"
+    " and its README says how to use it."
 )

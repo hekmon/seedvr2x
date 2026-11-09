@@ -1373,12 +1373,13 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   `clip.upscale` of each shot one after the other (each seeded by its first frame, its frames
   written into the clip's one output array, no window across a cut, the plan made once and said
   shot by shot, the bar over all the shots), a cut list for other frames refused, a clip the host
-  can't hold refused before a model loads with the command line's way named, a seed some shot would
-  seed past 2**32 (the seed plus the last shot's first frame and the encode's offset) refused
-  before a model loads, a picture at resolution 17 refused and a clip at 17 planned, four channels
-  with an opaque alpha a view of the same memory and not a copy, the input said in the
-  plan's RAM line and out of the comparison, and the INFO line naming the command line said once
-  at import and never by a run; a clip at enhanced and maximum equal to `clip.upscale` at the
+  can't hold refused before a model loads with the command line's stream its first way out, a
+  seed some shot would seed past 2**32 (the seed plus the last shot's first frame and the
+  encode's offset) refused before a model loads, a picture at resolution 17 refused and a clip
+  at 17 planned, four channels with an opaque alpha a view of the same memory and not a copy,
+  the input said in the plan's RAM line and out of the comparison, and the INFO line naming the
+  command line (it streams the clip, so a clip of any length fits, and resumes) said once at import
+  and never by a run; a clip at enhanced and maximum equal to `clip.upscale` at the
   level shot by shot (the shot of 2 frames with one run of its two), an unwired cut list one shot
   equal to `clip.upscale` of the whole clip with its INFO line once, a level that is no option
   refused at the node's start, the runs writing into the one output array, the bar over the
@@ -1524,10 +1525,14 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   figures, the target check) worded with the way out; the four kinds of a plan (memory, host,
   input, pin) worded from their facts and never by the library's sentence, in none of the library's
   terms, with the value node and the socket that take the number that fits, and a clip's host
-  refusal naming what the command line does instead; `tests/test_machine.py` the driver that
-  lends said once at INFO, what seedvr2x does first and then why, NVIDIA's "CUDA - Sysmem Fallback
-  Policy" named by what was measured on each platform (on Windows even at "Prefer No Sysmem
-  Fallback", under WSL2 whatever it says), the reading shifted by ComfyUI's models, torch's
+  refusal naming first the command line's one feature that fixes it (it streams the clip from its
+  source file to lossless files shot by shot, never holding it whole, so a clip of any length
+  fits; no RAM figure promised), then the nodes' own ways, and no "film" in it (the user,
+  2026-11-08: none in the nodes' texts, tooltips and README, `tests/test_plans.py`);
+  `tests/test_machine.py` the driver that lends said once at INFO, what seedvr2x does first and then
+  why, NVIDIA's "CUDA - Sysmem Fallback Policy" named by what was measured on each platform (on
+  Windows even at "Prefer No Sysmem Fallback", under WSL2 whatever it says), the reading shifted by
+  ComfyUI's models, torch's
   allocator setting given to `memory.startup` and the
   environment left as it was; `tests/test_process_state.py` torch's memory fraction never set
   and the global random generators as they were after a run; `tests/test_room.py` also the card

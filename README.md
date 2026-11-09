@@ -125,8 +125,8 @@ possible:
     and on macOS (Apple's M chips), Linux and WSL2 running it today; and the 7B's other smaller
     files, already published: fp8, NVFP4 and the other GGUF types, 4.8 to 8.8 GB instead of
     16.5.
-  - **ComfyUI nodes,** built on the same library, for ComfyUI's own workflows: begun, published
-    with version 0.2.0, on Linux, Windows and macOS.
+  - **ComfyUI nodes,** built on the same library, for ComfyUI's own workflows, on pictures and
+    clips that fit in RAM: begun, published with version 0.2.0, on Linux, Windows and macOS.
 - **Later:**
   - **Several GPUs for one job,** one process per card, each taking its own shots.
   - **HDR sources,** their HDR10 metadata carried to the output.

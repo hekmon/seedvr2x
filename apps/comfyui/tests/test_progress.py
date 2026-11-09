@@ -382,7 +382,7 @@ def test_a_later_run_names_its_own_frames_and_counts_its_decode_in_them() -> Non
         "Frames 1 to 480, run 1 of 2",
         "Frames 3 to 480, run 2 of 2",
     ]
-    # A clip that is a shot cut from a longer film starts where the shot does.
+    # A clip that is a shot cut from a longer clip starts where the shot does.
     inside = progress.clip_passes([Shot(100, 130)], TARGET, 5, None, None, runs=2)
     assert [each.label for each in inside] == [
         "Frames 101 to 130, run 1 of 2",

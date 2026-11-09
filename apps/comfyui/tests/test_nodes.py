@@ -694,8 +694,9 @@ def test_a_clip_the_host_cant_hold_is_refused_before_a_model_loads_in_the_nodes_
             cuts=(Shot(0, 21),),
         )
     text = str(refused.value)
-    assert "kept whole" in text and "seedvr2x's command line" in text
-    assert "apps/seedvr2x" in text and "picks up again after a stop" in text
+    assert "kept whole" in text and "seedvr2x's command line, which streams it" in text
+    assert "apps/seedvr2x" in text and "a clip of any length fits" in text
+    assert text.index("command line") < text.index("close programs that use the computer")
     assert "give it fewer frames" in text and "--" not in text
     assert machine.loads == []
     # A picture says none of it.
@@ -739,6 +740,7 @@ def test_the_nodes_load_with_one_line_naming_the_command_line_and_no_run_says_it
         assert len(said) == 1
         assert "apps/seedvr2x" in said[0] and "README" in said[0] and "http" not in said[0]
         assert "shot by shot" in said[0] and "resumes after a stop" in said[0]
+        assert "streams the clip" in said[0] and "film" not in said[0]
         caplog.clear()
         run_shots(machine, tmp_path, pictures(5), (Shot(0, 5),))
         upscale_image(handle(tmp_path), plans.Settings(), pictures(1), RESOLUTION, "1")
