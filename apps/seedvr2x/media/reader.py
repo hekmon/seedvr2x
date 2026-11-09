@@ -42,7 +42,6 @@ waits on it, the read failing, naming what it waited for (_Run._watch)."""
 import io
 import logging
 import math
-import os
 import queue
 import re
 import subprocess
@@ -60,6 +59,7 @@ from typing import Self, cast
 import numpy as np
 import numpy.typing as npt
 
+from media.channel import OVERWRITE, Channel
 from media.conversion import Conversion
 from media.ffmpeg import NO_METADATA, MediaError, ends_with_us, input_args
 from media.index import FrameIndex
@@ -173,21 +173,22 @@ def read_command(
     conversion: Conversion,
     seek: str | None,
     select: int | None,
-    hashes: int,
-    md5: int | None = None,
+    hashes: str,
+    md5: str | None = None,
 ) -> list[str]:
     """The ffmpeg command reading path: -copyts and -ss `seek` (seconds after the file's start,
     relative to it as seeking.md's method 2 has it, never -seek_timestamp: mechanism 5), without
     accurate seek; the decoded frames given to outputs of their own, each with its own filter
     graph: kept from pts `select` on (select) and converted to gbrp16le on stdout, as Decoder
-    gives them; every one hashed (CRC-32) to the pipe of file descriptor `hashes`, as the first
-    pass hashes them (media/scan.py); with `md5`, the frames kept also hashed by MD5, as decoded,
-    to that descriptor (tests/test_seek_sources.py). Each output's encoder in one thread
+    gives them; every one hashed (CRC-32) to the output `hashes` (a channel's: media/channel.py),
+    as the first pass hashes them (media/scan.py); with `md5`, the frames kept also hashed by MD5,
+    as decoded, to that output (tests/test_seek_sources.py). Each output's encoder in one thread
     (ONE_THREAD), none taking the source's metadata, as the first pass's (ffmpeg.NO_METADATA)."""
     kept = None if select is None else f"select=gte(pts\\,{select})"
     rgb = conversion.filters() if kept is None else f"{kept},{conversion.filters()}"
     return [
         *("ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-copyts"),
+        *OVERWRITE,
         # No accurate seek: the select by pts is the selection. Its trim, which fftools puts in
         # front of each graph with -ss (fftools/ffmpeg_demux.c:1140-1142, ffmpeg_filter.c:
         # 1945-1947), only dropped frames before -ss, which select drops too, and is a filter the
@@ -207,14 +208,14 @@ def read_command(
         # converted, never the index's, and went back to the start (6 to 7 attempts on uyvy422,
         # yuyv422 and nv12 rawvideo and rgb24 PNG, 2 to 3 on FFV1 bgr0: 2026-10-09).
         *("-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base:v", "demux", *NO_METADATA),
-        *("-c:v", "rawvideo", *ONE_THREAD, "-f", "framehash", "-hash", "crc32", f"pipe:{hashes}"),
+        *("-c:v", "rawvideo", *ONE_THREAD, "-f", "framehash", "-hash", "crc32", hashes),
         *(
             ()
             if md5 is None
             else (
                 *("-map", "0:v:0", *(() if kept is None else ("-vf", kept))),
                 *("-fps_mode", "passthrough", "-enc_time_base:v", "demux", *NO_METADATA),
-                *("-c:v", "rawvideo", *ONE_THREAD, "-f", "framemd5", f"pipe:{md5}"),
+                *("-c:v", "rawvideo", *ONE_THREAD, "-f", "framemd5", md5),
             )
         ),
     ]
@@ -270,44 +271,49 @@ class _Run:
         except OSError as error:
             what = f"reading with ffmpeg: no temporary file for its errors: {error}"
             raise MediaError(what) from error
-        pipes = [os.pipe() for _ in range(2 if md5 else 1)]
-        self.command = read_command(
-            path, conversion, seek, select, pipes[0][1], pipes[1][1] if md5 else None
-        )
+        channels: list[Channel] = []
         try:
+            channels.extend(Channel() for _ in range(2 if md5 else 1))
+            self.command = read_command(
+                path,
+                conversion,
+                seek,
+                select,
+                channels[0].output,
+                channels[1].output if md5 else None,
+            )
             # In a process group of its own, out of reach of the terminal's Ctrl-C, which only
             # seedvr2x handles (stop.py), as Decoder's.
             self._process = subprocess.Popen(
                 self.command,
                 stdout=subprocess.PIPE,
                 stderr=self._log,
-                pass_fds=[write for _, write in pipes],
+                pass_fds=[passed for channel in channels for passed in channel.passed],
                 process_group=0,
                 preexec_fn=ends_with_us(),
             )
         except BaseException:
-            for read, write in pipes:
-                os.close(read)
-                os.close(write)
+            for channel in channels:
+                channel.close()
             self._log.close()
             raise
-        for _, write in pipes:
-            os.close(write)
+        for channel in channels:
+            channel.started()
         assert self._process.stdout is not None
         self._stdout = cast(io.BufferedReader, self._process.stdout)
         self.hashes: queue.Queue[tuple[int, str] | None] = queue.Queue()
         self.md5s: queue.Queue[tuple[int, str] | None] | None = queue.Queue() if md5 else None
-        self._threads = [self._drain(pipes[0][0], self.hashes)]
+        self._threads = [self._drain(channels[0], self.hashes)]
         if self.md5s is not None:
-            self._threads.append(self._drain(pipes[1][0], self.md5s))
+            self._threads.append(self._drain(channels[1], self.md5s))
         threading.Thread(target=self._watch, daemon=True).start()
 
     def _drain(
-        self, descriptor: int, into: "queue.Queue[tuple[int, str] | None]"
+        self, channel: Channel, into: "queue.Queue[tuple[int, str] | None]"
     ) -> threading.Thread:
         def drain() -> None:
             try:
-                with os.fdopen(descriptor, "rb") as lines:
+                with channel.stream(self._process) as lines:
                     for line in lines:
                         self._progress = time.monotonic()
                         found = LINE.match(line)

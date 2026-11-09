@@ -3,9 +3,9 @@ the frame index made meanwhile (DESIGN.md, Input; media/index.py), ffmpeg's idet
 frame (Idet), and, given the shot detector, every frame scaled to its input and fed to it as it
 comes, its probabilities kept in the index (DESIGN.md, Shot detection)."""
 
+import io
 import logging
 import math
-import os
 import queue
 import re
 import subprocess
@@ -22,6 +22,7 @@ from typing import IO, Any, Protocol, cast
 import numpy as np
 import numpy.typing as npt
 
+from media.channel import OVERWRITE, Channel
 from media.ffmpeg import NO_METADATA, MediaError, argument, ends_with_us, input_args
 from media.index import NOPTS, FrameIndex
 from seedvr2x.clock import spent as span_seconds
@@ -299,8 +300,8 @@ def scan(path: Path, detector: Detects | None = None) -> Scan:
     refused = name_error(path)
     if refused:
         raise MediaError(refused)
-    pipe = os.pipe() if detector is not None else None
-    arguments = command(path, None if pipe is None else pipe[1])
+    channel = Channel() if detector is not None else None
+    arguments = command(path, None if channel is None else channel.output)
     scanned: list[object] = []
     scanner = threading.Thread(target=_packets_into, args=(path, scanned), daemon=True)
     scanner.start()
@@ -312,21 +313,22 @@ def scan(path: Path, detector: Detects | None = None) -> Scan:
             stderr=subprocess.PIPE,
             text=True,
             errors="replace",
-            pass_fds=() if pipe is None else (pipe[1],),
+            pass_fds=() if channel is None else channel.passed,
             preexec_fn=ends_with_us(),
         )
     except BaseException:
-        if pipe is not None:
-            os.close(pipe[0])
-            os.close(pipe[1])
+        if channel is not None:
+            channel.close()
         raise
-    if pipe is not None:
-        os.close(pipe[1])  # ffmpeg's alone: the pipe ends when its output does
+    if channel is not None:
+        channel.started()  # ffmpeg's alone: the channel ends when its output does
     try:
-        run = _Run(process, None if pipe is None else pipe[0])
+        run = _Run(process, channel)
     except BaseException:
         process.kill()
         process.wait()
+        if channel is not None:
+            channel.close()
         raise
     try:
         probabilities = run.detect(detector)
@@ -443,11 +445,12 @@ def name_error(path: Path) -> str:
     return ""
 
 
-def command(path: Path, frames: int | None = None) -> list[str]:
-    """The first pass's ffmpeg command over path (scan); with frames, the file descriptor of the
-    pipe the shot detector's frames go to, a third output (_detector_output)."""
+def command(path: Path, frames: str | None = None) -> list[str]:
+    """The first pass's ffmpeg command over path (scan); with frames, the output the shot
+    detector's frames go to (a channel's: media/channel.py), a third output (_detector_output)."""
     return [
         *("ffmpeg", "-hide_banner", "-nostdin", "-nostats"),
+        *(() if frames is None else OVERWRITE),
         # repeat: two reports alike in a row are both printed, never folded into "Last message
         # repeated" (libavutil/log.c), each tied to its frame.
         *("-loglevel", "repeat+level+info", "-debug_ts", "-copyts"),
@@ -478,10 +481,9 @@ def command(path: Path, frames: int | None = None) -> list[str]:
     ]
 
 
-def _detector_output(descriptor: int) -> list[str]:
-    """The first pass's output of the shot detector's frames, to the pipe of file descriptor
-    descriptor: every frame decoded, scaled to WIDTH x HEIGHT rgb24 on 4 threads, its encoder
-    holding no frame."""
+def _detector_output(output: str) -> list[str]:
+    """The first pass's output of the shot detector's frames, to `output`: every frame decoded,
+    scaled to WIDTH x HEIGHT rgb24 on 4 threads, its encoder holding no frame."""
     # DESIGN.md, Shot detection: every frame of the first pass's decode, scaled to 48x27 as
     # TransNetV2's official extraction scales them (ffmpeg's default scaler), on a fixed number of
     # threads, 4, so that its input doesn't depend on the CPU count. As measurement extracted
@@ -527,7 +529,7 @@ def _detector_output(descriptor: int) -> list[str]:
         *("-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base:v", "demux", *NO_METADATA),
         *("-threads", "4", "-thread_type", "slice"),
         *("-s", f"{WIDTH}x{HEIGHT}", "-pix_fmt", "rgb24"),
-        *("-f", "rawvideo", f"pipe:{descriptor}"),
+        *("-f", "rawvideo", output),
     ]
 
 
@@ -548,13 +550,18 @@ class _Frames:
     them (drain), CHUNK at a time, into a queue of HELD reads at most (get), the end marked by
     None. read counts the frames read; error says why their output ended inside a frame."""
 
-    def __init__(self, descriptor: int, progress: _Progress) -> None:
+    def __init__(
+        self, channel: Channel, process: "subprocess.Popen[str]", progress: _Progress
+    ) -> None:
         self.read = 0
         self.error = ""
         self._progress = progress
         self._queue: queue.Queue[npt.NDArray[np.uint8] | None] = queue.Queue(HELD)
         self._stopped = threading.Event()
-        self._stream = os.fdopen(descriptor, "rb", buffering=0)
+        self._channel, self._process = channel, process
+        self._stream: io.RawIOBase | io.BufferedReader | None = (
+            None  # opened by drain, in its thread (Channel.stream)
+        )
 
     def get(self) -> npt.NDArray[np.uint8] | None:
         """The next frames read, (n, 27, 48, 3) uint8, or None at their end."""
@@ -571,11 +578,14 @@ class _Frames:
                 break
 
     def close(self) -> None:
-        self._stream.close()
+        if self._stream is not None:
+            self._stream.close()
+        self._channel.close()
 
     def drain(self) -> None:
         """Read the frames to their pipe's end, or until stopped: a thread's whole work."""
         try:
+            self._stream = self._channel.stream(self._process, buffering=0)
             while not self._stopped.is_set():
                 chunk = np.empty((CHUNK, HEIGHT, WIDTH, 3), np.uint8)
                 view = memoryview(chunk).cast("B")
@@ -613,13 +623,13 @@ class _Run:
     watchdog stopping ffmpeg when nothing moves for WATCHDOG seconds, which stalled then says.
     What a reading thread raises stops ffmpeg at once, and failed says it (_reading)."""
 
-    def __init__(self, process: "subprocess.Popen[str]", frames: int | None) -> None:
+    def __init__(self, process: "subprocess.Popen[str]", frames: Channel | None) -> None:
         assert process.stdout is not None and process.stderr is not None
         self.process = process
         self.progress = _Progress()
         self.decoded = _Decoded(self.progress)
         self.hashed = _Hashed(self.progress)
-        self.frames = None if frames is None else _Frames(frames, self.progress)
+        self.frames = None if frames is None else _Frames(frames, process, self.progress)
         self.spent = 0.0  # seconds in the detector
         self.stalled: list[str] = []
         # What a reading thread raised, with which thread it was (_reading).

@@ -107,7 +107,7 @@ def test_reads_on_one_slice() -> None:
     # gives them.
     frame = _samples("yuv420p10le", WIDTH * HEIGHT * 3 // 2, 10)
     conversion = Conversion("yuv420p10le", "709", "limited", "left")
-    command = read_command(Path("in.mkv"), conversion, None, 0, 3)
+    command = read_command(Path("in.mkv"), conversion, None, 0, "pipe:3")
     output = command[command.index("-map") : command.index("pipe:1")]
     assert output[output.index("-vf") + 1].startswith("select=gte(pts\\,0),")
     _on_one_slice(frame, "yuv420p10le", output, "-filter_threads")

@@ -7482,10 +7482,10 @@ def test_cuts_replace_the_detector(
 
     source_path = job(tmp_path, monkeypatch)
     asked = asked_of_the_pull(monkeypatch)
-    outputs: list[int | None] = []
+    outputs: list[str | None] = []
     command = scan.command
 
-    def commanded(path: Path, frames: int | None = None) -> list[str]:
+    def commanded(path: Path, frames: str | None = None) -> list[str]:
         outputs.append(frames)
         return command(path, frames)
 

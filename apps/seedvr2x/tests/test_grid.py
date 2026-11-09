@@ -447,14 +447,10 @@ def made(tmp_path_factory: pytest.TempPathFactory) -> Callable[[str], Holed]:
     return get
 
 
-def pipes(command: tuple[str, ...]) -> tuple[int, ...]:
-    """The file descriptors of a read's hash pipes, in its command's order: the CRC-32s', then
-    the MD5s' when asked."""
-    return tuple(
-        int(part.removeprefix("pipe:"))
-        for part in command
-        if part.startswith("pipe:") and part != "pipe:1"
-    )
+def pipes(command: tuple[str, ...]) -> tuple[str, ...]:
+    """The outputs of a read's hash pipes, `pipe:N` with their file descriptors, in its command's
+    order: the CRC-32s', then the MD5s' when asked."""
+    return tuple(part for part in command if part.startswith("pipe:") and part != "pipe:1")
 
 
 def read(case: Holed, first: int, counts: list[int], frames: int | None = None) -> Reader:
@@ -803,9 +799,9 @@ def test_without_holes_the_reads_are_as_before(
         *("-fps_mode", "passthrough", "-noautoscale", *one, *bare),
         *("-f", "rawvideo", "-pix_fmt", "gbrp16le", "pipe:1"),
         *(*hashed, "-c:v", "rawvideo", *one, "-f", "framehash", "-hash", "crc32"),
-        f"pipe:{hashes}",
+        hashes,
         *("-map", "0:v:0", "-vf", select, *hashed[2:]),
-        *("-c:v", "rawvideo", *one, "-f", "framemd5", f"pipe:{md5}"),
+        *("-c:v", "rawvideo", *one, "-f", "framemd5", md5),
     ]
     assert list(attempt.command) == read_command(
         case.full, case.conversion, "4.004000", 6256, hashes, md5

@@ -40,6 +40,7 @@ from test_probe import has_encoder
 
 from media import ffmpeg, grid, index
 from media import reader as reading
+from media.channel import Channel
 from media.conversion import Conversion
 from media.decode import Decoder
 from media.ffmpeg import MediaError, input_args
@@ -1440,12 +1441,12 @@ def lagging(lag: int) -> type[reading._Run]:
 
     class Lagging(reading._Run):
         def _drain(
-            self, descriptor: int, into: "queue.Queue[tuple[int, str] | None]"
+            self, channel: Channel, into: "queue.Queue[tuple[int, str] | None]"
         ) -> threading.Thread:
             if into is not self.hashes:
-                return super()._drain(descriptor, into)
+                return super()._drain(channel, into)
             lines: queue.Queue[tuple[int, str] | None] = queue.Queue()
-            drained = super()._drain(descriptor, lines)
+            drained = super()._drain(channel, lines)
 
             def gate() -> None:
                 selected = 0
@@ -1483,8 +1484,8 @@ def test_each_output_encodes_in_one_thread() -> None:
     # one thread; and none takes the source's metadata or chapters, as none of the first pass's
     # does, whose headers ffmpeg prints among the lines it reads (ffmpeg.NO_METADATA).
     conversion = Conversion("yuv420p", "709", "limited", "left")
-    for md5 in (None, 6):
-        command = read_command(Path("in.mkv"), conversion, "1.000000", 1000, 5, md5)
+    for md5 in (None, "pipe:6"):
+        command = read_command(Path("in.mkv"), conversion, "1.000000", 1000, "pipe:5", md5)
         maps = [k for k, part in enumerate(command) if part == "-map"]
         ends = [k for k, part in enumerate(command) if part.startswith("pipe:")]
         assert len(maps) == len(ends) == (2 if md5 is None else 3)

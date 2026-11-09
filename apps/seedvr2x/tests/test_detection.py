@@ -288,7 +288,7 @@ def test_without_detector_no_third_output(clip: Path) -> None:
     # --cuts: the first pass as before the detector, two outputs, no probabilities.
     arguments = first.command(clip)
     assert arguments.count("-map") == 2 and "rgb24" not in arguments
-    with_frames = first.command(clip, 3)
+    with_frames = first.command(clip, "pipe:3")
     assert with_frames[: len(arguments)] == arguments
     assert with_frames[len(arguments) :] == [
         *("-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base:v", "demux"),
@@ -448,19 +448,23 @@ def test_a_reading_thread_that_raises_stops_the_pass(
             return
         # The frames' reader takes no lines: it raises once frames were read.
         monkeypatch.setattr(first, "CHUNK", 7)
-        stream = self._stream
+        opened = self._channel.stream
 
         class Short:
+            def __init__(self, stream: Any) -> None:
+                self.stream = stream
+
             def readinto(self, into: Any) -> int:
                 reads[0] += 1
                 if reads[0] > 20:
                     raise RuntimeError("made to fail")
-                return stream.readinto(into)
+                return self.stream.readinto(into)
 
             def close(self) -> None:
-                stream.close()
+                self.stream.close()
 
-        self._stream = Short()
+        # The stream as the channel opens it in the thread (media/channel.py), read short.
+        monkeypatch.setattr(self._channel, "stream", lambda *a, **k: Short(opened(*a, **k)))
         reading(self)
 
     monkeypatch.setattr(getattr(first, kind), name, failing)
