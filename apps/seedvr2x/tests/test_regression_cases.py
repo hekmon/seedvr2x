@@ -2,9 +2,10 @@
 (tests/test_regression.py, case), on the CPU: the directory named by the card's name, a card with
 none skipped; a tiled case at its own size, with what its debug log says of each tiled pass there;
 milestone 1's and a padding case's resolution; at 1080 and the test's own grids where the card says
-nothing."""
+nothing; Windows' cards under a level of their own."""
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,8 +19,26 @@ def card_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(test_regression, "REFERENCE", str(tmp_path))
     monkeypatch.setattr(test_regression, "card", lambda: CARD)
     directory = tmp_path / "seedvr2x" / "NVIDIA-GeForce-RTX-5090"
+    if sys.platform == "win32":
+        directory = tmp_path / "seedvr2x" / "windows" / "NVIDIA-GeForce-RTX-5090"
     directory.mkdir(parents=True)
     return directory
+
+
+@pytest.mark.parametrize(
+    ("platform", "level"), [("linux", ()), ("win32", ("windows",))], ids=["linux", "windows"]
+)
+def test_windows_cards_are_under_a_level_of_their_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, level: tuple[str, ...]
+) -> None:
+    # A picture made natively differs from WSL2's on the same card (2026-11-09): Windows holds to
+    # references of its own, Linux's (WSL2's among them) where they were.
+    monkeypatch.setattr(test_regression, "REFERENCE", str(tmp_path))
+    monkeypatch.setattr(test_regression.sys, "platform", platform)
+    assert test_regression.platform_level() == level
+    assert test_regression.card_directory(CARD) == Path(
+        tmp_path, "seedvr2x", *level, "NVIDIA-GeForce-RTX-5090"
+    )
 
 
 def test_a_tiled_case_takes_the_card_s_size_and_grids(

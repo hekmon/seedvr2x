@@ -33,7 +33,13 @@ being the name torch gives the card (torch.cuda.get_device_name) with each run o
 other than letters and digits a hyphen (seedvr2x/NVIDIA-GeForce-RTX-5090/). Each card holds to
 references of its own (decided on 2026-10-21): the noise is the same on every card (Pipeline
 step 2), but the kernels the GPU picks are not, so that another card's frames differ from a
-card's in the last bits. A card with no directory there has every case skipped, naming the card.
+card's in the last bits. Windows' own, under a platform level, seedvr2x/windows/<card>/
+(decided on 2026-11-09, DESIGN.md, Allocator: a picture made natively differed from the same run
+under WSL2 on the same card, 54 to 57 dB PSNR, and Windows repeats its own; torch's Windows wheel
+has no FlashAttention backend in SDPA, so another kernel runs there, inferred and not isolated),
+made natively as below; Linux's,
+WSL2's among them, stay at seedvr2x/<card>/ (platform_level). A card with no directory there has
+every case skipped, naming the card.
 A card with one runs every case, and a reference missing fails it. Inputs, in m1/:
 - input_rgb.mkv: 45 frames of 8-bit RGB FFV1 at 960x540, read alike by numz (OpenCV) and by
   seedvr2x: frames 48-92 of SEGMENT, a 1920x1080 yuv420p FFV1 segment of an animated episode
@@ -140,9 +146,10 @@ To make a card's references again, or for a new card: run each case's command (c
 the options above, in seedvr2x's defaults, with --dump-frames and the master's output) at the
 card's sizes, on a commit whose regression passed on a card that has references, and move each
 run's ours.mkv and frames/ to <name>.mkv and <name>_frames/ in the card's directory; write
-cases.json. A gate's case keeps 2 GiB of the card's budget (DESIGN.md, Validation, decided on
-2026-10-21): each case at a size whose plan beside a second program holding 2 GiB of the card is
-neither refused nor planned with the reserve of 2.5 GiB, its window and tiles the same. A change
+cases.json. Windows' natively, the run's own platform giving the directory (platform_level).
+A gate's case keeps 2 GiB of the card's budget (DESIGN.md, Validation, decided on 2026-10-21):
+each case at a size whose plan beside a second program holding 2 GiB of the card is neither
+refused nor planned with the reserve of 2.5 GiB, its window and tiles the same. A change
 that moves the output's bits is allowed with a measured reason, which remakes the references, said
 in its commit (DESIGN.md). A case refused at its run for the memory it takes is skipped, with the
 refusal's figures (upscaled), and one without its reference where the card can't run it likewise
@@ -230,12 +237,20 @@ def card() -> str:
     return found.stdout.strip().splitlines()[-1]
 
 
+def platform_level() -> tuple[str, ...]:
+    """The level of OWN that holds this platform's cards: none on Linux, `windows` on Windows
+    (the module's docstring)."""
+    return ("windows",) if sys.platform == "win32" else ()
+
+
 def card_directory(name: str) -> Path:
-    """Where the references of the card `name` are: OWN/<name>/ in SEEDVR2X_REFERENCE_DIR, its
-    name's runs of other characters than letters and digits each a hyphen ("NVIDIA GeForce RTX
-    5090": seedvr2x/NVIDIA-GeForce-RTX-5090/)."""
+    """Where the references of the card `name` are: OWN/<name>/ in SEEDVR2X_REFERENCE_DIR on
+    Linux, OWN/windows/<name>/ on Windows (platform_level), its name's runs of other characters
+    than letters and digits each a hyphen ("NVIDIA GeForce RTX 5090":
+    seedvr2x/NVIDIA-GeForce-RTX-5090/, seedvr2x/windows/NVIDIA-GeForce-RTX-5090/)."""
     assert REFERENCE is not None
-    return Path(REFERENCE) / OWN / re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-")
+    card = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-")
+    return Path(REFERENCE, OWN, *platform_level(), card)
 
 
 @dataclass(frozen=True)
@@ -669,8 +684,13 @@ def readings(free: Free, monkeypatch: pytest.MonkeyPatch) -> list[memory.Reading
         for by_card in shifts if free.card is not None else (0,):
             card = None if free.card is None else free.card + by_card
             monkeypatch.setattr(memory, "_spills", free.held)
-            monkeypatch.setattr(memory, "_native", True)
-            monkeypatch.setattr(memory, "_segments", True)
+            # The allocator the command runs with by default on this platform (memory.startup):
+            # torch's own with expandable segments on Linux; cudaMallocAsync on Windows, whose
+            # torch has no segments, each step's reserve then the pool's (impl-win-3, 2026-11-09:
+            # Linux's taken there made other tiles than the run's).
+            windows = sys.platform == "win32"
+            monkeypatch.setattr(memory, "_native", not windows)
+            monkeypatch.setattr(memory, "_segments", not windows)
             monkeypatch.setattr(memory, "_footing", None)
             monkeypatch.setattr(memory, "_planned", None)
             monkeypatch.setattr(
