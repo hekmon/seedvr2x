@@ -1477,3 +1477,49 @@ def test_the_least_room_replaces_the_vae_floor_alone(allocator: str) -> None:
     assert peaks.reserve(peaks.DECODE_PHASE, GIB, allocator, None, None) == peaks.reserve(
         peaks.DECODE_PHASE, GIB, allocator
     )
+
+
+# ---- The tiles remembered while a search runs (tiles_remembered) ---------------------------------
+
+
+def _tiled_figures() -> list[int]:
+    """Every tiled pass of both kinds over 1080p's, 4K's and an odd frame's padding, at each tile
+    side the planner takes, in bytes."""
+    found: list[int] = []
+    for padded in (OURS_1080, OURS_4K, padded_size((1036, 1844))):
+        for side in range(peaks.TILE_MIN, peaks.TILE_MAX + 1, peaks.TILE_STEP):
+            if not peaks.covers(padded, Tiles(side)):
+                for column in (0, 1):
+                    found.append(round(peaks._fit(padded, Tiles(side), column)))  # pyright: ignore[reportPrivateUsage]
+    return found
+
+
+def test_the_tiles_remembered_change_no_figure() -> None:
+    plain = _tiled_figures()
+    with peaks.tiles_remembered():
+        assert _tiled_figures() == plain  # made and remembered
+        assert _tiled_figures() == plain  # read from the memo
+        remembered = peaks._remembered_tile  # pyright: ignore[reportPrivateUsage]
+        assert remembered is not None
+        assert remembered.cache_info().hits > 0  # pyright: ignore[reportFunctionMemberAccess]
+        assert remembered.cache_info().maxsize == peaks.TILE_MEMO  # pyright: ignore[reportFunctionMemberAccess]
+    assert _tiled_figures() == plain
+
+
+def test_the_tiles_remembered_are_the_searchs_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Dropped at the end, the outer memo serving a nested search, and a figure set between two
+    # searches read by the second: the memo never outlives its search.
+    with peaks.tiles_remembered():
+        outer = peaks._remembered_tile  # pyright: ignore[reportPrivateUsage]
+        with peaks.tiles_remembered():
+            assert peaks._remembered_tile is outer  # pyright: ignore[reportPrivateUsage]
+        assert peaks._remembered_tile is outer  # pyright: ignore[reportPrivateUsage]
+        before = _tiled_figures()
+    assert peaks._remembered_tile is None  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(peaks, "CUT_OFF_EXTRA", peaks.CUT_OFF_EXTRA + GIB)
+    with peaks.tiles_remembered():
+        after = _tiled_figures()
+    assert after != before and after == _tiled_figures()
+    with pytest.raises(RuntimeError), peaks.tiles_remembered():
+        raise RuntimeError
+    assert peaks._remembered_tile is None  # pyright: ignore[reportPrivateUsage]

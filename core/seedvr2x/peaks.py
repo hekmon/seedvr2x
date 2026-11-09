@@ -10,7 +10,9 @@ Sizes are (height, width) in pixels; `padded` is the frame the model takes, the 
 (frames.padded_size). No torch at import: the command line plans before it imports torch
 (tests/test_cli.py)."""
 
-from functools import cache
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
+from functools import cache, lru_cache
 
 from seedvr2x import tilegrid, weights
 from seedvr2x.frames import padded_length
@@ -1136,7 +1138,39 @@ def _fit(padded: tuple[int, int], tiles: Tiles | None, column: int) -> float:
             f"tiles of {tiles.size} px over frames padded to {padded[1]}x{padded[0]}: one covers"
             " the whole frame, which is no tiling"
         )
-    return max(_tile(tiles.size, *shape, column) for shape in tile_shapes(padded, tiles))
+    tile = _tile if _remembered_tile is None else _remembered_tile
+    return max(tile(tiles.size, *shape, column) for shape in tile_shapes(padded, tiles))
+
+
+# The tiles' figures remembered while a search plans the same tiles again and again (the image
+# server's start, apps/imgserver/reservation.py's make): the start refused for two 4K pictures on 22
+# GiB makes 301 plans of one picture, 270 of them distinct, whose floor proofs (still_plan._worst,
+# 460 of them, one per bound, phase and tile side) count 19.0 million tiles, 353 thousand of them
+# distinct (2026-11-08). The memo is the search's alone, made at its start and dropped at its end
+# (tiles_remembered), never the process's: a figure of this module a test sets (CUT_OFF_EXTRA,
+# MEASURED) is read again by the next search, and memory is held only while a search runs. At most
+# TILE_MEMO tiles, the least recently used dropped past it: about 120 MiB at the most, extrapolated
+# from the refused start's 353 thousand measured at 81 MiB (its process's peak, 550 MiB without the
+# memo, 631 with), the start 67 s without and 28 s with. It changes no figure: a tile's is a
+# function of its four arguments and of this module's figures, which nothing changes during a
+# search.
+TILE_MEMO = 2**19
+_remembered_tile: Callable[[int, int, int, int], float] | None = None
+
+
+@contextmanager
+def tiles_remembered() -> Generator[None]:
+    """Inside it, each tile's figure (_tile) made once and remembered (TILE_MEMO), for a search that
+    plans the same tiles again and again; nested, the outer memo serves."""
+    global _remembered_tile
+    if _remembered_tile is not None:
+        yield
+        return
+    _remembered_tile = lru_cache(maxsize=TILE_MEMO)(_tile)
+    try:
+        yield
+    finally:
+        _remembered_tile = None
 
 
 def _tile(side: int, rows: int, columns: int, column: int) -> float:

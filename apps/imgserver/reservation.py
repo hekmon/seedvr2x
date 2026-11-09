@@ -374,7 +374,15 @@ def make(asked: Asked) -> Made:
     why and naming the most pictures at the asked size, and the largest size at the asked count,
     that would; and the smaller DiT files that would fit the asked bound and count as they are
     (smaller; DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too": the file is never changed
-    by itself)."""
+    by itself). The search counts the same tiles again and again, each bound and tile side it
+    tries holding most of the pictures of the others: their figures are made once while it runs
+    (peaks.tiles_remembered; the refused start of two 4K pictures on 22 GiB, 67 s to 28 s
+    alone, 2026-11-08)."""
+    with peaks.tiles_remembered():
+        return _make(asked)
+
+
+def _make(asked: Asked) -> Made:
     try:
         return _made(asked, asked.bound, asked.count)
     except Refusal as error:

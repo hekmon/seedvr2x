@@ -30,6 +30,7 @@ card, 18.45 GiB counted of the 23.45 free on the whole card, SDPA: the int8 DiT 
 passes in tiles of 1216 px, the fp16 refused, naming what fits."""
 
 import math
+from collections.abc import Callable
 from dataclasses import replace
 
 import pytest
@@ -363,6 +364,30 @@ def test_two_4k_pictures_do_not_fit_in_22_gib() -> None:
     largest = error.value.largest
     assert largest is not None and largest[0] < 3840 and largest[1] < 2160
     assert "--max-size" in str(error.value)
+
+
+def _outcome(make: Callable[[Asked], reservation.Made], wanted: Asked) -> tuple[object, ...]:
+    """What a start makes of `wanted`, its floor proofs made again (still_plan._worst's cache
+    emptied): the reservation's figures, or the refusal's words and counts."""
+    still_plan._worst.cache_clear()
+    try:
+        made = make(wanted)
+    except ReservationRefused as error:
+        return (str(error), error.most, error.largest)
+    return (made.plan, made.count, made.reservation, made.budget, made.pool, made.share)
+
+
+@pytest.mark.parametrize(
+    "wanted",
+    [asked(24), asked(96, 2), asked(20, 2, bound=(1920, 1080))],
+    ids=["one picture fits", "two fit", "two refused, a smaller size named"],
+)
+def test_the_tiles_remembered_change_no_start(wanted: Asked) -> None:
+    # make's search remembers the tiles' figures while it runs (peaks.tiles_remembered); _make is
+    # the same search without: the same plan, reservation and refusal, word for word.
+    remembered = _outcome(reservation.make, wanted)
+    assert remembered == _outcome(reservation._make, wanted)
+    assert peaks._remembered_tile is None
 
 
 def test_two_4k_pictures_fit_in_96_gib() -> None:
