@@ -1064,7 +1064,7 @@ def _run(args: argparse.Namespace) -> int:
                     " stream, and PNG output has none"
                 )
             # No {out} in it, or nothing at all: it could write nowhere seedvr2x looks.
-            check_command(args.segment_cmd)
+            check_command(args.segment_cmd, args.output)
         # A .mkv path is assembled at the job's end (_assemble): what the join needs of the build
         # is asked now, not once every segment is made.
         final = _final(args.output)

@@ -403,3 +403,113 @@ def _run(*options: str) -> str:
     if result.returncode != 0:
         raise MediaError(f"ffmpeg {' '.join(options)} failed: {result.stderr.strip()}")
     return result.stdout
+
+
+# CreateProcess's flag that starts a process with its first thread suspended (winbase.h), the
+# access a process needs to be put in a job and ended (winnt.h: PROCESS_SET_QUOTA,
+# PROCESS_TERMINATE), the thread's to be resumed (THREAD_SUSPEND_RESUME), and the toolhelp
+# snapshot of the threads (tlhelp32.h: TH32CS_SNAPTHREAD).
+CREATE_SUSPENDED = 0x4
+PROCESS_SET_QUOTA_AND_TERMINATE = 0x0100 | 0x0001
+THREAD_SUSPEND_RESUME = 0x0002
+SNAPTHREAD = 0x4
+
+
+class _ThreadEntry(ctypes.Structure):
+    """tlhelp32.h's THREADENTRY32."""
+
+    _fields_ = (
+        ("dwSize", ctypes.c_uint32),
+        ("cntUsage", ctypes.c_uint32),
+        ("th32ThreadID", ctypes.c_uint32),
+        ("th32OwnerProcessID", ctypes.c_uint32),
+        ("tpBasePri", ctypes.c_long),
+        ("tpDeltaPri", ctypes.c_long),
+        ("dwFlags", ctypes.c_uint32),
+    )
+
+
+def contained(pid: int) -> int:
+    """Put the process `pid`, started with CREATE_SUSPENDED, in a Job Object of its own, then
+    resume it: everything it starts is in that job (end_job ends them all), none started before
+    it was put there. Windows' twin of a process group of the shell's own (media/writer.py,
+    CommandWriter), which seedvr2x's own job holds as well (_in_a_job: nested jobs). Returns the
+    job's handle; MediaError where it can't be made, the process then ended."""
+    kernel32 = _kernel32()
+    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+    kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+    kernel32.AssignProcessToJobObject.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    kernel32.TerminateProcess.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel32.CreateToolhelp32Snapshot.argtypes = (ctypes.c_uint32, ctypes.c_uint32)
+    kernel32.Thread32First.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    kernel32.Thread32Next.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    kernel32.OpenThread.restype = ctypes.c_void_p
+    kernel32.OpenThread.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+    kernel32.ResumeThread.argtypes = (ctypes.c_void_p,)
+    # Its failure is (DWORD)-1, which ctypes' default int would read as -1.
+    kernel32.ResumeThread.restype = ctypes.c_uint32
+    process = kernel32.OpenProcess(PROCESS_SET_QUOTA_AND_TERMINATE, 0, pid)
+    if not process:
+        raise MediaError(_uncontained("OpenProcess", ctypes.get_last_error()))  # pyright: ignore[reportAttributeAccessIssue, reportUnknownArgumentType, reportUnknownMemberType]
+    try:
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job or not kernel32.AssignProcessToJobObject(job, process):
+            error = int(ctypes.get_last_error())  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownArgumentType]
+            kernel32.TerminateProcess(process, 1)
+            if job:
+                kernel32.CloseHandle(job)
+            raise MediaError(_uncontained("AssignProcessToJobObject", error))
+        # Its one thread resumed: a process just created, suspended, has no other.
+        snapshot = kernel32.CreateToolhelp32Snapshot(SNAPTHREAD, 0)
+        entry = _ThreadEntry(dwSize=ctypes.sizeof(_ThreadEntry))
+        resumed = False
+        # INVALID_HANDLE_VALUE, (HANDLE)-1, where the snapshot can't be taken: no thread found.
+        found = snapshot not in (None, ctypes.c_void_p(-1).value) and kernel32.Thread32First(
+            snapshot, ctypes.byref(entry)
+        )
+        error = 0
+        while found:
+            if entry.th32OwnerProcessID == pid:
+                thread = kernel32.OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID)
+                resumed = bool(thread) and kernel32.ResumeThread(thread) != 0xFFFFFFFF
+                if not resumed:
+                    error = int(ctypes.get_last_error())  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownArgumentType]
+                if thread:
+                    kernel32.CloseHandle(thread)
+                break
+            found = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+        if snapshot not in (None, ctypes.c_void_p(-1).value):
+            kernel32.CloseHandle(snapshot)
+        if not resumed:
+            kernel32.TerminateProcess(process, 1)
+            kernel32.CloseHandle(job)
+            raise MediaError(_uncontained("ResumeThread", error))
+        return int(job)
+    finally:
+        kernel32.CloseHandle(process)
+
+
+def end_job(job: int) -> None:
+    """End every process of the job `job` (contained) at once, as SIGKILL does a group."""
+    kernel32 = _kernel32()
+    kernel32.TerminateJobObject.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+    kernel32.TerminateJobObject(job, 1)
+
+
+def close_job(job: int) -> None:
+    """Close contained's handle, once nothing is left to end with it."""
+    kernel32 = _kernel32()
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle(job)
+
+
+def _uncontained(call: str, error: int) -> str:
+    return (
+        f"the segment command's shell can't be put in a Windows job of its own: {call} failed"
+        f" ({ctypes.FormatError(error).strip()}, WinError {error}); without it, a stop couldn't"  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+        " end what the command started"
+    )

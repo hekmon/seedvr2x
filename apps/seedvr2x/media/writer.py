@@ -22,6 +22,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -37,7 +38,16 @@ from typing import IO, Self
 import numpy as np
 import numpy.typing as npt
 
-from media.ffmpeg import MediaError, argument, ends_with_us, zscale
+from media.ffmpeg import (
+    CREATE_SUSPENDED,
+    MediaError,
+    argument,
+    close_job,
+    contained,
+    end_job,
+    ends_with_us,
+    zscale,
+)
 from media.files import command_partial, partial_path, replace_whole
 from media.probe import VideoStream
 
@@ -85,6 +95,8 @@ TAIL_WIDTH = 300
 # file, finishing a truncated file at the segment's path beside the resume's own command.
 _GROUPS: set[int] = set()
 _GROUPS_LOCK = threading.Lock()
+# On Windows, which has no process groups, each segment command's Job Object (ffmpeg.contained).
+_JOBS: set[int] = set()
 
 
 def end_commands() -> None:
@@ -93,7 +105,11 @@ def end_commands() -> None:
     unwinding's own stop (CommandWriter._stop: SIGTERM, then SIGKILL after STOP_GRACE) has
     removed each it stopped."""
     with _GROUPS_LOCK:
-        groups = list(_GROUPS)
+        groups, jobs = list(_GROUPS), list(_JOBS)
+    if sys.platform == "win32":
+        for job in jobs:
+            end_job(job)
+        return
     for group in groups:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(group, signal.SIGKILL)
@@ -629,9 +645,13 @@ class _Tail:
 _LINE_ENDS = re.compile(rb"[\r\n]")
 
 
-def check_command(command: str) -> None:
+def check_command(command: str, output: Path | None = None) -> None:
     """Raise MediaError unless command can be a segment command (CommandWriter): not empty, and
-    naming {out}, the file it must write, without which it would write nowhere seedvr2x looks."""
+    naming {out}, the file it must write, without which it would write nowhere seedvr2x looks;
+    with `output`, the job's -o, on Windows not under a name cmd.exe would expand (_word), said
+    at the job's start rather than at its first segment's."""
+    if output is not None and sys.platform == "win32":
+        _word(output.absolute())
     if not command.strip():
         raise MediaError("the segment command is empty")
     if OUT not in command:
@@ -702,6 +722,7 @@ class CommandWriter(Writer):
         # by the quoted name of the partial file. Every {out} is replaced, as GNU parallel
         # replaces {}; nothing else of the command is read.
         self._run = command.replace(OUT, _word(self._partial))
+        self._job: int | None = None  # on Windows, the shell's Job Object (ffmpeg.contained)
         self._tail = _Tail()
         self._output = threading.Thread(target=self._read_output, daemon=True)
         stream = [
@@ -714,16 +735,25 @@ class CommandWriter(Writer):
         assert self._process.stdout is not None
         try:
             # A group of its own, not ffmpeg's: abort() signals it whole, the shell and what it
-            # started, and ffmpeg must not be among them.
+            # started, and ffmpeg must not be among them. On Windows the shell is cmd.exe
+            # (COMSPEC, Popen's shell), started suspended and resumed in a Job Object of its own
+            # (ffmpeg.contained), the twin of the group, which abort() ends whole; seedvr2x's own
+            # job holds it too, so that it ends with a killed seedvr2x there (ffmpeg._in_a_job).
+            windows = sys.platform == "win32"
             self._shell = subprocess.Popen(
-                ["/bin/sh", "-c", self._run],
+                _cmd(self._run) if windows else ["/bin/sh", "-c", self._run],
                 stdin=self._process.stdout,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 process_group=0,
+                creationflags=CREATE_SUSPENDED if windows else 0,
             )
             with _GROUPS_LOCK:
-                _GROUPS.add(self._shell.pid)
+                if windows:
+                    self._job = contained(self._shell.pid)
+                    _JOBS.add(self._job)
+                else:
+                    _GROUPS.add(self._shell.pid)
         except BaseException as error:
             Writer.abort(self)
             if isinstance(error, OSError):
@@ -739,7 +769,12 @@ class CommandWriter(Writer):
         except BaseException:
             self.abort()
             raise
-        logger.debug("%s: the segment command, run by /bin/sh -c: %s", path, self._run)
+        logger.debug(
+            "%s: the segment command, run by %s: %s",
+            path,
+            "cmd.exe /c" if sys.platform == "win32" else "/bin/sh -c",
+            self._run,
+        )
 
     def close(self) -> int:
         """Finish the stream, wait for the segment command to end, however long it takes, check
@@ -819,6 +854,8 @@ class CommandWriter(Writer):
         other process's, so that what it left running can still be stopped by the group."""
         if self._shell.returncode is not None:
             return self._shell.returncode
+        if sys.platform == "win32":
+            return self._shell.poll()  # no group to keep: the shell's job is (ffmpeg.contained)
         ended = os.waitid(os.P_PID, self._shell.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
         if ended is None:
             return None
@@ -826,6 +863,8 @@ class CommandWriter(Writer):
 
     def _ended(self) -> int:
         """Wait for the shell to end, however long it takes; its status, as _status gives it."""
+        if sys.platform == "win32":
+            return self._shell.wait()
         while (status := self._status()) is None:
             os.waitid(os.P_PID, self._shell.pid, os.WEXITED | os.WNOWAIT)
         return status
@@ -853,6 +892,15 @@ class CommandWriter(Writer):
         can't catch would leave behind (DESIGN.md, Output, Writer)."""
         if self._shell.returncode is not None:
             return  # reaped, by close() or a first abort()
+        if sys.platform == "win32":
+            # No SIGTERM to give a console's processes: the job ended at once, as SIGKILL ends
+            # the group; a grace for the command there is the stop's Windows twin, to come.
+            try:
+                self._signal(signal.SIGTERM)
+            finally:
+                self._shell.wait()
+                self._forget_group()
+            return
         try:
             self._signal(signal.SIGTERM)
             notice = min(STOP_NOTICE_AFTER, STOP_GRACE)
@@ -870,8 +918,16 @@ class CommandWriter(Writer):
     def _forget_group(self) -> None:
         with _GROUPS_LOCK:
             _GROUPS.discard(self._shell.pid)
+            if self._job is not None:
+                _JOBS.discard(self._job)
+                close_job(self._job)
+                self._job = None
 
     def _signal(self, number: int) -> None:
+        if sys.platform == "win32":
+            if self._job is not None:
+                end_job(self._job)  # whatever the signal: the job ended, as by SIGKILL
+            return
         with contextlib.suppress(ProcessLookupError):
             os.killpg(self._shell.pid, number)
 
@@ -920,9 +976,28 @@ def _say(text: str) -> None:
         os.write(2, f"\n{time.strftime('%H:%M:%S')} {text}\n".encode())
 
 
+def _cmd(command: str) -> str:
+    """The command line that runs `command` in cmd.exe (COMSPEC) on Windows: /d, no AutoRun
+    command of the registry's run before it (one that prints, or changes directory under a
+    relative {out}); /v:off, no delayed expansion of `!`, whatever the registry enables; /s /c,
+    the line between the outer quotes taken as it is. Popen's shell=True gives `cmd.exe /c "..."`
+    without the first two (impl-win-3's review, 2026-11-09)."""
+    comspec = os.environ.get("COMSPEC", "cmd.exe")
+    return f'"{comspec}" /d /v:off /s /c "{command}"'
+
+
 def _word(path: Path) -> str:
     """path as one word of a shell command, which no command reads as an option, nor ffmpeg, if
-    the command runs it, as a protocol's name (ffmpeg.argument)."""
+    the command runs it, as a protocol's name (ffmpeg.argument). On Windows a word of cmd.exe's,
+    in double quotes, which hold its spaces and & ^ ( ) as they are; a Windows name holds no
+    double quote, and one holding % is refused, which cmd expands inside quotes too (%NAME%)."""
+    if sys.platform == "win32":
+        if "%" in str(path):
+            raise MediaError(
+                f"{path}: a name holding %, which cmd.exe, the segment command's shell on"
+                " Windows, would expand: write the output elsewhere"
+            )
+        return f'"{argument(path)}"'
     return shlex.quote(argument(path))
 
 
