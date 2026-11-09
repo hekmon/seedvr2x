@@ -1,0 +1,16 @@
+# Every file is checked out with the bytes the repository holds, on every platform. The text files
+# are LF, and Git for Windows' default (core.autocrlf=true) turned 525 of the 533 files into CRLF
+# on checkout (2026-11-09), the vendored trees and the pinned files among them.
+* text=auto eol=lf
+# Binary by name, whatever git's guess from their first bytes.
+*.png binary
+*.webp binary
+*.pt binary
+*.safetensors binary
+*.gguf binary
+*.mkv binary
+*.npy binary
+# The vendored code, never converted whatever an editor writes: its bytes are held to numz's and
+# TransNetV2's (tools/vendor.py, core/tests/test_detector.py).
+core/seedvr2x/vendor/** -text
+core/seedvr2x/transnetv2/** -text

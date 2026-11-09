@@ -276,6 +276,11 @@ beside it; the `__init__.py` is seedvr2x's.
   diffusers, rotary-embedding-torch and the rest. A bump can move the output's bits: it remakes
   the references, with the measured reason said in its commit (DESIGN.md).
 - Linux x86_64 only for now (DESIGN.md: Linux first).
+- Every file is checked out with the repository's bytes on every platform (`.gitattributes`:
+  `* text=auto eol=lf`, binary types by name, the vendored trees `-text`). Git for Windows'
+  default (`core.autocrlf=true`) turned 525 of the 533 files into CRLF, and `tools/vendor.py
+  check` (92 problems) and TransNetV2's pin refused that checkout; with the attributes every file
+  was the repository's byte for byte there and both passed (2026-11-09).
 - `gguf` (llama.cpp's own gguf-py, 0.19.0) is a dev dependency of `apps/seedvr2x` alone, pinned
   there: the tests' reference for the GGUF reader and the dequantisation, never the library's or
   the shipped environment's; the tests that use it skip without it.
