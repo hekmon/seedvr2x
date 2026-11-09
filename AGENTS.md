@@ -1498,7 +1498,10 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   value node gives refused at the upscale node's start; every input and output with a
   label and a tooltip, none in the library's terms; the colour correction a BOOLEAN, split or
   none, `quality` a combo (standard, enhanced, maximum) on Upscale Video alone, its tooltip's
-  points and the plan's quality line (the level and its runs, a short shot's missing runs not
+  points (among them the pulse at standard, one frame in four closer to the original than the
+  three before it and looking sharper, the measure and the eye said apart, never "is sharper",
+  and maximum's every frame from a run where it is rebuilt closest; nothing said of enhanced's,
+  unmeasured) and the plan's quality line (the level and its runs, a short shot's missing runs not
   counted), the seed's fixed control; the Models node's model, folder (an optional input: no
   default, no widget) and RAM tooltips; a value the
   prompt holds or a link gives refused in the nodes' words at queue time and at the node's

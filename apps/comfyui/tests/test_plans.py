@@ -428,19 +428,30 @@ def test_quality_is_a_combo_of_the_levels_on_upscale_video_alone_in_a_users_word
     assert quality.options == list(QUALITY) == ["standard", "enhanced", "maximum"]
     assert quality.default == "standard" and not quality.optional
     # MANUAL.md's section, in a ComfyUI user's words: the runs, each frame from the run that
-    # rebuilds it best, the gain where there is motion, none on a still shot, the cost in time.
+    # rebuilds it best, the gain where there is motion, none on a still shot, the cost in time;
+    # and what a user sees at standard, the pulse, as maximum's reason (the user, 2026-11-08).
     said = quality.tooltip
     for point in (
+        "rebuilds the last of each group closest to the original",
+        "at standard one frame in four comes out closer to the original than the three before"
+        " it, and looks sharper",
+        "edges that pulse, most on line art, dark scenes and motion",
+        "with maximum, a run where it is rebuilt closest to the original",
         "standard: once",
-        "enhanced: twice",
-        "maximum: four times",
-        "each frame is kept from the run that rebuilds it best",
+        "enhanced: twice, and maximum: four times",
+        "each frame kept from the run that rebuilds it best",
         "sharper lines and less flicker where there is motion",
         "changes little on a still shot",
         "2 (enhanced) or 4 (maximum) times as long as standard, and no more memory",
     ):
         assert point in said, point
     assert plain(said) and "--" not in said
+    # What enhanced does to the pulse is unmeasured: nothing said of it.
+    assert said.count("pulse") == 1
+    # What was measured (closer to the original) and what the eye sees (it looks sharper), never
+    # one from the other: by the luma's Laplacian variance the frame is less sharp on 6 of 8
+    # clips (DESIGN.md, Open questions, "Every fourth frame is the model's best").
+    assert "is sharper" not in said and "sharp frame" not in said
 
 
 def test_plan_only_is_a_boolean_off_by_default_on_each_upscale_node() -> None:

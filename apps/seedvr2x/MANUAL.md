@@ -658,17 +658,22 @@ or 4 times the GPU time, and no more memory.
 ### Why one run isn't the best the model can do
 
 The VAE packs a shot's frames 4 to a latent (after the first, which has one of its own), and
-the 4 frames of a latent don't come back equal. The last of the 4 is rebuilt best; the three
-before it come out softer, and on fast motion they carry ghosts: line art drawn twice. On 8
-clips that have an original to compare with, a group's last frame was 0.8–5.0 dB of PSNR-Y
-closer to it than the group's second
-([numerics.md](../../research/docs/numerics.md#every-fourth-frame-the-latent-grid)).
+the 4 frames of a latent don't come back equal. The last of the 4 is rebuilt closest to the
+original; the three before it come out further from it, and on fast motion they carry ghosts:
+line art drawn twice. On 8 clips that have an original to compare with, a group's last frame was
+the closest to it on all 8 by VMAF and LPIPS, and 0.8–5.0 dB of PSNR-Y above the group's second
+on 7 of them ([numerics.md](../../research/docs/numerics.md#every-fourth-frame-the-latent-grid)).
+
+At `standard` that shows: one frame in four comes out closer to the original than the three
+before it, and looks sharper; played, the edges pulse, most on line art, dark scenes and motion.
+Stepping a dark animation frame by frame at `standard` shows its edges sharper and lighter every
+4th frame.
 
 So `maximum` runs the shot 4 times, from its frame 0, 1, 2 and 3: every frame then ends a group
 of 4 in one of the runs, or is a run's own first frame, packed alone, and is taken from that
-run. `enhanced` runs it from frames 0 and 2, and
-takes each frame from the run where it sits third or fourth in its group. Each run is a whole
-run of its own, windows, colour correction and all.
+run, where it is rebuilt closest to the original, at 4 times the GPU time. `enhanced` runs it
+from frames 0 and 2, and takes each frame from the run where it sits third or fourth in its
+group. Each run is a whole run of its own, windows, colour correction and all.
 
 ### What it gives
 

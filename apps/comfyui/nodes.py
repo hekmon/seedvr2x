@@ -395,12 +395,23 @@ def _quality_input() -> Any:
         default=plans.QUALITY_DEFAULT,
         display_name=plans.LABELS["quality"],
         # MANUAL.md, Several runs of a shot: 2 or 4 times the time, no more memory; sharper lines
-        # and less flicker where there is motion, little change on a still shot.
-        tooltip="How many times the model runs over each shot. standard: once. enhanced: twice,"
-        " and maximum: four times, each run starting a frame or two further into the shot, and"
-        " each frame is kept from the run that rebuilds it best. The result has sharper lines and"
-        " less flicker where there is motion, and changes little on a still shot. It takes 2"
-        " (enhanced) or 4 (maximum) times as long as standard, and no more memory.",
+        # and less flicker where there is motion, little change on a still shot. The pulse at
+        # standard (DESIGN.md, Open questions, "Every fourth frame is the model's best": a group
+        # of 4's last frame closest to the original on 8 of 8 clips by VMAF and LPIPS, 0.8 to 5.0
+        # dB of PSNR-Y above its second on 7 of 8; less sharp by the luma's Laplacian variance on
+        # 6 of 8, a measure the user's eyes contradict), so what was measured (closer) and what
+        # the eye sees (sharper: the user, stepping a dark animation, 2026-11-08) are said apart,
+        # neither from the other; what enhanced does to it is unmeasured, so it is not said.
+        tooltip="How many times the model runs over each shot. standard: once. The model packs a"
+        " shot's frames in groups of 4 and rebuilds the last of each group closest to the"
+        " original, so at standard one frame in four comes out closer to the original than the"
+        " three before it, and looks sharper: edges that pulse, most on line art, dark scenes and"
+        " motion. enhanced: twice, and maximum: four times, each run starting a frame or two"
+        " further into the shot, each frame kept from the run that rebuilds it best; with maximum,"
+        " a run where it is rebuilt closest to the original."
+        " The result has sharper lines and less flicker where there is motion, and changes little"
+        " on a still shot. It takes 2 (enhanced) or 4 (maximum) times as long as standard, and no"
+        " more memory.",
     )
 
 

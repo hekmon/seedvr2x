@@ -39,9 +39,12 @@ cutting it into pieces, fitting the GPU's memory: the parts where a long run is 
   system memory, how the picture is tiled. Every run prints its plan, a line per choice with
   its reason and the option that changes it, then each unit's time left. It is developed on a
   96 GB card and checked on an RTX 5090, a 32 GB card driving a desktop.
-- **Crisper frames, for more GPU time.** The model rebuilds 3 frames of every 4 softer, with
-  doubled lines on fast motion. `--quality enhanced` or `maximum` runs each shot 2 or 4 times,
-  shifted a frame each time, and keeps each frame from its best run
+- **Crisper frames, for more GPU time.** The model rebuilds the last frame of every 4 closest to
+  the original, the 3 before it further from it, with doubled lines on fast motion, so at the
+  default, `--quality standard`, one frame in four looks sharper and edges pulse, most on line
+  art, dark scenes and motion. `--quality enhanced` or `maximum` runs each shot 2 or 4 times,
+  shifted a frame each time, and keeps each frame from its best run: with `maximum`, every frame
+  from a run where it is rebuilt closest to the original
   ([the manual](MANUAL.md#several-runs-of-a-shot---quality) shows it).
 - **It refuses what it can't do right.** Version 1 is for SDR, progressive, constant-frame-rate
   sources. An HDR, interlaced or variable-frame-rate file is refused with a message that says
