@@ -2,7 +2,7 @@
   "id": "3abe2710-6955-509b-a2f1-8cc1e4c90e86",
   "revision": 0,
   "last_node_id": 9,
-  "last_link_id": 12,
+  "last_link_id": 13,
   "nodes": [
     {
       "id": 1,
@@ -117,7 +117,8 @@
           "name": "fps",
           "type": "FLOAT",
           "links": [
-            6
+            6,
+            13
           ]
         },
         {
@@ -237,6 +238,12 @@
           "name": "models",
           "type": "SEEDVR2X_MODELS",
           "link": 12
+        },
+        {
+          "name": "frame_rate",
+          "type": "FLOAT",
+          "shape": 7,
+          "link": 13
         }
       ],
       "outputs": [
@@ -428,6 +435,14 @@
       9,
       1,
       "SEEDVR2X_MODELS"
+    ],
+    [
+      13,
+      4,
+      2,
+      9,
+      2,
+      "FLOAT"
     ]
   ],
   "groups": [

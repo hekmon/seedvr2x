@@ -11,6 +11,7 @@ on the node that has it (LABELS, words.say)."""
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
+from fractions import Fraction
 
 from seedvr2x import frames as frames_
 from seedvr2x import memory, peaks, pull, shotcuts, shotruns, shots, still_plan
@@ -157,6 +158,7 @@ LABELS = {
     "model": "model",
     "model_dir": "model folder",
     "keep_in_ram_between_runs": "keep in RAM between runs",
+    "frame_rate": "frame rate",
 }
 
 
@@ -762,20 +764,57 @@ def cuts_text(
     return "\n".join(lines)
 
 
+# The fraction a frame rate given as a float is read as: the one of denominator at most this nearest
+# it. The rates video uses are fractions of small denominators (25, 24000/1001, 30000/1001), and
+# the float of one is within half its last bit of it, 2e-15 near 24 fps, where two fractions of
+# denominators up to a million are at least 1e-12 apart: the float of 24000/1001 gives 24000/1001
+# back, and a frame's time is the exact one a constant rate gives it.
+RATE_DENOMINATOR = 1_000_000
+
+
+def rate_of(fps: float) -> Fraction:
+    """A clip's frame rate as ComfyUI gives it, frames per second as a float (Get Video
+    Components' fps, v0.44.0's comfy_extras/nodes_video.py: float() of the video's frame rate,
+    read, not copied: GPL-3.0), as the fraction it stands for (RATE_DENOMINATOR); a rate under
+    5e-7 fps, which that limit makes 0 and no video has, as its float exactly. The caller has
+    checked it is a positive finite number."""
+    exact = Fraction(fps)
+    return exact.limit_denominator(RATE_DENOMINATOR) or exact
+
+
+def cut_lines(found: Sequence[shotcuts.Cut], fps: float | None) -> str:
+    """The cut list as a user reads it, one line a cut, numbered from 1, each by the first frame
+    of the shot it starts (counted from 0, as the console and the command line's cut list count
+    them): "Cut #1 - 0:00:01.440 (frame 36)", the frame's time at the clip's frame rate in the
+    command line's form (shotcuts.timecode: rounded up to the millisecond, so that a player's
+    jump lands on the cut); without a rate, which ComfyUI's images don't carry, "Cut #1 - frame
+    36". The time is the frame's on a constant rate from the clip's first frame: the frames
+    ComfyUI gives keep no timestamp. A clip with no cut: "no cut: the clip is one shot"."""
+    if not found:
+        return "no cut: the clip is one shot"
+    rate = None if fps is None else rate_of(fps)
+    return "\n".join(
+        f"Cut #{number} - frame {cut.frame}"
+        if rate is None
+        else f"Cut #{number} - {shotcuts.timecode(cut.frame / rate)} (frame {cut.frame})"
+        for number, cut in enumerate(found, start=1)
+    )
+
+
 @dataclass(frozen=True)
 class CutList:
     """seedvr2x Cuts' output, which seedvr2x Upscale Video takes: the clip's shots, frames
     [start, end) in order and covering the clip, as a tuple (a node's output is cached by
-    ComfyUI, and a list is a value a downstream node could change), and `text`, the console's
-    text of the cuts (cuts_text: the frames, the cuts found at the threshold with their
-    probabilities, the possible cuts), which str() gives, one source for both. ComfyUI's Preview
-    as Text node, PreviewAny (v0.44.0, comfy_extras/nodes_preview_any.py, read, not copied:
-    GPL-3.0), shows a string as
-    it is, a number by str(), anything else by json.dumps and, where that raises, by str(): a
-    dataclass is no JSON value, so the user's preview node shows this text, where it showed the
-    tuple's repr, "(Shot(start=0, end=65), ...)" (the user's third test, 2026-11-08). No STRING
-    output (DESIGN.md: the nodes give no text outputs): the text is in the user's own node, not
-    in seedvr2x's status line, so its many lines are fine there."""
+    ComfyUI, and a list is a value a downstream node could change), and `text`, the cuts as a
+    user reads them (cut_lines: a line a cut, its time and its frame), which str() gives.
+    ComfyUI's Preview as Text node, PreviewAny (v0.44.0, comfy_extras/nodes_preview_any.py, read,
+    not copied: GPL-3.0), shows a string as it is, a number by str(), anything else by json.dumps
+    and, where that raises, by str(): a dataclass is no JSON value, so the user's preview node
+    shows this text, where it showed the tuple's repr, "(Shot(start=0, end=65), ...)" (the user's
+    third test, 2026-11-08), then the console's text (the user's fourth, the same evening: not
+    the list wanted). The console keeps its own text, the probabilities and the possible cuts
+    (cuts_text). No STRING output (DESIGN.md: the nodes give no text outputs): the text is in
+    the user's own node, not in seedvr2x's status line, so its many lines are fine there."""
 
     shots: tuple[shots.Shot, ...]
     text: str

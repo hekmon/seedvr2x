@@ -38,8 +38,9 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
                          kept between runs), plain Python; the CLI's job.py imports it, clip.py
                          runs a clip by it
     shotcuts.py          the cuts drawn from the shot detector's probabilities (Cut, detections,
-                         detected, possible, the default and the possible cuts' thresholds), plain
-                         Python and NumPy; the CLI's cuts.py keeps their timecodes, the cut list
+                         detected, possible, the default and the possible cuts' thresholds) and a
+                         time's form (timecode, the CLI's and the nodes'), plain Python and NumPy;
+                         the CLI's cuts.py keeps the times from the frame index, the cut list
                          file and the playlists
     record.py            seedvr2x's record in each output: its fields and the AI mark, a picture's
                          XMP packet, a video's stream tags
@@ -91,12 +92,15 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          upscale nodes' widgets, the plan's numbers their optional sockets of
                          seedvr2x's own types, no Tuning node; the Cuts node takes the Models
                          node's output, which also provides the shot detector's file, and has
-                         no mode and no folder; the Models node's model folder an optional
-                         STRING input with no widget, `force_input`)
+                         no mode and no folder, its frame rate an optional FLOAT input with no
+                         widget, for the cut list's times; the Models node's model folder an
+                         optional STRING input with no widget, `force_input`)
                          and ComfyUI's calls (the bar and the status of two lines it gets from
                          progress.py, Cancel, the plan said in the console, plan only, a
-                         refusal's line: `_refusing`); no text outputs (the plan and the cuts are
-                         the console's); the one module that imports `comfy_api` (unstable)
+                         refusal's line: `_refusing`); no text outputs (the plan, the cuts'
+                         probabilities and the possible cuts are the console's; the cut list's
+                         own str() is what Preview as Text shows); the one module that imports
+                         `comfy_api` (unstable)
   models.py plans.py     the files, the models kept in pinned memory and the one registration
                          with ComfyUI's model manager, a run's room and placement, keep in RAM
                          auto/on/off against ComfyUI's cap; the inputs' values as pins and
@@ -731,7 +735,9 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
 - The cuts drawn from the probabilities (`seedvr2x/shotcuts.py`) are held by
   `core/tests/test_shotcuts.py` to measurement's own detection
   (`research/scripts/scd_scores.py`'s `tnet_detections`, copied there, on the float32 values read
-  as float64, as its analysis reads them), and the possible cuts; the cut list `--plan` writes
+  as float64, as its analysis reads them), the possible cuts, and a time's form
+  (`shotcuts.timecode`, H:MM:SS.mmm rounded up to the millisecond, which the CLI's `cuts.py`
+  imports, its own tests unchanged, and the nodes' cut list shows); the cut list `--plan` writes
   with them, read back by `--cuts`, is `tests/test_cuts.py`'s (the CLI's). The CLI's
   (`--cut-threshold`, `--plan`, a plan planned again or taken up in another environment) by
   `tests/test_cli_run.py`, a `ScriptedDetector` giving chosen probabilities in place of the
@@ -1443,9 +1449,14 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   (nothing written into a folder), a file the cache lacks (lost since Models ran, or never had)
   fetched with the INFO line before it on Cuts' own bar,
   the detector closed after, the alpha left out, its refusals, its list into
-  Upscale Video (`plans.CutList`, the shots with the console's text of the cuts, which its str()
-  gives and json.dumps refuses, so that ComfyUI's Preview as Text (PreviewAny) shows that text, v0.44.0's order
-  read: JSON, then str(); the output's tooltip saying so), its file's refusals worded for seedvr2x
+  Upscale Video (`plans.CutList`, the shots and the cut list as a user reads it, a line a cut,
+  `Cut #1 - 0:00:01.440 (frame 36)` with the optional `frame rate` wired (FLOAT, `force_input`,
+  Get Video Components' fps; its float read as the fraction it stands for, `plans.rate_of`: the
+  float of 24000/1001 is 24000/1001 again), `Cut #1 - frame 36` unwired, `no cut: the clip is
+  one shot`, a rate no positive finite number refused before the detector runs; which its str()
+  gives and json.dumps refuses, so that ComfyUI's Preview as Text (PreviewAny) shows it,
+  v0.44.0's order read: JSON, then str(); the output's tooltip saying so; the console keeping
+  the probabilities and the possible cuts), its file's refusals worded for seedvr2x
   Models' "model folder" input (unwire it
   for Hugging Face's cache, or wire a folder), sizes with separators);
   `tests/test_models_node.py` seedvr2x Models as the user sees it: the missing files downloaded
@@ -1524,7 +1535,9 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   (`workflows/picture.json`, `clip.json`, ComfyUI's UI format): each parses, every node seedvr2x's
   or a stock one of a table read from v0.44.0, seedvr2x's sockets, outputs and widgets equal to
   their V3 schemas' in count, order and defaults, every optional input unwired but Upscale Video's
-  `cuts` (optional, recommended by its tooltip, so the clip example wires it), every link
+  `cuts` (optional, recommended by its tooltip, so the clip example wires it) and Cuts' `frame
+  rate` (wired from Get Video Components' fps, the cut list's times), each optional socket saved
+  hollow (`shape` 7) and no required one, every link
   joining an output to an input of its type, Models wired into the upscale node and no Tuning
   node, no text display (no Preview as Text node, no STRING link, no text output, the counters
   agreeing with the nodes and links), the clip's Cuts between Load Video and Upscale Video, with

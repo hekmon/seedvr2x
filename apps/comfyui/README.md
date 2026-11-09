@@ -26,9 +26,9 @@ before any model loads.
   run.
 - **seedvr2x Cuts** finds where a clip changes scene ([Cuts and shots](#cuts-and-shots)): it takes
   the clip's frames and the output of seedvr2x Models (which provides the shot detector's file),
-  and gives the cut list that Upscale Video takes; the cuts are said in ComfyUI's console, and
-  ComfyUI's Preview as Text node (PreviewAny) wired to its output shows them too, each with its
-  probability.
+  and gives the cut list that Upscale Video takes; ComfyUI's Preview as Text node (PreviewAny)
+  wired to its output shows the list, a line a cut with its time (its optional input `frame rate`
+  wired) and its frame, and ComfyUI's console says each cut's probability and the possible cuts.
 - **seedvr2x Upscale Image** upscales each picture of a batch on its own, to the output's short
   side given by `resolution` (1080 by default).
 - **seedvr2x Upscale Video** upscales a clip's frames shot by shot, each shot in sliding windows
@@ -87,10 +87,25 @@ uses while the node runs, and on the processor where there is none, and frees it
 command line's. A cut found for nothing only gives a shot its own windows, so the default errs
 toward cutting.
 
-The console lists each cut by the frame its shot starts at, counted from 0, with the detector's
-probability, and the **possible cuts**: scenes it found less sure than the threshold, which are not
-in the list. Look at them in the clip; a threshold under a possible cut's probability makes it a
-cut. The node's own line says how many: `2 shots · 1 possible cut below 0.30`.
+The cut list, wired to ComfyUI's Preview as Text node (PreviewAny), reads a line a cut, numbered
+from 1, by the frame its shot starts at, counted from 0, and its time:
+
+```
+Cut #1 - 0:00:01.440 (frame 36)
+Cut #2 - 0:00:04.000 (frame 100)
+```
+
+The time needs the clip's frame rate, which ComfyUI's images don't carry: wire the `fps` output of
+ComfyUI's Get Video Components to Cuts' optional input `frame rate`, as the clip example does.
+Unwired, each cut is given by its frame alone (`Cut #1 - frame 36`). A clip with no cut says
+`no cut: the clip is one shot`, wired or not. The time is the command line's form, counted from
+the clip's first frame at a constant rate and rounded up to the millisecond, so that a player's
+jump to it lands on the cut where the clip is the file from its start.
+
+The console lists each cut by its frame with the detector's probability, and the **possible
+cuts**: scenes it found less sure than the threshold, which are not in the list. Look at them in
+the clip; a threshold under a possible cut's probability makes it a cut. The node's own line says
+how many: `2 shots · 1 possible cut below 0.30`.
 
 ## Setting a value yourself
 

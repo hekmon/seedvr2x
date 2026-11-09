@@ -2,7 +2,11 @@
 detection): the detections at a threshold, one per run of frames reaching it, at its peak, the
 first of its highest frames, held to measurement's tnet_detections; the cut the frame after the
 peak, none after the last frame; the possible cuts, runs from 0.1 up peaking under the threshold.
-The cut list, the playlists and the times they hold are the CLI's, tests/test_cuts.py."""
+A time's form (timecode) is held here; the cut list, the playlists and the times they hold, from
+the frame index, are the CLI's, tests/test_cuts.py, and the ComfyUI nodes' cut list's,
+apps/comfyui/tests/test_cuts_node.py."""
+
+from fractions import Fraction
 
 import numpy as np
 import numpy.typing as npt
@@ -15,6 +19,7 @@ from seedvr2x.shotcuts import (
     detected,
     detections,
     possible,
+    timecode,
 )
 
 
@@ -143,3 +148,18 @@ def test_possible_cuts() -> None:
         expected = [k + 1 for k in runs if float(x[k]) < p and k + 1 < len(x)]
         assert frames(possible(x, p)) == expected and expected
         assert not set(expected) & set(frames(detected(x, p)))
+
+
+def test_a_time_is_h_mm_ss_mmm_rounded_up_to_the_millisecond() -> None:
+    # Rounded up, so that a jump lands in the frame's own display: 24000/1001's frame 1, 41.708 ms,
+    # is 0:00:00.042; a whole millisecond stays as it is; hours not padded, minutes and seconds
+    # to two digits.
+    assert timecode(Fraction(1001, 24000)) == "0:00:00.042"
+    assert timecode(Fraction(36, 25)) == "0:00:01.440"
+    assert timecode(Fraction(0)) == "0:00:00.000"
+    assert timecode(Fraction(40_001, 1_000_000)) == "0:00:00.041"
+    assert timecode(Fraction(172_800 * 1001, 24000)) == "2:00:07.200"
+    assert timecode(Fraction(100 * 3600 + 59 * 60 + 59)) == "100:59:59.000"
+    # Before the start, signed; no time, "-".
+    assert timecode(Fraction(-1, 100)) == "-0:00:00.010"
+    assert timecode(None) == "-"

@@ -648,3 +648,13 @@ def seed_past_the_cuts(seed: int, start: int, highest: int) -> Refused:
 
 def cuts_not_a_list() -> Refused:
     return Refused(f"seedvr2x Upscale Video takes the cuts output of {CUTS}")
+
+
+def frame_rate_wrong(value: object) -> Refused:
+    """A frame rate wired to seedvr2x Cuts that is no positive finite number: the cut list's
+    times are the frames' at that rate, so none is guessed."""
+    return Refused(
+        f"frame rate {value!r}: the clip's frames per second, a finite number above 0, as the fps"
+        " output of ComfyUI's Get Video Components gives it; unwired, the cut list gives each"
+        " cut's frame without its time"
+    )

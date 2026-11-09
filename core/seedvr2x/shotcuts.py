@@ -1,7 +1,9 @@
 """A source's cuts drawn from the shot detector's probabilities (DESIGN.md, Shot detection): where
 its shots start, at a threshold, so that another threshold gives its cuts without a second decode
 or detection. A brick of the library, plain Python and NumPy: the CLI's `cuts.py` keeps the cut
-list, the timecodes and the playlists, and any app draws its cuts here with the same code.
+list, the times from the frame index and the playlists, and any app draws its cuts here with the
+same code, and writes a cut's time in the same form (timecode: the CLI's cut list and playlists,
+the ComfyUI nodes' cut list).
 
 A detection is a run of frames whose single-frame probability reaches the threshold, one per run,
 at its peak. The cut is the frame after the peak: TransNetV2 marks the outgoing shot's last frame
@@ -9,7 +11,9 @@ at its peak. The cut is the frame after the peak: TransNetV2 marks the outgoing 
 burst filter and no minimum shot length, a short shot being better run alone than merged into its
 neighbour, from 1 frame on, and real cuts coming 1-3 frames apart in action anime."""
 
+import math
 from dataclasses import dataclass
+from fractions import Fraction
 
 import numpy as np
 import numpy.typing as npt
@@ -32,6 +36,27 @@ class Cut:
 
     frame: int
     probability: float | None = None
+
+
+def timecode(seconds: Fraction | None) -> str:
+    """H:MM:SS.mmm, rounded up to the millisecond; "-" without a time.
+
+    DESIGN.md, Shot detection: the cut's "time from the file's start, rounded up to the
+    millisecond", for the player that checks the cuts: "The player is VLC, the user's choice
+    (2026-10-10)", which "lands within 3 frames of the cut on a file with B-frames, mostly before
+    it, which a time rounded up serves better than one rounded down; mpv lands on the cut frame".
+    Rounded up, the time lies in its frame's own display, at its start or within a millisecond
+    after. A seek to the first frame at or after the time lands one frame late instead, wherever
+    the frame's time isn't a whole millisecond: ffmpeg -ss T -i FILE gave the next frame for 45
+    of the 48 frames of a 24000/1001 MP4 (time base 1/24000), and the frame itself for all 48
+    with the time rounded down; on Matroska, whose times are milliseconds, the frame itself
+    either way (measured 2026-10-10, n9.0.2)."""
+    if seconds is None:
+        return "-"
+    milliseconds = math.ceil(seconds * 1000)
+    sign, value = ("-" if milliseconds < 0 else ""), abs(milliseconds)
+    hours, minutes = value // 3_600_000, value // 60_000 % 60
+    return f"{sign}{hours}:{minutes:02d}:{value // 1000 % 60:02d}.{value % 1000:03d}"
 
 
 def detections(probabilities: npt.NDArray[np.floating], threshold: float) -> list[int]:

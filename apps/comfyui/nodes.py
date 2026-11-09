@@ -47,6 +47,7 @@ Nothing here saves a file: the nodes give ComfyUI's image, float32, which its sa
 carry no seedvr2x record (the CLI's 16-bit PNG has one)."""
 
 import logging
+import math
 import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
@@ -1009,8 +1010,10 @@ class Cuts(io.ComfyNode):
                 " (about 30 MB, provided by seedvr2x Models, which takes it from its model folder"
                 " or Hugging Face's cache), runs on your graphics card while the node runs, and on"
                 " the processor without one; frames are shrunk to its small input in torch, with"
-                " no ffmpeg. It gives the cut list, and says the cuts, and the possible cuts"
-                " (scenes it is less sure of, to check by eye), in ComfyUI's console."
+                " no ffmpeg. It gives the cut list, which ComfyUI's Preview as Text shows one line"
+                " a cut, timed where the clip's frame rate is connected; ComfyUI's console has"
+                " each cut's probability, and the possible cuts (scenes it is less sure of, to"
+                " check by eye)."
             ),
             inputs=[
                 io.Image.Input(
@@ -1037,14 +1040,28 @@ class Cuts(io.ComfyNode):
                     " a few false ones, which cost little: a shot cut for nothing only gets its"
                     " own windows. A lower value finds more cuts, with more false ones.",
                 ),
+                # An optional input and no widget, as Models' folder: ComfyUI's images carry no
+                # frame rate, and the one the clip has comes from the node that loaded it.
+                io.Float.Input(
+                    "frame_rate",
+                    optional=True,
+                    force_input=True,
+                    display_name=plans.LABELS["frame_rate"],
+                    tooltip="Optional. The clip's frames per second, for the time of each cut in"
+                    " the cut list: connect the fps output of ComfyUI's Get Video Components, the"
+                    " node that gives these images. Not connected: each cut is given by its frame"
+                    " alone.",
+                ),
             ],
             outputs=[
                 CutsType.Output(
                     "cuts",
                     display_name="cuts",
                     tooltip="The clip's shots, for seedvr2x Upscale Video's cuts input. Wired to"
-                    " ComfyUI's Preview as Text node (PreviewAny) too, it shows the cuts found,"
-                    " each with the detector's probability, and the possible cuts to check by eye.",
+                    " ComfyUI's Preview as Text node (PreviewAny) too, it shows the cut list, a"
+                    " line a cut: its time, with the frame rate connected, and the frame it starts"
+                    " on, counted from 0 (Cut #1 - 0:00:01.440 (frame 36)). The console says each"
+                    " cut's probability and the possible cuts, to check by eye.",
                 ),
             ],
             hidden=[io.Hidden.unique_id],
@@ -1052,7 +1069,11 @@ class Cuts(io.ComfyNode):
 
     @classmethod
     def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
-        cls, images: torch.Tensor, models: models_module.Handle, threshold: float
+        cls,
+        images: torch.Tensor,
+        models: models_module.Handle,
+        threshold: float,
+        frame_rate: float | None = None,
     ) -> io.NodeOutput:
         show = _shower(_node_id(cls))
         with _refusing(show):
@@ -1066,6 +1087,13 @@ class Cuts(io.ComfyNode):
                 raise words.Refused(f"threshold {threshold!r}: must be a number")
             if not 0 < threshold <= 1:
                 raise words.Refused(f"threshold {threshold}: must be above 0 and at most 1")
+            if frame_rate is not None and (
+                isinstance(frame_rate, bool)
+                or not isinstance(frame_rate, int | float)  # pyright: ignore[reportUnnecessaryIsInstance]
+                or not math.isfinite(frame_rate)
+                or frame_rate <= 0
+            ):
+                raise words.frame_rate_wrong(frame_rate)
             found = cls._probabilities(images, models, show)
             cuts = shotcuts.detected(found, float(threshold))
             maybe = shotcuts.possible(found, float(threshold))
@@ -1076,7 +1104,12 @@ class Cuts(io.ComfyNode):
             cut_list = tuple(
                 Shot(start, end) for start, end in zip(starts, [*starts[1:], count], strict=True)
             )
-            return io.NodeOutput(plans.CutList(cut_list, text))
+            return io.NodeOutput(
+                plans.CutList(
+                    cut_list,
+                    plans.cut_lines(cuts, None if frame_rate is None else float(frame_rate)),
+                )
+            )
 
     @staticmethod
     def _probabilities(

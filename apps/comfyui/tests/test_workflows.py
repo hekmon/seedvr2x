@@ -247,18 +247,21 @@ def test_every_link_joins_an_output_to_an_input_of_its_type(name: str) -> None:
         for output in node["outputs"]:
             assert set(output["links"] or []) <= listed
     # A seedvr2x node's required socket is wired (the nodes take no default for a handle or the
-    # pictures), and every optional one left unwired: the plan chooses. The one exception is the
+    # pictures), and every optional one left unwired: the plan chooses. The two exceptions are the
     # clip workflow's `cuts` socket of Upscale Video: optional (unwired, the clip is one shot) but
-    # recommended by its tooltip, so the example wires seedvr2x Cuts into it.
+    # recommended by its tooltip, so the example wires seedvr2x Cuts into it; and Cuts'
+    # `frame_rate`, optional (unwired, the cut list gives each cut's frame alone) and wired where
+    # the example has the clip's rate, Get Video Components' fps.
+    wired = {("seedvr2xUpscaleVideo", "cuts"), ("seedvr2xCuts", "frame_rate")}
     for node in workflow["nodes"]:
         if node["type"] in SCHEMAS:
-            unwired = [
-                each
-                for each in optional(node["type"])
-                if (node["type"], each) != ("seedvr2xUpscaleVideo", "cuts")
-            ]
+            unwired = [each for each in optional(node["type"]) if (node["type"], each) not in wired]
             for socket in node["inputs"]:
                 assert (socket["link"] is None) == (socket["name"] in unwired), socket["name"]
+                # The frontend draws a socket as the saved workflow has it: an optional one
+                # hollow (shape 7), a required one solid.
+                drawn = socket.get("shape")
+                assert drawn == (7 if socket["name"] in optional(node["type"]) else None), socket
             assert {each["name"] for each in node["inputs"]} >= set(optional(node["type"]))
 
 
@@ -333,8 +336,9 @@ def test_the_clip_workflow_takes_the_frame_rate_and_audio_of_the_video_it_loads(
 def test_the_clip_workflow_finds_the_cuts_of_the_frames_it_upscales() -> None:
     """Load Video, Cuts, Models, Upscale Video: the same frames go to Cuts and to the upscale, the
     cut list is wired to the upscale's optional cuts input (the example takes the recommended
-    way), Cuts takes the same Models node as the upscale (it gives the detector's file), and Cuts
-    is at its defaults (the detector at the command line's threshold)."""
+    way), Cuts takes the same Models node as the upscale (it gives the detector's file) and the
+    video's frame rate (the cut list's times), and Cuts is at its defaults (the detector at the
+    command line's threshold)."""
     workflow = load("clip")
     (upscale,) = of_type(workflow, "seedvr2xUpscaleVideo")
     (cuts,) = of_type(workflow, "seedvr2xCuts")
@@ -346,4 +350,9 @@ def test_the_clip_workflow_finds_the_cuts_of_the_frames_it_upscales() -> None:
     assert source(workflow, upscale, "cuts") is cuts
     assert source(workflow, upscale, "images") is components
     assert cuts["order"] < upscale["order"]
+    # The cut list's times at the loaded video's own frame rate: Get Video Components' fps, the
+    # same output CreateVideo takes.
+    assert source(workflow, cuts, "frame_rate") is components
+    rate = next(each for each in workflow["links"] if each[3] == cuts["id"] and each[5] == "FLOAT")
+    assert components["outputs"][rate[2]]["name"] == "fps"
     assert not of_type(load("picture"), "seedvr2xCuts")

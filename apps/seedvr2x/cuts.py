@@ -5,8 +5,9 @@ that another threshold gives its cuts without a second decode or detection; and 
 list format, read by job.read_cuts), with a playlist of each beside it, for VLC.
 
 The drawing of the cuts from the probabilities (Cut, detections, detected, possible, THRESHOLD and
-POSSIBLE) is the library's, seedvr2x.shotcuts; this module keeps what is the command's: a cut's
-time as a player shows it, the cut list file and the playlists."""
+POSSIBLE) and a time's form (timecode, which the ComfyUI nodes' cut list shows too) are the
+library's, seedvr2x.shotcuts; this module keeps what is the command's: a cut's time as a player
+shows it, from the frame index, the cut list file and the playlists."""
 
 import logging
 import math
@@ -25,7 +26,7 @@ import numpy as np
 from media import files
 from media.grid import filling
 from media.index import NOPTS, FrameIndex
-from seedvr2x.shotcuts import Cut
+from seedvr2x.shotcuts import Cut, timecode
 
 logger = logging.getLogger("cli.cuts")
 
@@ -57,27 +58,6 @@ def time_of(index: FrameIndex, frame: int) -> Fraction | None:
         # NOPTS is the lowest int64: as an origin, it gave "102481911520608:37:12.400".
         origin = 0 if first == NOPTS else first * index.time_base
     return pts * index.time_base - origin
-
-
-def timecode(seconds: Fraction | None) -> str:
-    """H:MM:SS.mmm, rounded up to the millisecond; "-" without a time.
-
-    DESIGN.md, Shot detection: the cut's "time from the file's start, rounded up to the
-    millisecond", for the player that checks the cuts: "The player is VLC, the user's choice
-    (2026-10-10)", which "lands within 3 frames of the cut on a file with B-frames, mostly before
-    it, which a time rounded up serves better than one rounded down; mpv lands on the cut frame".
-    Rounded up, the time lies in its frame's own display, at its start or within a millisecond
-    after. A seek to the first frame at or after the time lands one frame late instead, wherever
-    the frame's time isn't a whole millisecond: ffmpeg -ss T -i FILE gave the next frame for 45
-    of the 48 frames of a 24000/1001 MP4 (time base 1/24000), and the frame itself for all 48
-    with the time rounded down; on Matroska, whose times are milliseconds, the frame itself
-    either way (measured 2026-10-10, n9.0.2)."""
-    if seconds is None:
-        return "-"
-    milliseconds = math.ceil(seconds * 1000)
-    sign, value = ("-" if milliseconds < 0 else ""), abs(milliseconds)
-    hours, minutes = value // 3_600_000, value // 60_000 % 60
-    return f"{sign}{hours}:{minutes:02d}:{value // 1000 % 60:02d}.{value % 1000:03d}"
 
 
 def probability(value: float) -> str:
