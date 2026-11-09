@@ -321,10 +321,11 @@ From `apps/seedvr2x/`:
 uv run ruff format --check
 uv run ruff check
 uv run pyright
-uv run pytest
+OMP_NUM_THREADS=2 uv run pytest -n 8
 ```
 
-From `apps/imgserver/`, in its own environment, the same four as the CLI's. From
+From `apps/imgserver/`, in its own environment, the same four as the CLI's, its pytest without
+`-n` (as the library's and the nodes'). From
 `apps/comfyui/`, in the CLI's environment, the same four with `uv run --project ../seedvr2x`
 before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
 
@@ -350,31 +351,55 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
 ## Tests
 
 - `pytest` (as in [Checks](#checks)) runs on the CPU and needs no model. The four projects run at
-  once, each in its own process, basetemp and log, with a quarter of the machine's threads
-  (`OMP_NUM_THREADS`), and started with SIGINT at its default (a shell's background job has it
-  ignored, which `tests/test_stop.py`'s `test_terminable` reads): 28 minutes on 2026-11-07 on a
-  desktop of 32 threads, nothing else running, the CLI's minutes the wall: the library 5.5, the CLI
-  28.4, the image server 2.4, the nodes 0.8 (62 minutes the same day before, the projects one after
-  another, the stand-in VAE at its shipped widths, ffmpeg's listings asked by every run). While
-  building, run only the test files of the code just written, with ruff and pyright of the project
-  touched; the whole suite once at the end. A failure there is fixed in its patch and only its files
-  run again, never a second suite; a patch re-cut on a moved main runs the files its conflicts
-  touched. Tests that need ffmpeg skip without a build seedvr2x accepts (see
-  [Environment](#environment)).
+  once, each in its own process, basetemp and log, started with SIGINT at its default (a shell's
+  background job has it ignored, which `tests/test_stop.py`'s `test_terminable` reads), their
+  threads (`OMP_NUM_THREADS`) the machine's count between them: on a desktop of 32, the library 8,
+  the CLI 2 in each of its 8 workers (pytest-xdist, `-n 8`), the image server 4, the nodes 4. 7.4
+  minutes on 2026-11-09, nothing else running, the library's the wall: the library 7.4, the CLI 5.8,
+  the image server 2.5, the nodes 1.4, at 12.1 GiB of system memory used at the most (25.5 minutes
+  the day before, the CLI's the wall, its tests in one process: 6.1, 25.5, 2.5, 1.0). The CLI's
+  alone, nothing else running, on 2026-11-08: `-n 8` 4.8 minutes at 2 threads a worker, as at 1;
+  `-n 4` 8.6 at 4; `-n 12` and `-n 16` 4.9 to 5.0 (xdist's `--dist worksteal` 5.1 at 8 and 4.1 at
+  16), the wall being `tests/test_planner.py`'s longest-window test (2.7 minutes) and when it
+  starts, the CPU some 30% busy on average; at 1 thread a worker, the shipped widths' clip case took
+  77 s, 26 at 4. `-n 8` at 2 threads is the fewest workers that give the default distribution's
+  shortest wall, and leaves the other three projects their threads; 16 workers at 2 would take the
+  machine's 32 alone. While building, run only the test files of the code just written, with ruff
+  and pyright of the project touched, without `-n`; the whole suite once at the end. A failure there
+  is fixed in its patch and only its files run again, never a second suite; a patch re-cut on a
+  moved main runs the files its conflicts touched. Tests that need ffmpeg skip without a build
+  seedvr2x accepts (see [Environment](#environment)).
+- The CLI's tests under pytest-xdist (a dev dependency of `apps/seedvr2x` alone, pinned; the image
+  server's lock doesn't list it): each worker is a process of its own with its own basetemp
+  (`popen-gwN`), the tests run on its main thread, and the workers share the controller's process
+  group. The collected ids are the same with `-n` and without, and every assertion is kept. What
+  shared the machine badly, made safe: `tests/test_segment_cmd.py`'s Ctrl-C test times the kill
+  from the signal sent, not from its timer's start (2.62 s from the timer's start, over its 2.5,
+  at 1 thread a worker); `tests/test_cli_run.py`'s job run again in a fresh process hides
+  torchcodec from `sys.modules` while its in-process job runs, the environment's record being the
+  modules the process imported (`environment.imported`), those of the tests a worker ran before
+  it too (the tests of a 16-bit colour PNG import torchcodec; with torchcodec imported first in
+  every worker, its two cases were the suite's only ones to fail); `tests/conftest.py`'s line of
+  the ffmpeg memo's savings sums the workers' counts (`pytest_testnodedown`). Read and found
+  safe: every signal a test sends goes to its own process or to a group it started
+  (`start_new_session`), never to 0 or to pytest's group; the `/proc` scans select by the test's
+  own pids, their children and groups, or by its own tmp_path; no test reads a fixed path, the
+  home directory, a port, the load or the CPU count; the timing bounds the other tests take
+  (`ENDS_WITHIN` and the rest) held in ten runs of the CLI's suite at 4 to 16 workers.
 - The stand-in VAE of the CPU tests, `cpu_models` (`core/tests/stand_ins.py`), is the shipped one
   narrowed to 32, 32, 64 and 64 channels a block (`NARROW`: two widths, so that its resnets'
-  shortcuts are built, the decoder's tail's among them; the library reads no channel count of
-  the VAE), about nine times faster a pass; `shipped_cpu_models`, at the shipped widths, runs
-  one case of `tests/test_clip_cli.py` and one of `tests/test_still_cli.py`, and
-  `tests/test_tiling.py`'s `real` its own. In the CLI's tests, ffmpeg's listings
-  (`media/ffmpeg.py`'s check) and the conversions' fingerprint are asked once per build
+  shortcuts are built, the decoder's tail's among them; the library reads no channel count of the
+  VAE), about nine times faster a pass; `shipped_cpu_models`, at the shipped widths, runs one case
+  of `tests/test_clip_cli.py` and one of `tests/test_still_cli.py`, and `tests/test_tiling.py`'s
+  `real` its own. In the CLI's tests, ffmpeg's listings (`media/ffmpeg.py`'s check) and the
+  conversions' fingerprint are asked once per build in each process, each xdist worker its own
   (`tests/conftest.py`: the program PATH finds, by its path, inode, size, times and, under a
-  mebibyte, its bytes, its loader's environment, the options or the conversions): a fake build
-  is asked again only when its own bytes change, not files it prints from. They are asked every
-  time in `tests/test_ffmpeg_check.py`, `test_fingerprint.py` and `test_ends_with_us.py`
-  (`MEMO_OFF`), whose subject they are, and in any process of its own.
+  mebibyte, its bytes, its loader's environment, the options or the conversions): a fake build is
+  asked again only when its own bytes change, not files it prints from. They are asked every time in
+  `tests/test_ffmpeg_check.py`, `test_fingerprint.py` and `test_ends_with_us.py` (`MEMO_OFF`), whose
+  subject they are, and in any process of its own.
 - `pytest -m gpu` runs the tests that need CUDA, never selected by default; run it in each
-  directory.
+  directory, without `-n`: the tests share the one card.
 - **Where a test file sits.** `tests/test_x.py` is in the directory of the package it tests:
   `core/tests/` for the library's, `apps/seedvr2x/tests/` for the CLI's. File names are unique
   across the two, a helper being imported by name. A file that held both halves is two: the
@@ -1241,7 +1266,13 @@ before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
   `test_answers.py`, `test_metrics.py` (read back by prometheus_client's parser, a dependency of
   the tests alone), `test_main.py`, `test_names.py` and `test_lock.py` the parts alone. The
   library's three steps (`still.encoded`, `sampled`, `decoded`) are held to `still.upscale` by
-  the CLI's `tests/test_still_cli.py`, through `upscale`, which composes them.
+  the CLI's `tests/test_still_cli.py`, through `upscale`, which composes them. The start's
+  search remembers the tiles' figures while it runs (`peaks.tiles_remembered`,
+  `reservation.make`): `core/tests/test_peaks.py` holds every tiled pass over 1080p's, 4K's and
+  an odd frame's padding the same inside it, the memo the search's alone (gone at its end, a
+  raise included, the outer one serving a nested search, a figure set between two searches read
+  by the second), and `tests/test_reservation.py` a start's plan, reservation and refusal the same
+  with it and without (`_make`), its floor proofs made again.
 - The library's callbacks for a caller's bar, text and Cancel (`core/tests/test_progress_hooks.py`),
   all observing only: `tiling.TileStep` told by a tiled encode and decode (0 before the first
   tile, then each; a decode tells every tile before its first slice), through `shot_pass`,
