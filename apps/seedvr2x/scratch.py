@@ -8,7 +8,7 @@ so that the command line reports it as a file the run can't write."""
 import contextlib
 import logging
 import mmap
-import os
+import sys
 from collections.abc import Generator
 from pathlib import Path
 
@@ -16,7 +16,7 @@ import torch
 from torch import Tensor
 
 from media.ffmpeg import MediaError
-from media.files import make_directories
+from media.files import allocate, make_directories
 from seedvr2x.model import COMPUTE_DTYPE
 from seedvr2x.tilegrid import CHANNELS, SCRATCH, scratch_bytes
 
@@ -29,6 +29,22 @@ logger = logging.getLogger("cli.scratch")
 # gives each pass its plan's allowance, which the planner sets from the host's memory
 # (shot_plan.plan; DESIGN.md, Memory planner, Host RAM).
 DEFAULT_ALLOWANCE = 8 * 2**30
+
+# Windows' scratch files whose removal it refused while their mapping lived: Windows deletes no
+# file a mapping holds (WinError 32 or 5), where Linux unlinks it under the mapping, and the
+# mapping goes only with the last tensor on it, which the store's caller may still hold as the
+# block ends (impl-win-3's review, 2026-11-09). Removed at each later store's start, by then
+# unmapped (_remove_pending).
+_PENDING: list[Path] = []
+
+
+def _remove_pending() -> None:
+    for path in list(_PENDING):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            continue  # still mapped: the next store tries again
+        _PENDING.remove(path)
 
 
 class ScratchError(MediaError):
@@ -80,6 +96,7 @@ class Scratch:
         tensor on it, so nothing taken from the store is kept past the block but copies."""
         if self._open:
             raise RuntimeError("a scratch holds one store at a time")
+        _remove_pending()
         size = self.needed(frames, padded)
         shape = (CHANNELS, frames, *padded)
         self._open = True
@@ -117,7 +134,7 @@ class Scratch:
                     made = True
                     # Allocated whole: a full disk fails here, not later as a SIGBUS on a page of
                     # the mapping.
-                    os.posix_fallocate(file.fileno(), 0, size)
+                    allocate(file.fileno(), size)
                     # Mapped while the file allocated is still open, through its descriptor.
                     flat = _mapped(file.fileno(), path, size)
             except OSError as error:
@@ -130,7 +147,11 @@ class Scratch:
                 if made:
                     path.unlink(missing_ok=True)
             except OSError as error:
-                logger.warning("%s: the shot's scratch, not removed: %s", path, error)
+                if sys.platform == "win32" and getattr(error, "winerror", None) in (5, 32):
+                    _PENDING.append(path)
+                    logger.debug("%s: still mapped, removed at the next store: %s", path, error)
+                else:
+                    logger.warning("%s: the shot's scratch, not removed: %s", path, error)
 
 
 def _mapped(descriptor: int, path: Path, size: int) -> Tensor:

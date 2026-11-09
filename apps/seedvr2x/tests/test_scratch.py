@@ -741,3 +741,39 @@ def test_passes_keep_nothing_of_the_shot_on_the_device(
         for index in range(against + 1, len(along)):
             gathered = f"slice {index} against slice {against}: {said}"
             assert abs(along[index] - along[against]) <= TOLERANCE, gathered
+
+
+def test_on_windows_a_scratch_still_mapped_is_removed_at_the_next_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Windows deletes no file a mapping holds (WinError 32), and the store's caller may still hold
+    # a tensor on it as the block ends: said at debug, and removed at the next store's start, by
+    # then unmapped, where Linux unlinks it under the mapping (impl-win-3's review, 2026-11-09).
+    import scratch as module
+
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module, "_PENDING", [])
+    refusing = [True]
+    real = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if refusing[0] and self.name == tilegrid.SCRATCH and self.exists():
+            error = PermissionError(13, "The process cannot access the file", str(self))
+            error.winerror = 32  # type: ignore[attr-defined]  # Windows' attribute, set by hand
+            raise error
+        real(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    caplog.set_level(logging.DEBUG, logger="cli.scratch")
+    first, second = tmp_path / "shot_0", tmp_path / "shot_1"
+    with Scratch(first, allowance=0).store(1, (16, 16)) as store:
+        store.fill_(1)
+    del store
+    gc.collect()
+    left = first / tilegrid.SCRATCH
+    assert left.exists() and module._PENDING == [left]  # pyright: ignore[reportPrivateUsage]
+    assert "still mapped, removed at the next store" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    refusing[0] = False
+    with Scratch(second, allowance=0).store(1, (16, 16)):
+        assert not left.exists() and module._PENDING == []  # pyright: ignore[reportPrivateUsage]

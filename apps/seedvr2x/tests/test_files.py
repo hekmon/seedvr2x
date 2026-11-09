@@ -213,3 +213,34 @@ def test_on_windows_a_directory_another_process_locked_is_refused_until_it_ends(
     files.unlock_directory(mutex)
     again = files.lock_directory(tmp_path)
     files.unlock_directory(again)
+
+
+def test_free_space_and_allocate_are_statvfs_and_posix_fallocate_on_linux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if sys.platform != "win32":
+        stats = files.os.statvfs(tmp_path)
+        assert abs(files.free_space(tmp_path) - stats.f_bavail * stats.f_frsize) < 1 << 26
+        calls: list[tuple[int, int, int]] = []
+        monkeypatch.setattr(files.os, "posix_fallocate", lambda *a: calls.append(a))
+        files.allocate(7, 4096)
+        assert calls == [(7, 0, 4096)]
+    # Windows' twins: shutil.disk_usage's free bytes, and the file extended to its size.
+    monkeypatch.setattr(files.sys, "platform", "win32")
+    import shutil
+
+    assert files.free_space(tmp_path) == shutil.disk_usage(tmp_path).free
+    path = tmp_path / "scratch"
+    with path.open("x+b") as file:
+        files.allocate(file.fileno(), 1 << 20)
+    assert path.stat().st_size == 1 << 20
+
+
+@on_windows
+def test_on_windows_the_ram_line_reads_the_working_set() -> None:
+    import run
+
+    resident, peak = run._working_set()  # pyright: ignore[reportPrivateUsage]
+    assert 0 < resident <= peak
+    assert run._resident() == pytest.approx(resident, rel=0.5)  # pyright: ignore[reportPrivateUsage]
+    assert run._peak() >= resident  # pyright: ignore[reportPrivateUsage]

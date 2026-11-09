@@ -105,6 +105,26 @@ def test_nvidia_driver(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptur
     monkeypatch.setattr(ctypes, "CDLL", missing)
     assert model.nvidia_driver() is None
     assert caplog.text.count("the NVIDIA driver's version is unknown") == 3
+    assert ": cannot open shared object file" in caplog.text  # the library's own error, said
+
+
+def test_nvidia_driver_on_windows_asks_nvml_dll(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A native video said "the NVIDIA driver's version is unknown: Could not find module
+    # 'libnvidia-ml.so.1'" (2026-11-09): on Windows the driver's own nvml.dll, then NVSMI's.
+    from seedvr2x import model, probe
+
+    asked: list[str] = []
+
+    def found(name: str) -> object:
+        asked.append(name)
+        if name == "nvml.dll":
+            raise OSError("Could not find module 'nvml.dll'")
+        return NVML()
+
+    monkeypatch.setattr(probe.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "CDLL", found)
+    assert model.nvidia_driver() == "580.82.07"
+    assert asked == list(probe.NVML_WINDOWS)
 
 
 def sampler_bar() -> object:

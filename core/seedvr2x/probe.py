@@ -210,8 +210,8 @@ def library_code_sha256() -> str:
 def driver_version() -> str | None:
     """The NVIDIA driver's version, as nvidia-smi says it, read from NVML, the driver's own
     library (Linux's libnvidia-ml.so.1, Windows' nvml.dll); None, logged, where NVML can't say,
-    and silently on macOS, which has no NVIDIA driver. torch has no call for it. The same reading
-    as model.nvidia_driver, which is Linux's alone and imports the whole model layer."""
+    and silently on macOS, which has no NVIDIA driver. torch has no call for it. model.nvidia_driver
+    is this reading too, for the apps that already import the model layer."""
     if sys.platform == "darwin":
         return None
     names = NVML_WINDOWS if sys.platform == "win32" else (memory.NVML,)

@@ -51,7 +51,7 @@ import numpy as np
 import numpy.typing as npt
 
 from media.ffmpeg import MediaError, ends_with_us
-from media.files import partial_path, replace_whole
+from media.files import free_space, partial_path, replace_whole
 from media.index import NOPTS, FrameIndex
 from seedvr2x.clock import wall
 from seedvr2x.files import size_said
@@ -1478,10 +1478,9 @@ def _room(output: Path, video: int, others: int, segments: int) -> None:
     larger: one header for the segments' many (tests/test_assembly.py holds it under that sum)."""
     directory = output.parent
     try:
-        stats = os.statvfs(directory)
+        free = free_space(directory)
     except OSError as error:
         raise MediaError(f"{directory}: its free space unreadable: {error}") from error
-    free = stats.f_bavail * stats.f_frsize
     needed = video + others
     if free < needed:
         raise MediaError(

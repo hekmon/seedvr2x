@@ -170,6 +170,30 @@ def _sync(path: Path) -> None:
         os.close(descriptor)
 
 
+def free_space(directory: Path) -> int:
+    """The bytes free to this user on the disk of `directory`: statvfs's blocks available to a
+    user, as shutil.disk_usage's `free` reads them; on Windows, which has no statvfs,
+    shutil.disk_usage itself (GetDiskFreeSpaceExW's free bytes of the whole volume, a user's
+    quota not counted)."""
+    if sys.platform == "win32":
+        import shutil
+
+        return shutil.disk_usage(directory).free
+    stats = os.statvfs(directory)
+    return stats.f_bavail * stats.f_frsize
+
+
+def allocate(descriptor: int, size: int) -> None:
+    """Give the new, empty file of `descriptor` its `size` bytes on the disk now, so that a full
+    disk fails here rather than later, as a fault on a page of its mapping: posix_fallocate; on
+    Windows, which has none, the file extended to its size by os.ftruncate (the C runtime's
+    _chsize_s, which writes the zeros, so a full disk fails here there too)."""
+    if sys.platform == "win32":
+        os.ftruncate(descriptor, size)
+        return
+    os.posix_fallocate(descriptor, 0, size)
+
+
 def lock_directory(directory: Path) -> int:
     """Windows' twin of flock on a video's output directory (main._lock): a named mutex of the
     directory's identity, its volume's serial number and its file id (os.stat's st_dev and

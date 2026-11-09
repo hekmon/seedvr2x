@@ -8,11 +8,12 @@ A reading of the masters (`masters`) and of the room (`reading`), a line (`Disk.
 warning (`Disk.warning`), never a refusal: the assembly's own stop for want of room, and the
 frames a --quality's runs keep (main._room_on_disk), are separate and stay as they are."""
 
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
+
+from media.files import free_space
 
 # A master's bytes a frame before any is written, at most: its samples uncompressed, FFV1 being
 # lossless, at the bytes a sample each format takes (media/writer.py: yuv420p10le's 1.5 samples a
@@ -93,10 +94,8 @@ def free_on(directory: Path) -> int:
     place = directory
     while not place.exists():
         place = place.parent
-    # As the assembly's own check reads it (media/assembly.py, os.statvfs): the blocks free to a
-    # user, shutil.disk_usage's `free`.
-    stats = os.statvfs(place)
-    return stats.f_bavail * stats.f_frsize
+    # As the assembly's own check reads it (media/assembly.py, files.free_space).
+    return free_space(place)
 
 
 @dataclass(frozen=True)

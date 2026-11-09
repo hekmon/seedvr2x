@@ -10,7 +10,6 @@ through typed functions.
 
 # pyright: basic
 
-import ctypes
 import functools
 import logging
 import os
@@ -279,25 +278,13 @@ class Models:
 def nvidia_driver() -> str | None:
     """The NVIDIA driver's version, as nvidia-smi says it, read from NVML, the driver's own
     library, as torch reads the device count from it (torch/cuda/__init__.py,
-    _raw_device_count_nvml); None, logged, when NVML can't say. torch has no call for it."""
-    try:
-        nvml = ctypes.CDLL("libnvidia-ml.so.1")
-    except OSError as error:
-        logger.warning("the NVIDIA driver's version is unknown: %s", error)
-        return None
-    status = nvml.nvmlInit_v2()
-    if status != 0:
-        logger.warning("the NVIDIA driver's version is unknown: NVML's initialisation: %d", status)
-        return None
-    try:
-        version = ctypes.create_string_buffer(80)  # NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE
-        status = nvml.nvmlSystemGetDriverVersion(version, ctypes.c_uint(len(version)))
-        if status != 0:
-            logger.warning("the NVIDIA driver's version is unknown: NVML's answer: %d", status)
-            return None
-        return version.value.decode()
-    finally:
-        nvml.nvmlShutdown()
+    _raw_device_count_nvml); None, logged, when NVML can't say. torch has no call for it. The
+    environment probe's reading (probe.driver_version), which takes Windows' nvml.dll where this
+    one, Linux's alone, asked libnvidia-ml.so.1 there and said the version unknown in a native
+    video's lines (impl-win-3, 2026-11-09); Linux's words unchanged."""
+    from seedvr2x.probe import driver_version
+
+    return driver_version()
 
 
 def load_models(

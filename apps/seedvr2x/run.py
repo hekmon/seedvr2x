@@ -1,11 +1,11 @@
 """A job's run: its shots upscaled in order, their frames read from the source and written as they
 come (DESIGN.md, Pipeline, per shot), unit by unit (DESIGN.md, Pause and resume)."""
 
+import ctypes
 import logging
 import math
 import mmap
-import os
-import resource
+import sys
 import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
@@ -25,7 +25,7 @@ from job import KEPT_SAMPLE_BYTES, OutputSegment, Run, run_of
 from media.checksums import write_checksums
 from media.decode import to_float32
 from media.ffmpeg import MediaError
-from media.files import make_directories
+from media.files import allocate, make_directories
 from media.reader import Reader, listed
 from media.source import Source
 from media.writer import FFV1Writer, Tags, Writer, quantise
@@ -512,7 +512,7 @@ def _decode(
         name,
         spent,
         _resident() / GIB,
-        resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 / GIB,
+        _peak() / GIB,
         left,
     )
 
@@ -651,7 +651,7 @@ class Kept:
         self.path.unlink(missing_ok=True)
         try:
             with self.path.open("x+b") as file:
-                os.posix_fallocate(file.fileno(), 0, size)
+                allocate(file.fileno(), size)
                 mapping = mmap.mmap(file.fileno(), size)
         except OSError as error:
             self.path.unlink(missing_ok=True)
@@ -853,6 +853,54 @@ def _spent(models: Models, started: float) -> str:
 
 
 def _resident() -> int:
-    """The process's resident memory now, in bytes (Linux)."""
+    """The process's resident memory now, in bytes: /proc's on Linux, the working set on Windows
+    (_working_set)."""
+    if sys.platform == "win32":
+        return _working_set()[0]
+    import resource  # POSIX's, so that a run starts on Windows
+
     with open("/proc/self/statm") as statm:
         return int(statm.read().split()[1]) * resource.getpagesize()
+
+
+def _peak() -> int:
+    """The most resident memory the process has had, in bytes: getrusage's on Linux, the working
+    set's peak on Windows (_working_set)."""
+    if sys.platform == "win32":
+        return _working_set()[1]
+    import resource
+
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+
+
+class _MemoryCounters(ctypes.Structure):
+    """psapi.h's PROCESS_MEMORY_COUNTERS."""
+
+    _fields_ = (
+        ("cb", ctypes.c_uint32),
+        ("PageFaultCount", ctypes.c_uint32),
+        ("PeakWorkingSetSize", ctypes.c_size_t),
+        ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t),
+        ("PeakPagefileUsage", ctypes.c_size_t),
+    )
+
+
+def _working_set() -> tuple[int, int]:
+    """Windows' working set of this process and its peak, in bytes (K32GetProcessMemoryInfo),
+    the twins of Linux's resident memory and its peak; (0, 0), said at debug, where it can't be
+    read."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p  # pyright: ignore[reportUnknownMemberType]
+    kernel32.K32GetProcessMemoryInfo.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32)  # pyright: ignore[reportUnknownMemberType]
+    counters = _MemoryCounters(cb=ctypes.sizeof(_MemoryCounters))
+    process = kernel32.GetCurrentProcess()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if not kernel32.K32GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):  # pyright: ignore[reportUnknownMemberType]
+        error = int(ctypes.get_last_error())  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownArgumentType]
+        logger.debug("the working set unread: WinError %s", error)
+        return 0, 0
+    return counters.WorkingSetSize, counters.PeakWorkingSetSize
