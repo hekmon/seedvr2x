@@ -14,7 +14,7 @@ import numpy as np
 import numpy.typing as npt
 
 from media.conversion import Conversion
-from media.ffmpeg import MediaError, ends_with_us
+from media.ffmpeg import NEW_GROUP, MediaError, ends_with_us
 
 
 def decode_command(
@@ -95,6 +95,7 @@ class Decoder:
             stdout=subprocess.PIPE,
             stderr=self._log,
             process_group=0,
+            creationflags=NEW_GROUP,
             preexec_fn=ends_with_us(),
         )
         assert self._process.stdout is not None

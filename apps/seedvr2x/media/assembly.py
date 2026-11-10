@@ -50,7 +50,7 @@ from typing import IO, Any, cast
 import numpy as np
 import numpy.typing as npt
 
-from media.ffmpeg import MediaError, ends_with_us
+from media.ffmpeg import NEW_GROUP, MediaError, ends_with_us
 from media.files import free_space, partial_path, replace_whole
 from media.index import NOPTS, FrameIndex
 from seedvr2x.clock import wall
@@ -665,6 +665,7 @@ def _decoded(path: Path) -> list[str]:
             stderr=log,
             text=True,
             process_group=0,
+            creationflags=NEW_GROUP,
             preexec_fn=ends_with_us(),
         )
         assert process.stdout is not None
@@ -719,6 +720,7 @@ def segment_refusal(path: Path, frames: int, frame_rate: Fraction) -> str:
         text=True,
         check=False,
         process_group=0,
+        creationflags=NEW_GROUP,
         preexec_fn=ends_with_us(),
     )
     if result.returncode != 0:
@@ -1909,6 +1911,7 @@ def _read_packets(path: Path, video: int | None) -> tuple[dict[int, _Packets], i
             stderr=log,
             text=True,
             process_group=0,
+            creationflags=NEW_GROUP,
             preexec_fn=ends_with_us(),
         )
         assert process.stdout is not None
@@ -1964,6 +1967,7 @@ def _ffprobe(path: Path, *options: str) -> dict[str, Any]:
         text=True,
         check=False,
         process_group=0,
+        creationflags=NEW_GROUP,
         preexec_fn=ends_with_us(),
     )
     if result.returncode != 0:
@@ -1999,6 +2003,7 @@ def _run(command: Sequence[str]) -> tuple[int, list[str]]:
             stdout=subprocess.DEVNULL,
             stderr=log,
             process_group=0,
+            creationflags=NEW_GROUP,
             preexec_fn=ends_with_us(),
         )
         try:

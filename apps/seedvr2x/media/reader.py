@@ -61,7 +61,7 @@ import numpy.typing as npt
 
 from media.channel import OVERWRITE, Channel
 from media.conversion import Conversion
-from media.ffmpeg import NO_METADATA, MediaError, ends_with_us, input_args
+from media.ffmpeg import NEW_GROUP, NO_METADATA, MediaError, ends_with_us, input_args
 from media.index import FrameIndex
 
 logger = logging.getLogger("cli.media.reader")
@@ -290,6 +290,7 @@ class _Run:
                 stderr=self._log,
                 pass_fds=[passed for channel in channels for passed in channel.passed],
                 process_group=0,
+                creationflags=NEW_GROUP,
                 preexec_fn=ends_with_us(),
             )
         except BaseException:

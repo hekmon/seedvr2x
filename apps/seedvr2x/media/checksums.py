@@ -11,7 +11,7 @@ from collections import deque
 from collections.abc import Sequence
 from pathlib import Path
 
-from media.ffmpeg import MediaError, ends_with_us
+from media.ffmpeg import NEW_GROUP, MediaError, ends_with_us
 from media.files import write_whole
 
 _LINE = re.compile(r"[0-9a-f]{8}")
@@ -77,6 +77,7 @@ def check_frames(
             stdout=subprocess.PIPE,
             stderr=log,
             process_group=0,
+            creationflags=NEW_GROUP,
             preexec_fn=ends_with_us(),
         )
         assert process.stdout is not None

@@ -40,6 +40,7 @@ import numpy.typing as npt
 
 from media.ffmpeg import (
     CREATE_SUSPENDED,
+    NEW_GROUP,
     MediaError,
     argument,
     close_job,
@@ -234,6 +235,7 @@ class Writer:
             stdout=stdout,
             stderr=subprocess.PIPE,
             process_group=0,
+            creationflags=NEW_GROUP,
             preexec_fn=ends_with_us(),
         )
         assert self._process.stdin is not None and self._process.stderr is not None
@@ -746,7 +748,7 @@ class CommandWriter(Writer):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 process_group=0,
-                creationflags=CREATE_SUSPENDED if windows else 0,
+                creationflags=CREATE_SUSPENDED | NEW_GROUP if windows else 0,
             )
             with _GROUPS_LOCK:
                 if windows:
@@ -1133,6 +1135,7 @@ def count_packets(path: Path) -> int:
         text=True,
         check=False,
         process_group=0,  # as the writers' ffmpeg: it checks the segment being finished
+        creationflags=NEW_GROUP,
         preexec_fn=ends_with_us(),
     )
     if result.returncode != 0:
@@ -1172,6 +1175,7 @@ def count_frames(path: Path, strict: bool = False) -> int:
         errors="replace",
         check=False,
         process_group=0,  # as count_packets'
+        creationflags=NEW_GROUP,
         preexec_fn=ends_with_us(),
     )
     # The last lines only: a decoder that fails says so at every frame.

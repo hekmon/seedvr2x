@@ -221,6 +221,17 @@ def _unjobbed(call: str, error: int) -> str:
     )
 
 
+# The creation flags of every child seedvr2x starts in a process group of its own
+# (`process_group=0`, which Popen takes on POSIX alone): Windows' twin, CreateProcess's
+# CREATE_NEW_PROCESS_GROUP (winbase.h), whose processes have Ctrl-C disabled, they and what they
+# start, so that a console's Ctrl-C reaches seedvr2x alone (stop.py), which lets the unit in
+# progress finish. Without it every ffmpeg on the console got the first Ctrl-C and exited 255,
+# and the run stopped with exit 1 (impl-win-3, 2026-11-09). A Ctrl-Break reaches every process
+# on the console whatever its group: it is a stop at once, as SIGTERM. 0 elsewhere, which is all
+# Popen takes there.
+NEW_GROUP = 0x00000200 if sys.platform == "win32" else 0
+
+
 def ends_with_us() -> Callable[[], None] | None:
     """A `preexec_fn` for every ffmpeg and ffprobe seedvr2x starts, which has it killed (SIGKILL)
     when seedvr2x dies: DESIGN.md, Output, Assembly (decided on 2026-10-12 for the assembly's:
