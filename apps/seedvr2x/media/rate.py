@@ -10,6 +10,7 @@ timeline. Exact throughout: the frames' pts in their stream's time base, as the 
 them, and rates as fractions."""
 
 import math
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
@@ -603,6 +604,18 @@ NAMES = (
 SNAPPED = "'if(eq({0},NOPTS),NOPTS,round(round({0}*TB*$N/$D)*$D/TB/$N))'"
 
 
+# On Windows, said before the join's commands, which are a POSIX shell's (a for loop over a glob,
+# printf, $(...), awk under LC_ALL=C, grep and !) and have no equivalent in cmd, whose arithmetic
+# is integers alone (the durations are frames over the rate, to the microsecond): Git for
+# Windows' bash ran the first as given, the directory quoted by shlex, with a Windows build of
+# ffmpeg 9.0.1 on its PATH: 10 FFV1 segments at 24000/1001 joined, every frame and timestamp the
+# master's (impl-win-5, 2026-11-10).
+WINDOWS_SHELL = (
+    ", in a POSIX shell (on Windows, Git for Windows' Git Bash, ffmpeg and ffprobe on its PATH:"
+    " cmd and PowerShell take none of these lines)"
+)
+
+
 def grid_join(directory: str = "DIR", declares: Fraction | None = None) -> str:
     """How segments are joined so that every frame keeps its place on the frame grid, as a
     refusal advises it, each way with its command, in one place (DESIGN.md, Input: "a join that
@@ -642,7 +655,8 @@ def grid_join(directory: str = "DIR", declares: Fraction | None = None) -> str:
     advised commands "take a directory whose name begins with a hyphen"): `cd -dir` is refused
     by sh, dash ("cd: Illegal option -d") and bash, and `sptenc concat -dir joined.mkv` by
     sptenc ("flag provided but not defined: -dir"; v0.1.1 of 2026-10-02); cd -- is POSIX's, and
-    sptenc takes its directory after -- too ("Concatenating video files from -dir")."""
+    sptenc takes its directory after -- too ("Concatenating video files from -dir"). On Windows,
+    the first way says they are a POSIX shell's (WINDOWS_SHELL)."""
     # DESIGN.md, Input, directory input (the refusal's three joins, kept as built by design on
     # 2026-10-28, the questions of 2026-10-12). (1) Durations and the snap, in
     # one pass, over the other join that held as widely: the plain join, then a second stream
@@ -678,9 +692,10 @@ def grid_join(directory: str = "DIR", declares: Fraction | None = None) -> str:
     # after it in parentheses, so that a line copied whole is the command and nothing else
     # (DESIGN.md, What it prints: a refusal's advised command "on a line of its own"). The log's
     # time of day is on a message's first line only: the later lines start where they start.
+    shell = WINDOWS_SHELL if sys.platform == "win32" else ""
     ways = [
-        "with ffmpeg alone, each segment listed with its exact duration, its frames over the"
-        f" rate, and every timestamp snapped to the grid in one stream copy{first}\n"
+        f"with ffmpeg alone{shell}, each segment listed with its exact duration, its frames over"
+        f" the rate, and every timestamp snapped to the grid in one stream copy{first}\n"
         f"{there} {setting} {LISTED} && {GUARD} && ffmpeg -f concat"
         f' -safe 0 -i list.txt -c copy -bsf:v "{snap}" ../joined.mkv\n({asked})',
         "or with sptenc, for segments of its split, which snaps every timestamp to the grid:\n"

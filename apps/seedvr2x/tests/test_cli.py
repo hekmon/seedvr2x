@@ -512,7 +512,9 @@ def test_directory_refused_first(tmp_path: Path) -> None:
             " place\n"
         )
         assert result.stderr.endswith(advice)
-        assert "with ffmpeg alone, each segment listed with its exact duration" in advice
+        # On Windows the commands said to be a POSIX shell's first (rate.WINDOWS_SHELL).
+        shell = rate.WINDOWS_SHELL if sys.platform == "win32" else ""
+        assert f"with ffmpeg alone{shell}, each segment listed with its exact duration" in advice
         # The rate the shell's N and D in both commands, the join's and the remake's.
         # The directory after --, so that one whose name begins with a hyphen is no option.
         assert advice.count(f"cd -- {quoted} && N=24000 D=1001 && for f in ./*.mkv; do printf") == 2

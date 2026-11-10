@@ -39,6 +39,7 @@ from dataclasses import replace
 from fractions import Fraction
 from itertools import accumulate, pairwise
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -1175,7 +1176,7 @@ def no_rate(declares: Fraction) -> str:
     )
 
 
-def test_the_join_that_keeps_the_frame_grid() -> None:
+def test_the_join_that_keeps_the_frame_grid(monkeypatch: pytest.MonkeyPatch) -> None:
     # The advice of a join on the frame grid, in one place (rate.grid_join), whole: by ffmpeg alone
     # first, seedvr2x never needing sptenc, a shell's lines listing each segment with its exact
     # duration and one stream copy snapping every timestamp; then sptenc's concat; then, where no
@@ -1192,6 +1193,8 @@ def test_the_join_that_keeps_the_frame_grid() -> None:
     # and ffmpeg, in both commands, the guard that stops on a name holding an apostrophe, which the
     # names' words say; and the directory after --, cd's and sptenc's, one whose name begins with a
     # hyphen taken (design, 2026-10-12; typed in test_the_join_advised_takes_any_name).
+    # Linux's words first, on any platform; Windows' after.
+    monkeypatch.setattr(rate, "sys", SimpleNamespace(platform="linux"))
     snapped = "'if(eq({0},NOPTS),NOPTS,round(round({0}*TB*$N/$D)*$D/TB/$N))'"
     listed = (
         'for f in ./*.mkv; do printf "file \'%s\'\\n" "$f"; printf "duration %s\\n" "$(ffprobe -v'
@@ -1255,6 +1258,18 @@ def test_the_join_that_keeps_the_frame_grid() -> None:
     )
     assert "24000" not in known and "-r $N/$D" not in known
     assert "N=25 D=1 &&" in rate.grid_join(declares=Fraction(25))
+    # On Windows the same commands, said to be a POSIX shell's, which cmd and PowerShell don't
+    # take, before the first; nothing else moves.
+    linux = rate.grid_join()
+    monkeypatch.setattr(rate, "sys", SimpleNamespace(platform="win32"))
+    windows = rate.grid_join()
+    assert windows == linux.replace(
+        "with ffmpeg alone,",
+        "with ffmpeg alone, in a POSIX shell (on Windows, Git for Windows' Git Bash, ffmpeg and"
+        " ffprobe on its PATH: cmd and PowerShell take none of these lines),",
+        1,
+    )
+    assert windows.count("POSIX shell") == 1
 
 
 @needs_ffmpeg
