@@ -1408,15 +1408,22 @@ then, what differs:
 - **Its output is Windows' own.** The same job gives slightly different bits on Windows than on
   Linux or under WSL2, on the same card (most likely another attention kernel: PyTorch's
   Windows build has no FlashAttention backend in SDPA), and the same bits every time on Windows.
-- **Ending it.** A single Ctrl-C stops the run, but not yet as on Linux: every ffmpeg seedvr2x
-  started gets it too and ends at once, so the step in progress fails, and the run stops with
-  an error line, `ERROR writing ... with ffmpeg: exit status 255; stopped: ... the same command
-  resumes`, and exit status 1, rather than after the unit with 130; every unit done is kept,
-  and the same command resumes (measured on 2026-11-09). `--until` stops before a unit as on
+- **Ending it** is as on Linux ([stopping](#stopping)), Ctrl-Break standing for SIGTERM: Ctrl-C
+  once finishes the unit in progress (exit 130), twice stops at once (130); Ctrl-Break stops at
+  once (143), and so does closing the console window (143), within the 5 seconds Windows
+  leaves a closed console's programs: what a stop can't finish by then is left as a killed run
+  leaves it, and the same command resumes as after a crash. `--until` stops before a unit as on
   Linux. A process killed some other way (Task Manager, a crash) takes every ffmpeg it started
   with it, and your `--segment-cmd`; its units done are kept, and the same command resumes.
-- **`--segment-cmd`** is run by cmd.exe, `{out}` in double quotes; a stop ends it at once, with
-  whatever it started, without the 5 seconds it gets on Linux.
+- **Under `uv run`,** a Ctrl-Break ends uv at once and leaves seedvr2x running on its own, its
+  window's prompt back while it still works, and a second Ctrl-Break can no longer reach it
+  through uv. Run the environment's `seedvr2x.exe` itself (`.venv\Scripts\seedvr2x.exe`), or
+  stop with Ctrl-C, which uv passes on and waits for.
+- **`--segment-cmd`** is run by cmd.exe, `{out}` in double quotes; a stop at once sends it
+  Ctrl-Break, Windows' SIGTERM (a Python script gets SIGBREAK), and ends it with whatever it
+  started 5 seconds later, as on Linux. A command waiting for its next frame on the pipe doesn't
+  see the Ctrl-Break while it waits, where Linux's SIGTERM wakes it: ffmpeg takes the 5 seconds
+  there, and its partial file is removed as any other.
 - **A file another program has open,** a segment or the finished file in a player, can't be
   replaced or removed on Windows: seedvr2x stops, naming the file and Windows' reason. Close it
   there, then run the same command again.
@@ -1754,6 +1761,12 @@ program having taken part of the card since, the job can't go on as it is.
   or run it again with --accept-env-change, which plans the rest of the job again for the memory free now, its output from there no longer the uninterrupted run's bit for bit
   ```
 
+  A job whose tiles you pinned close to the budget is the likeliest to meet this on a card that
+  drives a desktop, whose programs take a little more or less of it from one day to the next: a
+  pin 0.14 GiB under its budget was refused at its resume when the desktop held 0.2 GiB more
+  (an RTX 5090 on Windows, 2026-11-09). Leave the planner a margin, or no pin at all, for a job
+  you expect to stop and resume there.
+
   `--verbose` adds the planner's figures. The ways out: free the memory and run the same
   command, which keeps the output bit for bit ([what else holds the
   card](#what-else-holds-the-card)); or `--accept-env-change`, which plans the rest again for
@@ -1823,7 +1836,8 @@ flag, as any resume; another GPU alone is no change to it, its assembly being ff
   ```
 
 - **Ctrl-C twice, or SIGTERM,** stops at once (`ERROR stopped at once (Ctrl-C)`, exit 130, or
-  `(SIGTERM)`, 143). Only the unit in progress is lost. Before the first unit (the first pass,
+  `(SIGTERM)`, 143). On Windows Ctrl-Break, or the console window closed, is SIGTERM's twin
+  (`(Ctrl-Break)`, `(the console closed)`, 143; [on Windows itself](#on-windows-itself)). Only the unit in progress is lost. Before the first unit (the first pass,
   the model load, the calibration), a single Ctrl-C stops at once. Once the GPU has been used,
   the process then ends without waiting for its work, which a stalled card might never finish:
   `stopped at once (SIGTERM); the process ends without waiting for the GPU`, or `..., 34 min 12 s
@@ -1833,12 +1847,14 @@ flag, as any resume; another GPU alone is no change to it, its assembly being ff
   stops after the unit, the second at once), ends the process from another thread, `stopped at
   once (SIGTERM), asked again before the main thread answered the first: it had been held in one
   call for 3 min 2 s, at ...`, exit 143 or 130. The unit in progress is lost and made again by
-  the same command; every unit done is kept. Not on Windows yet.
+  the same command; every unit done is kept. On Windows, Ctrl-Break twice.
 - **A CUDA error** other than out of memory ends the run the same way, exit 1, its line saying so:
   every unit done is kept, and the same command resumes.
 - **With `--segment-cmd`,** a stop at once ends your command too: its process group gets SIGTERM,
   then SIGKILL after 5 s, with a line meanwhile, `the segment command was sent SIGTERM: it has 5 s
-  to end before SIGKILL; Ctrl-C again kills it at once`. Its file is discarded. A single Ctrl-C
+  to end before SIGKILL; Ctrl-C again kills it at once` (on Windows Ctrl-Break, then its job ended:
+  `the segment command was sent Ctrl-Break: it has 5 s to end before its job is ended; Ctrl-C
+  again ends it at once`). Its file is discarded. A single Ctrl-C
   lets it finish its segment. Where the process is ended from another thread (a stop asked again
   while the main thread answers nothing, below), the command's process group gets SIGKILL at
   once.
@@ -2433,7 +2449,7 @@ CUDA's own `CUDA_VISIBLE_DEVICES` chooses which, and separate jobs run on separa
 | 2 | An unknown option, a missing argument, or a value of the wrong form (`--until 7h30`, `--frame-rate 23.976`). |
 | 75 | Stopped by `--until`, to be run again. |
 | 130 | Stopped by Ctrl-C. |
-| 143 | Stopped by SIGTERM, at once. |
+| 143 | Stopped at once by SIGTERM; on Windows by Ctrl-Break, or the console window closed. |
 
 A picture's run takes the same codes: 0 once its file is written, or its plan said by `--plan`.
 

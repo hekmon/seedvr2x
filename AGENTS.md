@@ -300,20 +300,39 @@ beside it; the `__init__.py` is seedvr2x's.
   - every child in a Job Object that kills them when seedvr2x ends (`media/ffmpeg.py`,
     `_in_a_job`, PDEATHSIG's twin: `ends_with_us` returns None there, no preexec_fn); a
     `--segment-cmd` run by cmd.exe (COMSPEC, `/d /v:off /s /c`: no AutoRun, no delayed
-    expansion), started suspended in a job of its own (`ffmpeg.contained`), which its stop ends at
-    once, `{out}` in double quotes and an output under a name holding `%` refused at the job's
-    start (`tests/test_segment_cmd_windows.py`);
+    expansion), started suspended in a job of its own (`ffmpeg.contained`), `{out}` in double
+    quotes and an output under a name holding `%` refused at the job's start, a shell that can't be
+    put in its job killed and reaped (`tests/test_segment_cmd_windows.py`);
+  - the stop as on Linux (`stop.py`, `tests/test_groups.py`, `tests/test_closing.py`): every child
+    started in a group of its own on Linux (`process_group=0`) started with
+    CREATE_NEW_PROCESS_GROUP there too (`media/ffmpeg.NEW_GROUP`), so that a console's Ctrl-C
+    reaches seedvr2x alone and the first finishes the unit; Ctrl-Break (SIGBREAK) SIGTERM's twin
+    (`stop.AT_ONCE`, `Terminated.how` naming it, 143), and so is the console's close (the logoff's
+    and shutdown's events, handled alike, reach no process that has loaded user32, as torch's
+    does) (`stop.Closing`, a console handler that raises SIGBREAK for the
+    main thread and waits `CLOSE_WAIT` seconds before ending the process itself, 5 s being
+    what Windows leaves a closed console's process, measured; the handler stays registered once
+    a close is handled, its removal waiting for it); the process ended at once by
+    TerminateProcess on itself (`stop.end_process`, `os._exit`'s twin: ExitProcess runs every
+    library's detach, and after a close with torch loaded it ended the process with 0), a closed
+    run's normal end too (`stop.closed`, `main.main`); the watcher on a socket pair
+    (`stop.WATCHED` true there, `Watch.put`); a segment command sent Ctrl-Break
+    (`ffmpeg.break_group`), then its job ended after `STOP_GRACE`, the line in Windows' words (a
+    command blocked reading its pipe takes the 5 s: Ctrl-Break doesn't interrupt that read);
   - a video's directory lock a named mutex of the directory's volume and file id
     (`files.lock_directory`: no file added, the kernel's however the process ends), refused in
     flock's words; a file Windows won't replace or remove (WinError 32, a sharing violation:
     another program has it open; 5, access denied: that, or read-only, or a protected folder,
     each said) refused naming it and Windows' reason (`files.HeldFile`, a MediaError and a
-    PermissionError both, `files.held`, main's net), never retried; a scratch file still mapped
-    as its store ends, which Windows won't delete, removed at the next store
-    (`scratch._PENDING`, `tests/test_scratch.py`);
+    PermissionError both, `files.held`, main's net, where a refused opening is said as one:
+    `files.refused`), never retried; a scratch file still mapped as its store ends, which Windows
+    won't delete, removed at the next store, at the segment's end, as main returns, or at the next
+    start as a leftover (`scratch._PENDING`, `scratch.remove_pending`, `tests/test_scratch.py`);
   - the RAM line from the working set (`run._working_set`), the free space by
-    `shutil.disk_usage` and a scratch file's room by extending it (`files.free_space`,
-    `files.allocate`); POSIX's own modules, `fcntl` and `resource`, imported where Linux takes
+    `shutil.disk_usage` and a scratch file's room reserved and its end set without a byte written
+    (`files.free_space`, `files.allocate`: the C runtime's `_chsize_s` wrote the zeros, 34 s for
+    32 GiB on an NVMe drive, the reservation 0.03 s, NTFS writing the zeros as the pass reaches
+    them, 6.3 s there); POSIX's own modules, `fcntl` and `resource`, imported where Linux takes
     them (`tests/test_cli.py`: the help without either);
   - torch loaded before `memory.startup` (TorchCodec, for a 16-bit PNG) keeps the allocator it
     loaded with: torch refuses another backend at its CUDA's first use (an internal assert,
@@ -327,10 +346,8 @@ beside it; the `__init__.py` is seedvr2x's.
     (`model.nvidia_driver`, the probe's reading); a model file the system can't follow (a WSL
     link) refused as `ModelUnreadable`; the commands a refusal advises quoted for cmd
     (`errors.shell_word`).
-  Not built there: Ctrl-C's and the stop's twins (the watcher, the statuses 130 and 143, a
-  segment command's grace), impl-win-4's (MANUAL.md, On Windows itself, says what a Ctrl-C
-  does today). `--compile` is refused there, PyTorch's Windows build having no Triton
-  (`tests/test_compile_cli.py`).
+  Not built there: SIGUSR1's stacks (Windows has no such signal). `--compile` is refused there,
+  PyTorch's Windows build having no Triton (`tests/test_compile_cli.py`).
 - Every file is checked out with the repository's bytes on every platform (`.gitattributes`:
   `* text=auto eol=lf`, binary types by name, the vendored trees `-text`). Git for Windows'
   default (`core.autocrlf=true`) turned 525 of the 533 files into CRLF, and `tools/vendor.py
@@ -470,12 +487,24 @@ marker. The image server, Linux's alone by its lock, has no such line.
   directory, without `-n`: the tests share the one card.
 - **Windows' cases.** The tests of Windows' twins are named `on_windows` and skip elsewhere, each
   beside a Linux half that holds its words with Windows faked (kernel32 and the platform):
-  `tests/test_channel.py`, `tests/test_files.py`, `tests/test_ends_with_us.py` and
-  `tests/test_segment_cmd_windows.py` (the CLI's). They run natively file by file (impl-win-3,
-  2026-11-09: all passing). The library's suite is never run natively until its synthetic model
-  files are sparse on NTFS (impl-win-2's native run filled the disk twice); the CLI's whole suite
-  natively, with its POSIX fakes (`#!/bin/sh` ffmpegs, `fcntl`, stand-ins that read Windows as a
-  driver that refuses, a test that signals its own process), is impl-win-4's.
+  `tests/test_channel.py`, `tests/test_files.py`, `tests/test_ends_with_us.py`,
+  `tests/test_segment_cmd_windows.py`, `tests/test_groups.py`, `tests/test_closing.py` and
+  `tests/test_stop.py`'s (the console's Ctrl-C, Ctrl-Break and close sent to a hidden console of
+  the test's own). Each project's suite runs natively too, on the CPU, each test running or
+  skipping by its reason (impl-win-4, 2026-11-10): the CLI's 2,195 passed and 322 skipped (21
+  reasons) in 8.4 minutes at `-n 4`, the library's 2,286 passed and 34 skipped in 7.2, the nodes'
+  442 passed in 1.2, each at 9 GiB of memory at the most. The CLI's POSIX parts skip there by the
+  markers of `tests/posix_only.py` (POSIX programs and `#!/bin/sh` fakes, signals and process
+  groups, `/proc`, `time.tzset`, POSIX calls, a name Windows refuses, `fcntl`, permissions); the
+  library's by inline reasons (`/proc`, SIGUSR2, `os.mkfifo`); its synthetic model files are
+  sparse on NTFS (`library_fixtures.sparse`, `grow`: a truncate there writes the zeros). Natively
+  met and kept in mind: ffmpeg's lines carry its contexts' addresses without `0x`; a file's times
+  are kept to 100 ns, so a test that touches a file moves its time by a millisecond or more; a
+  write into a pipe whose reader has gone fails with EINVAL (`writer.pipe_gone`); `os.kill` on a
+  process is TerminateProcess, so a test signals itself with `signal.raise_signal`; a scratch file
+  is removed only once unmapped (`tests/test_scratch.py`'s `gone`); the venv's `python.exe` is a
+  launcher whose child is the interpreter. Run natively with `-n 4` for the CLI, its basetemp on a
+  local disk.
 - **Where a test file sits.** `tests/test_x.py` is in the directory of the package it tests:
   `core/tests/` for the library's, `apps/seedvr2x/tests/` for the CLI's. File names are unique
   across the two, a helper being imported by name. A file that held both halves is two: the
@@ -932,8 +961,8 @@ marker. The image server, Linux's alone by its lock, has no such line.
   and so does an unexpected exception from `serve` once CUDA was used, logged with its traceback
   first (`tests/test_main.py`; without CUDA it is raised as before). The POSIX-only parts have
   a guard each: `HAS_SIGUSR1` (both apps' `main.py`) for the stacks on SIGUSR1, Windows having
-  no such signal; the statuses 130 and 143 (128 plus the signal) and ffmpeg's end with the
-  parent (`PDEATHSIG`) are POSIX's, said in comments, their Windows twins a later baton's.
+  no such signal; the statuses 130 and 143 (128 plus the signal) are POSIX's, kept on Windows,
+  and ffmpeg's end with the parent is PDEATHSIG there and a Job Object on Windows.
 - A stop at once that needs no main thread (`stop.Watch`, around `main(owns_process=True)`
   alone; DESIGN.md, Allocator, "Out of the stop's reach"): a main thread held in one call in C
   answers no Python handler, so the C handler's byte on `signal.set_wakeup_fd` (a non-blocking
@@ -950,8 +979,8 @@ marker. The image server, Linux's alone by its lock, has no such line.
   (the select's timeout, a sampling period and no grace period) and, past its unit's
   `waiting.bound` in one frame and instruction and outside `waiting.wait` (which says its own),
   says the stall's line once per hold (`waiting.held`, the unit read through
-  `waiting.unit_of(ident)`). The one guard is `stop.WATCHED` (`os.name == "posix"`; Windows'
-  `set_wakeup_fd` takes a socket: a later baton's); off it, off the main thread, or with the
+  `waiting.unit_of(ident)`). The one guard is `stop.WATCHED` (POSIX's pipe, Windows' socket
+  pair, the tests turning it off); off it, off the main thread, or with the
   wakeup descriptor another's, there is no pipe and no thread, said at debug. A process ended
   from the thread leaves the partial segment (a file or a PNG directory) and no cleanup of the
   writers: ffmpeg dies with its parent (PDEATHSIG), a segment command's process group is killed
