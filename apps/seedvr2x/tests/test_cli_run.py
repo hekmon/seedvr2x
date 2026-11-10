@@ -3055,10 +3055,14 @@ def test_the_checks_ahead_scale_with_the_source_s_size(
     # The early warning's minutes (cli._checks_ahead; DESIGN.md, Memory planner, A resume whose
     # recorded shape no longer fits, 2026-10-29): the source's hash and the remux rehearsal, where
     # it runs, by the source's size at the rates of milestone 7's third night; the model files,
-    # vouched for by the record, nothing. A sparse file stands for the source.
+    # vouched for by the record, nothing. A sparse file stands for the source. The helpers
+    # imported here: test_stop.py's driver imports this module where core's tests aren't on the
+    # path.
+    from library_fixtures import grow, sparse
+
     path = tmp_path / "source.mkv"
-    with path.open("wb") as written:
-        written.truncate(source)
+    with sparse(path.open("wb")) as written:
+        grow(written, source)
     args = SimpleNamespace(input=path)
     assert cli._checks_ahead(args, rehearses) == seconds  # pyright: ignore[reportPrivateUsage, reportArgumentType]
 

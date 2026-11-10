@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from levels import levels
+from library_fixtures import grow, sparse
 from posix_only import NAME
 from test_probe import (
     BT2020,
@@ -722,11 +723,11 @@ def test_the_line_before_the_masters_are_checked_says_tiny_sizes_and_times_as_th
     # "about N s"; with no disk rate, the bytes alone.
     said = cli._checking_said  # pyright: ignore[reportPrivateUsage]
     small = tmp_path / "small.mkv"
-    with small.open("wb") as handle:
-        handle.truncate(41 * 2**20)
+    with sparse(small.open("wb")) as handle:
+        grow(handle, 41 * 2**20)
     big = tmp_path / "big.mkv"
-    with big.open("wb") as handle:
-        handle.truncate(3 * 2**30)
+    with sparse(big.open("wb")) as handle:
+        grow(handle, 3 * 2**30)
     rate = 100 * 2**20
     assert said([small], rate) == "checking the bytes of 1 segment, 41 MiB, under a second"
     assert said([small], None) == "checking the bytes of 1 segment, 41 MiB"

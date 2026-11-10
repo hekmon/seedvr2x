@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from library_fixtures import cli_words
+from library_fixtures import cli_words, grow, sparse
 from test_gguf_file import Spec, body, entry, write_gguf
 
 from seedvr2x import gguf_file, weights
@@ -138,9 +138,10 @@ def write(
     data: Mapping[str, bytes] | None = None,
 ) -> Path:
     """A safetensors file of these tensors, their data contiguous in the order given: its header,
-    with __metadata__ when given, then nothing but its full length, by truncate: a sparse file,
-    which costs no disk (the 7B in fp16, 16.48 GB on paper); the check reads the header alone,
-    and an int8 file's markers, whose bytes `data` gives by name, written in their places."""
+    with __metadata__ when given, then nothing but its full length, by truncate: a sparse file
+    (marked so on NTFS, library_fixtures.sparse), which costs no disk (the 7B in fp16, 16.48 GB
+    on paper); the check reads the header alone, and an int8 file's markers, whose bytes `data`
+    gives by name, written in their places."""
     header: dict[str, object] = {} if metadata is None else {"__metadata__": dict(metadata)}
     offset = 0
     starts: dict[str, int] = {}
@@ -150,9 +151,9 @@ def write(
         starts[name] = offset
         offset = end
     raw = json.dumps(header).encode()
-    with path.open("wb") as file:
+    with sparse(path.open("wb")) as file:
         file.write(len(raw).to_bytes(8, "little") + raw)
-        file.truncate(8 + len(raw) + offset)
+        grow(file, 8 + len(raw) + offset)
         for name, content in (data or {}).items():
             file.seek(8 + len(raw) + starts[name])
             file.write(content)
@@ -1290,9 +1291,9 @@ def test_header_length_limits(tmp_path: Path) -> None:
     # 100,000,000 taken, the header read whole (a sparse file: the brace, then zeros), then
     # refused for what it holds.
     path = tmp_path / "y.safetensors"
-    with path.open("wb") as file:
+    with sparse(path.open("wb")) as file:
         file.write((100_000_000).to_bytes(8, "little") + b"{")
-        file.truncate(8 + 100_000_000)
+        grow(file, 8 + 100_000_000)
     assert refused(path, "dit").startswith(
         f"{path}: a damaged safetensors file: its header isn't JSON: Expecting property name"
     )

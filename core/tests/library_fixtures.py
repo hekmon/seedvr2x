@@ -22,7 +22,9 @@ wall's (clock.py): the machine's own would drift a long session's expectations (
 runs 10% away), so every test has a ratio of 1.0, frozen clocks, unless it sets another
 (tests/test_clock.py)."""
 
+import sys
 from collections.abc import Iterator
+from typing import IO, Any
 
 import pytest
 
@@ -121,3 +123,64 @@ LEAN_WINDOWS: list[tuple[int, int, int, bool, int]] = [
     (2192, 3, 36, True, 8_141_528_034),
     (2192, 4, 36, True, 10_308_134_434),
 ]
+
+
+FSCTL_SET_SPARSE = 0x000900C4
+
+
+def _kernel32() -> Any:
+    """kernel32, loaded where Windows has it (tests replace it)."""
+    import ctypes
+
+    return ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+
+
+def sparse[F: IO[Any]](file: F) -> F:
+    """The file, opened for writing and still empty, marked sparse on Windows: NTFS makes a file
+    sparse only once marked so (FSCTL_SET_SPARSE, Microsoft's documentation of the control code),
+    else a file extended by truncate or by a seek past its end is allocated and written in zeros
+    (the library's native tests filled a 313 GB drive twice with 15.3 GiB of synthetic model
+    files, impl-win-2, 2026-11-09). Marking is not enough: Python's truncate there is the C
+    runtime's _chsize_s, which writes the zeros even in a sparse file (impl-win-4, 2026-11-09:
+    truncate to 1 GiB 0.84 s and 1 GiB on the disk), so a file grows by `grow`. Nothing on other
+    platforms, where ext4 and the rest do it unmarked. The bytes written are the same either
+    way; only the allocation differs."""
+    if sys.platform != "win32":
+        return file
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    file.flush()
+    handle = msvcrt.get_osfhandle(file.fileno())
+    returned = wintypes.DWORD(0)
+    control = _kernel32().DeviceIoControl
+    control.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    control.restype = wintypes.BOOL
+    if not control(handle, FSCTL_SET_SPARSE, None, 0, None, 0, ctypes.byref(returned), None):
+        raise OSError(f"FSCTL_SET_SPARSE failed on {file.name!r}")
+    return file
+
+
+def grow[F: IO[Any]](file: F, size: int) -> F:
+    """The open file, a sparse one (`sparse`) written from its start, grown to size bytes, its
+    position kept. On Windows by a seek to size - 1 and one zero byte, which allocates nothing
+    (impl-win-4, 2026-11-09: 0.000 s and 0.12 MiB on the disk for 1 GiB, where truncate wrote
+    the whole of it); elsewhere by truncate, as before. The file must be shorter than size."""
+    if sys.platform != "win32" or size <= 0:
+        file.truncate(size)
+        return file
+    place = file.tell()
+    file.seek(size - 1)
+    file.write(b"\0")
+    file.seek(place)
+    return file

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from library_fixtures import grow, sparse
 
 from seedvr2x import gguf_file
 from seedvr2x.gguf_file import ALIGNMENT, TYPES, GgufError, GgufHeader, GgufTensor
@@ -132,9 +133,9 @@ def write_gguf(
     """A GGUF file of these tensors: its header, then nothing to its full length, by truncate (a
     sparse file). `claims` go to header()."""
     raw = header(specs, entries, alignment=alignment, **claims)
-    with path.open("wb") as file:
+    with sparse(path.open("wb")) as file:
         file.write(raw)
-        file.truncate(len(raw) + placed(specs, alignment)[1])
+        grow(file, len(raw) + placed(specs, alignment)[1])
     return path
 
 
@@ -519,9 +520,9 @@ def test_metadata_values_are_bounded(tmp_path: Path) -> None:
     count = gguf_file.VALUE_LIMIT + 1
     raw = header([], [text("k") + struct.pack("<IIQ", ARRAY, 0, count)], metadata=1)
     path = tmp_path / "x.gguf"
-    with path.open("wb") as file:
+    with sparse(path.open("wb")) as file:
         file.write(raw)
-        file.truncate(len(raw) + count)
+        grow(file, len(raw) + count)
     error = refusal(path)
     assert error.kind == "damaged" and "over 10,000,000 values" in str(error)
 

@@ -25,6 +25,7 @@ from typing import Any
 import numpy as np
 import pytest
 from levels import levels
+from library_fixtures import grow, sparse
 from posix_only import NAME, POSIX_CALLS, SIGNALS
 from test_probe import has_encoder
 
@@ -2311,8 +2312,8 @@ def test_the_estimate_reads_a_sample_of_the_middle_and_scales_to_the_size(
     # gives 20 s; the whole of a smaller file is its own sample.
     source = tmp_path / "in.bin"
     size = 10 * assembly.SAMPLE
-    with source.open("wb") as handle:
-        handle.truncate(size)
+    with sparse(source.open("wb")) as handle:
+        grow(handle, size)
     ticks = iter([100.0, 102.0])
     monkeypatch.setattr(assembly.time, "monotonic", lambda: next(ticks))
     assert assembly._read_seconds(source, size) == pytest.approx(20.0)  # pyright: ignore[reportPrivateUsage]
