@@ -699,30 +699,28 @@ def host(
     return parts
 
 
-def _windows_available(kernel32: Any = None) -> int | None:
-    """The physical memory Windows has available, in bytes, or None where the call fails (said at
-    debug: the callers' own warning that the memory is unread is the user's line). Source:
-    kernel32's GlobalMemoryStatusEx, which fills a MEMORYSTATUSEX (dwLength, dwMemoryLoad,
-    ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile, ullTotalVirtual,
-    ullAvailVirtual, ullAvailExtendedVirtual) once dwLength holds its size; ullAvailPhys is what
-    Task Manager calls "Available" (standby, free and zeroed pages). `kernel32` is the library
-    object, loaded here by default and replaced by the tests."""
+class _MemoryStatus(ctypes.Structure):
+    """kernel32's MEMORYSTATUSEX, which GlobalMemoryStatusEx fills once dwLength holds its size."""
 
-    class Status(ctypes.Structure):
-        _fields_ = (
-            ("dwLength", ctypes.c_uint32),
-            ("dwMemoryLoad", ctypes.c_uint32),
-            ("ullTotalPhys", ctypes.c_uint64),
-            ("ullAvailPhys", ctypes.c_uint64),
-            ("ullTotalPageFile", ctypes.c_uint64),
-            ("ullAvailPageFile", ctypes.c_uint64),
-            ("ullTotalVirtual", ctypes.c_uint64),
-            ("ullAvailVirtual", ctypes.c_uint64),
-            ("ullAvailExtendedVirtual", ctypes.c_uint64),
-        )
+    _fields_ = (
+        ("dwLength", ctypes.c_uint32),
+        ("dwMemoryLoad", ctypes.c_uint32),
+        ("ullTotalPhys", ctypes.c_uint64),
+        ("ullAvailPhys", ctypes.c_uint64),
+        ("ullTotalPageFile", ctypes.c_uint64),
+        ("ullAvailPageFile", ctypes.c_uint64),
+        ("ullTotalVirtual", ctypes.c_uint64),
+        ("ullAvailVirtual", ctypes.c_uint64),
+        ("ullAvailExtendedVirtual", ctypes.c_uint64),
+    )
 
-    status = Status()
-    status.dwLength = ctypes.sizeof(Status)
+
+def _windows_status(kernel32: Any, what: str) -> _MemoryStatus | None:
+    """kernel32's GlobalMemoryStatusEx, or None where the call fails, said at debug as `what`
+    unread (the callers' own lines are the user's). `kernel32` is the library object, loaded here
+    where None and replaced by the tests."""
+    status = _MemoryStatus()
+    status.dwLength = ctypes.sizeof(_MemoryStatus)
     # WinDLL, WinError and get_last_error are ctypes' on Windows alone, and its stubs say so: by
     # getattr, so that pyright, which reads the module for Linux, takes the calls.
     try:
@@ -730,13 +728,38 @@ def _windows_available(kernel32: Any = None) -> int | None:
             kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)  # noqa: B009
         done = kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
     except (OSError, AttributeError) as error:
-        logger.debug("the system memory available is unread: kernel32 failed: %s", error)
+        logger.debug("%s is unread: kernel32 failed: %s", what, error)
         return None
     if not done:
         reason = getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())  # noqa: B009
-        logger.debug("the system memory available is unread: GlobalMemoryStatusEx: %s", reason)
+        logger.debug("%s is unread: GlobalMemoryStatusEx: %s", what, reason)
         return None
-    return int(status.ullAvailPhys)
+    return status
+
+
+def _windows_available(kernel32: Any = None) -> int | None:
+    """The physical memory Windows has available, in bytes, or None where the call fails (said at
+    debug: the callers' own warning that the memory is unread is the user's line). Source:
+    kernel32's GlobalMemoryStatusEx; its ullAvailPhys is what Task Manager calls "Available"
+    (standby, free and zeroed pages)."""
+    status = _windows_status(kernel32, "the system memory available")
+    return None if status is None else int(status.ullAvailPhys)
+
+
+def commit(kernel32: Any = None) -> tuple[int, int] | None:
+    """On Windows, the system's commit charge and its limit, in bytes (GlobalMemoryStatusEx: the
+    limit ullTotalPageFile, what is left of it ullAvailPageFile); None elsewhere, or where the
+    call fails. Windows charges the GPU memory a process holds to its commit, as it does its own
+    memory: the process's private bytes grew as the pool's reserved bytes did, by 8.86 GiB for
+    8.84 as the encode's phase came in, and as torch's own allocator's did, by 6.37 for 6.36 (an
+    RTX 5090 natively, impl-win-5, 2026-11-10). A job's memory limit, which bounds the
+    same charge, is not in these figures: in a job of 10 GiB they were the system's."""
+    if sys.platform != "win32":
+        return None
+    status = _windows_status(kernel32, "the system's commit")
+    if status is None:
+        return None
+    return int(status.ullTotalPageFile - status.ullAvailPageFile), int(status.ullTotalPageFile)
 
 
 def available(proc: Path = Path("/proc"), cgroups: Path = Path("/sys/fs/cgroup")) -> int | None:

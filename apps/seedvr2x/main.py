@@ -2150,6 +2150,14 @@ _OOM_ASYNC = re.compile(
     r"Currently allocated *: (?P<held>.+)\nRequested *: (?P<asked>.+)\n"
     r"Device limit *: (?P<card>.+)\nFree \(according to CUDA\): (?P<free>.+)"
 )
+_OOM_ASYNC_LIMIT = re.compile(r"PyTorch limit \(set by user-supplied memory fraction\)\n *: (.+)")
+# torch's sizes (c10's format_size): bytes, then KiB, MiB and GiB at two decimals.
+_SIZE = re.compile(r"(\d+(?:\.\d+)?) (bytes|KiB|MiB|GiB)")
+_UNITS = {"bytes": 1, "KiB": 2**10, "MiB": 2**20, "GiB": 2**30}
+# What three of torch's sizes rounded to two decimals of a GiB can be off by together, and more:
+# where the request and what torch holds come under its limit by less, torch's own check may be
+# the one that refused.
+_ROUNDING = 2**30 // 64
 
 
 def _refused(error: BaseException) -> str:
@@ -2168,7 +2176,13 @@ def _refused(error: BaseException) -> str:
     There too, cudaMallocAsync's message, DESIGN.md's allocator on such a driver, is read
     beyond its first line, which says no figure: what was asked, what torch had allocated, and
     the same two figures, from its own lines (torch 2.14.1's words under each allocator, its
-    limit refusing a request of 4 GiB: tests/test_cli_run.py)."""
+    limit refusing a request of 4 GiB: tests/test_cli_run.py); on a run held to its card, what
+    was asked and what torch had allocated alone, torch's own counts. Its first line is torch's
+    for its limit whatever refused (c10's CUDAMallocAsyncAllocator words every
+    cudaErrorMemoryAllocation so), so where torch's limit is set (under the card's memory: an
+    unset one is UINT64_MAX's figure) its figure is said, and where the request and what torch
+    held come under it, the refusal is said as the driver's, with
+    Windows' commit there (_commit_said)."""
     from seedvr2x import memory
 
     held = " (held to the card's own memory: its driver gives more)" * memory.spills()
@@ -2184,14 +2198,48 @@ def _refused(error: BaseException) -> str:
         if counted is not None:
             words += f", torch holding {counted[1]} allocated and {counted[2]} more reserved"
         said = words + (f", {allowed[1]} allowed" if allowed is not None else "")
-    elif not memory.spills():
-        lines = _OOM_ASYNC.search(whole)
-        if lines is not None:
+    elif (lines := _OOM_ASYNC.search(whole)) is not None:
+        if memory.spills():
+            said += f": {lines['asked']} asked, torch holding {lines['held']} allocated"
+        else:
             said += (
                 f": {lines['asked']} asked, {lines['free']} free of the GPU's {lines['card']},"
                 f" torch holding {lines['held']} allocated"
             )
+        limit = _OOM_ASYNC_LIMIT.search(whole)
+        allowed, card = (None, None) if limit is None else (_size(limit[1]), _size(lines["card"]))
+        # torch says a limit unset as UINT64_MAX's 17179869184.00 GiB: no limit, none judged.
+        if limit is not None and allowed is not None and card is not None and allowed < card:
+            said += f" of the {limit[1]} it is allowed"
+            counted, asked = _size(lines["held"]), _size(lines["asked"])
+            if counted is not None and asked is not None and counted + asked + _ROUNDING < allowed:
+                said += ": the driver refused it, not torch's limit" + _commit_said()
     return f"the GPU's memory was refused{held}: {said}"
+
+
+def _size(text: str) -> int | None:
+    """One of torch's sizes in its message (`_SIZE`), in bytes; None where it is no such size."""
+    found = _SIZE.fullmatch(text.strip())
+    return None if found is None else round(float(found[1]) * _UNITS[found[2]])
+
+
+def _commit_said() -> str:
+    """Beside a GPU allocation the driver refused under torch's limit, on Windows: the system's
+    commit, to which Windows charges the GPU memory a process holds (blockswap.commit): a job
+    memory limit of 24.9 GiB, where the run commits 31.2 GiB at its peak, refused the pool's
+    growth in the calibration's encode, said in torch's words for its own limit (impl-win-4's
+    run, found so by impl-win-5, 2026-11-10). Nothing elsewhere, or where it is unread."""
+    from seedvr2x.blockswap import commit
+
+    figures = commit()
+    if figures is None:
+        return ""
+    committed, most = figures
+    return (
+        "; Windows counts the GPU memory a process holds in its commit charge, which the"
+        " system's memory and page file bound, and a job's memory limit where the process runs"
+        f" in one: {committed / 2**30:.2f} GiB committed of the system's {most / 2**30:.2f}"
+    )
 
 
 def _directory_refused(path: Path) -> str:

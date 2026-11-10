@@ -1729,7 +1729,7 @@ def test_the_card_s_figures_stay_in_a_refusal_where_the_driver_refuses(
     assert refused(torch.OutOfMemoryError(ASYNC_REFUSED)) == (
         "the GPU's memory was refused: Allocation on device 0 would exceed allowed memory. (out"
         " of memory): 4.00 GiB asked, 30.19 GiB free of the GPU's 31.82 GiB, torch holding 0"
-        " bytes allocated"
+        " bytes allocated of the 325.79 MiB it is allowed"
     )
     # On a run held to its card the driver's figure isn't the card's (it read 30.20 GiB free
     # there beside a desktop holding 5.6 GiB of the card): neither is said, as before.
@@ -1739,8 +1739,66 @@ def test_the_card_s_figures_stay_in_a_refusal_where_the_driver_refuses(
         f"{held}CUDA out of memory. Tried to allocate 4.00 GiB, torch holding 0 bytes allocated"
         " and 0 bytes more reserved, 325.79 MiB allowed"
     )
+    # cudaMallocAsync's own counts stay: what was asked, what torch held and its limit.
     assert refused(torch.OutOfMemoryError(ASYNC_REFUSED)) == (
-        f"{held}Allocation on device 0 would exceed allowed memory. (out of memory)"
+        f"{held}Allocation on device 0 would exceed allowed memory. (out of memory): 4.00 GiB"
+        " asked, torch holding 0 bytes allocated of the 325.79 MiB it is allowed"
+    )
+
+
+# cudaMallocAsync's words where the driver refused the pool's growth under torch's limit: a job
+# memory limit of 26 GiB on Windows, which charges the GPU memory to the process's commit, in the
+# calibration's encode (torch 2.14.1, an RTX 5090 natively, impl-win-5, 2026-11-10).
+DRIVER_REFUSED = (
+    "Allocation on device 0 would exceed allowed memory. (out of memory)\n"
+    "Currently allocated     : 21.57 GiB\n"
+    "Requested               : 256.00 MiB\n"
+    "Device limit            : 31.82 GiB\n"
+    "Free (according to CUDA): 8.27 GiB\n"
+    "PyTorch limit (set by user-supplied memory fraction)\n"
+    "                        : 27.30 GiB"
+)
+
+
+def test_a_refusal_under_torch_s_limit_is_said_as_the_driver_s_with_windows_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # torch words every allocation cudaMallocAsync refuses as its own limit's; where the request
+    # and what torch holds come under the limit, the driver refused it, and on Windows, which
+    # charges the GPU memory to the commit, the system's commit is said beside it.
+    from seedvr2x import blockswap, memory
+
+    refused = cli._refused  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(memory, "_spills", True)
+    held = "the GPU's memory was refused (held to the card's own memory: its driver gives more): "
+    first = "Allocation on device 0 would exceed allowed memory. (out of memory)"
+    monkeypatch.setattr(blockswap, "commit", lambda: None)
+    assert refused(torch.OutOfMemoryError(DRIVER_REFUSED)) == (
+        f"{held}{first}: 256.00 MiB asked, torch holding 21.57 GiB allocated of the 27.30 GiB it"
+        " is allowed: the driver refused it, not torch's limit"
+    )
+    monkeypatch.setattr(blockswap, "commit", lambda: (int(94.6 * 2**30), int(94.7 * 2**30)))
+    assert refused(torch.OutOfMemoryError(DRIVER_REFUSED)) == (
+        f"{held}{first}: 256.00 MiB asked, torch holding 21.57 GiB allocated of the 27.30 GiB it"
+        " is allowed: the driver refused it, not torch's limit; Windows counts the GPU memory a"
+        " process holds in its commit charge, which the system's memory and page file bound,"
+        " and a job's memory limit where the process runs in one: 94.60 GiB committed of the"
+        " system's 94.70"
+    )
+    # At torch's limit, by less than its sizes' rounding, the refusal may be torch's own: no
+    # more is said.
+    edge = DRIVER_REFUSED.replace("21.57 GiB", "27.04 GiB")
+    assert refused(torch.OutOfMemoryError(edge)).endswith("of the 27.30 GiB it is allowed")
+    over = DRIVER_REFUSED.replace("21.57 GiB", "27.20 GiB")
+    assert refused(torch.OutOfMemoryError(over)).endswith("of the 27.30 GiB it is allowed")
+    # With no limit set torch says UINT64_MAX's figure (c10's lazy_init_device): no limit said,
+    # nothing judged.
+    unlimited = DRIVER_REFUSED.replace("27.30 GiB", "17179869184.00 GiB")
+    assert refused(torch.OutOfMemoryError(unlimited)).endswith("torch holding 21.57 GiB allocated")
+    monkeypatch.setattr(memory, "_spills", False)
+    assert refused(torch.OutOfMemoryError(unlimited)) == (
+        f"the GPU's memory was refused: {first}: 256.00 MiB asked, 8.27 GiB free of the GPU's"
+        " 31.82 GiB, torch holding 21.57 GiB allocated"
     )
 
 

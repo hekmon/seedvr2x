@@ -2306,15 +2306,42 @@ class FakeKernel32:
     """kernel32 for `available` on Windows: GlobalMemoryStatusEx fills the structure it is
     handed by reference, as the API does, and returns its status (0: failed)."""
 
-    def __init__(self, avail: int, status: int = 1) -> None:
+    def __init__(self, avail: int, status: int = 1, page_file: tuple[int, int] = (0, 0)) -> None:
         self.avail, self.status, self.length, self.calls = avail, status, None, 0
+        self.page_file = page_file
 
     def GlobalMemoryStatusEx(self, reference: Any) -> int:
         self.calls += 1
         structure = reference._obj
         self.length = structure.dwLength
         structure.ullAvailPhys = self.avail
+        structure.ullTotalPageFile, structure.ullAvailPageFile = self.page_file
         return self.status
+
+
+def test_the_commit_on_windows_is_its_limit_less_what_is_left_of_it(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The system's commit charge and its limit (ullTotalPageFile, less ullAvailPageFile), which
+    # Windows charges the GPU memory a process holds to; nothing off Windows, nothing called.
+    fake = FakeKernel32(5, page_file=(101_000_000_000, 37_000_000_000))
+    monkeypatch.setattr(blockswap.ctypes, "WinDLL", lambda *a, **k: fake, raising=False)
+    monkeypatch.setattr(blockswap, "sys", SimpleNamespace(platform="linux"))
+    assert blockswap.commit() is None
+    assert fake.calls == 0
+    monkeypatch.setattr(blockswap, "sys", SimpleNamespace(platform="win32"))
+    assert blockswap.commit() == (64_000_000_000, 101_000_000_000)
+    assert fake.calls == 1
+    assert fake.length == 64
+    # A failed call: no figure, said at debug.
+    monkeypatch.setattr(
+        blockswap.ctypes, "WinError", lambda code: OSError(f"error {code}"), raising=False
+    )
+    monkeypatch.setattr(blockswap.ctypes, "get_last_error", lambda: 5, raising=False)
+    caplog.set_level("DEBUG", logger=blockswap.logger.name)
+    assert blockswap.commit(FakeKernel32(5, status=0)) is None
+    assert [r.levelname for r in caplog.records] == ["DEBUG"]
+    assert caplog.messages[0].startswith("the system's commit is unread: GlobalMemoryStatusEx")
 
 
 def test_the_memory_available_on_windows_is_the_physical_memory_kernel32_gives(
