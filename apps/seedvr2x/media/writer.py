@@ -43,6 +43,7 @@ from media.ffmpeg import (
     NEW_GROUP,
     MediaError,
     argument,
+    break_group,
     close_job,
     contained,
     end_job,
@@ -882,8 +883,9 @@ class CommandWriter(Writer):
         return True
 
     def _stop(self) -> None:
-        """Stop the shell and whatever it started that stayed in its group: SIGTERM, then SIGKILL
-        once they are over, or after STOP_GRACE seconds; a line on stderr, when they are still
+        """Stop the shell and whatever it started that stayed in its group: SIGTERM (Ctrl-Break on
+        Windows, its job ended in SIGKILL's place: _ask_to_end), then SIGKILL once they are over,
+        or after STOP_GRACE seconds; a line on stderr, when they are still
         running STOP_NOTICE_AFTER seconds after SIGTERM, says so. A Ctrl-C meanwhile, which raises
         KeyboardInterrupt here (stop.py: a second one is a stop at once), goes to the
         SIGKILL below: the group is killed at once, and the shell reaped.
@@ -892,30 +894,47 @@ class CommandWriter(Writer):
         command is the user's, and may be a script with scratch of its own to remove or the
         client of an encoder running elsewhere (a container, another machine), which a signal it
         can't catch would leave behind (DESIGN.md, Output, Writer)."""
-        if self._shell.returncode is not None:
-            return  # reaped, by close() or a first abort()
-        if sys.platform == "win32":
-            # No SIGTERM to give a console's processes: the job ended at once, as SIGKILL ends
-            # the group; a grace for the command there is the stop's Windows twin, to come.
-            try:
-                self._signal(signal.SIGTERM)
-            finally:
-                self._shell.wait()
-                self._forget_group()
+        if self._shell.returncode is not None and (sys.platform != "win32" or self._job is None):
+            # Reaped, by close() or a first abort(). On Windows _status reaps the shell as it
+            # polls (Popen.poll), what it started left running in its job: ended below.
             return
         try:
-            self._signal(signal.SIGTERM)
-            notice = min(STOP_NOTICE_AFTER, STOP_GRACE)
-            if not self._over(notice):
-                _say(
-                    f"the segment command was sent SIGTERM: it has {STOP_GRACE:g} s to end before"
-                    " SIGKILL; Ctrl-C again kills it at once"
-                )
-                self._over(STOP_GRACE - notice)
+            if self._ask_to_end():
+                notice = min(STOP_NOTICE_AFTER, STOP_GRACE)
+                if not self._over(notice):
+                    _say(
+                        f"the segment command was sent Ctrl-Break: it has {STOP_GRACE:g} s to end"
+                        " before its job is ended; Ctrl-C again ends it at once"
+                        if sys.platform == "win32"
+                        else f"the segment command was sent SIGTERM: it has {STOP_GRACE:g} s to"
+                        " end before SIGKILL; Ctrl-C again kills it at once"
+                    )
+                    self._over(STOP_GRACE - notice)
         finally:
-            self._signal(signal.SIGKILL)
+            self._kill()
             self._shell.wait()
             self._forget_group()
+
+    def _ask_to_end(self) -> bool:
+        """Ask the command to end: SIGTERM to its group; on Windows Ctrl-Break to its console
+        group (ffmpeg.break_group: the shell leads it), the twin there, which ffmpeg answers as
+        SIGTERM and Python as SIGBREAK. Whether it was asked: where Windows can't send it (no
+        console shared), said, the job is ended at once, as before the twin."""
+        if sys.platform != "win32":
+            self._signal(signal.SIGTERM)
+            return True
+        if self._shell.poll() is not None:
+            # Its shell has ended: an event to a group no process of the console leads is not
+            # sent, its job ended at once instead (whatever it left running).
+            return False
+        refused = break_group(self._shell.pid)
+        if refused is not None:
+            logger.warning(
+                "the segment command can't be sent Ctrl-Break (%s): its job is ended at once",
+                refused,
+            )
+            return False
+        return True
 
     def _forget_group(self) -> None:
         with _GROUPS_LOCK:
@@ -926,12 +945,19 @@ class CommandWriter(Writer):
                 self._job = None
 
     def _signal(self, number: int) -> None:
+        """Signal the command's group: POSIX's alone, Windows' twins being _ask_to_end's and
+        _kill's."""
+        if sys.platform != "win32":
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self._shell.pid, number)
+
+    def _kill(self) -> None:
+        """End the command at once: SIGKILL to its group; on Windows its job ended, the twin."""
         if sys.platform == "win32":
             if self._job is not None:
-                end_job(self._job)  # whatever the signal: the job ended, as by SIGKILL
+                end_job(self._job)
             return
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(self._shell.pid, number)
+        self._signal(signal.SIGKILL)
 
     def _broken(self) -> MediaError:
         # ffmpeg no longer reads: it failed, or the command no longer reads it. Each is left

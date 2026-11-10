@@ -504,6 +504,24 @@ def contained(pid: int) -> int:
         kernel32.CloseHandle(process)
 
 
+# GenerateConsoleCtrlEvent's Ctrl-Break (wincon.h's CTRL_BREAK_EVENT).
+CTRL_BREAK_EVENT = 1
+
+
+def break_group(group: int) -> str | None:
+    """Send Ctrl-Break to the console's process group `group`, its root's pid (started with
+    NEW_GROUP): what the segment command gets on Windows where POSIX sends its group SIGTERM, a
+    console's processes having no SIGTERM. Ctrl-Break, not Ctrl-C: a group's processes have
+    Ctrl-C disabled (CreateProcess's documentation), and Windows sends Ctrl-C to no group but
+    the whole console's. None once sent; Windows' reason where it can't be (no console shared)."""
+    kernel32 = _kernel32()
+    kernel32.GenerateConsoleCtrlEvent.argtypes = (ctypes.c_uint32, ctypes.c_uint32)
+    if kernel32.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, group):
+        return None
+    error = int(ctypes.get_last_error())  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownArgumentType]
+    return f"{ctypes.FormatError(error).strip()}, WinError {error}"  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+
+
 def end_job(job: int) -> None:
     """End every process of the job `job` (contained) at once, as SIGKILL does a group."""
     kernel32 = _kernel32()
