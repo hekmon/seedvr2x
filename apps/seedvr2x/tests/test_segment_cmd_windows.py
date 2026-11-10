@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 from test_segment_cmd import TELL, gone, members, started
 
+from media import ffmpeg as ffmpeg_module
 from media import writer as writer_module
 from media.ffmpeg import MediaError
 from media.writer import CommandWriter, Tags, check_command, count_frames
@@ -45,6 +46,40 @@ def test_on_windows_out_is_a_double_quoted_word_and_a_percent_is_refused(
         f"{held}: a name holding %, which cmd.exe, the segment command's shell on Windows, would"
         " expand: write the output elsewhere"
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows faked over a POSIX shell")
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs an ffmpeg on PATH")
+def test_on_windows_a_shell_that_could_not_be_contained_is_killed_and_reaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ffmpeg.contained raising after the shell was started (it ends the process only after some
+    # of its failures, OpenProcess's not among them): the Popen handle was left unwaited, the
+    # shell alive if suspended. Windows faked, a POSIX shell in its place.
+    monkeypatch.setattr(writer_module.sys, "platform", "win32")
+    monkeypatch.setattr(writer_module, "CREATE_SUSPENDED", 0)
+    monkeypatch.setattr(writer_module, "_cmd", lambda command: ["/bin/sh", "-c", "sleep 60"])
+
+    def uncontained(pid: int) -> int:
+        raise MediaError("the shell can't be put in a job: OpenProcess failed")
+
+    monkeypatch.setattr(writer_module, "contained", uncontained)
+    # seedvr2x's own Job Object (ffmpeg._in_a_job), which the writer's ffmpeg would ask for.
+    monkeypatch.setattr(ffmpeg_module, "_in_a_job", lambda: None)
+    shells: list[subprocess.Popen[Any]] = []
+    real = subprocess.Popen
+
+    def recording(args: list[str], *more: object, **named: object) -> subprocess.Popen[Any]:
+        process = real(args, *more, **named)  # pyright: ignore[reportCallIssue, reportArgumentType]
+        if args[:1] == ["/bin/sh"]:
+            shells.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", recording)
+    path = tmp_path / "seg_000001.mkv"
+    with pytest.raises(MediaError, match="can't be put in a job"):
+        CommandWriter("sleep 60 {out}", path, "yuv420p10le", 64, 48, RATE, BT709)
+    assert len(shells) == 1 and shells[0].returncode is not None  # waited, not left to the GC
 
 
 def marked(marker: str) -> list[str]:

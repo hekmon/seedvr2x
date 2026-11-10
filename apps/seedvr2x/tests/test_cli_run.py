@@ -4590,7 +4590,8 @@ def test_another_job_refused(
     assert "not this job's: notes.txt" in refused(tmp_path, source_path, caplog, *JOB)
     (out / "notes.txt").unlink()
     (out / "resume" / "shot_000004" / "notes.txt").write_text("mine")
-    assert "shot_000004/notes.txt: not this job's" in refused(tmp_path, source_path, caplog, *JOB)
+    foreign = Path("shot_000004", "notes.txt")
+    assert f"{foreign}: not this job's" in refused(tmp_path, source_path, caplog, *JOB)
     (out / "resume" / "shot_000004" / "notes.txt").unlink()
     # Missing what the manifest names (a finished segment missing is no longer refused: made
     # again, test_a_finished_segment_missing_or_changed_is_made_again_at_a_start).

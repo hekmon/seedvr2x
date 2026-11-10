@@ -6,8 +6,10 @@ alone otherwise (tiling.InMemory); a store that can't be made is a ScratchError,
 so that the command line reports it as a file the run can't write."""
 
 import contextlib
+import gc
 import logging
 import mmap
+import os
 import sys
 from collections.abc import Generator
 from pathlib import Path
@@ -34,17 +36,47 @@ DEFAULT_ALLOWANCE = 8 * 2**30
 # file a mapping holds (WinError 32 or 5), where Linux unlinks it under the mapping, and the
 # mapping goes only with the last tensor on it, which the store's caller may still hold as the
 # block ends (impl-win-3's review, 2026-11-09). Removed at each later store's start, by then
-# unmapped (_remove_pending).
+# unmapped (remove_pending), and at the end of each segment, before its shots' directories are
+# removed (units.segment_finished), and as main returns: a file left there would keep Windows from
+# removing its directory (WinError 145 or 32, a directory not empty or held), the removal ignoring
+# errors. A process that ends with one pending leaves the file to the next start, which discards a
+# scratch file as any leftover of a job (resume.leftovers, SCRATCH).
 _PENDING: list[Path] = []
+# The directories a finished segment removed but for a file still pending there
+# (units.segment_finished): a shot's, and the job's resume directory once every segment is
+# finished. Both stayed, empty, once the file went (natively, 2026-11-10).
+_LEFT: list[Path] = []
 
 
-def _remove_pending() -> None:
+def remove_with(directory: Path) -> None:
+    """Remove the directories under `directory`, and it, that are empty once no pending file is
+    left in it: never a file, so that a unit made again there meanwhile (the assembly's remake of
+    a damaged segment, in the same process) keeps its own."""
+    _LEFT.append(directory)
+
+
+def remove_pending(collect: bool = True) -> None:
+    """Remove the scratch files whose removal Windows refused while they were mapped, those whose
+    mapping has gone since. A collection first (`collect`): a mapping goes with the last tensor on
+    it, which a reference cycle in a finished block may still hold. Nothing pending (Linux always):
+    no work."""
+    if not _PENDING and not _LEFT:
+        return
+    if collect and _PENDING:
+        gc.collect()
     for path in list(_PENDING):
         try:
             path.unlink(missing_ok=True)
         except OSError:
             continue  # still mapped: the next store tries again
         _PENDING.remove(path)
+    for directory in list(_LEFT):
+        if any(path.is_relative_to(directory) for path in _PENDING):
+            continue
+        for place, _, _ in os.walk(directory, topdown=False):  # the deepest first
+            with contextlib.suppress(OSError):  # not empty: a file someone's
+                os.rmdir(place)
+        _LEFT.remove(directory)
 
 
 class ScratchError(MediaError):
@@ -96,7 +128,7 @@ class Scratch:
         tensor on it, so nothing taken from the store is kept past the block but copies."""
         if self._open:
             raise RuntimeError("a scratch holds one store at a time")
-        _remove_pending()
+        remove_pending()
         size = self.needed(frames, padded)
         shape = (CHANNELS, frames, *padded)
         self._open = True
@@ -149,7 +181,11 @@ class Scratch:
             except OSError as error:
                 if sys.platform == "win32" and getattr(error, "winerror", None) in (5, 32):
                     _PENDING.append(path)
-                    logger.debug("%s: still mapped, removed at the next store: %s", path, error)
+                    # Its text, not the error: the error's traceback holds this frame, whose
+                    # `flat` holds the mapping, which a handler keeping its records would keep.
+                    logger.debug(
+                        "%s: still mapped, removed at the next store: %s", path, str(error)
+                    )
                 else:
                     logger.warning("%s: the shot's scratch, not removed: %s", path, error)
 

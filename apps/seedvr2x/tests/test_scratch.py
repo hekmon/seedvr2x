@@ -11,6 +11,8 @@ import logging
 import mmap
 import os
 import resource
+import shutil
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -50,7 +52,7 @@ from test_tiling import (
 )
 from torch import Tensor
 
-from scratch import DEFAULT_ALLOWANCE, Scratch, ScratchError
+from scratch import DEFAULT_ALLOWANCE, Scratch, ScratchError, remove_pending
 from seedvr2x import model, tilegrid, tiling
 from seedvr2x.passes import Tiles
 
@@ -174,6 +176,15 @@ def test_scratch_allowance_is_its_passs() -> None:
         Scratch(None).store(676, (1104, 1920)),
     ):
         pass
+
+
+def gone(path: Path) -> bool:
+    """No file at path once its store has ended: on Windows, which deletes no file still mapped,
+    once its pending removal has run (scratch.remove_pending), as the next store's start and the
+    segment's end run it; on Linux it is gone as the store ends."""
+    if sys.platform == "win32":
+        remove_pending()
+    return not path.exists()
 
 
 def test_scratch_replaces_a_killed_runs(tmp_path: Path) -> None:
@@ -750,8 +761,11 @@ def test_on_windows_a_scratch_still_mapped_is_removed_at_the_next_store(
     # a tensor on it as the block ends: said at debug, and removed at the next store's start, by
     # then unmapped, where Linux unlinks it under the mapping (impl-win-3's review, 2026-11-09).
     import scratch as module
+    from media import files
 
     monkeypatch.setattr(module.sys, "platform", "win32")
+    # Windows' room reserved (files._reserve) stood in by the file's extension.
+    monkeypatch.setattr(files, "_reserve", lambda descriptor, size: os.ftruncate(descriptor, size))
     monkeypatch.setattr(module, "_PENDING", [])
     refusing = [True]
     real = Path.unlink
@@ -777,3 +791,78 @@ def test_on_windows_a_scratch_still_mapped_is_removed_at_the_next_store(
     refusing[0] = False
     with Scratch(second, allowance=0).store(1, (16, 16)):
         assert not left.exists() and module._PENDING == []  # pyright: ignore[reportPrivateUsage]
+
+
+def test_on_windows_a_scratch_pending_at_a_segments_end_is_removed_before_its_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # remove_pending, called by units.segment_finished and as main returns, removes what Windows
+    # kept mapped once the mapping has gone, so that the shot's directory removal, which ignores
+    # errors, finds it empty; a file still refused stays pending, the next start discarding it
+    # as a leftover (resume.leftovers; impl-win-4, 2026-11-09).
+    import scratch as module
+
+    left = tmp_path / "shot_0" / tilegrid.SCRATCH
+    left.parent.mkdir()
+    left.write_bytes(b"x")
+    monkeypatch.setattr(module, "_PENDING", [left])
+    real = Path.unlink
+    refusing = [True]
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if refusing[0] and self == left:
+            raise PermissionError(13, "The process cannot access the file", str(self))
+        real(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    module.remove_pending()
+    assert left.exists() and module._PENDING == [left]  # pyright: ignore[reportPrivateUsage]
+    refusing[0] = False
+    module.remove_pending()
+    assert not left.exists() and module._PENDING == []  # pyright: ignore[reportPrivateUsage]
+    shutil.rmtree(left.parent)
+    assert not left.parent.exists()
+    module.remove_pending()  # nothing pending: nothing to do
+
+
+def test_a_finished_shots_directory_goes_with_its_pending_scratch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A finished segment's last decode can still map its scratch as the segment is recorded, so
+    # that the shot's directory stays; once the file goes, the directories it left empty go, the
+    # job's resume directory too, and never a file: a unit made again there meanwhile (the
+    # assembly's remake of a damaged segment) keeps its own (natively, 2026-11-10: both stayed).
+    import scratch as module
+
+    root = tmp_path / "resume"
+    shot, other = root / "shot_000004", root / "shot_000009"
+    left = shot / tilegrid.SCRATCH
+    shot.mkdir(parents=True)
+    left.write_bytes(b"x")
+    monkeypatch.setattr(module, "_PENDING", [left])
+    monkeypatch.setattr(module, "_LEFT", [])
+    real = Path.unlink
+    refusing = [True]
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if refusing[0] and self == left:
+            raise PermissionError(13, "The process cannot access the file", str(self))
+        real(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    module.remove_with(shot)
+    module.remove_with(root)
+    module.remove_pending()
+    assert left.exists() and shot.is_dir()
+    refusing[0] = False
+    (other / "window_0000.pt").parent.mkdir()
+    (other / "window_0000.pt").write_bytes(b"remade")
+    module.remove_pending()
+    # The emptied shot's directory gone; the other's file kept, so its directory and root stay.
+    assert not shot.exists() and (other / "window_0000.pt").read_bytes() == b"remade"
+    assert module._LEFT == []  # pyright: ignore[reportPrivateUsage]
+    (other / "window_0000.pt").unlink()
+    other.rmdir()
+    module.remove_with(root)
+    module.remove_pending()
+    assert not root.exists() and module._LEFT == []  # pyright: ignore[reportPrivateUsage]

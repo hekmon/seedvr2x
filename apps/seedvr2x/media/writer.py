@@ -759,6 +759,15 @@ class CommandWriter(Writer):
                     _GROUPS.add(self._shell.pid)
         except BaseException as error:
             Writer.abort(self)
+            # A shell started but not contained (ffmpeg.contained raised: it ends the process
+            # only after some of its failures, OpenProcess's not among them) is killed and
+            # reaped here: its Popen handle would otherwise be left unwaited to the garbage
+            # collector, a ResourceWarning and, on Windows, a process handle kept open.
+            shell = getattr(self, "_shell", None)
+            if shell is not None:
+                with contextlib.suppress(OSError):
+                    shell.kill()
+                shell.wait()
             if isinstance(error, OSError):
                 raise MediaError(f"{path}: the segment command can't be run: {error}") from error
             raise

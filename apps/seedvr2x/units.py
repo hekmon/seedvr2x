@@ -24,6 +24,7 @@ from torch import Tensor
 
 from manifest import STATE, Manifest, size
 from media.files import make_directories, partial_path, replace_whole
+from scratch import remove_pending, remove_with
 from seedvr2x.sampling import CPU, moved
 
 # A shot's files besides its units (DESIGN.md, Colour correction): the copy of its input frames,
@@ -144,11 +145,21 @@ class Units:
         """Record segment `segment` as finished, then remove what its shots kept."""
         path = self.directory / self.manifest.files[segment]
         self.manifest.segment_finished(segment, size(path), digest(path))
+        # A scratch Windows kept mapped is removed now, or the shot's directory stays (scratch).
+        remove_pending()
+        done = all(self.manifest.finished)
         for shot in self.manifest.segment_shots(segment):
             start = self.manifest.shots[shot].start
-            shutil.rmtree(self.root / f"shot_{start:06d}", ignore_errors=True)
-        if all(self.manifest.finished) and self.root.is_dir() and not any(self.root.iterdir()):
-            self.root.rmdir()
+            directory = self.root / f"shot_{start:06d}"
+            shutil.rmtree(directory, ignore_errors=True)
+            if directory.exists():
+                # A scratch still mapped there, the last decode's: removed with it (scratch).
+                remove_with(directory)
+        if done and self.root.is_dir():
+            if not any(self.root.iterdir()):
+                self.root.rmdir()
+            else:  # the shots' directories a pending scratch keeps: it, empty, goes with them
+                remove_with(self.root)
 
 
 def _save(tensor: Tensor, path: Path) -> Tensor:

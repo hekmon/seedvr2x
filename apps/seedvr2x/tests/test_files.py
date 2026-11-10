@@ -3,6 +3,8 @@ limits there (files._sync), and Linux's way unchanged; a file Windows won't repl
 program holds it refused in its words (files.held), and a video's directory lock there
 (files.lock_directory, main._lock); no ffmpeg needed. The cases named on_windows run natively."""
 
+import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -101,6 +103,50 @@ def test_a_held_file_is_said_with_its_name_and_windows_reason(
     assert files.held(windows_error(2, tmp_path / "a.mkv")) is None
     # Still an OSError where a failed write's was caught, and a MediaError where a run's is.
     assert issubclass(files.HeldFile, PermissionError) and issubclass(files.HeldFile, MediaError)
+
+
+def raised_by(call: str, winerror: int, path: Path) -> OSError:
+    """The error `call` raises on a file that isn't there, its winerror set by hand: its
+    innermost frame is the line of the call, as a C call's error shows it."""
+    try:
+        if call == "unlink":
+            os.unlink(path)
+        elif call == "remove":
+            path.unlink()
+        else:
+            open(path, "rb").close()
+    except OSError as error:
+        error.winerror = winerror  # type: ignore[attr-defined]  # Windows' attribute
+        return error
+    raise AssertionError("the file exists")
+
+
+def test_a_denied_opening_is_said_as_one_and_a_denied_removal_as_a_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # main's net words a WinError 5 or 32 by what was being done: a source Windows would not let
+    # seedvr2x open, to read it, is no refused change (impl-win-4, 2026-11-09).
+    missing = tmp_path / "source.mkv"
+    read = raised_by("read", 5, missing)
+    if sys.platform != "win32":
+        assert files.refused(read) is None  # Linux's: nothing of Windows'
+    monkeypatch.setattr(files.sys, "platform", "win32")
+    said = files.refused(read)
+    assert said is not None
+    assert said.startswith(f"{missing}: Windows refused to open it: ")
+    assert "(WinError 5)" in said and "exclusively" in said and "permission" in said
+    assert "change or remove" not in said
+    assert not files.changing(read)
+    sharing = files.refused(raised_by("read", 32, missing))
+    assert sharing is not None and "refused to open it" in sharing and "(WinError 32)" in sharing
+    for call in ("unlink", "remove"):
+        removal = raised_by(call, 32, missing)
+        assert files.changing(removal)
+        assert files.refused(removal) == files.held(removal)
+        assert "Windows refused to change or remove it" in str(files.refused(removal))
+    # A rename or a replace carries its second name: a change whatever the frame.
+    assert files.changing(windows_error(5, tmp_path / "a.partial", missing))
+    assert files.refused(windows_error(2, missing)) is None
 
 
 def test_a_replace_windows_refuses_is_held_file_and_write_whole_leaves_no_partial(
@@ -225,15 +271,70 @@ def test_free_space_and_allocate_are_statvfs_and_posix_fallocate_on_linux(
         monkeypatch.setattr(files.os, "posix_fallocate", lambda *a: calls.append(a))
         files.allocate(7, 4096)
         assert calls == [(7, 0, 4096)]
-    # Windows' twins: shutil.disk_usage's free bytes, and the file extended to its size.
+    # Windows' twins: shutil.disk_usage's free bytes, and the file's room reserved by its handle
+    # (files._reserve, natively below).
     monkeypatch.setattr(files.sys, "platform", "win32")
     import shutil
 
     assert files.free_space(tmp_path) == shutil.disk_usage(tmp_path).free
+    reserved: list[tuple[int, int]] = []
+    monkeypatch.setattr(files, "_reserve", lambda *a: reserved.append(a))
+    files.allocate(7, 1 << 20)
+    assert reserved == [(7, 1 << 20)]
+
+
+@on_windows
+def test_on_windows_a_scratch_is_allocated_without_writing_its_zeros(tmp_path: Path) -> None:
+    # 1 GiB reserved and its end set at once, where the C runtime's _chsize_s wrote the zeros at
+    # 0.84 s a GiB (impl-win-4, 2026-11-09); what was never written reads as zeros.
+    import time
+
     path = tmp_path / "scratch"
     with path.open("x+b") as file:
+        start = time.monotonic()
+        files.allocate(file.fileno(), 1 << 30)
+        assert time.monotonic() - start < 1.0
+        file.seek((1 << 30) - 4096)
+        assert file.read() == bytes(4096)
+    assert path.stat().st_size == 1 << 30
+
+
+def test_on_windows_a_disk_without_the_room_is_refused_by_its_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ERROR_DISK_FULL (112) from FileAllocationInfo: an OSError carrying it, as posix_fallocate's
+    # ENOSPC, nothing extended.
+    monkeypatch.setattr(files.sys, "platform", "win32")
+    asked: list[int] = []
+
+    def full(descriptor: int, information: int, size: int) -> int:
+        asked.append(information)
+        return 112
+
+    monkeypatch.setattr(files, "_file_information", full)
+    path = tmp_path / "scratch"
+    with path.open("x+b") as file, pytest.raises(OSError) as refused:
+        files.allocate(file.fileno(), 1 << 20)
+    assert "112" in str(refused.value)  # Windows' WinError, its words or its number
+    assert asked == [files.FILE_ALLOCATION_INFO] and path.stat().st_size == 0
+
+
+@pytest.mark.parametrize("error", files.UNSUPPORTED)
+def test_on_windows_a_file_system_without_the_reservation_extends_the_file_saying_so(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error: int,
+) -> None:
+    # A share, or a driver other than NTFS's: the file extended as before the reservation, by
+    # the C runtime's writing its zeros, said at INFO.
+    monkeypatch.setattr(files.sys, "platform", "win32")
+    monkeypatch.setattr(files, "_file_information", lambda *a: error)
+    path = tmp_path / "scratch"
+    with caplog.at_level(logging.INFO, logger="cli.media.files"), path.open("x+b") as file:
         files.allocate(file.fileno(), 1 << 20)
     assert path.stat().st_size == 1 << 20
+    assert f"doesn't reserve a file's room ahead (WinError {error})" in caplog.text
 
 
 @on_windows

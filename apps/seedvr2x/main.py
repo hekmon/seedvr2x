@@ -321,13 +321,14 @@ def _main(argv: list[str] | None, owns_process: bool) -> int:
             # SIGTERM, or on Windows Ctrl-Break or the console's close, its twins there.
             return _stopped_at_once(error.how, 143, error, owns_process)
         except Exception as error:
-            # A file Windows wouldn't change while another program held it, where no refusal of
-            # the run's own said it (media.files.held: replace_whole's are HeldFile, refused with
+            # A file Windows wouldn't change or read while another program held it, where no
+            # refusal of the run's own said it (media.files.refused: a change or removal said
+            # as one, a denied read as a read; replace_whole's are HeldFile, refused with
             # what is kept): its words, never a traceback; status 1, ended as below once CUDA was
             # used.
-            from media.files import held
+            from media.files import refused as windows_refusal
 
-            refused = held(error) if isinstance(error, OSError) else None
+            refused = windows_refusal(error) if isinstance(error, OSError) else None
             if refused is not None:
                 logger.error("%s", refused)
                 if owns_process and waiting.cuda_used():
@@ -3934,7 +3935,17 @@ _CLEANING = threading.Lock()
 def _unmake() -> None:
     import contextlib
 
+    # A scratch file Windows kept mapped while the job ran, its mapping gone with the run's
+    # frames (scratch.remove_pending): never left in the work directory. Only where the run
+    # imported scratch (nothing is pending otherwise): importing it here would import torch,
+    # which a refusal before the run never does (tests/test_ffmpeg_check.py). No collection:
+    # this runs on a stop at once too, from the watcher's thread (_flush), where a finalizer it
+    # would run (blockswap.HostCopy's cudaHostUnregister) can wait on a stalled GPU for ever; a
+    # file still mapped then is the next start's leftover (resume.leftovers).
+    scratch = sys.modules.get("scratch")
     with _CLEANING:
+        if scratch is not None:
+            scratch.remove_pending(collect=False)
         while _MADE:
             with contextlib.suppress(OSError):  # the job's files are there, or the directory gone
                 _MADE.pop().rmdir()

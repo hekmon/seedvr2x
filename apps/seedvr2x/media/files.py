@@ -5,7 +5,9 @@ import contextlib
 import errno
 import logging
 import os
+import re
 import sys
+import traceback
 from pathlib import Path
 
 from media.ffmpeg import MediaError
@@ -53,6 +55,51 @@ def held(error: OSError, what: str = "") -> str | None:
     return (
         f"{path}: Windows refused to {action}: {error.strerror} (WinError {winerror}); {causes},"
         " then run the same command again"
+    )
+
+
+# The calls that change or remove a file, as the source line of an error's innermost frame shows
+# them, or as the name of a frame on its way (pathlib's unlink, shutil's rmtree and its helpers):
+# a Windows refusal (WinError 5 or 32) names the same file, and no other attribute, whether open()
+# or unlink() raised it, so the call that raised it is what tells a refused change from a refused
+# opening (impl-win-4, 2026-11-09; os.replace and os.rename also carry a second name, filename2).
+_CHANGES = re.compile(
+    r"\b(?:os|shutil)\.(?:unlink|remove|removedirs|rmdir|rmtree|rename|renames|replace|truncate)\("
+)
+_CHANGING_FRAMES = re.compile(
+    r"^(?:unlink|remove|removedirs|rmdir|rmtree|_rmtree_unsafe|_rmtree_safe_fd|rename|replace)$"
+)
+
+
+def changing(error: OSError) -> bool:
+    """Whether `error` was met changing or removing a file, not reading one: a second name
+    (a rename's or a replace's) or, in the innermost frame of its traceback, the line of a call
+    that changes or removes (os.unlink, Path.unlink, os.replace, shutil.rmtree and the rest)."""
+    if error.filename2 is not None:
+        return True
+    if error.__traceback__ is None:
+        return False
+    frames = traceback.extract_tb(error.__traceback__)
+    if any(_CHANGING_FRAMES.match(frame.name) for frame in frames[1:]):
+        return True
+    return bool(frames) and _CHANGES.search(frames[-1].line or "") is not None
+
+
+def refused(error: OSError) -> str | None:
+    """The words of a Windows refusal (HELD) of a file, None for any other error: a change or a
+    removal said by `held`; anything else said as the file's opening refused, to read it or to
+    write it (open() raises both, the same way), with Windows' reason and its likely causes
+    (another program holding the file exclusively, or permissions), never as a change."""
+    if sys.platform != "win32" or getattr(error, "winerror", None) not in HELD:
+        return None
+    if changing(error):
+        return held(error)
+    return (
+        f"{error.filename}: Windows refused to open it: {error.strerror} (WinError"
+        f" {error.winerror}); another program may have it open exclusively (a player, an editor,"
+        " an antivirus scanning it), or this account may lack the permission to open it (or its"
+        " folder is one Windows protects from this program): close it there or mend that, then"
+        " run the same command again"
     )
 
 
@@ -186,12 +233,78 @@ def free_space(directory: Path) -> int:
 def allocate(descriptor: int, size: int) -> None:
     """Give the new, empty file of `descriptor` its `size` bytes on the disk now, so that a full
     disk fails here rather than later, as a fault on a page of its mapping: posix_fallocate; on
-    Windows, which has none, the file extended to its size by os.ftruncate (the C runtime's
-    _chsize_s, which writes the zeros, so a full disk fails here there too)."""
+    Windows, which has none, its clusters reserved (SetFileInformationByHandle's
+    FileAllocationInfo, refused where the disk hasn't the room), then its end set there
+    (FileEndOfFileInfo), neither writing a byte: NTFS reads what lies past the data written as
+    zeros. Not os.ftruncate there: the C runtime's _chsize_s writes the zeros, 0.84 s a GiB on
+    an NTFS disk (impl-win-4, 2026-11-09), seconds to a minute before a large tiled shot."""
     if sys.platform == "win32":
-        os.ftruncate(descriptor, size)
+        _reserve(descriptor, size)
         return
     os.posix_fallocate(descriptor, 0, size)
+
+
+# The errors of a file system that has no FileAllocationInfo or FileEndOfFileInfo (a share, or
+# another driver than NTFS's): ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
+# ERROR_INVALID_PARAMETER (winerror.h). There the C runtime's extension, which writes the zeros,
+# as before.
+UNSUPPORTED = (1, 50, 87)
+
+
+def _reserve(descriptor: int, size: int) -> None:
+    """allocate's Windows half: the clusters reserved, then the end set, by the file's handle
+    (_file_information); where the file system has neither, the file extended by os.ftruncate,
+    said; any other refusal (ERROR_DISK_FULL, 112) an OSError, as posix_fallocate's ENOSPC."""
+    for information in (FILE_ALLOCATION_INFO, FILE_END_OF_FILE_INFO):
+        error = _file_information(descriptor, information, size)
+        if error in UNSUPPORTED:
+            logger.info(
+                "this file system doesn't reserve a file's room ahead (WinError %d): the scratch"
+                " file is extended by writing its zeros instead, which takes longer",
+                error,
+            )
+            os.ftruncate(descriptor, size)
+            return
+        if error:
+            raise OSError(errno.EIO, _said(error), None, error)
+
+
+# FILE_INFO_BY_HANDLE_CLASS (minwinbase.h): FileAllocationInfo, FileEndOfFileInfo, each
+# structure one LARGE_INTEGER.
+FILE_ALLOCATION_INFO = 5
+FILE_END_OF_FILE_INFO = 6
+
+
+def _file_information(descriptor: int, information: int, size: int) -> int:
+    """SetFileInformationByHandle of class `information`, `size` bytes, on the file of
+    `descriptor`: 0 once set, else Windows' error."""
+    if sys.platform != "win32":
+        raise AssertionError("Windows' allocation: allocate takes posix_fallocate elsewhere")
+    import ctypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.SetFileInformationByHandle.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    )
+    value = ctypes.c_int64(size)
+    if kernel32.SetFileInformationByHandle(
+        msvcrt.get_osfhandle(descriptor), information, ctypes.byref(value), ctypes.sizeof(value)
+    ):
+        return 0
+    return ctypes.get_last_error()
+
+
+def _said(error: int) -> str:
+    """Windows' words for its error `error` (its number alone where ctypes has no FormatError:
+    off Windows, where the tests fake it)."""
+    import ctypes
+
+    format_error = getattr(ctypes, "FormatError", None)
+    return f"WinError {error}" if format_error is None else str(format_error(error)).strip()
 
 
 def lock_directory(directory: Path) -> int:
