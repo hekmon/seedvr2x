@@ -3,7 +3,6 @@
 import json
 import logging
 import re
-import shlex
 import subprocess
 from dataclasses import dataclass
 from fractions import Fraction
@@ -12,6 +11,7 @@ from typing import Any, cast
 
 from media import rate
 from media.ffmpeg import MediaError, argument, ends_with_us
+from seedvr2x.errors import shell_word
 
 logger = logging.getLogger("cli.media.probe")
 
@@ -237,8 +237,8 @@ def _refuse_image(path: Path, probed: dict[str, Any]) -> None:
             f"{path}: an image file ({kind}), not a video, and not a picture seedvr2x reads:"
             f" it reads {PICTURES} as pictures, told by their content, and refuses any other"
             " image format, which ffmpeg would run as a video of one frame. Make a PNG of it with"
-            f" a tool that reads it, e.g. ffmpeg -i {shlex.quote(str(path))}"
-            f" {shlex.quote(str(path) + '.png')} where your ffmpeg decodes it"
+            f" a tool that reads it, e.g. ffmpeg -i {shell_word(str(path))}"
+            f" {shell_word(str(path) + '.png')} where your ffmpeg decodes it"
         )
 
 

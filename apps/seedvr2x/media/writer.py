@@ -71,6 +71,17 @@ OUT = "{out}"
 # reads 1,000 bytes, and with one that reads nothing, 2026-10-10). ffmpeg ignores SIGPIPE, so no
 # signal ends it there.
 BROKEN_PIPE = -errno.EPIPE & 0xFF
+
+
+def pipe_gone(error: OSError) -> bool:
+    """A write or a close's flush into a pipe whose reader has gone: EPIPE (BrokenPipeError) on
+    POSIX; on Windows EINVAL, its ERROR_NO_DATA ("the pipe is being closed"), which a writer's
+    abort met as a raw error natively (2026-11-10)."""
+    return isinstance(error, BrokenPipeError) or (
+        sys.platform == "win32" and error.errno == errno.EINVAL
+    )
+
+
 # The seconds a segment command is left to end on SIGTERM before SIGKILL (CommandWriter._stop):
 # DESIGN.md, Output, Writer, decided on 2026-10-28 (the user): 5, where 2 as built was short for a
 # command flushing to a slow disk, and 5 stays within the 10 s a container's stop gives the whole
@@ -257,7 +268,9 @@ class Writer:
             packed = memoryview(self._pack(frame)).cast("B")
             try:
                 self._stdin.write(packed)
-            except BrokenPipeError:
+            except OSError as error:
+                if not pipe_gone(error):
+                    raise
                 raise self._broken() from None
             if self._holds_as_fed:
                 self.checksums.append(zlib.crc32(packed))
@@ -267,8 +280,9 @@ class Writer:
         """Finish the output and check it; returns the frames written."""
         try:
             self._stdin.close()
-        except BrokenPipeError:
-            pass
+        except OSError as error:
+            if not pipe_gone(error):
+                raise
         status = self._process.wait()
         self._drain.join()
         if status != 0:
@@ -284,8 +298,9 @@ class Writer:
         # garbage collector.
         try:
             self._stdin.close()
-        except BrokenPipeError:
-            pass
+        except OSError as error:
+            if not pipe_gone(error):
+                raise
         self._discard()
 
     def _pack(self, frame: Frame) -> npt.NDArray[np.uint16]:
@@ -794,8 +809,9 @@ class CommandWriter(Writer):
         try:
             try:
                 self._stdin.close()
-            except BrokenPipeError:
-                pass
+            except OSError as error:
+                if not pipe_gone(error):
+                    raise
             status = self._process.wait()
             self._drain.join()
             ended = self._ended()

@@ -2267,6 +2267,7 @@ def _directory_refused(path: Path) -> str:
         " from its own detection or a cut list (--cuts), and every output segment from its rules."
         " Give it the file the segments were split from, or join the segments back into one file"
         " first so that every frame keeps its place on the frame grid:\n"
+        # A POSIX shell's command on any platform (a for loop, $N/$D, a glob): quoted for it.
         f"{rate.grid_join(shlex.quote(str(path)))}\n"
         "A plain join by ffmpeg's concat demuxer, -f concat -c copy alone, can drift off the"
         " grid, up to 1 ms a join, and is refused once a frame lies half a frame off its place"

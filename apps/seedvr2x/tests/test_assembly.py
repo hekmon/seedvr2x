@@ -1578,7 +1578,7 @@ def unrated(directory: Path) -> Path:
     return source
 
 
-NO_RATE = re.compile(r"\[in#0\S* @ 0x[0-9a-f]+\] \[warning\] Stream #(\d+): not enough frames")
+NO_RATE = re.compile(r"\[in#0\S* @ (?:0x)?[0-9a-f]+\] \[warning\] Stream #(\d+): not enough frames")
 
 
 def test_a_covers_unestimated_rate_is_tolerated_and_no_other_streams(
@@ -1626,6 +1626,29 @@ def test_a_covers_unestimated_rate_is_tolerated_and_no_other_streams(
     assert complaints([line.format(cover).replace("in#0", "in#1")], {cover}) != []
     assert complaints([line.format(cover).replace("in#0", "in#2")], {cover}) == []
     assert complaints([line.format(cover) + " now"], {cover}) != []
+
+
+@pytest.mark.parametrize("address", ["0x5fd716b70f40", "00000216b010c940"])
+def test_ffmpegs_lines_are_known_by_either_platforms_address(address: str) -> None:
+    # A context's address is ffmpeg's %p: 0x and hex digits on Linux, the digits alone in
+    # Windows' builds, where every tolerated note failed the assembly it was printed in, a font
+    # attached as mkvmerge does among them (natively, 2026-11-09).
+    from media import scan
+
+    complaints = assembly._complaints  # pyright: ignore[reportPrivateUsage]
+    tolerated = [
+        f"[in#0/matroska,webm @ {address}] [warning] Could not find codec parameters for stream 5"
+        " (Attachment: none): unknown codec",
+        f"[in#2/mov,mp4,m4a,3gp,3g2,mj2 @ {address}] [warning] stream 2, timescale not set",
+        f"[aist#0:1/pcm_s16le @ {address}] [warning] Guessed Channel Layout: stereo",
+    ]
+    assert complaints(tolerated) == []
+    note = f"[in#0/matroska,webm @ {address}] [warning] Stream #3: not enough frames to estimate"
+    note += " rate; consider increasing probesize"
+    assert complaints([note], {3}) == [] and complaints([note], set()) == [note]
+    header = f"[out#0/matroska @ {address}] [error] Could not write header"
+    assert assembly.PREFIX.sub("", header) == "Could not write header"
+    assert scan.ERROR_AT_START.match(f"[in#0 @ {address}] [error] Error opening input")
 
 
 def size_of(path: Path) -> int:

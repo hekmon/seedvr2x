@@ -10,7 +10,6 @@ timeline. Exact throughout: the frames' pts in their stream's time base, as the 
 them, and rates as fractions."""
 
 import math
-import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
@@ -21,6 +20,7 @@ import numpy.typing as npt
 
 from media.assembly import Stream
 from media.index import NOPTS, FrameIndex
+from seedvr2x.errors import shell_word
 
 # Beyond it, a deviation's numerator could overflow numpy's int64 (_numerators): Python's exact
 # integers then, slower.
@@ -532,7 +532,7 @@ def remake(
     for number, (cover, file) in enumerate(zip(covers, files, strict=True), attachments):
         words += ["-attach", file]
         for key in ("mimetype", "filename"):
-            words += [f"-metadata:s:t:{number}", shlex.quote(f"{key}={cover.tags[key]}")]
+            words += [f"-metadata:s:t:{number}", shell_word(f"{key}={cover.tags[key]}")]
     return (
         "two commands, the first taking the cover picture out of the file and the second leaving"
         " it out of the remake, which would make it a second video track, to attach it to the"

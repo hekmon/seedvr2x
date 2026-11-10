@@ -112,21 +112,23 @@ EXACT = 2**52
 #   guess by the number of channels (fftools/ffmpeg_demux.c, "Guessed Channel Layout"): PCM in
 #   Matroska, whose tracks hold a count of channels alone. A copy writes that count again, and
 #   the packets as they are, compared.
+# A context's address is ffmpeg's %p: 0x and hex digits on Linux, the digits alone in Windows'
+# builds (gyan.dev's 9.0.1: "[in#0/matroska,webm @ 00000216b010c940]", natively 2026-11-09).
 # All from the source alone, input 0 of every command here, and input 2 of the join, which opens
 # the source twice (_join). Anything else printed
 # fails the run it is printed by, as the strict reads of the input copies do
 # (media/checksums.py).
 TOLERATED = (
     re.compile(
-        r"\[in#[02](/\S+)? @ 0x[0-9a-f]+\] \[warning\] Could not find codec parameters for stream"
-        r" \d+ \(.*\): .*"
+        r"\[in#[02](/\S+)? @ (?:0x)?[0-9a-f]+\] \[warning\] Could not find codec parameters for"
+        r" stream \d+ \(.*\): .*"
     ),
     re.compile(
         r"Consider increasing the value for the 'analyzeduration' \(\d+\) and 'probesize' \(\d+\)"
         r" options"
     ),
-    re.compile(r"\[in#[02](/\S+)? @ 0x[0-9a-f]+\] \[warning\] stream \d+, timescale not set"),
-    re.compile(r"\[aist#[02]:\d+/\S+ @ 0x[0-9a-f]+\] \[warning\] Guessed Channel Layout: .*"),
+    re.compile(r"\[in#[02](/\S+)? @ (?:0x)?[0-9a-f]+\] \[warning\] stream \d+, timescale not set"),
+    re.compile(r"\[aist#[02]:\d+/\S+ @ (?:0x)?[0-9a-f]+\] \[warning\] Guessed Channel Layout: .*"),
 )
 # And, for a cover picture alone, ffmpeg's note that a stream of one frame has no rate to
 # estimate (libavformat/demux.c, avformat_find_stream_info: "not enough frames to estimate rate;
@@ -137,11 +139,11 @@ TOLERATED = (
 # picture, the picture being attached whole, its bytes compared; for any other stream it fails
 # the run as before, the stream being the one the message numbers (_complaints).
 NO_RATE = re.compile(
-    r"\[in#[02](/\S+)? @ 0x[0-9a-f]+\] \[warning\] Stream #(\d+): not enough frames to estimate"
-    r" rate; consider increasing probesize"
+    r"\[in#[02](/\S+)? @ (?:0x)?[0-9a-f]+\] \[warning\] Stream #(\d+): not enough frames to"
+    r" estimate rate; consider increasing probesize"
 )
 # A message's prefix at -loglevel level+warning: its contexts, then its level.
-PREFIX = re.compile(r"^(\[[^\]]* @ 0x[0-9a-f]+\] )*\[(warning|error|fatal|panic)\] ")
+PREFIX = re.compile(r"^(\[[^\]]* @ (?:0x)?[0-9a-f]+\] )*\[(warning|error|fatal|panic)\] ")
 # The muxer's second message when it refuses a stream, which says nothing of why: the first does.
 NO_HEADER = "Could not write header"
 

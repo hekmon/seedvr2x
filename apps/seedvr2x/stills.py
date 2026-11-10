@@ -12,13 +12,13 @@ in as `Reads`, so that one function replaces each for a test as it does for a vi
 
 import logging
 import os
-import shlex
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from seedvr2x.errors import shell_word
 from stop import terminable
 
 if TYPE_CHECKING:
@@ -556,7 +556,7 @@ def _check_output(output: Path, source: Path) -> None:
         raise JobError(
             f"{output}: seedvr2x writes a picture as a PNG or a lossless WebP only: write"
             f" {written} (or {output.with_suffix('.webp')}), then convert it, e.g. ffmpeg -i"
-            f" {shlex.quote(str(written))} {shlex.quote(str(target))}"
+            f" {shell_word(str(written))} {shell_word(str(target))}"
         )
     if _same(output, source):
         raise JobError(f"{output}: the source itself; choose another -o")

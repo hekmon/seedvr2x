@@ -142,6 +142,11 @@ def replace_whole(partial: Path, path: Path, stale: Path | None = None) -> None:
             raise
         raise HeldFile(refused) from error
     try:
+        if sys.platform == "win32" and partial.is_dir() and path.is_dir():
+            # Windows renames no directory onto another, even an empty one (access denied, met
+            # natively on 2026-11-10), where POSIX's rename replaces an empty one: removed first,
+            # partial being whole by now, so that a stop between leaves a segment to make again.
+            path.rmdir()
         partial.replace(path)
     except OSError as error:
         refused = held(error, "replace")

@@ -64,7 +64,7 @@ ERROR = re.compile(r"\[(error|fatal|panic)\]")
 # has one, each "[name @ 0x...] " (libavutil/log.c:333-345 at n9.0.2: "[mpeg2video @ 0x...]
 # [IMGUTILS @ 0x...] [error] Picture size 0x0 is invalid"): what is taken for an error before
 # MAPPING, where a line may hold the source's own text behind "[info]".
-ERROR_AT_START = re.compile(r"(\[[^\]]* @ 0x[0-9a-f]+\] )*\[(error|fatal|panic)\] ")
+ERROR_AT_START = re.compile(r"(\[[^\]]* @ (?:0x)?[0-9a-f]+\] )*\[(error|fatal|panic)\] ")
 # The line ffmpeg prints once every input is opened and dumped, and before its scheduler starts a
 # thread (fftools/ffmpeg.c:734-736, 892-896 at n9.0.2, print_stream_maps then sch_start; an
 # input's dump at ffmpeg_demux.c:2340), whole, with its level. Before it, ffmpeg prints the

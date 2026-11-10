@@ -1,6 +1,7 @@
 """The writers, against the real ffmpeg: exact round trips, the yuv420p10le conversion and its tags
 (skipped without a build seedvr2x accepts)."""
 
+import errno
 import json
 import struct
 import subprocess
@@ -843,3 +844,18 @@ def test_a_png_directory_carries_no_record(tmp_path: Path) -> None:
     for frame in frames:
         assert b"seedvr2x" not in frame.read_bytes().lower()
         assert not {"tEXt", "iTXt", "zTXt"} & set(png_chunks(frame))
+
+
+def test_a_pipe_whose_reader_is_gone_is_told_on_either_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Windows says a write or a close's flush into a pipe whose reader has gone with EINVAL
+    # (ERROR_NO_DATA), not EPIPE: a writer's abort met it as a raw error natively (2026-11-10).
+    from media import writer
+
+    invalid = OSError(errno.EINVAL, "Invalid argument")
+    monkeypatch.setattr(writer.sys, "platform", "linux")
+    assert writer.pipe_gone(BrokenPipeError(errno.EPIPE, "Broken pipe"))
+    assert not writer.pipe_gone(invalid)
+    monkeypatch.setattr(writer.sys, "platform", "win32")
+    assert writer.pipe_gone(invalid) and not writer.pipe_gone(OSError(errno.EIO, "I/O error"))
