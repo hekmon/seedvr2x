@@ -34,6 +34,12 @@ A SeedVR2 video upscaler for **long runs** (whole episodes or films) that:
     (measured on an emulated one, see [Memory planner](#memory-planner)).
   - These cards also compute more slowly (an RTX 5080 has 84 SMs, the 96 GB card 188), so a
     job lasts longer there, and resume and `--until` matter most.
+- gives its best with little tuning (the user, 2026-11-09): few options, each a switch or a
+  few named levels with an opinionated default that a measurement chose, never a filter's or
+  a model's raw parameters; the users' documents say when to take each, and where seedvr2x
+  can tell from the source, its plan says so, as the size line names the `--resolution` that
+  keeps the source's size. Raw control stays with the tools around it: ffmpeg's filters
+  before seedvr2x, `--segment-cmd` after.
 - can be paused and resumed (run at night, give the computer back in the morning)
 
 v1 is for SDR sources, made as perfect as they can be: the user's priority, SDR being what gets
@@ -1907,6 +1913,55 @@ The rule: the upscale must look like its source in any given player.
   - The correction is only a different target size for the input resize (step 0 of the
     [Pipeline](#pipeline-per-shot)).
 
+### Banded sources: an input deband, an option to come
+Decided by the user on 2026-11-09, on impl-win-4's renders of the user's dark animation's sky
+(240 frames at 540p, x2 to 1080p, seed 42, both 7B models; measured on 96 of the frames).
+- **What the model does with banding.** An 8-bit source's smooth gradient comes in steps of
+  one code, about 0.4%, which no eye sees in the source; both models, at `standard` and at
+  `maximum`, draw them as contour lines across the sky, which the eye sees (on high-pass
+  pictures, read by eye and not measured, the outputs' lines show at a gain of 10 where the
+  source's steps need 40). The likely trigger is a compressed source's wide flat plateaus
+  with hard borders, the grain that would hide the steps taken off by its encoder (inferred,
+  not isolated).
+- **Measured** (the terraces left in the sky: a band-pass's robust spread, in 8-bit codes).
+  ffmpeg's `deband` on the input at 16 bits (`format=yuv420p16le,deband`, so that its
+  in-between values stay, the CLI reading every source at 16 bits) brought the open sky under
+  the plain bicubic's (0.36 against 0.47, the unfiltered runs' 0.59 to 0.64), and the sky by
+  the tower's and the clouds' edges too (0.56 against the bicubic's 0.72 and the unfiltered
+  runs' 0.81 to 0.84). ffmpeg's `gradfun` (8 bits, dithered) cleared the open sky less (0.40
+  to 0.46) and left lines by the edges, as the eyes saw. A stronger `deband` turned the dark
+  mountain to speckle (its edges +38% on the input), and numz's input noise (ffmpeg's `noise`
+  standing in) hid the steps under grain without smoothing them.
+- **The user's eyes:** `deband` first, no terrace left and the mountain closer to the
+  original without blur (the model's texture there had been too prominent: its edges 26 to
+  28% under the unfiltered runs'); at `maximum` the best clip, for the sky, the mountain and
+  as a whole, but with a speckle along the clouds' borders. `deband`'s `blur` compares a pixel
+  with the average of its four random references, which near a border can straddle it and
+  average close to the pixel, which then takes a mix of both sides; with `blur=0` each of the
+  four must be within the threshold. By the edges, on the input, `blur=0` changed 50% of the
+  pixels against 69% and left 44% less speckle, the open sky within 4% of the default's; its
+  output at `maximum` keeps the sky (0.38) and most of the mountain's texture (its edges 8%
+  under the unfiltered run's), the clouds' borders crisp: it waits for the eyes. A smaller
+  `range` (8) let the terraces back (+21 to 22%).
+- **Decided:** an input deband becomes an option, never a default. Some sources can't be
+  restored cleanly without it, this one among them; on others it may take thin faint lines
+  or fine gradients for banding. One switch, `--deband`, at a measured setting, named levels
+  only if the material needs them (Goal), the users' documents saying when to take it.
+- **Before any code, a study:** more material (bright animation with clean lines, live
+  action, film grain, bright scenes), the setting (`blur` among it), the eyes, the same
+  frames in every read (a resume reads a shot from its first frame), and whether the plan can
+  tell a banded source (8 bits, wide flat areas with hard borders) and say that `--deband` may
+  help, as the size line names the `--resolution` that keeps the source's size.
+- **Then the CLI:** ffmpeg's own `deband` in the reader's chain at 16 bits, before the RGB
+  conversion, its setting in the job's settings and record (it changes the output). The nodes
+  and pictures after: their frames never pass through ffmpeg, so a deband in torch, written
+  from the algorithm's description, never from ffmpeg's code (LGPL).
+- **The model's input precision.** The encoder's input is cast to bfloat16, 8 significant
+  bits, in [0, 1], before the resize and the normalisation to [-1, 1]: finer than an 8-bit
+  code in dark tones, about one code in the bright half. On a bright sky part of `deband`'s
+  smoothing may round away there, where `gradfun`'s dither would survive: the bright material
+  compares both.
+
 ## Pipeline, per shot
 
 0. **Resize** of the input to the output size. The model restores a picture that is already at
@@ -2141,7 +2196,10 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   fourth frame is the model's best" has them), the edges pulsing, most on line art, dark
   scenes and motion, and `maximum` is the fix (the user, 2026-11-08, stepping a dark
   animation at `standard`: its edges sharper and lighter every 4th frame; most users would
-  give up before finding the cause alone).
+  give up before finding the cause alone). The eyes confirmed it on 2026-11-09 for both 7B
+  models, on the same animation at `maximum`: the sharp 7B's pulse gone, and the regular
+  7B's noise as the camera moves gone or nearly (impl-win-3 and impl-win-4; Open questions,
+  "Every fourth frame is the model's best").
 - **What.** Run s, for s from 0 to 3, is fed the shot from its frame s; frame f is taken from
   run f mod 4, where it ends its group (frames 0 to 3 each a run's own first frame, a latent
   of its own). Each run is a whole one: its plan of windows, its padded end (step 1), its
@@ -4282,9 +4340,35 @@ run in one line, before the models load as after.
     milestone 1's input upscaled natively on the RTX 5090, killed after a window and resumed,
     its frames the uninterrupted run's. Torch loaded before the allocator is chosen (a 16-bit
     PNG's decoder imports it) keeps the allocator it loaded with, said at INFO, rather than a
-    still's decode moved after the card is asked. One Ctrl-C there reaches every ffmpeg on the
-    console too, so the step in progress fails and the run stops with exit 1, its units kept
-    (the stop's twins are impl-win-4's).
+    still's decode moved after the card is asked. The stop there, built the next night
+    (impl-win-4) and measured natively on the card with milestone 1's input: every child in
+    a process group of its own, as on Linux (`CREATE_NEW_PROCESS_GROUP`), so that a console's
+    Ctrl-C reaches seedvr2x alone, once finishing the unit in progress and twice stopping at
+    once (130 both); Ctrl-Break and the console's close are SIGTERM's twins (143, each said
+    by name), the close within the 5 s Windows leaves a handler before it ends the process
+    (5.00 to 5.01 s, measured); the watcher reads Windows' wakeup on a socket pair, so that a
+    main thread held in C is ended as on Linux; a segment command is sent Ctrl-Break, given
+    5 s, then its job ended. No stop left an ffmpeg, and each stopped run, resumed, made the
+    uninterrupted run's frames. A stop at once ends the process by TerminateProcess on
+    itself, POSIX `_exit`'s twin: after a close, with torch loaded, `os._exit(143)` and
+    `sys.exit(143)` both ended it with status 0. A segment command blocked reading its pipe
+    doesn't see Ctrl-Break (ffmpeg took the whole 5 s), where SIGTERM wakes it on Linux: said
+    in the users' manual, as is `uv run`'s Ctrl-Break, which ends uv and leaves the run on its
+    own. Measured beside it: a scratch file's room reserved without writing its zeros (32 GiB
+    in 0.03 s, 34.2 s before), a tiled shot's scratch on its file natively, its frames the
+    uninterrupted run's, and the suites of the CLI, the library and the nodes natively, each
+    test passing or skipped by a reason Windows has (2,195, 2,286 and 442 passed; the
+    library's synthetic model files sparse on NTFS too). Decided on 2026-11-10, on its
+    questions: every stop at once there ends by TerminateProcess (ExitProcess would run every
+    library's detach, CUDA's among them), the console's handler left registered once a close
+    is handled (its removal waits for it to return); a test whose subject Windows lacks skips
+    there naming its reason, and a check that can't hold there (the library's `mappings()`,
+    empty natively) is left out of its test and counted. Left for the next Windows baton:
+    the calibration's encode refused under `cudaMallocAsync` (To measure, the hold); a
+    segment command's stdin closed before its Ctrl-Break; the grid join's advised commands,
+    a POSIX shell's, for cmd; a directory where a file goes (WinError 5) said as its own
+    case; the logoff's and shutdown's events, handled as the close but unmeasured (Windows
+    calls no console handler for them in a process that has loaded user32, as torch's has).
   - The detector's close waited on the card outside the poll (`torch.cuda.synchronize`), and
     nothing tested its close on a failed card: mended on 2026-11-08 (impl-nodes-5), its wait
     through the poll, the Cuts node's Cancel its check; a wait an exception ends, or a failed
@@ -4419,7 +4503,8 @@ run in one line, before the models load as after.
     Ctrl-Break under `uv run` ends uv at once and leaves Python running, a Ctrl-C making uv
     wait, which the CLI's stop there is to answer. The children's end is built (impl-win-3:
     a Job Object, a hard-killed run leaving no ffmpeg or cmd.exe); Ctrl-C's groups, the
-    watcher's socket, the statuses and a segment command's grace are impl-win-4's.
+    watcher's socket, the statuses and a segment command's grace the next night
+    (impl-win-4: Windows itself, above).
   Decided the same day, on its questions:
   - In a launch a single stop is not answered; the repeated one is the way, as decided. One
     set of RoPE tables for all blocks (fewer launches and less memory, where the blocks'
@@ -4738,7 +4823,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | `--output` | `-o`, required: a `.mkv` path gives the finished file, any other path a directory of segments; for a picture, a new `.png` or `.webp` file; no default directory |
 | `--attention_mode` | dropped: SDPA, the one kernel since 2026-11-08 (FA2 when installed before); no kernel measured faster |
 | `--color_correction` | `split` (seedvr2x's own, beyond numz's `lab`) by default; `none` available; numz's `lab`, `wavelet`, `wavelet_adaptive`, `hsv` and `adain` dropped |
-| `--input_noise_scale` | dropped (numz's own addition, only degrades) |
+| `--input_noise_scale` | dropped (numz's own addition, only degrades); on a banded source it hides the steps under grain without smoothing them, where an input deband, to come as `--deband`, smooths them (see [Banded sources](#banded-sources-an-input-deband-an-option-to-come)) |
 | `--latent_noise_scale` | dropped from v1 (ByteDance uses 0; corrected version possibly later as an experiment, see bug 08) |
 | `--batch_size`, `--temporal_overlap`, `--prepend_frames`, `--uniform_batch_size` | replaced by shots, windows and latent stitching, chosen by the planner; `--window` pins the window cap |
 | `--blocks_to_swap`, tile sizes, offload devices | chosen by the planner; `--swap-blocks`, `--encode-tile` and `--decode-tile` pin them, exactly or refused; no offload device, the DiT's host copy being pinned memory |
@@ -5292,8 +5377,13 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   its edges but 16% less Laplacian variance at the group's last frame; and `maximum` leaves a
   rhythm too, the frames from the run that starts at the shot's first frame scoring higher in
   48 to 49 of 59 groups (the runs differing by where they start: inferred). Measures, not
-  eyes: whether `maximum` takes the visible pulse away is the user's to see on the clips kept,
-  and the users' documents, which call it the fix (impl-nodes-7), follow what the eye finds.
+  eyes, and the eyes settled it the same day: at `maximum` the user saw no pulse left, the
+  rhythm measured there invisible, so the users' documents, which call `maximum` the fix
+  (impl-nodes-7), stand. The regular 7B at `maximum` (impl-win-4, the same clip and setup):
+  its dip at a group's last frame is gone (on the mountain's crop the Laplacian variance's
+  median +2.1%, 37 of 59 groups up, where `standard`'s was 16% under), and the user saw its
+  noise as the camera moves cleared, or most of it. So both models' 4-frame artefacts are
+  `maximum`'s to mend, by the same mechanism most likely (inferred).
 - **The VAE's room, by the frames** (see [Memory planner](#memory-planner), the budget).
   Measured by tile size on the 96 GB card (2026-10-16 to 18): every tile the 12 to 48 GB cards
   take, passes alone, six of them in whole runs, three decodes under expandable segments; a room
@@ -5314,7 +5404,12 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   need in 12 units of 93, so it wants torch's limit lowered for the unit, or its cache emptied
   first. Both constants on a card with nothing else on it. The other bits seen once after a
   window had passed the card. And the Windows side: a desktop took 0.44 to 0.58 GiB back and
-  forth within minutes, and gave up 455 MiB at once as the card filled.
+  forth within minutes, and gave up 455 MiB at once as the card filled. Natively under
+  `cudaMallocAsync` (impl-win-4, 2026-11-09, the CLI on milestone 1's input): a plan 0.17 GiB
+  under its budget, 28.30 GiB free, was refused by torch's limit ("would exceed allowed
+  memory") 1 s into the calibration's encode, where the same job ran at 27.59 GiB free: the
+  encode's figure under the pool there falling short (inferred), the next Windows baton's to
+  measure.
 - **The load through WSL's file bridge.** One read serves the 7B's file at 253 MB/s from an NVMe
   drive on the Windows side, a load of 75 s; two or more at once, 480 MB/s and 42 to 43 s. A
   patch reading each tensor in four pieces is held, level on a Linux NVMe drive; not measured on
