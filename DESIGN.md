@@ -1941,26 +1941,41 @@ Decided by the user on 2026-11-09, on impl-win-4's renders of the user's dark an
   four must be within the threshold. By the edges, on the input, `blur=0` changed 50% of the
   pixels against 69% and left 44% less speckle, the open sky within 4% of the default's; its
   output at `maximum` keeps the sky (0.38) and most of the mountain's texture (its edges 8%
-  under the unfiltered run's), the clouds' borders crisp: it waits for the eyes. A smaller
-  `range` (8) let the terraces back (+21 to 22%).
+  under the unfiltered run's), the clouds' borders crisp, and the user's eyes saw less noise
+  by the clouds' edges than with the default (2026-11-10): `blur=0` is where the study
+  starts. A smaller `range` (8) let the terraces back (+21 to 22%).
 - **Decided:** an input deband becomes an option, never a default. Some sources can't be
   restored cleanly without it, this one among them; on others it may take thin faint lines
   or fine gradients for banding. One switch, `--deband`, at a measured setting, named levels
   only if the material needs them (Goal), the users' documents saying when to take it.
 - **Before any code, a study:** more material (bright animation with clean lines, live
-  action, film grain, bright scenes), the setting (`blur` among it), the eyes, the same
-  frames in every read (a resume reads a shot from its first frame), and whether the plan can
-  tell a banded source (8 bits, wide flat areas with hard borders) and say that `--deband` may
-  help, as the size line names the `--resolution` that keeps the source's size.
+  action, film grain, bright scenes), the setting, starting from `blur=0`, the eyes, and
+  whether the plan can tell a banded source (8 bits, wide flat areas with hard borders) and
+  say that `--deband` may help, as the size line names the `--resolution` that keeps the
+  source's size. Every read must give the same frames, a resume reading a shot from its
+  first frame: checked on this clip on the CPU (impl-win-5, 2026-11-10), a read by the
+  reader's seek from frame 144, standing for a shot's start, against the same 96 frames of a
+  whole read, by framemd5, at 16 bits and after the CLI's conversion, the default and
+  `blur=0`: equal in every comparison, ffmpeg's threads its own or one. The clip is
+  all-intra, and that the filter keeps nothing from one frame to the next is inferred, not
+  read: the study's sources are checked the same way.
 - **Then the CLI:** ffmpeg's own `deband` in the reader's chain at 16 bits, before the RGB
-  conversion, its setting in the job's settings and record (it changes the output). The nodes
+  conversion, and that conversion built from the 16-bit format: its chain begins with the
+  source's own planar format (`yuv420p` on this clip), which after `deband` would cut its
+  output back to 8 bits (impl-win-5). Its setting in the job's settings and record (it
+  changes the output). The nodes
   and pictures after: their frames never pass through ffmpeg, so a deband in torch, written
   from the algorithm's description, never from ffmpeg's code (LGPL).
-- **The model's input precision.** The encoder's input is cast to bfloat16, 8 significant
-  bits, in [0, 1], before the resize and the normalisation to [-1, 1]: finer than an 8-bit
-  code in dark tones, about one code in the bright half. On a bright sky part of `deband`'s
-  smoothing may round away there, where `gradfun`'s dither would survive: the bright material
-  compares both.
+- **The model's input precision.** The encoder's input is cast to bfloat16 (from float16 on
+  the host), 8 significant bits, in [0, 1], and the resize and the normalisation to [-1, 1]
+  after it run in bfloat16 too: about one 8-bit code in the bright half and half a code
+  under it, the normalisation bringing the darkest quarter to that half code too (read in
+  the code, not measured). Measured on this sky, the casts alone (impl-win-5, at 540p, by
+  the terraces' measure above): they keep about 98% of `deband`'s smoothing in the luma,
+  `blur=0`'s alike, and all of it in the red, 98% of whose pixels sit in [0.5, 1), where the
+  step is one code. That measure blurs at σ = 2, which averages most of one step's rounding
+  out; the study measures through the resize and the normalisation, and on the bright
+  material against `gradfun`'s dither.
 
 ## Pipeline, per shot
 
@@ -4352,23 +4367,30 @@ run in one line, before the models load as after.
     uninterrupted run's frames. A stop at once ends the process by TerminateProcess on
     itself, POSIX `_exit`'s twin: after a close, with torch loaded, `os._exit(143)` and
     `sys.exit(143)` both ended it with status 0. A segment command blocked reading its pipe
-    doesn't see Ctrl-Break (ffmpeg took the whole 5 s), where SIGTERM wakes it on Linux: said
-    in the users' manual, as is `uv run`'s Ctrl-Break, which ends uv and leaves the run on its
-    own. Measured beside it: a scratch file's room reserved without writing its zeros (32 GiB
-    in 0.03 s, 34.2 s before), a tiled shot's scratch on its file natively, its frames the
-    uninterrupted run's, and the suites of the CLI, the library and the nodes natively, each
-    test passing or skipped by a reason Windows has (2,195, 2,286 and 442 passed; the
-    library's synthetic model files sparse on NTFS too). Decided on 2026-11-10, on its
-    questions: every stop at once there ends by TerminateProcess (ExitProcess would run every
-    library's detach, CUDA's among them), the console's handler left registered once a close
-    is handled (its removal waits for it to return); a test whose subject Windows lacks skips
-    there naming its reason, and a check that can't hold there (the library's `mappings()`,
-    empty natively) is left out of its test and counted. Left for the next Windows baton:
-    the calibration's encode refused under `cudaMallocAsync` (To measure, the hold); a
-    segment command's stdin closed before its Ctrl-Break; the grid join's advised commands,
-    a POSIX shell's, for cmd; a directory where a file goes (WinError 5) said as its own
-    case; the logoff's and shutdown's events, handled as the close but unmeasured (Windows
-    calls no console handler for them in a process that has loaded user32, as torch's has).
+    doesn't see Ctrl-Break (ffmpeg took the whole 5 s), where SIGTERM wakes it on Linux (mended
+    the next morning, below); `uv run`'s Ctrl-Break, which ends uv and leaves the run on its
+    own, is said in the users' manual. Measured beside it: a scratch file's room reserved
+    without writing its zeros (32 GiB in 0.03 s, 34.2 s before), a tiled shot's scratch on its
+    file natively, its frames the uninterrupted run's, and the suites of the CLI, the library
+    and the nodes natively, each test passing or skipped by a reason Windows has (2,195, 2,286
+    and 442 passed; the library's synthetic model files sparse on NTFS too). Decided on
+    2026-11-10, on its questions: every stop at once there ends by TerminateProcess
+    (ExitProcess would run every library's detach, CUDA's among them), the console's handler
+    left registered once a close is handled (its removal waits for it to return); a test whose
+    subject Windows lacks skips there naming its reason, and a check that can't hold there is
+    left out of its test and counted. Built the next morning (impl-win-5, 2026-11-10), each
+    measured natively: a segment command's input ended right after its Ctrl-Break, so that one
+    blocked reading its pipe ends at once (an abort 5.02 s before, 0.015 s after), the
+    Ctrl-Break kept first, as SIGTERM is on Linux, for a command that cleans up; the grid
+    join's advised commands said to be a POSIX shell's there, Git for Windows' bash running
+    them as printed (every frame and timestamp the master's), cmd having no equivalent (its
+    arithmetic integers alone, the durations frames over the rate to the microsecond); a
+    directory where a file goes said as one (a replace onto it and its removal WinError 5, its
+    opening errno 13); the library's tests' `mappings()`, empty natively before, read there by
+    VirtualQuery, the twin of /proc's maps, so that their checks run; and the calibration's
+    refusal traced to its cause (To measure, the hold). Left: the logoff's and shutdown's
+    events, handled as the close but unmeasured (Windows calls no console handler for them in a
+    process that has loaded user32, as torch's has).
   - The detector's close waited on the card outside the poll (`torch.cuda.synchronize`), and
     nothing tested its close on a failed card: mended on 2026-11-08 (impl-nodes-5), its wait
     through the poll, the Cuts node's Cancel its check; a wait an exception ends, or a failed
@@ -5406,10 +5428,27 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   window had passed the card. And the Windows side: a desktop took 0.44 to 0.58 GiB back and
   forth within minutes, and gave up 455 MiB at once as the card filled. Natively under
   `cudaMallocAsync` (impl-win-4, 2026-11-09, the CLI on milestone 1's input): a plan 0.17 GiB
-  under its budget, 28.30 GiB free, was refused by torch's limit ("would exceed allowed
-  memory") 1 s into the calibration's encode, where the same job ran at 27.59 GiB free: the
-  encode's figure under the pool there falling short (inferred), the next Windows baton's to
-  measure.
+  under its budget, 28.30 GiB free, was refused in the words of torch's limit ("would exceed
+  allowed memory") 1 s into the calibration's encode, where the same job ran at 27.59 GiB free.
+  Measured the next morning (impl-win-5): the plan held there step by step (the encode 22.97
+  GiB allocated against its 23.36, a DiT window 21.83 against 21.90, the decode 21.08 against
+  21.09, the pool beyond the encode's and the decode's peaks 2.37 and 5.08 GiB, within their
+  reserves of 3.80 and 6.11); the refusal was the test's guard on the system's memory, a job
+  memory limit of 24.9 GiB: Windows charges the GPU memory a process holds to its commit (its
+  private bytes followed the pool's reserved bytes one to one, and torch's own allocator's
+  alike: Windows' charge, not the pool's), and torch under `cudaMallocAsync` words every
+  refusal of the driver as its own limit's. The CLI now says such a refusal as the driver's,
+  with the system's commit. Left for Windows:
+  - whether the plan counts the GPU's memory against the system's commit limit: a run
+    committed 31.2 GiB at its peak on the RTX 5090, the system 71 GiB of its 94.7, and a
+    system with little page file could refuse a plan the card holds. The commit run out
+    showed three ways: torch's out of memory (said now as the driver's), a cuDNN error ("GET
+    was unable to find an engine") and a crash with no message (0xC0000005, an access
+    violation);
+  - torch's own allocator there (`backend:native`, not the default; ComfyUI's
+    `--disable-cuda-malloc` gives it): its flat 4.5 GiB fell short in the calibration's
+    window by fragmentation, 20.19 GiB allocated and 6.02 reserved beyond it, of 27.32
+    allowed.
 - **The load through WSL's file bridge.** One read serves the 7B's file at 253 MB/s from an NVMe
   drive on the Windows side, a load of 75 s; two or more at once, 480 MB/s and 42 to 43 s. A
   patch reading each tensor in four pieces is held, level on a Linux NVMe drive; not measured on
