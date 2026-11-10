@@ -12,6 +12,7 @@ itself refuses a buffer written under a kernel queued to read it that nothing ho
 The swap on a real card, the DiT's bits and the figures: tests/test_placement.py (GPU).
 """
 
+import ctypes
 import gc
 import hashlib
 import io
@@ -427,19 +428,57 @@ NO_PROC = pytest.mark.skipif(
 
 
 def mappings(path: Path) -> list[str]:
-    """This process's mappings of the file at path, /proc/self/maps' lines for it. Natively on
-    Windows there is no such list to read, so none is returned: the tests that assert no mapping
-    run there without that one assertion, and test_read_never_maps_the_file, whose subject it is,
-    skips."""
+    """This process's mappings of the file at path: /proc/self/maps' lines for it on Linux; on
+    Windows, its address space walked by VirtualQuery and each mapped view (MEM_MAPPED) named by
+    psapi's GetMappedFileNameW, a device path (\\Device\\HarddiskVolumeN\\...), its file's
+    path after the drive compared without case (natively, impl-win-5, 2026-11-10: safetensors'
+    own mapping seen there while a tensor of it lives, none once it has gone)."""
     if ON_WINDOWS:
-        return []
+        return _windows_mappings(path)
     name = str(path.resolve())
     return [line for line in Path("/proc/self/maps").read_text().splitlines() if name in line]
 
 
-@pytest.mark.skipif(
-    ON_WINDOWS, reason="lists the process's mappings from /proc/self/maps (native, 2026-11-10)"
-)
+def _windows_mappings(path: Path) -> list[str]:
+    import ctypes.wintypes as wintypes
+
+    class Region(ctypes.Structure):  # MEMORY_BASIC_INFORMATION, 64-bit
+        _fields_ = (
+            ("BaseAddress", ctypes.c_void_p),
+            ("AllocationBase", ctypes.c_void_p),
+            ("AllocationProtect", wintypes.DWORD),
+            ("PartitionId", wintypes.WORD),
+            ("RegionSize", ctypes.c_size_t),
+            ("State", wintypes.DWORD),
+            ("Protect", wintypes.DWORD),
+            ("Type", wintypes.DWORD),
+        )
+
+    mapped = 0x40000  # MEM_MAPPED
+    windll: Any = getattr(ctypes, "WinDLL")  # noqa: B009  # Windows' alone
+    kernel32, psapi = windll("kernel32"), windll("psapi")
+    kernel32.VirtualQuery.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t)
+    kernel32.VirtualQuery.restype = ctypes.c_size_t
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    psapi.GetMappedFileNameW.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+    )
+    process = kernel32.GetCurrentProcess()
+    tail = os.path.splitdrive(str(path.resolve()))[1].lower()
+    region, address, found = Region(), 0, []
+    name = ctypes.create_unicode_buffer(32768)
+    while kernel32.VirtualQuery(address, ctypes.byref(region), ctypes.sizeof(region)):
+        if region.Type == mapped and region.BaseAddress is not None:
+            if psapi.GetMappedFileNameW(process, region.BaseAddress, name, len(name)):
+                if name.value.lower().endswith(tail):
+                    found.append(f"{region.BaseAddress:#x} {region.RegionSize} {name.value}")
+        address = (region.BaseAddress or 0) + region.RegionSize
+    return found
+
+
 @pytest.mark.parametrize("dtype", [None, torch.bfloat16])
 @pytest.mark.parametrize("with_parts", [False, True])
 def test_read_never_maps_the_file(
