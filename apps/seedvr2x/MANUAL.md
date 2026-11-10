@@ -1422,11 +1422,21 @@ then, what differs:
 - **`--segment-cmd`** is run by cmd.exe, `{out}` in double quotes; a stop at once sends it
   Ctrl-Break, Windows' SIGTERM (a Python script gets SIGBREAK), and ends it with whatever it
   started 5 seconds later, as on Linux. A command waiting for its next frame on the pipe doesn't
-  see the Ctrl-Break while it waits, where Linux's SIGTERM wakes it: ffmpeg takes the 5 seconds
-  there, and its partial file is removed as any other.
+  see the Ctrl-Break while it waits, where Linux's SIGTERM wakes it, so on Windows seedvr2x ends
+  its own ffmpeg right after the Ctrl-Break: the command finds its input's end and ends at once,
+  ffmpeg in a hundredth of a second, and its partial file is removed as any other.
 - **A file another program has open,** a segment or the finished file in a player, can't be
   replaced or removed on Windows: seedvr2x stops, naming the file and Windows' reason. Close it
-  there, then run the same command again.
+  there, then run the same command again. A directory where seedvr2x puts a file is said as one:
+  move or rename it, or give another name.
+- **The GPU's memory counts in Windows' commit charge,** as a program's own memory does: a 1080p job
+  on a 32 GB card committed 33.5 GB at its peak, up to 28 GB of it the GPU's. Where the commit limit
+  is reached (the memory and the page file, or a limit a job object sets), the driver refuses the
+  GPU's memory under seedvr2x's own limit, and the run stops saying so, with the system's commit:
+  give Windows a larger page file, or close what else commits.
+- **The joins a directory's refusal advises** are a POSIX shell's commands: run them in one, as
+  Git for Windows' Git Bash, which ran them as given, with ffmpeg and ffprobe on its `PATH`; cmd
+  and PowerShell take none of them.
 - **A model folder of links made under WSL** can't be read by Windows: give the files
   themselves, or hard links to them (`mklink /H`).
 - **`--compile`** is refused: PyTorch's Windows build has no Triton.

@@ -317,17 +317,32 @@ beside it; the `__init__.py` is seedvr2x's.
     library's detach, and after a close with torch loaded it ended the process with 0), a closed
     run's normal end too (`stop.closed`, `main.main`); the watcher on a socket pair
     (`stop.WATCHED` true there, `Watch.put`); a segment command sent Ctrl-Break
-    (`ffmpeg.break_group`), then its job ended after `STOP_GRACE`, the line in Windows' words (a
-    command blocked reading its pipe takes the 5 s: Ctrl-Break doesn't interrupt that read);
+    (`ffmpeg.break_group`), seedvr2x's own ffmpeg ended right after it there
+    (`CommandWriter._stop`), then its job ended after `STOP_GRACE`, the line in Windows' words: a
+    command blocked reading its pipe, which Ctrl-Break doesn't interrupt, took the 5 s, and with
+    its input at its end ends by itself, 0.01 s later natively (impl-win-5, 2026-11-10), Linux's
+    order unchanged;
   - a video's directory lock a named mutex of the directory's volume and file id
     (`files.lock_directory`: no file added, the kernel's however the process ends), refused in
-    flock's words; a file Windows won't replace or remove (WinError 32, a sharing violation:
-    another program has it open; 5, access denied: that, or read-only, or a protected folder,
-    each said) refused naming it and Windows' reason (`files.HeldFile`, a MediaError and a
-    PermissionError both, `files.held`, main's net, where a refused opening is said as one:
-    `files.refused`), never retried; a scratch file still mapped as its store ends, which Windows
-    won't delete, removed at the next store, at the segment's end, as main returns, or at the next
-    start as a leftover (`scratch._PENDING`, `scratch.remove_pending`, `tests/test_scratch.py`);
+    flock's words; a file Windows won't replace or remove (WinError 32, a sharing violation: another
+    program has it open; 5, access denied: that, or read-only, or a protected folder, each said)
+    refused naming it and Windows' reason (`files.HeldFile`, a MediaError and a PermissionError
+    both, `files.held`, main's net, where a refused opening is said as one: `files.refused`), never
+    retried; a directory where a file goes (a replace onto it or its removal, WinError 5; its
+    opening, errno 13 alone) said as one (`files.in_the_way`), a directory seedvr2x means to remove
+    (rmdir, rmtree) not; a scratch file still mapped as its store ends, which Windows won't delete,
+    removed at the next store, at the segment's end, as main returns, or at the next start as a
+    leftover (`scratch._PENDING`, `scratch.remove_pending`, `tests/test_scratch.py`);
+  - the GPU's memory charged to the process's commit, as its own memory is (its private bytes
+    grew with the pool's reserved bytes, 8.86 GiB for 8.84, and with torch's own allocator's;
+    a job's commit 31.2 GiB at its peak, 1080p on the RTX 5090): an allocation the driver
+    refuses under torch's limit, which cudaMallocAsync words as torch's limit ("would exceed
+    allowed memory"; an unset limit is said as UINT64_MAX's figure, and judged no limit), is
+    said as the driver's, with the system's commit (`main._refused`,
+    `blockswap.commit`; met under impl-win-4's RAM guard, a job memory limit of 24.9 GiB, in the
+    calibration's encode, and found so by impl-win-5, 2026-11-10); the grid join's advised
+    commands said there to be a POSIX shell's (`rate.WINDOWS_SHELL`: Git for Windows' bash ran
+    them as given);
   - the RAM line from the working set (`run._working_set`), the free space by
     `shutil.disk_usage` and a scratch file's room reserved and its end set without a byte written
     (`files.free_space`, `files.allocate`: the C runtime's `_chsize_s` wrote the zeros, 34 s for
@@ -491,12 +506,14 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `tests/test_segment_cmd_windows.py`, `tests/test_groups.py`, `tests/test_closing.py` and
   `tests/test_stop.py`'s (the console's Ctrl-C, Ctrl-Break and close sent to a hidden console of
   the test's own). Each project's suite runs natively too, on the CPU, each test running or
-  skipping by its reason (impl-win-4, 2026-11-10): the CLI's 2,195 passed and 322 skipped (21
-  reasons) in 8.4 minutes at `-n 4`, the library's 2,286 passed and 34 skipped in 7.2, the nodes'
-  442 passed in 1.2, each at 9 GiB of memory at the most. The CLI's POSIX parts skip there by the
+  skipping by its reason (impl-win-4, 2026-11-10, the CLI's and the library's again by impl-win-5
+  that day): the CLI's 2,199 passed and 323 skipped (21 reasons) in 8.1 minutes at `-n 4`, 14 GiB
+  of memory at the most, the library's 2,291 passed and 30 skipped in 6.4, 9 GiB, the nodes' 442
+  passed in 1.2, 2.4 GiB. The CLI's POSIX parts skip there by the
   markers of `tests/posix_only.py` (POSIX programs and `#!/bin/sh` fakes, signals and process
   groups, `/proc`, `time.tzset`, POSIX calls, a name Windows refuses, `fcntl`, permissions); the
-  library's by inline reasons (`/proc`, SIGUSR2, `os.mkfifo`); its synthetic model files are
+  library's by inline reasons (`/proc`, SIGUSR2, `os.mkfifo`), a file's mappings read there by
+  VirtualQuery and GetMappedFileNameW (`test_blockswap.mappings`); its synthetic model files are
   sparse on NTFS (`library_fixtures.sparse`, `grow`: a truncate there writes the zeros). Natively
   met and kept in mind: ffmpeg's lines carry its contexts' addresses without `0x`; a file's times
   are kept to 100 ns, so a test that touches a file moves its time by a millisecond or more; a
