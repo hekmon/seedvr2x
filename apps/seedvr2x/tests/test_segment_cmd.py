@@ -18,6 +18,7 @@ import zlib
 from collections.abc import Generator
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -41,6 +42,9 @@ from media.writer import (
     open_writer,
 )
 from stop import Stop
+
+posix_os: Any = os
+posix_signal: Any = signal
 
 
 def _usable() -> bool:
@@ -542,9 +546,9 @@ def test_groups_of_their_own(tmp_path: Path) -> None:
     writer, shell, child = started(tmp_path, f"{TELL}; cat > {{out}}; wait")
     try:
         feeding = writer._process.pid  # pyright: ignore[reportPrivateUsage]
-        assert os.getpgid(shell) == shell == os.getpgid(child)
-        assert os.getpgid(feeding) == feeding
-        assert len({shell, feeding, os.getpgid(0)}) == 3
+        assert posix_os.getpgid(shell) == shell == posix_os.getpgid(child)
+        assert posix_os.getpgid(feeding) == feeding
+        assert len({shell, feeding, posix_os.getpgid(0)}) == 3
     finally:
         writer.abort()
     assert gone(shell)
@@ -642,12 +646,12 @@ def alarm() -> Generator[None]:
     def interrupt(number: int, frame: object) -> None:
         raise _Interrupted
 
-    previous = signal.signal(signal.SIGALRM, interrupt)
+    previous = signal.signal(posix_signal.SIGALRM, interrupt)
     try:
         yield
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        posix_signal.setitimer(posix_signal.ITIMER_REAL, 0)
+        signal.signal(posix_signal.SIGALRM, previous)
 
 
 def test_stop_at_once_while_the_command_finishes(tmp_path: Path, alarm: None) -> None:
@@ -656,7 +660,7 @@ def test_stop_at_once_while_the_command_finishes(tmp_path: Path, alarm: None) ->
     writer, shell, _ = started(tmp_path, f"{TELL}; cat > {{out}}; wait")
     with pytest.raises(_Interrupted):
         with writer:
-            signal.setitimer(signal.ITIMER_REAL, 0.3)
+            posix_signal.setitimer(posix_signal.ITIMER_REAL, 0.3)
     assert gone(shell)
     assert list(writer.path.parent.iterdir()) == []
 
@@ -669,7 +673,7 @@ def test_a_command_s_leftovers_survive_its_success_only(tmp_path: Path) -> None:
     try:
         assert writer.path.exists() and members(shell) == [child]
     finally:
-        os.kill(child, signal.SIGKILL)
+        os.kill(child, posix_signal.SIGKILL)
     writer, shell, child = started(tmp_path, f"{TELL}; cat > {{out}}; exit 3")
     with pytest.raises(MediaError, match="exited with status 3"):
         writer.close()

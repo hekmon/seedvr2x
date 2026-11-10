@@ -10,7 +10,6 @@ import gc
 import logging
 import mmap
 import os
-import resource
 import shutil
 import sys
 from collections.abc import Iterator
@@ -55,6 +54,8 @@ from torch import Tensor
 from scratch import DEFAULT_ALLOWANCE, Scratch, ScratchError, remove_pending
 from seedvr2x import model, tilegrid, tiling
 from seedvr2x.passes import Tiles
+
+posix_os: Any = os
 
 BF16 = torch.bfloat16
 CPU = torch.device("cpu")
@@ -127,7 +128,7 @@ def test_scratch_on_disk(tmp_path: Path) -> None:
         assert (store.shape, store.dtype, store.device) == ((3, 5, 16, 24), BF16, CPU)
         assert not bits(store).any()
         # Whole on disk from the start, its blocks allocated.
-        assert path.stat().st_size == needed <= path.stat().st_blocks * 512
+        assert path.stat().st_size == needed <= cast(Any, path.stat()).st_blocks * 512
         assert mapped(path)
         # The descriptor it was allocated through is closed: the mapping's own is the only one,
         # and the mapping is the tensor's to keep, nothing else holding it.
@@ -207,7 +208,7 @@ def test_scratch_maps_the_file_it_allocated(
     needed = Scratch.needed(5, (16, 24))
     theirs = b"\x55" * needed
     other.write_bytes(theirs)
-    allocate = os.posix_fallocate
+    allocate = posix_os.posix_fallocate
     allocated: list[int] = []
 
     def swapped(descriptor: int, offset: int, length: int) -> None:
@@ -232,7 +233,9 @@ def test_scratch_maps_the_file_it_allocated(
         (descriptor,) = allocated
         status = os.fstat(descriptor)
         assert (status.st_size, status.st_nlink) == (needed, 0)
-        written = torch.frombuffer(bytearray(os.pread(descriptor, needed, 0)), dtype=torch.int16)
+        written = torch.frombuffer(
+            bytearray(posix_os.pread(descriptor, needed, 0)), dtype=torch.int16
+        )
         assert torch.equal(written, bits(values).flatten()) and same(store, values)
         os.close(descriptor)
         del store
@@ -294,23 +297,26 @@ def test_scratch_the_system_wont_map(tmp_path: Path, monkeypatch: pytest.MonkeyP
     # gigabyte over what it has (the file left sparse, for the test's sake). A ScratchError, the
     # file removed, and no descriptor left on it: torch.from_file, which mapped it before, kept
     # its own open on the file, removed and allocated whole.
+    import resource
+
+    posix_resource: Any = resource
     path = tmp_path / tilegrid.SCRATCH
     needed = Scratch.needed(4000, (1024, 1024))
     monkeypatch.setattr(
         os, "posix_fallocate", lambda descriptor, offset, length: os.ftruncate(descriptor, length)
     )
-    has = int(Path("/proc/self/statm").read_text().split()[0]) * os.sysconf("SC_PAGE_SIZE")
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    has = int(Path("/proc/self/statm").read_text().split()[0]) * posix_os.sysconf("SC_PAGE_SIZE")
+    soft, hard = posix_resource.getrlimit(posix_resource.RLIMIT_AS)
     limit = has + (1 << 30)
-    if soft != resource.RLIM_INFINITY:
+    if soft != posix_resource.RLIM_INFINITY:
         limit = min(limit, soft)
-    resource.setrlimit(resource.RLIMIT_AS, (limit, hard))
+    posix_resource.setrlimit(posix_resource.RLIMIT_AS, (limit, hard))
     try:
         with pytest.raises(ScratchError, match=f"{needed} bytes, not mapped: .*Cannot alloc"):
             with Scratch(tmp_path, 0).store(4000, (1024, 1024)):
                 pass
     finally:
-        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
+        posix_resource.setrlimit(posix_resource.RLIMIT_AS, (soft, hard))
     assert not path.exists() and not mapped(path) and not open_on(path)
 
 

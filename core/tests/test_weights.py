@@ -47,6 +47,8 @@ from seedvr2x.weights import (
     TensorInfo,
 )
 
+posix_os: Any = os
+
 # A model's tensors, by name: (dtype, shape).
 Tensors = dict[str, tuple[str, tuple[int, ...]]]
 
@@ -1036,12 +1038,11 @@ def test_missing(tmp_path: Path) -> None:
     # Nothing there, or something that isn't a file to read: a directory, a FIFO (never opened,
     # which would wait for a writer).
     (tmp_path / "a directory").mkdir()
-    os.mkfifo(tmp_path / "a fifo")
-    for name, what in (
-        ("x.safetensors", "no such model file"),
-        ("a directory", "not a regular file"),
-        ("a fifo", "not a regular file"),
-    ):
+    cases = [("x.safetensors", "no such model file"), ("a directory", "not a regular file")]
+    if sys.platform != "win32":  # Windows has no os.mkfifo (native, 2026-11-10)
+        posix_os.mkfifo(tmp_path / "a fifo")
+        cases.append(("a fifo", "not a regular file"))
+    for name, what in cases:
         path = tmp_path / name
         assert refused(path, "dit") == f"{path}: {what}"
         with pytest.raises(ModelError, match=what):

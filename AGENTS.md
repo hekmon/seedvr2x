@@ -371,6 +371,7 @@ From `core/`, in the CLI's environment:
 uv run --project ../apps/seedvr2x ruff format --check
 uv run --project ../apps/seedvr2x ruff check
 uv run --project ../apps/seedvr2x pyright
+uv run --project ../apps/seedvr2x pyright --pythonplatform Windows
 uv run --project ../apps/seedvr2x tools/vendor.py check
 uv run --project ../apps/seedvr2x pytest
 ```
@@ -381,6 +382,7 @@ From `apps/seedvr2x/`:
 uv run ruff format --check
 uv run ruff check
 uv run pyright
+uv run pyright --pythonplatform Windows
 OMP_NUM_THREADS=2 uv run pytest -n 8
 ```
 
@@ -388,6 +390,12 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's, its 
 `-n` (as the library's and the nodes'). From
 `apps/comfyui/`, in the CLI's environment, the same four with `uv run --project ../seedvr2x`
 before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
+
+The library, the CLI and the nodes are also checked by pyright for the Windows platform
+(`--pythonplatform Windows`, a second command line, run from WSL or Linux): a POSIX-only name used
+where it can't run is narrowed by a `sys.platform` test, and the tests of POSIX-only behaviour
+reach it through an `Any`-typed alias (`posix_os`, `posix_signal`), since pyright reads no skip
+marker. The image server, Linux's alone by its lock, has no such line.
 
 - ruff: line length 100, rules E, F, W, I, B, UP and RUF, set in each pyproject. The vendored
   code, `seedvr2x/vendor/` and `seedvr2x/transnetv2/`, is excluded from formatting and from that

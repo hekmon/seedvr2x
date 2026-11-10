@@ -293,7 +293,9 @@ def _main(argv: list[str] | None, owns_process: bool) -> int:
     # HF_HOME/.agent_harnesses.json (utils/_headers.py:183-189, utils/_detect_agent.py:143-163,
     # 180-203).
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-    if owns_process and HAS_SIGUSR1:
+    if owns_process and HAS_SIGUSR1 and sys.platform != "win32":
+        # (The platform test beside the constant: pyright narrows it, so that the Windows
+        # platform's check sees no signal.SIGUSR1 here.)
         # Every thread's Python stack on SIGUSR1, to stderr, the run going on (DESIGN.md,
         # Allocator, the hang of 2026-11-06, which had none to show): faulthandler's handler is
         # C's, so it answers with the main thread inside a CUDA call too.
@@ -3755,25 +3757,26 @@ def _host_available(
     from seedvr2x.shot_plan import ALLOWANCE_UNKNOWN_HOST
 
     available = blockswap.available(proc, cgroups)
-    if available is None and sys.platform == "win32":
-        # Windows reads no /proc: GlobalMemoryStatusEx's ullAvailPhys, its failure's reason at
-        # debug (blockswap.available).
-        logger.warning(
-            "Windows' GlobalMemoryStatusEx gave no reading of the system memory available, so the"
-            " plan can't check what it takes of it, nor size from it what a tiled shot's scratch"
-            " may take, which is then the shot's whole scratch, %d GiB at most",
-            ALLOWANCE_UNKNOWN_HOST // GIB,
-        )
-    elif available is None:
-        logger.warning(
-            "%s: no MemAvailable read there, nor a control group's limit under %s: the system"
-            " memory available isn't known, so the plan can't check what it takes of it, nor"
-            " size from it what a tiled shot's scratch may take, which is then the shot's whole"
-            " scratch, %d GiB at most",
-            proc / "meminfo",
-            cgroups,
-            ALLOWANCE_UNKNOWN_HOST // GIB,
-        )
+    if available is None:
+        if sys.platform == "win32":
+            # Windows reads no /proc: GlobalMemoryStatusEx's ullAvailPhys, its failure's reason at
+            # debug (blockswap.available).
+            logger.warning(
+                "Windows' GlobalMemoryStatusEx gave no reading of the system memory available, so"
+                " the plan can't check what it takes of it, nor size from it what a tiled shot's"
+                " scratch may take, which is then the shot's whole scratch, %d GiB at most",
+                ALLOWANCE_UNKNOWN_HOST // GIB,
+            )
+        else:
+            logger.warning(
+                "%s: no MemAvailable read there, nor a control group's limit under %s: the system"
+                " memory available isn't known, so the plan can't check what it takes of it, nor"
+                " size from it what a tiled shot's scratch may take, which is then the shot's whole"
+                " scratch, %d GiB at most",
+                proc / "meminfo",
+                cgroups,
+                ALLOWANCE_UNKNOWN_HOST // GIB,
+            )
     return available
 
 

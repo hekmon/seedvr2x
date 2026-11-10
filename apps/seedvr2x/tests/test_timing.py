@@ -48,6 +48,8 @@ from timing import (
     would_end,
 )
 
+posix_time: Any = time
+
 # An encode at 2 s and 0.5 s a frame, a window at 1 s and 0.25 ms a token, a decode at 3 s and
 # 1.5 s a frame.
 MODELS: dict[Kind, Model] = {
@@ -78,7 +80,7 @@ def zone_utc() -> Generator[None]:
 def zone(name: str) -> Generator[None]:
     before = os.environ.get("TZ")
     os.environ["TZ"] = name
-    time.tzset()
+    posix_time.tzset()
     try:
         yield
     finally:
@@ -86,7 +88,7 @@ def zone(name: str) -> Generator[None]:
             del os.environ["TZ"]
         else:
             os.environ["TZ"] = before
-        time.tzset()
+        posix_time.tzset()
 
 
 def test_ending_across_a_change_of_the_clock() -> None:

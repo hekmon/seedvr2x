@@ -54,6 +54,9 @@ from manifest import NAME
 from media import ffmpeg
 from media.ffmpeg import MediaError
 
+posix_os: Any = os
+posix_signal: Any = signal
+
 
 def _usable() -> bool:
     try:
@@ -1366,6 +1369,7 @@ def test_one_writer_at_a_time_from_the_start(
     import fcntl
     import os
 
+    posix_fcntl: Any = fcntl
     source = job(tmp_path, monkeypatch)
     passes = first_passes(monkeypatch)
     work = tmp_path / "x.mkv.work"
@@ -1378,7 +1382,7 @@ def test_one_writer_at_a_time_from_the_start(
         else:
             work.mkdir()
         descriptor = os.open(work, os.O_RDONLY)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)  # another seedvr2x's
+        posix_fcntl.flock(descriptor, posix_fcntl.LOCK_EX)  # another seedvr2x's
         try:
             text = refused(tmp_path, source, caplog, *JOB, output="x.mkv")
         finally:
@@ -1593,7 +1597,7 @@ def stopping(directory: Path, slow: str = "-", signals: tuple[int, ...] = ()) ->
         lines.append(line)
         if line.startswith(f"IN {slow}"):
             for number in signals:
-                os.killpg(process.pid, number)
+                posix_os.killpg(process.pid, number)
                 time.sleep(0.3)
     return process.wait(timeout=120), "".join(lines)
 
@@ -1677,7 +1681,7 @@ def test_a_killed_run_leaves_none_of_its_assemblys_ffmpeg(
     finally:
         for pid in left:
             if alive(pid):
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, posix_signal.SIGKILL)
         process.stderr.close()
     assert not (film_directory / "x.mkv").exists()
 

@@ -65,6 +65,11 @@ from media import ffmpeg
 from seedvr2x import model, pull, weights
 from seedvr2x.pull import Pin
 
+# A file's time moved by a nanosecond, or a millisecond on Windows, whose NTFS keeps it to 100 ns.
+TOUCH = 1 if sys.platform != "win32" else 1_000_000
+
+posix_os: Any = os
+
 # Another revision's commit, as a download of the repo's head (hf download without --revision)
 # leaves the same files under it.
 OTHER = "0123456789abcdef0123456789abcdef01234567"
@@ -659,7 +664,10 @@ def test_failures_refused(
 
 @needs_ffmpeg
 @pytest.mark.usefixtures("stand_in", "pins")
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a directory whatever its permissions")
+@pytest.mark.skipif(
+    sys.platform != "win32" and posix_os.geteuid() == 0,
+    reason="root reads a directory whatever its permissions",
+)
 @pytest.mark.parametrize("unreadable", ["snapshots", "blobs"])
 def test_cache_unreadable_refused(
     tmp_path: Path,

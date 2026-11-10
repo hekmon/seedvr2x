@@ -37,6 +37,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from array import array
@@ -1172,6 +1173,8 @@ def _read_seconds(source: Path, size: int) -> float:
     offset = (size - length) // 2
     with source.open("rb", buffering=0) as handle:
         try:
+            if sys.platform == "win32":  # pyright narrows this; os has no posix_fadvise there
+                raise AttributeError("Windows has no os.posix_fadvise")
             os.posix_fadvise(handle.fileno(), offset, length, os.POSIX_FADV_DONTNEED)
         except (AttributeError, OSError) as error:
             # The figure may then be a read from memory, short: said in the log, never silently.

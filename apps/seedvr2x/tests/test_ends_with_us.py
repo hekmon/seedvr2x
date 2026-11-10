@@ -20,12 +20,15 @@ import sys
 import textwrap
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import seedvr2x
 from media import ffmpeg
 from media.ffmpeg import MediaError
+
+posix_signal: Any = signal
 
 # The CLI's files: the app's root modules and media/ (every process seedvr2x starts is the
 # CLI's), and the library's package, which starts none.
@@ -339,7 +342,7 @@ def test_prctl_is_resolved_in_the_parent_before_any_fork(monkeypatch: pytest.Mon
         assert recorder.looked_up == ["prctl"] and prepare is not None
         prepare()  # the child's part, run here
         assert recorder.looked_up == ["prctl"]
-        assert recorder.calls == [(ffmpeg.PR_SET_PDEATHSIG, int(signal.SIGKILL))]
+        assert recorder.calls == [(ffmpeg.PR_SET_PDEATHSIG, int(posix_signal.SIGKILL))]
     finally:
         ffmpeg._prctl.cache_clear()  # pyright: ignore[reportPrivateUsage]
 
@@ -516,7 +519,7 @@ def test_a_killed_run_leaves_none_of_the_ffmpeg_and_ffprobe_it_started(
             # It may end between the look and the kill: the test's own finding, not this one's.
             if alive(pid):
                 with contextlib.suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
+                    os.kill(pid, posix_signal.SIGKILL)
         if child.poll() is None:
             child.kill()
             child.wait()
@@ -599,7 +602,7 @@ def test_a_killed_run_leaves_none_of_its_real_ffmpeg(tmp_path: Path, site: str) 
             # It may end between the look and the kill: the test's own finding, not this one's.
             if alive(pid):
                 with contextlib.suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
+                    os.kill(pid, posix_signal.SIGKILL)
         child.stdout.close()
         if child.poll() is None:
             child.kill()
@@ -647,7 +650,7 @@ def test_the_segment_commands_shell_is_not_hooked(tmp_path: Path) -> None:
             # It may end between the look and the kill: the test's own finding, not this one's.
             if alive(pid):
                 with contextlib.suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
+                    os.kill(pid, posix_signal.SIGKILL)
         child.stdout.close()
         if child.poll() is None:
             child.kill()

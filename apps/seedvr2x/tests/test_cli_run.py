@@ -8,7 +8,6 @@ is the GPU tests' (test_regression.py, test_shots.py)."""
 
 import ctypes
 import errno
-import fcntl
 import hashlib
 import inspect
 import json
@@ -58,6 +57,9 @@ from seedvr2x.pull import Pin
 from seedvr2x.shot_pass import decode_shot
 from seedvr2x.shot_plan import Peaks, Pins
 from seedvr2x.shots import Shot, shot_layout
+
+posix_os: Any = os
+posix_time: Any = time
 
 
 def _usable() -> bool:
@@ -5183,11 +5185,14 @@ def test_driver_recorded_not_compared(
 def test_one_writer_at_a_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
+    import fcntl
+
+    posix_fcntl: Any = fcntl
     source_path = job(tmp_path, monkeypatch)
     out = tmp_path / "out"
     out.mkdir()
     descriptor = os.open(out, os.O_RDONLY)
-    fcntl.flock(descriptor, fcntl.LOCK_EX)  # another seedvr2x's
+    posix_fcntl.flock(descriptor, posix_fcntl.LOCK_EX)  # another seedvr2x's
     try:
         assert upscale(tmp_path, source_path, "out", *JOB) == 1
         assert "another seedvr2x is writing it" in caplog.text
@@ -5197,7 +5202,7 @@ def test_one_writer_at_a_time(
     assert upscale(tmp_path, source_path, "out", *JOB) == 0  # the lock went with the run
     # A job resumed: locked before its record is read.
     descriptor = os.open(out, os.O_RDONLY)
-    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    posix_fcntl.flock(descriptor, posix_fcntl.LOCK_EX)
     try:
         caplog.clear()
         assert upscale(tmp_path, source_path, "out", *JOB) == 1
@@ -8233,7 +8238,8 @@ def test_plan_file_refused(
         assert f"--plan {plan}: {said} another file" in text
     assert (tmp_path / "cuts.txt").read_bytes() == listed
     # A directory that takes no new file: said now, not once the first pass has run.
-    if os.geteuid() != 0:  # root writes anywhere
+    # Root writes anywhere; a mode refuses no one on Windows.
+    if sys.platform != "win32" and posix_os.geteuid() != 0:
         locked = tmp_path / "locked"
         locked.mkdir(mode=0o555)
         text = refused(tmp_path, source_path, caplog, "--plan", "locked/plan.txt", output="one.mkv")
@@ -8992,7 +8998,7 @@ def test_a_line_says_when_the_date_or_the_clocks_change_but_not_under_verbose(
     from zoneinfo import ZoneInfo
 
     monkeypatch.setenv("TZ", "Europe/Paris")
-    time.tzset()
+    posix_time.tzset()
     try:
         paris = ZoneInfo("Europe/Paris")
 
@@ -9046,7 +9052,7 @@ def test_a_line_says_when_the_date_or_the_clocks_change_but_not_under_verbose(
         assert line(verbose, after, "x").count("\n") == 0
     finally:
         monkeypatch.undo()
-        time.tzset()
+        posix_time.tzset()
 
 
 def stream_tags_of(path: Path) -> dict[str, str]:

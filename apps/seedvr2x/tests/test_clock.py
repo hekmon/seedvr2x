@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -21,6 +22,8 @@ from seedvr2x import clock
 from seedvr2x.clock import MIN_SPAN, Pace, spoken, taking
 from stop import Deadline, Stop, late
 from timing import Clock, Kind, Model, Progress, Unit, would_end
+
+posix_time: Any = time
 
 START = datetime(2026, 10, 29, 22, 0, tzinfo=UTC)
 # A day's epoch seconds for the wall's reader: any, only its differences count.
@@ -253,7 +256,7 @@ def zone_utc() -> Iterator[None]:
     process's given back."""
     before = os.environ.get("TZ")
     os.environ["TZ"] = "UTC"
-    time.tzset()
+    posix_time.tzset()
     try:
         yield
     finally:
@@ -261,7 +264,7 @@ def zone_utc() -> Iterator[None]:
             del os.environ["TZ"]
         else:
             os.environ["TZ"] = before
-        time.tzset()
+        posix_time.tzset()
 
 
 @pytest.fixture

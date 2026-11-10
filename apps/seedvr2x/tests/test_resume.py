@@ -19,8 +19,12 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
+
+posix_os: Any = os
+posix_signal: Any = signal
 
 # The installed command, the script beside the interpreter.
 COMMAND = str(Path(sys.executable).with_name("seedvr2x"))
@@ -135,7 +139,7 @@ def kill(delay: float = 0.0) -> Callable[[int], None]:
 
     def act(pid: int) -> None:
         time.sleep(delay)
-        os.kill(pid, signal.SIGKILL)
+        os.kill(pid, posix_signal.SIGKILL)
 
     return act
 
@@ -148,7 +152,7 @@ def kill_once_there(path: Path) -> Callable[[int], None]:
         while not path.exists():
             assert time.monotonic() < deadline, f"{path} never came"
             time.sleep(0.005)
-        os.kill(pid, signal.SIGKILL)
+        os.kill(pid, posix_signal.SIGKILL)
 
     return act
 
@@ -158,7 +162,7 @@ def ctrl_c(delay: float = 0.0) -> Callable[[int], None]:
 
     def act(pid: int) -> None:
         time.sleep(delay)
-        os.killpg(pid, signal.SIGINT)
+        posix_os.killpg(pid, signal.SIGINT)
 
     return act
 
@@ -199,12 +203,12 @@ def test_interrupted_and_resumed_bit_identical(tmp_path: Path) -> None:
 
     # Killed inside the second shot's encode: the first shot's units kept.
     status, log = upscale(tmp_path, "out", ("run: shot 2/3: encoding", kill()))
-    assert status == -signal.SIGKILL
+    assert status == -posix_signal.SIGKILL
     assert progress(out) == ([True, False, False], [1, 0, 0], [False, False])
 
     # Killed inside its second window: its latent and first window kept.
     status, log = upscale(tmp_path, "out", ("run: shot 2/3: window 2/3", kill()))
-    assert status == -signal.SIGKILL
+    assert status == -posix_signal.SIGKILL
     assert encoded(log) == [2] and "resuming" in log
     assert progress(out) == ([True, True, False], [1, 1, 0], [False, False])
 
@@ -226,7 +230,7 @@ def test_interrupted_and_resumed_bit_identical(tmp_path: Path) -> None:
 
     # Killed inside it: what ffmpeg left of the segment is discarded on resume.
     status, log = upscale(tmp_path, "out", ("run: shot 2/3: decoding", kill(1.0)))
-    assert status == -signal.SIGKILL
+    assert status == -posix_signal.SIGKILL
     assert progress(out)[2] == [False, False]
     assert (out / "seg_000000.mkv.partial").exists()
 
@@ -289,7 +293,7 @@ def test_tiled_interrupted_and_resumed_bit_identical(tmp_path: Path) -> None:
         options=TILED,
         on_disk=True,
     )
-    assert status == -signal.SIGKILL
+    assert status == -posix_signal.SIGKILL
     assert progress(out) == ([True, False, False], [1, 0, 0], [False, False])
     assert scratch.exists() and not re.search(discarded, log)
 
@@ -302,7 +306,7 @@ def test_tiled_interrupted_and_resumed_bit_identical(tmp_path: Path) -> None:
         options=TILED,
         on_disk=True,
     )
-    assert status == -signal.SIGKILL
+    assert status == -posix_signal.SIGKILL
     assert re.search(discarded, log) and encoded(log) == [2]
     assert progress(out) == ([True, True, False], [1, 3, 0], [False, False])
     assert scratch.exists()

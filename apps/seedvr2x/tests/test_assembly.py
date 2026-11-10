@@ -48,6 +48,9 @@ from media.writer import FFV1Writer, Tags
 from seedvr2x.files import size_said
 from seedvr2x.record import Model, Record, Video
 
+posix_os: Any = os
+posix_signal: Any = signal
+
 
 def _usable() -> bool:
     try:
@@ -2087,7 +2090,7 @@ def test_refused_without_room(
     job = jobs()
     source = rich(tmp_path / "source", job)
     video = sum(path.stat().st_size for path, _ in job.segments)
-    statvfs = os.statvfs
+    statvfs = posix_os.statvfs
     free = {"bytes": video - 4096}
 
     def little(path: Any) -> Any:
@@ -2120,15 +2123,15 @@ def test_refused_without_room(
 @pytest.fixture
 def alarm() -> Iterator[Callable[[Callable[[], None]], None]]:
     """Run something in this thread 0.3 s from now, as a signal's handler runs."""
-    before = signal.getsignal(signal.SIGALRM)
+    before = signal.getsignal(posix_signal.SIGALRM)
 
     def arm(action: Callable[[], None]) -> None:
-        signal.signal(signal.SIGALRM, lambda *_: action())
-        signal.setitimer(signal.ITIMER_REAL, 0.3)
+        signal.signal(posix_signal.SIGALRM, lambda *_: action())
+        posix_signal.setitimer(posix_signal.ITIMER_REAL, 0.3)
 
     yield arm
-    signal.setitimer(signal.ITIMER_REAL, 0)
-    signal.signal(signal.SIGALRM, before)
+    posix_signal.setitimer(posix_signal.ITIMER_REAL, 0)
+    signal.signal(posix_signal.SIGALRM, before)
 
 
 def interrupt() -> None:
@@ -2174,7 +2177,7 @@ def test_a_stop_kills_the_join_and_removes_the_partial(
         assemble(output, job.segments, job.frame_rate, job.master, index, work)
     monkeypatch.undo()
     assert started and started[-1].args == ["sleep", "60"]
-    assert started[-1].returncode == -signal.SIGKILL
+    assert started[-1].returncode == -posix_signal.SIGKILL
     assert output.read_bytes() == b"the file before"
     assert not partial_path(output).exists() and not list(work.iterdir())
     # What a killed run may leave in the work directory, by name.

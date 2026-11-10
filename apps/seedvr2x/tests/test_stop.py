@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable, Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -37,6 +38,10 @@ from stop import (
     late,
     terminable,
 )
+
+posix_os: Any = os
+posix_signal: Any = signal
+posix_time: Any = time
 
 TESTS = Path(__file__).resolve().parent
 
@@ -307,7 +312,7 @@ def upscale(
     def kill() -> None:
         killed.set()
         with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
+            posix_os.killpg(process.pid, posix_signal.SIGKILL)
 
     watchdog: threading.Timer | None = None
     try:
@@ -319,10 +324,10 @@ def upscale(
                 time.sleep(delay)
                 for number in signals:
                     # SIGUSR1 to seedvr2x alone: ffmpeg's default for it is to end.
-                    if number == signal.SIGUSR1:
+                    if number == posix_signal.SIGUSR1:
                         os.kill(process.pid, number)
                     else:
-                        os.killpg(process.pid, number)
+                        posix_os.killpg(process.pid, number)
                     time.sleep(0.3)
                 if within is not None:
                     watchdog = threading.Timer(within, kill)
@@ -331,8 +336,11 @@ def upscale(
     finally:
         if watchdog is not None:
             watchdog.cancel()
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
+        if sys.platform == "win32":
+            process.kill()  # a resume's run here (no signal sent): the driver, with no group
+        else:
+            with contextlib.suppress(ProcessLookupError):
+                posix_os.killpg(process.pid, posix_signal.SIGKILL)
     text = "".join(lines)
     if killed.is_set():
         pytest.fail(f"the process was still running {within} s after the signal:\n{text}")
@@ -1133,7 +1141,7 @@ def paris() -> Generator[None]:
     """The local zone set to Europe/Paris for a test, the process's given back."""
     before = os.environ.get("TZ")
     os.environ["TZ"] = "Europe/Paris"
-    time.tzset()
+    posix_time.tzset()
     try:
         yield
     finally:
@@ -1141,7 +1149,7 @@ def paris() -> Generator[None]:
             del os.environ["TZ"]
         else:
             os.environ["TZ"] = before
-        time.tzset()
+        posix_time.tzset()
 
 
 def local(text: str) -> datetime:
@@ -1202,7 +1210,7 @@ def test_sigusr1_prints_every_threads_stack(job: Path, mode: str) -> None:
     # Python's sleep or in a C call: every thread's stack on stderr, the step's frame in the
     # main thread's, and the run going on to its end (DESIGN.md, Allocator, the hang of
     # 2026-11-06).
-    status, calls, text = upscale(job, "out", "decode 0", (signal.SIGUSR1,), mode)
+    status, calls, text = upscale(job, "out", "decode 0", (posix_signal.SIGUSR1,), mode)
     assert status == 0, text
     assert calls == UNINTERRUPTED
     assert re.search(r"^Current thread 0x[0-9a-f]+ \(most recent call first\):$", text, re.M)
