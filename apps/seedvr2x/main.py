@@ -252,15 +252,34 @@ def main(argv: list[str] | None = None, *, owns_process: bool = False) -> int:
     main thread (stop.Watch): a main thread held in one call in C, which answers no signal."""
     if not owns_process:
         return _main(argv, owns_process)
-    with stopping.Watch(_flush, WATCH_ALSO):
-        return _main(argv, owns_process)
+    with stopping.Watch(_flush, WATCH_ALSO), stopping.Closing(_flush):
+        try:
+            status = _main(argv, owns_process)
+        except BaseException as error:
+            if not stopping.closed():
+                raise
+            # Ended below, never by Python's exit: a Ctrl-Break the run's stops didn't take (the
+            # options read, seedvr2x verify) or an error the run raised as the console closed.
+            if isinstance(error, Terminated):
+                logger.error("stopped at once (%s)", error.how)
+                status = 143
+            else:
+                logger.error("the run failed as the console closed: %r", error, exc_info=error)
+                status = 1
+    if stopping.closed():
+        # Windows' console closed: Python's own exit, with torch's libraries loaded, ended the
+        # process with 0 (natively, 2026-11-09); stop.end_process keeps the status. Watch and
+        # Closing gave Python's handlers back: the stops ignored first, as at every _end.
+        _ignore_stops()
+        _end(status)
+    return status
 
 
 # What a stall's line says of the repeated signal (waiting.held), in the command's words; the
 # Ctrl-C is counted as stop.Watch counts it (the first only stops after the unit).
 WATCH_ALSO = (
-    "if the main thread answers nothing, SIGTERM twice or Ctrl-C three times ends the process"
-    " from another thread"
+    f"if the main thread answers nothing, {'Ctrl-Break' if sys.platform == 'win32' else 'SIGTERM'}"
+    " twice or Ctrl-C three times ends the process from another thread"
 )
 
 
@@ -299,7 +318,8 @@ def _main(argv: list[str] | None, owns_process: bool) -> int:
         except KeyboardInterrupt as error:
             return _stopped_at_once("Ctrl-C", 130, error, owns_process)
         except Terminated as error:
-            return _stopped_at_once("SIGTERM", 143, error, owns_process)
+            # SIGTERM, or on Windows Ctrl-Break or the console's close, its twins there.
+            return _stopped_at_once(error.how, 143, error, owns_process)
         except Exception as error:
             # A file Windows wouldn't change while another program held it, where no refusal of
             # the run's own said it (media.files.held: replace_whole's are HeldFile, refused with
@@ -367,17 +387,18 @@ def _stopped_at_once(how: str, status: int, error: BaseException, owns_process: 
 
 
 def _ignore_stops() -> None:
-    """Ctrl-C and SIGTERM ignored from here to the end: Stop gave Python's handlers back as the
-    run unwound, and another Ctrl-C would raise inside _end, the teardown it skips run after all."""
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    """Ctrl-C and SIGTERM (Ctrl-Break too on Windows: stop.AT_ONCE) ignored from here to the end:
+    Stop gave Python's handlers back as the run unwound, and another Ctrl-C would raise inside
+    _end, the teardown it skips run after all."""
+    for number in (signal.SIGINT, *stopping.AT_ONCE):
+        signal.signal(number, signal.SIG_IGN)
 
 
 def _end(status: int) -> NoReturn:
     """End the process with status once its own work is done: the work directories this run
     made and left empty removed, its locks released, the lines logged flushed and print's buffers
-    with them. Python's teardown and CUDA's are skipped (os._exit), which can wait on the GPU's
-    work: the place-study night's hang (2026-11-06) logged its stop at once, then stayed 20 s
+    with them. Python's teardown and CUDA's are skipped (stop.end_process), which can wait on the
+    GPU's work: the place-study night's hang (2026-11-06) logged its stop at once, then stayed 20 s
     with its card's memory held until it was killed, a normal exit of that job taking 1.4 s at
     most. What they would have done the kernel does: the locks' descriptors closed, the memory
     pinned and the card's given back, ffmpeg's processes killed by their parent's death
@@ -387,7 +408,7 @@ def _end(status: int) -> NoReturn:
     # Once, with the stop watcher's own ending (stop.Watch), whichever gets here first.
     stopping.ending()
     _flush()
-    os._exit(status)
+    stopping.end_process(status)
 
 
 def _flush() -> None:
@@ -721,6 +742,11 @@ def verify(argv: list[str]) -> int:
         except KeyboardInterrupt:
             logger.error("stopped (Ctrl-C)")
             return 130
+        except Terminated as error:
+            # Windows' Ctrl-Break or the console's close (stop.Closing), as SIGTERM's default
+            # ends it on POSIX.
+            logger.error("stopped (%s)", error.how)
+            return 143
 
 
 @dataclass(frozen=True)

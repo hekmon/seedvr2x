@@ -205,8 +205,12 @@ def _begin(stop: Stop | None, unit: str, cost: float | None) -> None:
     waiting.unit(unit, cost, WAY)
 
 
-# The way out a wait on the GPU that lasts says (waiting.py), in the command's words.
-WAY = "Ctrl-C twice or SIGTERM stops it at once, every unit done kept, and the same command resumes"
+# The way out a wait on the GPU that lasts says (waiting.py), in the command's words: Ctrl-Break
+# is SIGTERM's twin on Windows (stop.AT_ONCE).
+WAY = (
+    f"Ctrl-C twice or {'Ctrl-Break' if sys.platform == 'win32' else 'SIGTERM'} stops it at once,"
+    " every unit done kept, and the same command resumes"
+)
 
 
 def _made(

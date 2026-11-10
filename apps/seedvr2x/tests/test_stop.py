@@ -6,6 +6,7 @@ signals go to their whole process group, as a terminal sends Ctrl-C: ffmpeg's pr
 out of its reach, else the segment being written would end early."""
 
 import contextlib
+import ctypes
 import json
 import logging
 import os
@@ -75,7 +76,8 @@ import run
 
 slow = sys.argv[2]
 mode = os.environ.get("STOP_MODE", "")
-libc = ctypes.CDLL(None)
+# The C library on POSIX; on Windows the interpreter's own DLL, which held() alone needs there.
+libc = ctypes.CDLL(None) if os.name == "posix" else ctypes.CDLL("python", handle=sys.dllhandle)
 
 HANGS = ("stall", "atexit", "finalizer", "cuda-error", "type-error", "wait")
 if mode in HANGS:
@@ -562,6 +564,230 @@ def test_a_stop_asked_again_ends_a_held_main_thread_from_another_thread(
         resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])
 
 
+# Windows' twins of the stops above, natively: the same run (DRIVER) in a console of its own,
+# hidden, where a helper sends the console's events as keys do (GenerateConsoleCtrlEvent to every
+# process of the console: C for Ctrl-C, B for Ctrl-Break) from inside the step `slow`, 0.3 s
+# apart, and kills it `within` seconds after the last if it has not ended. The helper ignores
+# both events; its status and the run's stderr come back through files.
+CONSOLE_HELPER = r"""
+import ctypes, signal, subprocess, sys, threading, time
+out, slow, events, within = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
+command = sys.argv[sys.argv.index("--") + 1:]
+kernel32 = ctypes.WinDLL("kernel32")
+# Ctrl-C as a user's console has it, whatever this process inherited (a process started in a
+# group of its own has it disabled, its children too), then ignored here alone, by Python.
+kernel32.SetConsoleCtrlHandler(None, False)
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+timer = None
+with open(out + ".err", "w") as err:
+    process = subprocess.Popen(command, stderr=subprocess.PIPE, text=True)
+    for line in process.stderr:
+        err.write(line)
+        err.flush()
+        if line.startswith(f"IN {slow}") and events:
+            for event in events:
+                kernel32.GenerateConsoleCtrlEvent(0 if event == "C" else 1, 0)
+                time.sleep(0.3)
+            events = ""
+            timer = threading.Timer(within, lambda: (err.write("KILLED\n"), process.kill()))
+            timer.daemon = True
+            timer.start()
+    status = process.wait()
+    if timer is not None:
+        timer.cancel()
+with open(out + ".status", "w") as done:
+    done.write(str(status))
+"""
+
+
+def upscale_on_windows(
+    directory: Path, output: str, slow: str, events: str, mode: str = "", within: float = 30.0
+) -> tuple[int, list[str], str]:
+    """upscale's twin on Windows: the run's status, the steps it called, its stderr."""
+    assert sys.platform == "win32"  # for the type checker: the callers skip elsewhere
+    helper = directory / "helper.py"
+    helper.write_text(CONSOLE_HELPER)
+    out = directory / "helper"
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = 0  # SW_HIDE: no window on the desktop
+    subprocess.run(
+        [
+            *(sys.executable, str(helper), str(out), slow, events, str(within), "--"),
+            *(sys.executable, "-c", DRIVER, str(TESTS), slow),
+            *("in.mkv", "-o", output, "--model-dir", ".", "--dit-model", "w.safetensors"),
+            *("--vae-model", "w.safetensors", "--resolution", "96", "--seed", "42"),
+            *("--cuts", "cuts.txt", "--window", "5", "--min-segment", "0.12"),
+            *("--color-correction", "none", "--format", "gbrp16le"),
+        ],
+        cwd=directory,
+        env={**os.environ, "STOP_MODE": mode},
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+        startupinfo=info,
+        timeout=600,
+        check=True,
+    )
+    text = (directory / "helper.err").read_text()
+    if "KILLED" in text:
+        pytest.fail(f"the process was still running {within} s after the last event:\n{text}")
+    calls = [
+        line.split(" ", 1)[1].strip() for line in text.splitlines() if line.startswith("CALL ")
+    ]
+    return int((directory / "helper.status").read_text()), calls, text
+
+
+on_windows = pytest.mark.skipif(sys.platform != "win32", reason="a console's events are Windows'")
+
+
+@on_windows
+@pytest.mark.parametrize(
+    ("events", "status", "said"),
+    [("CC", 130, "stopped at once (Ctrl-C)"), ("B", 143, "stopped at once (Ctrl-Break)")],
+)
+def test_on_windows_stopped_at_once(job: Path, events: str, status: int, said: str) -> None:
+    found, calls, text = upscale_on_windows(job, "out", "decode 0", events)
+    assert found == status, text
+    assert re.search(rf"^\d\d:\d\d:\d\d .*{re.escape(said)}$", text, re.MULTILINE), text
+    assert calls == UNINTERRUPTED[:5]
+    # The segment being written is gone, partial file and all (its ffmpeg got Ctrl-Break too);
+    # the windows are kept.
+    assert progress(job) == ([False, False], [1, 1, 0])
+    assert sorted(p.name for p in (job / "out").iterdir()) == [
+        "frame_index.bin",
+        "manifest.json",
+        "resume",
+    ]
+    resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])
+
+
+# The console's close (stop.Closing): the helper starts the run with its stderr in a file of its
+# own, since the helper ends with the console as it closes; once the slow step begins it says the
+# console's window and the interpreter's pid, and the test closes the window as a user's click
+# does.
+CLOSE_HELPER = r"""
+import ctypes, subprocess, sys, time
+out, slow = sys.argv[1], sys.argv[2]
+command = sys.argv[sys.argv.index("--") + 1:]
+kernel32 = ctypes.WinDLL("kernel32")
+kernel32.GetConsoleWindow.restype = ctypes.c_void_p
+with open(out + ".err", "w") as err:
+    process = subprocess.Popen(command, stderr=err)
+while f"IN {slow}" not in open(out + ".err").read() and process.poll() is None:
+    time.sleep(0.05)
+# The interpreter itself: sys.executable may be a venv's launcher, whose child it is, and which
+# ends on the close with Windows' status, whatever its child's.
+class Entry(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_uint32), ("usage", ctypes.c_uint32), ("pid", ctypes.c_uint32),
+        ("heap", ctypes.c_size_t), ("module", ctypes.c_uint32), ("threads", ctypes.c_uint32),
+        ("parent", ctypes.c_uint32), ("base", ctypes.c_long), ("flags", ctypes.c_uint32),
+        ("exe", ctypes.c_wchar * 260),
+    ]
+kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+snapshot = kernel32.CreateToolhelp32Snapshot(2, 0)
+entry, children = Entry(size=ctypes.sizeof(Entry)), {}
+found = kernel32.Process32FirstW(ctypes.c_void_p(snapshot), ctypes.byref(entry))
+while found:
+    children.setdefault(entry.parent, []).append((entry.pid, entry.exe.lower()))
+    found = kernel32.Process32NextW(ctypes.c_void_p(snapshot), ctypes.byref(entry))
+kernel32.CloseHandle(ctypes.c_void_p(snapshot))
+pid = process.pid
+while [child for child, exe in children.get(pid, []) if exe == "python.exe"]:
+    pid = [child for child, exe in children[pid] if exe == "python.exe"][0]
+with open(out + ".close", "w") as said:
+    said.write(f"{kernel32.GetConsoleWindow()} {pid}")
+process.wait()
+"""
+
+
+@on_windows
+def test_on_windows_the_consoles_close_stops_at_once_with_143(job: Path) -> None:
+    # Windows ends a closed console's process 5 s after the close (5.00 to 5.01 s, measured
+    # natively, 2026-11-09): the run is stopped at once within it, said as such, 143.
+    assert sys.platform == "win32"  # for the type checker: the skip above says it
+    helper, out = job / "helper.py", job / "helper"
+    helper.write_text(CLOSE_HELPER)
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = 0  # SW_HIDE: no window on the desktop
+    console = subprocess.Popen(
+        [
+            *(sys.executable, str(helper), str(out), "decode 0", "--"),
+            *(sys.executable, "-c", DRIVER, str(TESTS), "decode 0"),
+            *("in.mkv", "-o", "out", "--model-dir", ".", "--dit-model", "w.safetensors"),
+            *("--vae-model", "w.safetensors", "--resolution", "96", "--seed", "42"),
+            *("--cuts", "cuts.txt", "--window", "5", "--min-segment", "0.12"),
+            *("--color-correction", "none", "--format", "gbrp16le"),
+        ],
+        cwd=job,
+        env={**os.environ, "STOP_MODE": ""},
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+        startupinfo=info,
+    )
+    said = job / "helper.close"
+    until(said.exists, 120.0)
+    window, pid = (int(word) for word in said.read_text().split())
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, opened before the close: its status stays.
+    process = kernel32.OpenProcess(0x00100000 | 0x1000, False, pid)
+    assert process, ctypes.get_last_error()
+    try:
+        ctypes.WinDLL("user32").PostMessageW(ctypes.c_void_p(window), 0x0010, 0, 0)  # WM_CLOSE
+        closed = time.monotonic()
+        assert kernel32.WaitForSingleObject(ctypes.c_void_p(process), 30000) == 0
+        took = time.monotonic() - closed
+        status = ctypes.c_ulong()
+        kernel32.GetExitCodeProcess(ctypes.c_void_p(process), ctypes.byref(status))
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(process))
+    console.wait(timeout=30)
+    text = (job / "helper.err").read_text()
+    assert status.value == 143, (status.value, took, text)
+    assert took < 5.0, (took, text)
+    assert re.search(r"^\d\d:\d\d:\d\d .*stopped at once \(the console closed\)", text, re.M), text
+    calls = [
+        line.split(" ", 1)[1].strip() for line in text.splitlines() if line.startswith("CALL ")
+    ]
+    assert calls == UNINTERRUPTED[:5]
+    assert progress(job) == ([False, False], [1, 1, 0])
+    resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])
+
+
+@on_windows
+def test_on_windows_ctrl_c_once_finishes_the_unit(job: Path) -> None:
+    # The run's children in groups of their own (media/ffmpeg.py, NEW_GROUP): the console's
+    # Ctrl-C reaches seedvr2x alone, which finishes the decode it is in, then stops, 130.
+    # Before them every ffmpeg got it too and ended, and the run stopped with exit 1 (impl-win-3).
+    found, calls, text = upscale_on_windows(job, "out", "decode 0", "C")
+    assert found == 130, text
+    assert re.search(r"^\d\d:\d\d:\d\d stopping after ", text, re.MULTILINE), text
+    assert "stopped after" in text and "ERROR" not in text, text
+    assert calls == UNINTERRUPTED[:6]
+    assert progress(job) == ([True, False], [1, 1, 0])
+    resumed_as_uninterrupted(job, UNINTERRUPTED[6:])
+
+
+@on_windows
+@pytest.mark.parametrize(
+    ("events", "status", "how"),
+    # The first Ctrl-C stops after the unit, which a main thread held can't do; the second is
+    # the stop at once; the third is asked again.
+    [("BB", 143, "Ctrl-Break"), ("CCC", 130, "Ctrl-C")],
+)
+def test_on_windows_a_stop_asked_again_ends_a_held_main_thread_from_another_thread(
+    job: Path, events: str, status: int, how: str
+) -> None:
+    found, calls, text = upscale_on_windows(job, "out", "decode 0", events, mode="held")
+    assert found == status, text
+    assert re.search(ASKED_AGAIN.format(how=re.escape(how), spoken=SPOKEN), text, re.M), text
+    assert text.count("stopped at once") == 1, text
+    assert calls == UNINTERRUPTED[:5]
+    assert progress(job) == ([False, False], [1, 1, 0])
+    resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])
+
+
 def test_one_signal_ends_nothing_of_a_held_main_thread(job: Path) -> None:
     # Python's handler can't run, so the one SIGTERM is unanswered, and a watcher that ended the
     # process on it would end it on a stop that only asked once.
@@ -641,11 +867,11 @@ def test_the_watcher_ends_a_stop_at_once_asked_again(
 ) -> None:
     with Watch(leaving.finish, "the way out", leave=leaving.leave) as watch:
         assert watch.active
-        os.write(watch.write, bytes([signal.SIGTERM]))
+        watch.put(bytes([signal.SIGTERM]))
         # Unanswered, one stop at once ends nothing.
         until(lambda: watch._pending == [signal.SIGTERM])  # pyright: ignore[reportPrivateUsage]
         assert leaving.statuses == []
-        os.write(watch.write, bytes([signal.SIGTERM]))
+        watch.put(bytes([signal.SIGTERM]))
         until(lambda: leaving.statuses != [])
     assert leaving.statuses == [143]
     assert leaving.finished == 1
@@ -657,8 +883,8 @@ def test_an_answer_clears_what_it_follows(leaving: Leaving) -> None:
     # the watcher read it, or after, is the same: the next is a first.
     with Watch(leaving.finish, leave=leaving.leave) as watch:
         for _ in range(3):
-            os.write(watch.write, bytes([signal.SIGTERM, stop_module.ACK]))
-        os.write(watch.write, bytes([signal.SIGTERM]))
+            watch.put(bytes([signal.SIGTERM, stop_module.ACK]))
+        watch.put(bytes([signal.SIGTERM]))
         until(lambda: watch._pending == [signal.SIGTERM])  # pyright: ignore[reportPrivateUsage]
         assert leaving.statuses == []
 
@@ -668,23 +894,23 @@ def test_ctrl_c_is_a_stop_at_once_when_asked_after_a_first_or_with_no_stop(
 ) -> None:
     with Watch(leaving.finish, leave=leaving.leave) as watch:
         # No Stop in force: Python's KeyboardInterrupt, a stop at once; the second ends it.
-        os.write(watch.write, bytes([signal.SIGINT]))
+        watch.put(bytes([signal.SIGINT]))
         until(lambda: watch._hard)  # pyright: ignore[reportPrivateUsage]
         assert leaving.statuses == []
-        os.write(watch.write, bytes([signal.SIGINT]))
+        watch.put(bytes([signal.SIGINT]))
         until(lambda: leaving.statuses != [])
     assert leaving.statuses == [130]
     # A Stop in force and not asked: the first only stops after the unit, the second is the stop
     # at once, the third is asked again.
     other = Leaving()
     with Stop(), Watch(other.finish, leave=other.leave) as watch:
-        os.write(watch.write, bytes([signal.SIGINT]))
+        watch.put(bytes([signal.SIGINT]))
         until(lambda: watch._pending == [signal.SIGINT])  # pyright: ignore[reportPrivateUsage]
         assert not watch._hard  # pyright: ignore[reportPrivateUsage]
-        os.write(watch.write, bytes([signal.SIGINT]))
+        watch.put(bytes([signal.SIGINT]))
         until(lambda: watch._hard)  # pyright: ignore[reportPrivateUsage]
         assert other.statuses == []
-        os.write(watch.write, bytes([signal.SIGINT]))
+        watch.put(bytes([signal.SIGINT]))
         until(lambda: other.statuses != [])
     assert other.statuses == [130]
 
@@ -715,7 +941,7 @@ def test_signals_a_responsive_main_thread_answers_are_never_asked_again(leaving:
             time.sleep(5)
         # Seven signals, each answered; the watcher has read them all once a later byte it is
         # given comes back as the state it leaves.
-        os.write(watch.write, bytes([signal.SIGTERM]))
+        watch.put(bytes([signal.SIGTERM]))
         until(lambda: watch._pending == [signal.SIGTERM])  # pyright: ignore[reportPrivateUsage]
         assert leaving.statuses == []
     assert signal.getsignal(signal.SIGINT) is before
@@ -724,7 +950,7 @@ def test_signals_a_responsive_main_thread_answers_are_never_asked_again(leaving:
 def test_the_process_is_ended_once_by_whoever_asks_first(leaving: Leaving) -> None:
     with Watch(leaving.finish, leave=leaving.leave) as watch:
         stop_module.ending()  # the main thread is ending the process: main._end
-        os.write(watch.write, bytes([signal.SIGTERM, signal.SIGTERM, signal.SIGTERM]))
+        watch.put(bytes([signal.SIGTERM, signal.SIGTERM, signal.SIGTERM]))
         until(lambda: watch._hard)  # pyright: ignore[reportPrivateUsage]
         time.sleep(0.2)
         assert leaving.statuses == []
@@ -739,7 +965,7 @@ def test_the_process_is_ended_once_by_whoever_asks_first(leaving: Leaving) -> No
         exit_now.wait(10)
 
     with Watch(other.finish, leave=slow_leave) as watch:
-        os.write(watch.write, bytes([signal.SIGTERM, signal.SIGTERM]))
+        watch.put(bytes([signal.SIGTERM, signal.SIGTERM]))
         until(lambda: other.statuses != [])
         waits = threading.Thread(target=stop_module.ending, daemon=True)
         waits.start()
