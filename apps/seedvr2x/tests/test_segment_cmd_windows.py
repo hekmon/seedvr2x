@@ -274,6 +274,28 @@ def test_on_windows_a_command_ctrl_break_cant_reach_has_its_job_ended_at_once(
 
 
 @posix_shell
+def test_on_windows_a_command_reading_its_pipe_ends_with_ffmpeg_before_any_ctrl_break(
+    tmp_path: Path,
+    faked: Callable[[CommandWriter, FakedJob], None],
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    # On Windows Ctrl-Break, then ffmpeg ended at once: a command blocked reading its pipe,
+    # which Ctrl-Break doesn't wake there, finds its stdin at its end and ends within the notice,
+    # no line said; then its job is ended, whatever it left.
+    writer, shell, _ = started(tmp_path, "echo $$ $$ > '{pids}'; exec cat > {out}")
+    job = FakedJob()
+    faked(writer, job)
+    capfd.readouterr()
+    start = time.monotonic()
+    writer.abort()
+    assert time.monotonic() - start < 2
+    assert job.calls == [("break", shell), ("end", 7)]
+    assert gone(shell)
+    assert list(writer.path.parent.iterdir()) == []
+    assert capfd.readouterr().err == ""
+
+
+@posix_shell
 def test_on_windows_a_command_whose_shell_has_ended_gets_no_ctrl_break(
     tmp_path: Path,
     faked: Callable[[CommandWriter, FakedJob], None],
@@ -295,6 +317,27 @@ def test_on_windows_a_command_whose_shell_has_ended_gets_no_ctrl_break(
     writer.abort()
     assert job.calls == [("end", 7)]
     assert gone(shell) and child not in members(shell)
+    assert capfd.readouterr().err == ""
+
+
+@on_windows
+def test_on_windows_an_ffmpeg_reading_its_pipe_ends_at_once_on_an_abort(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    # Natively: the command's ffmpeg blocked reading the stream ends once ffmpeg's end closes
+    # it, not 5 s later.
+    path = tmp_path / "seg_000001.mkv"
+    held = CommandWriter(
+        "ffmpeg -v error -y -i - -c copy {out}", path, "yuv420p10le", 64, 48, RATE, BT709
+    )
+    held.write(np.zeros((3, 48, 64, 3), np.float32))
+    time.sleep(1)
+    capfd.readouterr()
+    start = time.monotonic()
+    held.abort()
+    assert time.monotonic() - start < 2
+    assert held._shell.returncode is not None  # pyright: ignore[reportPrivateUsage]
+    assert not path.exists() and list(tmp_path.iterdir()) == []
     assert capfd.readouterr().err == ""
 
 

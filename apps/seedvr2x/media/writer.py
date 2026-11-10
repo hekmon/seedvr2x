@@ -909,11 +909,11 @@ class CommandWriter(Writer):
 
     def _stop(self) -> None:
         """Stop the shell and whatever it started that stayed in its group: SIGTERM (Ctrl-Break on
-        Windows, its job ended in SIGKILL's place: _ask_to_end), then SIGKILL once they are over,
-        or after STOP_GRACE seconds; a line on stderr, when they are still
-        running STOP_NOTICE_AFTER seconds after SIGTERM, says so. A Ctrl-C meanwhile, which raises
-        KeyboardInterrupt here (stop.py: a second one is a stop at once), goes to the
-        SIGKILL below: the group is killed at once, and the shell reaped.
+        Windows, ffmpeg's stream to it then ended, its job ended in SIGKILL's place: _ask_to_end),
+        then SIGKILL once they are over, or after STOP_GRACE seconds; a line on stderr, when they
+        are still running STOP_NOTICE_AFTER seconds after SIGTERM, says so. A Ctrl-C meanwhile,
+        which raises KeyboardInterrupt here (stop.py: a second one is a stop at once), goes to
+        the SIGKILL below: the group is killed at once, and the shell reaped.
 
         Not SIGKILL at once, as ffmpeg gets: nothing the command writes is kept either, but the
         command is the user's, and may be a script with scratch of its own to remove or the
@@ -924,7 +924,17 @@ class CommandWriter(Writer):
             # polls (Popen.poll), what it started left running in its job: ended below.
             return
         try:
-            if self._ask_to_end():
+            asked = self._ask_to_end()
+            if sys.platform == "win32":
+                # Then ffmpeg ended at once, so that the command's stdin is at its end: one
+                # blocked reading its pipe doesn't see Ctrl-Break there, where SIGTERM wakes it
+                # on Linux, and took the whole STOP_GRACE (`ffmpeg -i - -c copy {out}`, 5.02 s
+                # in three aborts); with its input ended it ended by itself 0.01 s later,
+                # nothing left (natively, impl-win-5, 2026-11-10). Linux's order unchanged:
+                # SIGTERM, the grace, and ffmpeg after the command (abort).
+                self._process.kill()
+                self._process.wait()
+            if asked:
                 notice = min(STOP_NOTICE_AFTER, STOP_GRACE)
                 if not self._over(notice):
                     _say(
