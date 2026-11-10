@@ -19,6 +19,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 import torch
+from posix_only import POSIX_CALLS, PROC
 from test_tiling import (
     CASES,
     DITS,
@@ -119,6 +120,7 @@ def test_scratch_in_memory(tmp_path: Path) -> None:
         pass
 
 
+@PROC
 def test_scratch_on_disk(tmp_path: Path) -> None:
     directory = tmp_path / "resume" / "shot_000012"  # not there yet
     needed = Scratch.needed(5, (16, 24))
@@ -154,6 +156,7 @@ def test_scratch_on_disk(tmp_path: Path) -> None:
     assert not mapped(path) and not open_on(path)
 
 
+@PROC
 def test_scratch_goes_on_failure(tmp_path: Path) -> None:
     scratch = Scratch(tmp_path, 0)
     path = tmp_path / tilegrid.SCRATCH
@@ -193,10 +196,12 @@ def test_scratch_replaces_a_killed_runs(tmp_path: Path) -> None:
     path.write_bytes(b"\xff" * 4096)
     with Scratch(tmp_path, 0).store(2, (8, 8)) as store:
         assert path.stat().st_size == Scratch.needed(2, (8, 8)) and not bits(store).any()
-    assert not path.exists()
+    del store
+    assert gone(path)
 
 
 @pytest.mark.parametrize("planted", ["link", "file"])
+@POSIX_CALLS
 def test_scratch_maps_the_file_it_allocated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planted: str
 ) -> None:
@@ -245,6 +250,7 @@ def test_scratch_maps_the_file_it_allocated(
     assert planted == "file" or other.read_bytes() == theirs
 
 
+@POSIX_CALLS
 def test_scratch_without_room(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     needed = Scratch.needed(2, (8, 8))
     # No directory, and more than the allowance: the bytes and the allowance are named.
@@ -292,6 +298,7 @@ def test_scratch_without_room(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         pass
 
 
+@POSIX_CALLS
 def test_scratch_the_system_wont_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A mapping the system itself refuses: 25 GB, with the process's address space held to a
     # gigabyte over what it has (the file left sparse, for the test's sake). A ScratchError, the
@@ -341,6 +348,7 @@ def test_scratch_that_stays_is_said(
 # The slices.
 
 
+@PROC
 def test_scratch_in_memory_is_the_scratch_on_disk(stand_in: model.Models, tmp_path: Path) -> None:
     tiles = Tiles(64, 16)
     latent = latent_of(4, (11, 13))
@@ -375,6 +383,7 @@ def test_scratch_in_memory_is_the_scratch_on_disk(stand_in: model.Models, tmp_pa
     assert same(kept, in_memory_latent)
 
 
+@PROC
 def test_decode_closed_early(stand_in: model.Models, tmp_path: Path) -> None:
     path = tmp_path / tilegrid.SCRATCH
     scratch = Scratch(tmp_path, 0)
@@ -391,6 +400,7 @@ def test_decode_closed_early(stand_in: model.Models, tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("call", [0, 1, 4, 7])
+@PROC
 def test_decode_failing_in_a_tile(stand_in: model.Models, tmp_path: Path, call: int) -> None:
     # A pass that fails, the first of a tile or a later one, in the first tile or another: the
     # scratch goes and the causal memory is cleared.
@@ -405,6 +415,7 @@ def test_decode_failing_in_a_tile(stand_in: model.Models, tmp_path: Path, call: 
         pass
 
 
+@PROC
 def test_decode_failing_between_passes(
     stand_in: model.Models, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -433,6 +444,7 @@ def test_decode_failing_between_passes(
 
 
 @pytest.mark.parametrize("call", [0, 3, 5])
+@PROC
 def test_encode_failing_in_a_tile(stand_in: model.Models, tmp_path: Path, call: int) -> None:
     vae, path = vae_of(stand_in), tmp_path / tilegrid.SCRATCH
     scratch = Scratch(tmp_path, 0)
@@ -517,7 +529,7 @@ def test_the_passes_on_the_file_are_the_passes_in_memory(
         stand_in, iter(slices_of(stand_in, video)), frames, tiles, tiling.InMemory()
     )
     assert same(kept, memory) and kept.stride() == memory.stride()
-    assert not (tmp_path / tilegrid.SCRATCH).exists()
+    assert gone(tmp_path / tilegrid.SCRATCH)
 
 
 def test_refused_passes_leave_no_file(stand_in: model.Models, tmp_path: Path) -> None:
@@ -534,7 +546,7 @@ def test_refused_passes_leave_no_file(stand_in: model.Models, tmp_path: Path) ->
     ):
         with pytest.raises(ValueError, match=match):
             tiling.encode_tiled(stand_in, iter(slices), 13, tiles, Scratch(tmp_path, 0))
-        assert not vae.calls and not path.exists()
+        assert not vae.calls and gone(path)
     with pytest.raises(ValueError, match="multiples of 8"):
         tiling.encode_tiled(stand_in, [video_of(5, (90, 104))], 5, tiles, Scratch(tmp_path, 0))
     with pytest.raises(ValueError, match=r"latent torch\.float32"):

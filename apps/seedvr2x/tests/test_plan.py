@@ -6,8 +6,10 @@ and test_planner.py's)."""
 import argparse
 import datetime
 import logging
+import sys
 import weakref
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -170,7 +172,9 @@ def test_free_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [ref() for ref in made] == [None, None, None]
 
 
-def test_host_available(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_host_available(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # What the placement reads before it pins a copy (blockswap.available, which
     # tests/test_blockswap.py holds to the kernel's files): the kernel's MemAvailable, in bytes,
     # or less under a container's limit; None when nothing can be read, said as a warning, once:
@@ -179,6 +183,21 @@ def test_host_available(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> Non
     from seedvr2x import blockswap
 
     levels(caplog, logging.DEBUG)
+
+    class Linux:
+        platform = "linux"
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(sys, name)
+
+    def as_linux() -> None:
+        # Linux's reading, its /proc and control groups the subject, on Windows too: the command
+        # and the library read Windows' own there (test_blockswap.py holds it, faked).
+        if sys.platform == "win32":
+            monkeypatch.setattr(blockswap, "sys", Linux())
+            monkeypatch.setattr(cli, "sys", Linux())
+
+    as_linux()
     available = cli._host_available  # pyright: ignore[reportPrivateUsage]
     proc, cgroups = tmp_path / "proc", tmp_path / "cgroup"
     (proc / "self").mkdir(parents=True)
@@ -193,9 +212,11 @@ def test_host_available(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> Non
     (cgroups / "job" / "memory.current").write_text(f"{3 * 1024**3}\n")
     (cgroups / "job" / "memory.stat").write_text(f"active_file {1024**3}\ninactive_file 0\n")
     assert available(proc, cgroups) == 6 * 1024**3 == blockswap.available(proc, cgroups)
-    found = available()  # this machine's own
+    monkeypatch.undo()  # this machine's own reading, on its own platform
+    found = available()
     assert found is not None and found == pytest.approx(blockswap.available(), rel=0.2)
     assert caplog.text == ""
+    as_linux()
     # Nothing to read: no MemAvailable, and no limit.
     for text in ("MemTotal:       65806340 kB\n", "MemAvailable:   lots kB\n", "MemAvailable:\n"):
         caplog.clear()

@@ -147,6 +147,8 @@ def test_the_readings_are_those_memory_makes(monkeypatch: pytest.MonkeyPatch) ->
             round(24.8 * GIB) - memory.HELD_BACK,
             True,
             memory.HELD_BACK,
+            # The platform's allocator, as readings takes it (tests/test_regression.py).
+            memory.POOL if sys.platform == "win32" else memory.SEGMENTS,
         )
     ]
     unread = reg.readings(READINGS["unread"], monkeypatch)[0]

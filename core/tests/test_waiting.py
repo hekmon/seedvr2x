@@ -24,6 +24,8 @@ import torch
 from seedvr2x import memory, model, waiting
 from seedvr2x.memory import Activity
 
+posix_signal: Any = signal
+
 REAL_STACKS = waiting._stacks  # pyright: ignore[reportPrivateUsage]
 UNIT = "segment 2/5's decode and write"
 GIB = 2**30
@@ -252,6 +254,10 @@ def test_a_wait_with_no_unit_ended_by_a_stop_is_recorded_nameless(world: World) 
     assert ended is not None and ended.unit is None and ended.seconds == 3.0
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="sends SIGUSR2 with os.kill; Windows has no SIGUSR2 (native, 2026-11-10)",
+)
 def test_a_signal_between_two_polls_ends_the_wait_after_the_line(
     world: World, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -260,7 +266,7 @@ def test_a_signal_between_two_polls_ends_the_wait_after_the_line(
     def handler(number: int, frame: Any) -> None:
         raise Stop("signal")
 
-    before = signal.signal(signal.SIGUSR2, handler)
+    before = signal.signal(posix_signal.SIGUSR2, handler)
     waiting.unit(UNIT, 30.0)
     fake = world.clock
     plain = fake.sleep
@@ -269,7 +275,7 @@ def test_a_signal_between_two_polls_ends_the_wait_after_the_line(
     def sleep(seconds: float) -> None:
         if fake.now > 120.0:
             fired.append(fake.now)
-            os.kill(os.getpid(), signal.SIGUSR2)
+            os.kill(os.getpid(), posix_signal.SIGUSR2)
         plain(seconds)
 
     monkeypatch.setattr(waiting, "sleep", sleep)
@@ -277,7 +283,7 @@ def test_a_signal_between_two_polls_ends_the_wait_after_the_line(
         with pytest.raises(Stop):
             waiting.wait(lambda: False, 10.0)
     finally:
-        signal.signal(signal.SIGUSR2, before)
+        signal.signal(posix_signal.SIGUSR2, before)
     assert fired == [130.0]
     said = warnings(caplog)
     assert len(said) == 1 and "a wait on the GPU has lasted 2 min 10 s" in said[0]

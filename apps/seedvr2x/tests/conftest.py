@@ -12,6 +12,7 @@ test_ends_with_us.py, whose subject they are, ask them every time."""
 import hashlib
 import os
 import shutil
+import sys
 from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
@@ -29,6 +30,24 @@ def small_disk_probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(timing, "PROBE", 1024**2)
     monkeypatch.setattr(timing, "BLOCK", 256 * 1024)
     yield
+
+
+NATIVE_WINDOWS = sys.platform == "win32"
+
+
+@pytest.fixture(autouse=True)
+def the_linux_driver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The memory model of a Linux driver that refuses, on native Windows too: memory.startup
+    takes Windows itself for a driver that lends (memory.windows; DESIGN.md, Allocator, Windows
+    itself), which the CLI's tests of the plan, the allocator and the card's lines don't hold
+    (core/tests/test_memory.py holds that model, by faking the platform). Where the process is
+    Windows, the stand-in answers no, as library_fixtures.no_driver_asked answers no to
+    paravirtual; a test that replaces `memory.windows` itself is answered as it asks. On Linux
+    nothing is replaced."""
+    if NATIVE_WINDOWS:
+        from seedvr2x import memory
+
+        monkeypatch.setattr(memory, "windows", lambda: False)
 
 
 # ---- ffmpeg's listings and the conversions' fingerprint, asked once per build -------------------

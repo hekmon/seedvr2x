@@ -36,6 +36,7 @@ import numpy.typing as npt
 import pytest
 import torch
 from PIL import Image, ImageCms
+from posix_only import SYMLINKS
 from stand_ins import cpu_models, shipped_cpu_models  # noqa: F401
 from test_picture import exif_chunk, header_only_png, inserted
 from test_record import read_xmp
@@ -865,11 +866,15 @@ def test_o_can_be_a_png_in_any_case(machine: Machine, tmp_path: Path) -> None:
 
 def test_o_can_be_a_webp_in_any_case(machine: Machine, tmp_path: Path) -> None:
     source = make_picture(tmp_path / "in.png", bits=8)
-    for name in ("out.webp", "OUT.WEBP", "Out.WebP"):
-        assert run(machine, source, tmp_path / name) == 0
-        assert read_back(tmp_path / name).format == "WEBP"
+    for place, name in enumerate(("out.webp", "OUT.WEBP", "Out.WebP")):
+        # A directory each: Windows' names are one file whatever their case.
+        output = tmp_path / str(place) / name
+        output.parent.mkdir()
+        assert run(machine, source, output) == 0
+        assert read_back(output).format == "WEBP"
 
 
+@SYMLINKS
 def test_o_is_never_a_directory_the_source_or_a_file_there(
     machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1836,10 +1841,12 @@ def test_the_library_makes_the_webp_the_command_writes(
     models = pipeline_models(cpu_models)
     use_library(machine, monkeypatch, models)
     source = make_picture(tmp_path / "in.png", seed=3, bits=8)
-    for name in ("out.webp", "OUT.WEBP"):
+    for place, name in enumerate(("out.webp", "OUT.WEBP")):
         machine.passes.clear()
         caplog.clear()
-        output = tmp_path / name
+        # A directory each: Windows' names are one file whatever their case.
+        output = tmp_path / str(place) / name
+        output.parent.mkdir()
         assert run(machine, source, output, "--color-correction", "split") == 0
         ((arguments, keywords),) = machine.passes
         pixels, target, seed = arguments[1:4]

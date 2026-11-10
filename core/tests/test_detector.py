@@ -43,6 +43,9 @@ from seedvr2x.detector import BATCH, STEP, WINDOW, Detector
 from seedvr2x.transnetv2.transnetv2_pytorch import TransNetV2
 from seedvr2x.weights import ModelError
 
+# A file's time moved by a nanosecond, or a millisecond on Windows, whose NTFS keeps it to 100 ns.
+TOUCH = 1 if sys.platform != "win32" else 1_000_000
+
 VENDORED = Path(seedvr2x.transnetv2.__file__).parent
 # TransNetV2's files at 85cef72 (github.com/soCzech/TransNetV2), as models/transnetv2_weights.py
 # pins them (SOURCES), by their name here: size and SHA-256.
@@ -303,7 +306,7 @@ def test_model_file_checked(tmp_path: Path, untrained: Path) -> None:
     hashes.sha256(copy)
     Detector(copy, CPU, hashes=hashes).close()
     state = copy.stat()
-    os.utime(copy, ns=(state.st_atime_ns, state.st_mtime_ns + 1))
+    os.utime(copy, ns=(state.st_atime_ns, state.st_mtime_ns + TOUCH))
     with pytest.raises(ModelError, match="changed since its SHA-256 was read"):
         Detector(copy, CPU, hashes=hashes)
 

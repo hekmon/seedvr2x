@@ -33,6 +33,7 @@ Skipped without an ffmpeg seedvr2x accepts, or without libx264."""
 
 import logging
 import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from fractions import Fraction
@@ -449,8 +450,14 @@ def made(tmp_path_factory: pytest.TempPathFactory) -> Callable[[str], Holed]:
 
 def pipes(command: tuple[str, ...]) -> tuple[str, ...]:
     """The outputs of a read's hash pipes, `pipe:N` with their file descriptors, in its command's
-    order: the CRC-32s', then the MD5s' when asked."""
-    return tuple(part for part in command if part.startswith("pipe:") and part != "pipe:1")
+    order: the CRC-32s', then the MD5s' when asked; on Windows seedvr2x's named pipes
+    (media/channel.py), `pipe:N` taking no inherited handle there."""
+    named = "\\\\.\\pipe\\seedvr2x-"
+    return tuple(
+        part
+        for part in command
+        if (part.startswith("pipe:") and part != "pipe:1") or part.startswith(named)
+    )
 
 
 def read(case: Holed, first: int, counts: list[int], frames: int | None = None) -> Reader:
@@ -792,7 +799,12 @@ def test_without_holes_the_reads_are_as_before(
     select = "select=gte(pts\\,6256)"
     one, bare = ("-threads", "1"), ("-map_metadata", "-1", "-map_chapters", "-1")
     hashed = ("-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base:v", "demux", *bare)
-    assert list(attempt.command) == [
+    command = list(attempt.command)
+    if sys.platform == "win32":
+        # -y there, which takes a named pipe for an existing file (media/channel.py).
+        assert command.count("-y") == 1
+        command.remove("-y")
+    assert command == [
         *("ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-copyts"),
         *("-noaccurate_seek", "-ss", "4.004000", "-noautorotate", "-i", str(case.full)),
         *("-map", "0:v:0", "-vf", f"{select},{case.conversion.filters()}"),

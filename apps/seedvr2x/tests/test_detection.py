@@ -27,6 +27,7 @@ tests/test_regression.py reads it), the largest difference printed (-rP), the sa
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 from collections import Counter
@@ -38,6 +39,7 @@ import numpy.typing as npt
 import pytest
 import torch
 from levels import levels
+from posix_only import PROC
 from test_detector import official as measurements_model
 from test_detector import streamed, tnet_predict, untrained_weights
 from test_detector_cli import CUTS, SHOTS
@@ -269,6 +271,7 @@ def test_scaler_threads_change_no_byte(
     assert official(path).tobytes() == one.tobytes()
 
 
+@PROC
 def test_scaled_on_four_threads(clip: Path) -> None:
     # The detector's output, the first pass's third (scan.command), its filter graph named vf#2:0
     # by ffmpeg, which inserts the scaler there: 4 threads for the scaler, whatever the CPUs,
@@ -289,6 +292,10 @@ def test_without_detector_no_third_output(clip: Path) -> None:
     arguments = first.command(clip)
     assert arguments.count("-map") == 2 and "rgb24" not in arguments
     with_frames = first.command(clip, "pipe:3")
+    if sys.platform == "win32":
+        # -y there, which takes the named pipe for an existing file (media/channel.py).
+        assert with_frames.count("-y") == 1
+        with_frames.remove("-y")
     assert with_frames[: len(arguments)] == arguments
     assert with_frames[len(arguments) :] == [
         *("-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base:v", "demux"),
@@ -357,6 +364,7 @@ def test_slow_detector_holds_ffmpeg_back(clip: Path, monkeypatch: pytest.MonkeyP
     assert scanned.index.probabilities is not None and len(scanned.index.probabilities) == 280
 
 
+@PROC
 def test_a_pass_that_stops_moving_is_stopped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -419,6 +427,7 @@ def long_clip(tmp_path_factory: pytest.TempPathFactory) -> Path:
         ("_Frames.drain", "the thread reading the shot detector's frames"),
     ],
 )
+@PROC
 def test_a_reading_thread_that_raises_stops_the_pass(
     long_clip: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -480,6 +489,7 @@ def test_a_reading_thread_that_raises_stops_the_pass(
     assert len(recorder.frames) < 3000 and not ffmpeg_threads()
 
 
+@PROC
 def test_a_reading_thread_that_raises_stops_the_pass_its_queue_full(
     long_clip: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

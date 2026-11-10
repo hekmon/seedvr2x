@@ -19,6 +19,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
+from posix_only import POSIX_CALLS
 
 import job
 import manifest
@@ -623,6 +624,7 @@ def test_no_kept_frames_make_no_file(tmp_path: Path) -> None:
     assert not path.exists()
 
 
+@POSIX_CALLS
 def test_a_full_disk_is_a_scratch_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / KEPT
 

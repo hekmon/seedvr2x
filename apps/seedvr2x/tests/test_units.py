@@ -166,7 +166,9 @@ def test_manifest_records_each_unit_once_whole(tmp_path: Path) -> None:
 
     def recording() -> None:
         write()
-        files = sorted(str(p.relative_to(tmp_path / STATE)) for p in (tmp_path / STATE).rglob("*"))
+        files = sorted(
+            p.relative_to(tmp_path / STATE).as_posix() for p in (tmp_path / STATE).rglob("*")
+        )
         seen.append((list(record.encoded), list(record.windows_done), files))
 
     record.write = recording  # type: ignore[method-assign]

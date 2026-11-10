@@ -74,7 +74,7 @@ def test_the_models_node_gives_a_light_handle(
         "seedvr2x_ema_7b_sharp_int8_convrot.safetensors", str(models_folder), "off"
     )
     assert models.Handle("a").directory is None and models.Handle("a").keep == "auto"
-    assert str(models.Handle("a", "/m").directory) == "/m"
+    assert str(models.Handle("a", "/m").directory) == str(Path("/m"))
     # The files, not the mode, are what the kept weights are filed under.
     assert models.Handle("a", "/m", "on").key == models.Handle("a", "/m", "off").key
 

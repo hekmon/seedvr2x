@@ -38,6 +38,7 @@ import numpy.typing as npt
 import pytest
 import torch
 from levels import levels
+from posix_only import FLOCK, POSIX_CALLS, PROC, SIGNALS, SYMLINKS, TZSET
 from test_probe import BT709_VUI, has_encoder, has_x265, x265_file
 from test_rate import mechanism7, retagged, strayed
 
@@ -3315,10 +3316,19 @@ def tiled_steps(
 
     given: list[tuple[str, Tiles | None, Path | None, int]] = []
 
+    def none_left(scratch: Path) -> bool:
+        # Windows deletes no file still mapped: the last store's file is pending there, and this
+        # store's start removes it (scratch.remove_pending); on Linux it went as its store ended.
+        import scratch as scratch_module
+
+        path = scratch / tilegrid.SCRATCH
+        pending = scratch_module._PENDING  # pyright: ignore[reportPrivateUsage]
+        return not path.exists() or (sys.platform == "win32" and path in pending)
+
     def encode(*arguments: Any, tiles: Tiles | None, store: Scratch, **options: Any) -> Any:
         scratch, allowance = store.directory, store.allowance
         given.append(("encode", tiles, scratch, allowance))
-        assert scratch is not None and not (scratch / tilegrid.SCRATCH).exists()
+        assert scratch is not None and none_left(scratch)
         with Scratch(scratch, 0).store(1, (8, 8)):
             assert (scratch / tilegrid.SCRATCH).is_file()
             return steps.encode(*arguments, **options)
@@ -3326,7 +3336,7 @@ def tiled_steps(
     def decode(*arguments: Any, tiles: Tiles | None, store: Scratch, **options: Any) -> None:
         scratch, allowance = store.directory, store.allowance
         given.append(("decode", tiles, scratch, allowance))
-        assert scratch is not None and not (scratch / tilegrid.SCRATCH).exists()
+        assert scratch is not None and none_left(scratch)
         with Scratch(scratch, 0).store(1, (8, 8)):
             assert (scratch / tilegrid.SCRATCH).is_file()
             steps.decode(*arguments)
@@ -4066,6 +4076,7 @@ def test_split_copy_checked_before_its_last_frames(
 
 
 @pytest.mark.parametrize("presses", [1, 2])
+@SIGNALS
 def test_split_copy_again_stopped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4192,7 +4203,7 @@ def test_split_one_file(
         steps.stop, steps.poison = stop, poison
         assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == status
         assert not one.exists()
-        copies = sorted(str(path.relative_to(work)) for path in work.rglob("input.mkv"))
+        copies = sorted(path.relative_to(work).as_posix() for path in work.rglob("input.mkv"))
         assert copies == [f"resume/shot_{start:06d}/input.mkv" for start in (0, 3, 4)]
         steps.stop = steps.poison = None
         assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == 0
@@ -4359,7 +4370,7 @@ def test_leftovers_discarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, st
     stopped(tmp_path, source_path, "out", *JOB)
     out = tmp_path / "out"
     state = out / "resume"
-    assert sorted(str(p.relative_to(state)) for p in state.rglob("*")) == [
+    assert sorted(p.relative_to(state).as_posix() for p in state.rglob("*")) == [
         "shot_000004",
         "shot_000004/latent.pt",
         "shot_000004/window_0000.pt",
@@ -4463,6 +4474,7 @@ def test_one_file_checksums_kept_until_replaced(
     assert cli.main(["verify", str(master)]) == 0
 
 
+@SYMLINKS
 def test_checksums_on_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -4506,7 +4518,7 @@ def test_checksums_on_resume(
 def contents(directory: Path) -> dict[str, bytes | None]:
     """Every path under directory, with a file's bytes."""
     return {
-        str(path.relative_to(directory)): path.read_bytes() if path.is_file() else None
+        path.relative_to(directory).as_posix(): path.read_bytes() if path.is_file() else None
         for path in sorted(directory.rglob("*"))
     }
 
@@ -5182,6 +5194,7 @@ def test_driver_recorded_not_compared(
     assert json.loads(manifest.read_text())["environment"]["driver"] == "another"
 
 
+@FLOCK
 def test_one_writer_at_a_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -5508,7 +5521,7 @@ def test_missing_frames_filled_through_a_run_and_its_resumes(
     passes = first_passes(monkeypatch)
     assert upscale(tmp_path, source_path, "whole", *options) == 0
     assert steps.calls == HOLED_RUN and len(passes) == 1
-    assert f"{tmp_path / MISSING_SAID}" in caplog.text
+    assert f"{tmp_path}{os.sep}{MISSING_SAID}" in caplog.text
     assert "holes.mkv: 40 frames (38 decoded, 2 filled), 64x48" in caplog.text
     whole = tmp_path / "whole"
     assert shots_of(whole) == [(0, 12), (12, 18), (18, 24), (24, 40)]
@@ -5556,7 +5569,7 @@ def test_missing_frames_filled_through_a_run_and_its_resumes(
         assert upscale(tmp_path, source_path, output, *options) == 0
         assert steps.calls == HOLED_RUN[HOLED_RUN.index(stop) :] and passes == []
         assert f"{tmp_path / output}: the same input and ffmpeg, the first pass as" in caplog.text
-        assert f"{tmp_path / MISSING_SAID}" in caplog.text
+        assert f"{tmp_path}{os.sep}{MISSING_SAID}" in caplog.text
         assert steps.read == {shot: read[shot] for shot in steps.read}
         seeking = commands[0]
         if stop == "encode 24":
@@ -5848,6 +5861,7 @@ def test_finished_job_run_again_makes_nothing(
 
 @pytest.mark.parametrize("index", ["intact", "missing", "damaged", "another ffmpeg's"])
 @pytest.mark.parametrize("cut", ["by a list", "detected"])
+@POSIX_CALLS
 def test_file_job_with_every_segment_finished_is_assembled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6071,6 +6085,8 @@ sys.exit(status)
 
 
 @pytest.mark.parametrize("output", ["out", "one.mkv"], ids=["finished", "its assembly left"])
+@POSIX_CALLS
+@PROC
 def test_a_job_with_every_segment_made_asks_the_gpu_nothing_in_a_fresh_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, output: str
 ) -> None:
@@ -6177,6 +6193,7 @@ def memory_of_the_run() -> ModuleType:
 
 @pytest.mark.parametrize("index", ["intact", "missing"])
 @pytest.mark.parametrize("cut", ["by a list", "detected"])
+@POSIX_CALLS
 def test_a_job_with_only_its_assembly_left_asks_the_gpu_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6219,6 +6236,7 @@ def test_a_job_with_only_its_assembly_left_asks_the_gpu_nothing(
 
 @pytest.mark.parametrize("accept", [(), ("--accept-env-change",)], ids=["unasked", "accepted"])
 @pytest.mark.parametrize("change", ["GPU", "stack", "ffmpeg"])
+@POSIX_CALLS
 def test_a_job_with_only_its_assembly_left_in_another_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6523,6 +6541,7 @@ def test_a_finished_job_whose_record_has_no_time_is_hashed_as_before(
     assert finished.reads == [finished.model if lacks == "model time" else finished.source]
 
 
+@POSIX_CALLS
 def test_a_job_with_its_assembly_left_reads_no_model_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -7583,6 +7602,7 @@ def test_first_pass_run_again_detects_again(
     assert found.tobytes() == stand_in_probabilities(extracted(source_path)).tobytes()
 
 
+@SYMLINKS
 def test_real_detector_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
 ) -> None:
@@ -8159,12 +8179,12 @@ def test_plan_writes_the_playlists_of_its_cuts(
     ]
     move = "it names the source by its file name alone, in.mkv: move it beside the source, then"
     said = [record.getMessage() for record in caplog.records]
-    first = next(i for i, line in enumerate(said) if line.startswith("plans/again.cuts.m3u8"))
+    cuts_said = str(Path("plans", "again.cuts.m3u8"))  # as the run says a path, on each platform
+    first = next(i for i, line in enumerate(said) if line.startswith(cuts_said))
     assert said[first : first + 2] == [
-        f"plans/again.cuts.m3u8: a playlist of the 2 detected cuts {PLAYLIST_SAID}; {move} open"
-        " it in VLC",
-        f"plans/again.possible.m3u8: a playlist of the 3 possible cuts {PLAYLIST_SAID}; {move}"
-        " open it in VLC",
+        f"{cuts_said}: a playlist of the 2 detected cuts {PLAYLIST_SAID}; {move} open it in VLC",
+        f"{Path('plans', 'again.possible.m3u8')}: a playlist of the 3 possible cuts"
+        f" {PLAYLIST_SAID}; {move} open it in VLC",
     ]
     assert sorted(os.listdir(tmp_path / "plans")) == [
         "again",
@@ -8204,6 +8224,7 @@ def test_plan_writes_the_playlists_of_its_cuts(
     assert not [record for record in caplog.records if record.name == "cli.cuts"]
 
 
+@SYMLINKS
 def test_plan_file_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -8227,7 +8248,7 @@ def test_plan_file_refused(
         ("out", ".", "a directory; it names the cut list's file"),
     ):
         text = refused(tmp_path, source_path, caplog, "--plan", plan, output=output)
-        assert f"--plan {plan}: {said}" in text
+        assert f"--plan {Path(plan)}: {said}" in text
     # The cut list given: its plan written over it would lose its comments, the possible cuts it
     # kept commented among them. By its path or by a link to it.
     listed = (tmp_path / "cuts.txt").read_bytes()
@@ -8248,6 +8269,7 @@ def test_plan_file_refused(
     assert not (tmp_path / "one.mkv").exists() and not (tmp_path / "one.mkv.work").exists()
 
 
+@SYMLINKS
 def test_plan_playlist_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -8724,7 +8746,7 @@ def test_plan_playlist_not_written_fails(
     text = refused(tmp_path, source_path, caplog, "--plan", str(plan), output="one.mkv")
     for playlist in (tmp_path / "plan.txt.cuts.m3u8", tmp_path / "plan.txt.possible.m3u8"):
         said = f"its playlist, {playlist}, not written: [Errno 28] No space left on device"
-        assert f"--plan {plan}: {said}" in text and not playlist.exists()
+        assert f"--plan {Path(plan)}: {said}" in text and not playlist.exists()
     assert cut_lines(plan) == PLANNED
 
 
@@ -8750,6 +8772,7 @@ def synthetic_clip(path: Path) -> Path:
     return path
 
 
+@SYMLINKS
 def test_real_detection_playlist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -8822,6 +8845,7 @@ def test_real_detection_playlist(
     print(playlist.read_text())
 
 
+@SYMLINKS
 def test_real_detection_cuts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -8985,6 +9009,7 @@ def test_a_line_starts_with_the_time_of_day_but_under_verbose() -> None:
     )
 
 
+@TZSET
 def test_a_line_says_when_the_date_or_the_clocks_change_but_not_under_verbose(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

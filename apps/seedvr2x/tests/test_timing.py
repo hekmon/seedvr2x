@@ -6,6 +6,7 @@ own."""
 import logging
 import os
 import re
+import sys
 import tempfile
 import time
 from collections.abc import Generator
@@ -18,6 +19,7 @@ import numpy as np
 import pytest
 import torch
 from levels import levels
+from posix_only import TZSET
 
 import calibration
 import run
@@ -78,6 +80,9 @@ def zone_utc() -> Generator[None]:
 
 
 def zone(name: str) -> Generator[None]:
+    if sys.platform == "win32":  # no time.tzset there: the tests that read the zone are TZSET's
+        yield
+        return
     before = os.environ.get("TZ")
     os.environ["TZ"] = name
     posix_time.tzset()
@@ -91,6 +96,7 @@ def zone(name: str) -> Generator[None]:
         posix_time.tzset()
 
 
+@TZSET
 def test_ending_across_a_change_of_the_clock() -> None:
     # Paris's clock goes back from 03:00 CEST to 02:00 CET on 2026-10-25: two hours after 01:30
     # CEST, it shows 02:30 (a review's finding: the offset of the start kept, it said 03:30).
@@ -553,6 +559,7 @@ def test_said_waits_for_the_first_kind_missing() -> None:
     assert waiting.said() == "the job's time left known once the assembly is timed"
 
 
+@TZSET
 def test_said_the_time_left_and_the_end() -> None:
     now = datetime(2026, 10, 21, 6, 59, 30, tzinfo=UTC)
     progress = Progress(Clock(MODELS), UNITS, lambda: now)
@@ -562,6 +569,7 @@ def test_said_the_time_left_and_the_end() -> None:
     assert progress.said() == "about 35 s left, the job ending about 07:01"
 
 
+@TZSET
 def test_said_the_last_unit_made() -> None:
     progress = Progress(Clock(MODELS), UNITS[:1], lambda: START)
     progress.made(("encode", 0), "encode", 13, 8.5)
@@ -591,10 +599,12 @@ def test_the_first_encode_is_the_first() -> None:
         (2 * 86_400 + 600, "10:10 on Fri 23 Oct"),
     ],
 )
+@TZSET
 def test_ending(seconds: float, said: str) -> None:
     assert ending(START, seconds) == said
 
 
+@TZSET
 def test_ending_in_the_local_zone() -> None:
     now = datetime(2026, 10, 21, 12, 0).astimezone()
     assert ending(now, 90 * 60) == "13:30"

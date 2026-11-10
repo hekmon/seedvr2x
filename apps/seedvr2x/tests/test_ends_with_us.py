@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from posix_only import PROC, SHELL_FAKE, SIGNALS
 
 import seedvr2x
 from media import ffmpeg
@@ -185,7 +186,7 @@ def test_every_process_started_passes_the_hook_but_the_segment_commands_shell() 
     without: list[str] = []
     violations: list[str] = []
     for path in sources():
-        found = scan(ast.parse(path.read_text()), str(path.relative_to(SOURCE)))
+        found = scan(ast.parse(path.read_text()), path.relative_to(SOURCE).as_posix())
         hooked += found.hooked
         without += found.unhooked
         violations += found.violations
@@ -205,7 +206,9 @@ def test_no_library_file_starts_a_process() -> None:
     # the starters the scan refuses.
     files = library_sources()
     assert {"model.py", "pull.py", "memory.py"} <= {path.name for path in files}
-    found = [scan(ast.parse(path.read_text()), str(path.relative_to(LIBRARY))) for path in files]
+    found = [
+        scan(ast.parse(path.read_text()), path.relative_to(LIBRARY).as_posix()) for path in files
+    ]
     assert [f.hooked for f in found if f.hooked] == []
     assert [f.unhooked for f in found if f.unhooked] == []
     assert [f.violations for f in found if f.violations] == []
@@ -327,6 +330,7 @@ class Recorder:
         return 0
 
 
+@PROC
 def test_prctl_is_resolved_in_the_parent_before_any_fork(monkeypatch: pytest.MonkeyPatch) -> None:
     # Design, baton 3 (2026-10-30): ctypes' lazy attribute lookup allocates, which the child of
     # a multi-threaded process must not do between its fork and its exec. ends_with_us looks
@@ -347,6 +351,7 @@ def test_prctl_is_resolved_in_the_parent_before_any_fork(monkeypatch: pytest.Mon
         ffmpeg._prctl.cache_clear()  # pyright: ignore[reportPrivateUsage]
 
 
+@PROC
 def test_the_hook_holds_the_typed_c_function_not_the_library() -> None:
     # The real library: the function cached, typed, and the only ctypes object the hook closes
     # over (a CDLL there would look its attributes up again in the child).
@@ -488,6 +493,8 @@ def pids_of(path: Path) -> list[int]:
 
 @pytest.mark.parametrize("held", [True, False], ids=["hooked", "control_without"])
 @pytest.mark.parametrize("site", SITES)
+@SHELL_FAKE
+@SIGNALS
 def test_a_killed_run_leaves_none_of_the_ffmpeg_and_ffprobe_it_started(
     tmp_path: Path, fakes: dict[str, str], site: str, held: bool
 ) -> None:
@@ -567,6 +574,7 @@ REAL = {
 
 @needs_ffmpeg
 @pytest.mark.parametrize("site", REAL)
+@SIGNALS
 def test_a_killed_run_leaves_none_of_its_real_ffmpeg(tmp_path: Path, site: str) -> None:
     # As the assembly's test (tests/test_assembled.py): the child at work, SIGKILLed alone. No
     # control here: these ffmpeg end on their pipes whatever the hook does (the reader's at its
@@ -610,6 +618,7 @@ def test_a_killed_run_leaves_none_of_its_real_ffmpeg(tmp_path: Path, site: str) 
 
 
 @needs_ffmpeg
+@SIGNALS
 def test_the_segment_commands_shell_is_not_hooked(tmp_path: Path) -> None:
     # DESIGN.md, Output, Assembly (2026-10-29): the user's --segment-cmd "ends at its input's end".
     # A command that never reads its input, killed with seedvr2x's ffmpeg, goes on: the shell has

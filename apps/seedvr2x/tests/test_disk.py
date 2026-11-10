@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 from levels import levels
+from posix_only import POSIX_CALLS
 from test_cli_run import (
     JOB,
     Steps,
@@ -145,6 +146,7 @@ def test_an_unknown_size_is_said_and_never_warned_of() -> None:
     assert unknown.warning(Path("film.mkv")) is None
 
 
+@POSIX_CALLS
 def test_free_room_is_the_blocks_free_to_a_user(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

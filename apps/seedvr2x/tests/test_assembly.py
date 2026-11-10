@@ -25,6 +25,7 @@ from typing import Any
 import numpy as np
 import pytest
 from levels import levels
+from posix_only import NAME, POSIX_CALLS, SIGNALS
 from test_probe import has_encoder
 
 import stop
@@ -466,7 +467,9 @@ def test_durations_start_every_segment_at_its_exact_time() -> None:
     film = Fraction(24000, 1001)
     listed = concat_list([(Path(f"/s/{place}.mkv"), 121) for place in range(800)], film)
     lines = listed.splitlines()
-    assert lines[0] == "ffconcat version 1.0" and lines[1] == "file 'file:/s/0.mkv'"
+    # The path made absolute as the list writes it: /s/0.mkv on Linux, the drive's on Windows.
+    first = os.path.abspath("/s/0.mkv")
+    assert lines[0] == "ffconcat version 1.0" and lines[1] == f"file 'file:{first}'"
     durations = [round(Fraction(line.split()[1]) * 1_000_000) for line in lines[2::2]]
     assert all(
         line.startswith("duration ") and len(line.split(".")[1]) == 6 for line in lines[2::2]
@@ -479,6 +482,7 @@ def test_durations_start_every_segment_at_its_exact_time() -> None:
     assert 799 * alone - round(Fraction(121 * 799) / film * 1_000_000) == -266
 
 
+@NAME
 def test_a_name_is_escaped_by_the_demuxers_rules(tmp_path: Path, jobs: Callable[..., Job]) -> None:
     # A space, a quote, a backslash, and what a URL would read as its own: the demuxer opens the
     # very files, and the job assembles from them.
@@ -2041,6 +2045,7 @@ def test_a_partial_file_left_goes_before_the_room_is_read(
     assert there == [False, False] and shown(output) == shown(job.master)
 
 
+@NAME
 def test_names_ffmpeg_would_take_for_a_protocol(
     tmp_path: Path, jobs: Callable[..., Job], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2069,6 +2074,7 @@ def test_names_ffmpeg_would_take_for_a_protocol(
     assert not list(work.iterdir())
 
 
+@NAME
 def test_a_name_the_locale_cant_hold(tmp_path: Path) -> None:
     # A directory whose name isn't valid in the locale's encoding, as a file system holds any
     # bytes: the list of the segments is written as the file system's bytes, no
@@ -2082,6 +2088,7 @@ def test_a_name_the_locale_cant_hold(tmp_path: Path) -> None:
     assert done.frames == job.frames and shown(there / "out.mkv") == shown(job.master)
 
 
+@POSIX_CALLS
 def test_refused_without_room(
     tmp_path: Path, jobs: Callable[..., Job], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2145,6 +2152,7 @@ def terminate() -> None:
 @pytest.mark.parametrize(
     ("action", "raised"), [(interrupt, KeyboardInterrupt), (terminate, stop.Terminated)]
 )
+@SIGNALS
 def test_a_stop_kills_the_join_and_removes_the_partial(
     tmp_path: Path,
     jobs: Callable[..., Job],

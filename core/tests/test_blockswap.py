@@ -19,6 +19,8 @@ import itertools
 import json
 import os
 import random
+import re
+import sys
 import threading
 import time
 import weakref
@@ -418,12 +420,26 @@ def test_read_puts_the_parts_in_their_host_copies(
     assert len(parts[OTHER].fields) == 6  # the parameters outside the blocks: no buffer
 
 
+ON_WINDOWS = sys.platform == "win32"
+NO_PROC = pytest.mark.skipif(
+    ON_WINDOWS, reason="reads /proc/self/smaps, which Windows has no twin of (native, 2026-11-10)"
+)
+
+
 def mappings(path: Path) -> list[str]:
-    """This process's mappings of the file at path, /proc/self/maps' lines for it."""
+    """This process's mappings of the file at path, /proc/self/maps' lines for it. Natively on
+    Windows there is no such list to read, so none is returned: the tests that assert no mapping
+    run there without that one assertion, and test_read_never_maps_the_file, whose subject it is,
+    skips."""
+    if ON_WINDOWS:
+        return []
     name = str(path.resolve())
     return [line for line in Path("/proc/self/maps").read_text().splitlines() if name in line]
 
 
+@pytest.mark.skipif(
+    ON_WINDOWS, reason="lists the process's mappings from /proc/self/maps (native, 2026-11-10)"
+)
 @pytest.mark.parametrize("dtype", [None, torch.bfloat16])
 @pytest.mark.parametrize("with_parts", [False, True])
 def test_read_never_maps_the_file(
@@ -1285,7 +1301,9 @@ def test_a_gguf_file_cut_short_is_refused_in_safetensors_words(
     # Cut inside the header: said as cut short as it loaded, with the way out.
     with path.open("r+b") as file:
         file.truncate(100)
-    with pytest.raises(weights.ModelError, match=f"^{path}: cut short as it loaded") as error:
+    with pytest.raises(
+        weights.ModelError, match=f"^{re.escape(str(path))}: cut short as it loaded"
+    ) as error:
         read_it()
     assert str(error.value).endswith(f"; {weights.AGAIN}")
     # Cut after the header was read: the tensors' read meets the end of the file.
@@ -2073,6 +2091,7 @@ def test_a_phase_that_fails_to_enter_is_no_phase(monkeypatch: pytest.MonkeyPatch
     assert same(run(dit, sim), reference(4))
 
 
+@NO_PROC
 def test_a_host_copy_is_a_private_mapping() -> None:
     # One kind of mapping, the one research/scripts/pin_probe.py measured: private, anonymous,
     # as /proc says of the copy's address; and kept out of a child process (MADV_DONTFORK, the
@@ -2122,6 +2141,12 @@ def test_a_host_copy_on_linux_is_a_private_anonymous_mmap_kept_from_children(
     # /proc by test_a_host_copy_is_a_private_mapping).
     import mmap
 
+    posix_mmap: Any = mmap
+    # Linux's values where this mmap has none (Windows': MAP_PRIVATE and the rest are POSIX's).
+    MAP_PRIVATE = getattr(posix_mmap, "MAP_PRIVATE", 2)
+    MAP_ANONYMOUS = getattr(posix_mmap, "MAP_ANONYMOUS", 0x20)
+    MADV_DONTFORK = getattr(posix_mmap, "MADV_DONTFORK", 10)
+
     calls: list[tuple[Any, ...]] = []
 
     class Area(bytearray):
@@ -2135,17 +2160,17 @@ def test_a_host_copy_on_linux_is_a_private_anonymous_mmap_kept_from_children(
     fake = SimpleNamespace(
         mmap=anonymous,
         PAGESIZE=mmap.PAGESIZE,
-        MAP_PRIVATE=mmap.MAP_PRIVATE,
-        MAP_ANONYMOUS=mmap.MAP_ANONYMOUS,
-        MADV_DONTFORK=mmap.MADV_DONTFORK,
+        MAP_PRIVATE=MAP_PRIVATE,
+        MAP_ANONYMOUS=MAP_ANONYMOUS,
+        MADV_DONTFORK=MADV_DONTFORK,
     )
     monkeypatch.setattr(blockswap, "mmap", fake)
     monkeypatch.setattr(blockswap, "sys", SimpleNamespace(platform="linux"))
     blockswap.HostCopy(1, pin=False)
-    flags = mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS
+    flags = MAP_PRIVATE | MAP_ANONYMOUS
     assert calls == [
         ("mmap", (-1, mmap.PAGESIZE), {"flags": flags}),
-        ("madvise", mmap.MADV_DONTFORK),
+        ("madvise", MADV_DONTFORK),
     ]
 
 
@@ -2220,7 +2245,12 @@ def cgroup_tree(root: Path, available_kib: int, groups: str, files: dict[str, st
         (root / "sys" / name).write_text(content)
 
 
-def test_the_memory_available_is_a_container_s_limit_too(tmp_path: Path) -> None:
+def test_the_memory_available_is_a_container_s_limit_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The Linux branch, whatever the platform the test runs on.
+    monkeypatch.setattr(blockswap, "sys", SimpleNamespace(platform="linux"))
+
     def available(case: str, kib: int, groups: str, files: dict[str, str]) -> int | None:
         cgroup_tree(tmp_path / case, kib, groups, files)
         return blockswap.available(tmp_path / case / "proc", tmp_path / case / "sys")
@@ -2257,7 +2287,7 @@ def test_the_memory_available_is_a_container_s_limit_too(tmp_path: Path) -> None
     # A limit that isn't a number is no limit read: the next one counts, here the host's.
     for text in ("", "9e5"):
         odd = {"a/memory.max": f"{text}\n", "a/memory.current": "100000\n"}
-        assert available(f"odd {text}", 1000, "0::/a\n", odd) == 1000 * 1024
+        assert available(f"odd-{text}", 1000, "0::/a\n", odd) == 1000 * 1024
     # memory.high is a limit as well: past it the kernel reclaims from the group and slows it.
     high = {"a/memory.max": "max\n", "a/memory.high": "600000\n", "a/memory.current": "100000\n"}
     assert available("high", 1000, "0::/a\n", high) == 500_000

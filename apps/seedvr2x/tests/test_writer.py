@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 import pytest
+from posix_only import NAME, PROGRAM
 
 from media import ffmpeg, files
 from media.checksums import check_frames, frame_bytes
@@ -134,7 +135,7 @@ def packet_times(path: Path) -> list[int]:
 @pytest.mark.parametrize(
     ("kind", "rate"),
     [
-        (kind, rate)
+        pytest.param(kind, rate, marks=PROGRAM if kind == "command" else ())
         for kind in ("gbrp16le", "yuv420p10le", "command")
         for rate in (Fraction(60000, 1001), Fraction(120000, 1001), Fraction(240000, 1001))
     ]
@@ -285,7 +286,10 @@ def before_the_rate_option(kind: str, rate: str, out: Path) -> list[str]:
 
 
 @pytest.mark.parametrize("rate", ["24000/1001", "24", "25", "30000/1001", "50", "60000/1001"])
-@pytest.mark.parametrize("kind", ["gbrp16le", "yuv420p10le", "command", "png"])
+@pytest.mark.parametrize(
+    "kind",
+    ["gbrp16le", "yuv420p10le", pytest.param("command", marks=PROGRAM), "png"],
+)
 def test_files_at_the_rates_in_use_are_those_written_before_the_rate_option(
     tmp_path: Path, kind: str, rate: str
 ) -> None:
@@ -442,6 +446,7 @@ def test_stale_checksums_stay_until_the_new_file_is_safe(
 AWKWARD = ["x: y", "-lead: ing"]
 
 
+@NAME
 def test_argument_is_never_a_protocol_nor_an_option() -> None:
     assert argument(Path("x: y/seg.mkv")) == "./x: y/seg.mkv"
     assert argument(Path("-s.mkv")) == "./-s.mkv"
@@ -451,6 +456,7 @@ def test_argument_is_never_a_protocol_nor_an_option() -> None:
 
 @pytest.mark.parametrize("directory", AWKWARD)
 @pytest.mark.parametrize("pix_fmt", ["gbrp16le", "yuv420p10le"])
+@NAME
 def test_ffv1_to_a_relative_name_holding_a_colon(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory: str, pix_fmt: str
 ) -> None:
@@ -467,6 +473,7 @@ def test_ffv1_to_a_relative_name_holding_a_colon(
 
 
 @pytest.mark.parametrize("directory", AWKWARD)
+@NAME
 def test_png_to_a_relative_name_holding_a_colon(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory: str
 ) -> None:
@@ -481,6 +488,7 @@ def test_png_to_a_relative_name_holding_a_colon(
 
 
 @pytest.mark.parametrize("directory", AWKWARD)
+@NAME
 def test_command_to_a_relative_name_holding_a_colon(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory: str
 ) -> None:
@@ -807,7 +815,7 @@ def test_no_record_no_seedvr2x_tag(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "command",
     [
-        "cat > {out}",
+        pytest.param("cat > {out}", marks=PROGRAM),
         # A user's encoder: ffmpeg copies an input stream's tags to its output's by default.
         "ffmpeg -nostdin -v error -i - -c:v ffv1 -f matroska {out}",
     ],

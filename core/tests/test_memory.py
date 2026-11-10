@@ -292,6 +292,28 @@ def libraries(monkeypatch: pytest.MonkeyPatch, card: Card | None, nvml: Any = No
     return asked
 
 
+class _Platform:
+    """`sys` as memory sees it, its platform settable apart from the process's own."""
+
+    def __init__(self, platform: str) -> None:
+        self.platform = platform
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(sys, name)
+
+
+@pytest.fixture(autouse=True)
+def linux_unless_faked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """memory reads the platform from its own `sys`, which is Linux's for every test here that
+    doesn't fake Windows (`monkeypatch.setattr(memory.sys, "platform", "win32")`): natively on
+    Windows the code would ask for nvcuda.dll and nvml.dll, take cudaMallocAsync for the default
+    and read no expandable segments, where these tests' stand-ins and expectations are Linux's
+    (63 of them failed natively, 2026-11-10). The Windows cases are the faked ones; a
+    proxy, never the process's `sys.platform`, which subprocess and pathlib read."""
+    if sys.platform == "win32":
+        monkeypatch.setattr(memory, "sys", _Platform("linux"))
+
+
 @pytest.fixture(autouse=True)
 def reasons_unsaid(monkeypatch: pytest.MonkeyPatch) -> None:
     """No reason for an unread card said yet (memory._unread): each test's first is at INFO."""

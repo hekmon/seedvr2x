@@ -6,9 +6,12 @@ import sys
 from pathlib import Path
 
 import pytest
+from posix_only import SHELL_FAKE
 
 from media import ffmpeg
 from media.ffmpeg import MediaError
+
+pytestmark = SHELL_FAKE
 
 FILTERS = ("zscale", "format", "scale", "setparams", "split", "select", "idet", "null")
 

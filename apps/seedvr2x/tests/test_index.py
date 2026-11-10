@@ -36,6 +36,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from posix_only import SHELL_FAKE
 from test_probe import has_encoder
 
 from media import ffmpeg, grid, index
@@ -967,6 +968,7 @@ def faked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., Path
 
 
 @needs_ffmpeg
+@SHELL_FAKE
 def test_pts_are_the_hashes(faked: Callable[..., Path]) -> None:
     # Each frame's pts and the time base are read from the hashes on stdout, where ffmpeg writes
     # nothing else: whatever stderr says of them, the source's metadata being printed there, gives
@@ -991,6 +993,7 @@ def test_pts_are_the_hashes(faked: Callable[..., Path]) -> None:
 
 @needs_ffmpeg
 @pytest.mark.parametrize("decoded", [2, 4])
+@SHELL_FAKE
 def test_counts_must_agree(faked: Callable[..., Path], decoded: int) -> None:
     # A frame the decoder gave and no hash line, or a hash line and no frame of the decoder's:
     # refused, since the reports of stderr are tied to the frames of stdout by their order.
@@ -1011,6 +1014,7 @@ def test_counts_must_agree(faked: Callable[..., Path], decoded: int) -> None:
         ("#no time base", "ffmpeg gave its hashes no time base"),
     ],
 )
+@SHELL_FAKE
 def test_time_base_refused(faked: Callable[..., Path], header: str, said: str) -> None:
     # A time base no pts can be read in is refused, a zero raising nothing (ffmpeg gives none).
     hashes = [header if line.startswith("#tb") else line for line in HEADER]
@@ -1197,6 +1201,7 @@ def test_each_stream_mapping_line_begins_the_reading_again() -> None:
         ),
     ],
 )
+@SHELL_FAKE
 def test_a_failure_says_why(faked: Callable[..., Path], logged: list[str], said: str) -> None:
     path = faked(HEADER, logged, status=1)
     with pytest.raises(MediaError) as refused:
@@ -1546,6 +1551,7 @@ def test_a_hash_lagging_past_the_read_ahead_fails_naming_it(
 
 @needs_ffmpeg
 @pytest.mark.parametrize(("frames", "awaited"), [(0, "frame 150's RGB"), (1, "frame 150's CRC-32")])
+@SHELL_FAKE
 def test_a_stalled_ffmpeg_fails_within_the_bound(
     synth: Callable[[str], Source],
     tmp_path: Path,

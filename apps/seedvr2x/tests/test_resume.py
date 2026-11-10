@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from posix_only import SIGNALS
 
 posix_os: Any = os
 posix_signal: Any = signal
@@ -195,6 +196,7 @@ def encoded(log: str) -> list[int]:
     return [int(n) for n in re.findall(r"run: shot (\d+)/3, frames .* encoded in", log)]
 
 
+@SIGNALS
 def test_interrupted_and_resumed_bit_identical(tmp_path: Path) -> None:
     (tmp_path / "cuts.txt").write_text(CUTS)
     status, log = upscale(tmp_path, "whole")
@@ -262,6 +264,7 @@ TILED = ["--encode-tile", "512", "--decode-tile", "512"]
 GRID = "4 tiles of 512 px sharing 64, 2 across and 2 down,"
 
 
+@SIGNALS
 def test_tiled_interrupted_and_resumed_bit_identical(tmp_path: Path) -> None:
     # The tiled job uninterrupted, its scratch in system memory, as a user's at this size, then
     # on disk (ON_DISK): the same segments, bit for bit, and nothing of the scratch left.

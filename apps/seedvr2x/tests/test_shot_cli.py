@@ -21,8 +21,9 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
+from posix_only import PROC
 from stand_ins import DEVICE, channel_major, cpu_models  # noqa: F401
-from test_scratch import mapped
+from test_scratch import gone, mapped
 from test_shot_pass import (  # noqa: F401
     LARGE,
     LAYOUT,
@@ -125,6 +126,7 @@ def test_tiled_decode_is_corrected_as_a_streamed_one(
     assert not same_writes(tiled, written_by(stand_in, latent, count, reference=correction))
 
 
+@PROC
 def test_tiled_passes_keep_their_scratch_where_told(stand_in: model.Models, tmp_path: Path) -> None:  # noqa: F811
     count = 13
     frames, latent = shot_frames(count), shot_latent(count)
@@ -184,6 +186,7 @@ def test_tiled_passes_keep_their_scratch_where_told(stand_in: model.Models, tmp_
     assert vae.carry.memory is None
 
 
+@PROC
 @pytest.mark.parametrize("failure", ["writer", "tile", "correction"])
 def test_tiled_decode_failing_leaves_nothing(
     stand_in: model.Models,  # noqa: F811
@@ -246,11 +249,11 @@ def test_tiled_encode_failing_leaves_nothing(stand_in: model.Models, tmp_path: P
 
     with pytest.raises(Failing, match="the source"):
         encode_shot(stand_in, read, count, LARGE, 42, **on_disk)
-    assert there == [True] and not path.exists()
+    assert there == [True] and gone(path)
     failing_at(vae, 4)  # the second tile's second slice
     with pytest.raises(Failing, match="pass 4"):
         encode_shot(stand_in, Reads(frames), count, LARGE, 42, **on_disk)
-    assert not path.exists() and vae.carry.memory is None
+    assert gone(path) and vae.carry.memory is None
     assert not list(tmp_path.iterdir())
 
 
@@ -332,7 +335,7 @@ def test_a_tiled_decode_hands_its_frames_on_slice_by_slice(
 
         most, left = allocated(decoded)
         assert sum(frames) == 4 * latents - 3 and max(frames) == 5 and left == 0
-        assert not (tmp_path / tiling.SCRATCH).exists()
+        assert gone(tmp_path / tiling.SCRATCH)
         taken.append(most)
     assert taken[0] == taken[1] == taken[2] and 5 * frame < taken[0] < 11 * frame
 

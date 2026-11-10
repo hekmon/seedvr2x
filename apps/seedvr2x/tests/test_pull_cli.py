@@ -34,6 +34,7 @@ from huggingface_hub.errors import (
     RepositoryNotFoundError,
     RevisionNotFoundError,
 )
+from posix_only import PERMISSIONS, POSIX_CALLS, SIGNALS, SYMLINKS
 from test_cli_run import LOADED, STAND_IN_MODELS, StandInDetector, kept, source, stand_in_model
 from test_pull import (
     CONTENT,
@@ -114,6 +115,18 @@ def upscale(tmp_path: Path, output: str, *options: str, detect: bool = False) ->
             *options,
         ]
     )
+
+
+def cli_disks_aside(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The command line's own readings of its output's disk (disk.py, the assembly's check),
+    which on Windows go through shutil.disk_usage as the library's check of the cache's does
+    (media/files.free_space): given a figure, so that a test's shutil.disk_usage counts the
+    library's asks alone, as on Linux, where those readings take statvfs."""
+    import disk
+    from media import assembly
+
+    for module in (disk, assembly):
+        monkeypatch.setattr(module, "free_space", lambda directory: 2**50)
 
 
 def test_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -263,6 +276,7 @@ def test_downloaded_with_the_pin(
 @needs_ffmpeg
 @pytest.mark.usefixtures("stand_in")
 @pytest.mark.parametrize("output", ["out", "one.mkv"], ids=["finished", "its assembly left"])
+@POSIX_CALLS
 def test_a_job_with_every_segment_made_fetches_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -322,6 +336,7 @@ def test_a_job_with_every_segment_made_fetches_nothing(
 
 @needs_ffmpeg
 @pytest.mark.usefixtures("stand_in")
+@POSIX_CALLS
 def test_a_job_whose_first_pass_runs_again_fetches_the_detector_alone(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -440,6 +455,7 @@ def other_revision(cache: Path, layout: str) -> dict[str, Path]:
 @pytest.mark.usefixtures("stand_in", "pins")
 @pytest.mark.parametrize("layout", ["own", "shared"])
 @pytest.mark.parametrize("offline", [False, True], ids=["online", "offline"])
+@SYMLINKS
 def test_another_revisions_download_taken(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -453,6 +469,7 @@ def test_another_revisions_download_taken(
     caplog.set_level(logging.INFO)
     blobs = other_revision(hub.cache, layout)
     asked: list[Path] = []
+    cli_disks_aside(monkeypatch)
     monkeypatch.setattr(shutil, "disk_usage", lambda path: asked.append(Path(path)))
     monkeypatch.setattr(constants, "HF_HUB_OFFLINE", offline)
     assert upscale(tmp_path, "one.mkv", "--dit-model", DIT, "--vae-model", VAE) == 0
@@ -467,6 +484,7 @@ def test_another_revisions_download_taken(
 
 @needs_ffmpeg
 @pytest.mark.usefixtures("stand_in")
+@SYMLINKS
 def test_another_revisions_blob_of_another_size_refused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -479,6 +497,7 @@ def test_another_revisions_blob_of_another_size_refused(
     # to remove it; no space asked, nothing downloaded, nothing written, the blob left as it is.
     blobs = other_revision(hub.cache, "own")
     blobs[VAE].write_bytes(CONTENT[VAE] + b"!")
+    cli_disks_aside(monkeypatch)
     monkeypatch.setattr(shutil, "disk_usage", lambda path: pytest.fail("space asked"))
     assert upscale(tmp_path, "out", "--dit-model", DIT, "--vae-model", VAE) == 1
     size = pins[VAE].size
@@ -669,6 +688,7 @@ def test_failures_refused(
     reason="root reads a directory whatever its permissions",
 )
 @pytest.mark.parametrize("unreadable", ["snapshots", "blobs"])
+@PERMISSIONS
 def test_cache_unreadable_refused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -719,6 +739,7 @@ def test_space_checked_before_a_download(
         asked.append(Path(path))
         return SimpleNamespace(free=free[0])
 
+    cli_disks_aside(monkeypatch)
     monkeypatch.setattr(shutil, "disk_usage", disk_usage)
     options = ["--dit-model", DIT, "--vae-model", VAE]
     assert upscale(tmp_path, "out", *options) == 1
@@ -844,6 +865,7 @@ sys.exit(cli.main(sys.argv[3:]))
 
 
 @needs_ffmpeg
+@SIGNALS
 def test_sigterm_during_a_download(tmp_path: Path) -> None:
     # SIGTERM while a file downloads, before the run's own handlers: raised as Terminated, so that
     # the download unwinds, its finally run, and the run stops at once, exit 143, nothing written.
@@ -1009,6 +1031,7 @@ def test_telemetry_off_unless_set(tmp_path: Path, given: str | None) -> None:
 
 @needs_ffmpeg
 @pytest.mark.usefixtures("stand_in")
+@SYMLINKS
 def test_cache_behind_a_link(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1220,7 +1243,7 @@ def test_changed_during_the_first_pass_refused(
 
     def touched(*args: Any, **kwargs: Any) -> Any:
         state = (directory / DIT).stat()
-        os.utime(directory / DIT, ns=(state.st_atime_ns, state.st_mtime_ns + 1))
+        os.utime(directory / DIT, ns=(state.st_atime_ns, state.st_mtime_ns + TOUCH))
         return first_pass(*args, **kwargs)
 
     def load_models(

@@ -7,6 +7,7 @@ Cuts refuses it) or the cache's, the files' places said in ComfyUI's console, an
 downloading again a file the cache has lost since."""
 
 import logging
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -312,14 +313,18 @@ def test_a_tilde_that_begins_the_folder_is_the_home_folder(
     monkeypatch.setenv("USERPROFILE", str(home))
     for given in ("~/my models", '"~/my models"', " ~/my models ", "~"):
         expected = home / "my models" if given.strip(' "') != "~" else home
-        assert models.model_folder(given) == str(expected), given
+        if sys.platform == "win32":  # expanduser keeps the "/" given after the home folder
+            assert Path(models.model_folder(given)) == expected, given
+        else:
+            assert models.model_folder(given) == str(expected), given
     # Only where it begins the value: elsewhere it is part of a name, refused as no folder.
     with pytest.raises(words.Refused, match="is not a folder"):
         models.model_folder(str(tmp_path / "~"))
     # One that names no folder is refused by the folder it named.
     with pytest.raises(words.Refused) as refused:
         models.model_folder("~/nowhere")
-    assert str(refused.value).startswith(f'"{home / "nowhere"}" is not a folder')
+    # The rest as given after the home folder ("/" kept on Windows too, by expanduser).
+    assert str(refused.value).startswith(f'"{home}/nowhere" is not a folder')
 
 
 @pytest.mark.parametrize("given", [None, "", "   ", '""', ' "" ', '" "'])

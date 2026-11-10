@@ -3,6 +3,7 @@ pythonpath), the stand-in models (core/tests/stand_ins.py), and the stand-in for
 modules (tests/comfy_stand_in), reset for every test with the nodes' own state."""
 
 import logging
+import sys
 import threading
 from collections.abc import Iterator
 
@@ -84,3 +85,26 @@ def no_ticks(monkeypatch: pytest.MonkeyPatch) -> None:
         stopped.wait()
 
     monkeypatch.setattr(progress, "_wait", never)
+
+
+class _Platform:
+    """`sys` as the library's memory module sees it, its platform settable apart from the
+    process's own."""
+
+    def __init__(self, platform: str) -> None:
+        self.platform = platform
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(sys, name)
+
+
+@pytest.fixture(autouse=True)
+def linux_memory_unless_faked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Natively on Windows, the library's memory module reads Linux's platform, so that the
+    nodes' cases of a Linux driver hold their words there (the allocator's notes); Windows' own
+    cases fake it as on Linux (`memory.sys.platform`, tests/test_machine.py). On Linux nothing is
+    replaced. The proxy is never the process's `sys`, which subprocess and pathlib read."""
+    if sys.platform == "win32":
+        from seedvr2x import memory
+
+        monkeypatch.setattr(memory, "sys", _Platform("linux"))

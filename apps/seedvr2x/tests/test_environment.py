@@ -46,6 +46,11 @@ def test_torchcodec_is_declared_and_not_recorded_by_a_run_that_reads_no_16_bit_p
     assert done.stdout.split() == ["True", "False", "False"]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="torch's Windows wheel requires none of NVIDIA's wheels: its CUDA libraries are in it"
+    " (the lock's markers)",
+)
 def test_torch_runtime_libraries() -> None:
     # Loaded by torch without being imported, so found from its requirements: through the extras
     # it asks (cuda-toolkit[cublas,…]), those shipping a shared library other than Python's

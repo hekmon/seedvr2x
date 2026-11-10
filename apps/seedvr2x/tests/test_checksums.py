@@ -1,5 +1,6 @@
 """Per-frame checksum files (media/checksums.py): read back as written, refused unless whole."""
 
+import re
 from fractions import Fraction
 from pathlib import Path
 
@@ -45,7 +46,7 @@ def test_refused_unless_whole(tmp_path: Path, content: bytes | None, said: str) 
     path = tmp_path / "a.crc32"
     if content is not None:
         path.write_bytes(content)
-    with pytest.raises(MediaError, match=f"^{path}: {said}"):
+    with pytest.raises(MediaError, match=f"^{re.escape(str(path))}: {said}"):
         read_checksums(path)
 
 

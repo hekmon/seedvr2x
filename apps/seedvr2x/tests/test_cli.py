@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 from fractions import Fraction
@@ -14,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from levels import levels
+from posix_only import NAME
 from test_probe import (
     BT2020,
     SDR_TAGS,
@@ -391,6 +393,7 @@ BEFORE_THE_MODEL_FILES = EARLY.replace(
 ).replace("source.first_pass = ", "pull.resolve = source.first_pass = ")
 
 
+@NAME
 def test_a_line_break_in_the_name_refused_before_the_model_files(tmp_path: Path) -> None:
     # A name ffmpeg prints as it is, a line of the name's own among those the first pass reads
     # (media/scan.py, MAPPING): refused with what the source declares, before the model files are
@@ -497,6 +500,8 @@ def test_directory_refused_first(tmp_path: Path) -> None:
         assert "its own detection or a cut list (--cuts), and every output segment" in result.stderr
         # The path as shlex.quote gives it, one word for a shell, its apostrophe written '"'"'.
         quoted = f"'{tmp_path}/the film'\"'\"'s segments'"
+        if sys.platform == "win32":  # a POSIX shell's command there too: Windows' path in it
+            quoted = shlex.quote(str(segments))
         advice = (
             " Give it the file the segments were split from, or join the segments back into one"
             " file first so that every frame keeps its place on the frame grid:\n"

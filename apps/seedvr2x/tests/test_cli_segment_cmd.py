@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 from levels import levels
+from posix_only import POSIX_CALLS, PROGRAM, SIGNALS
 from test_assembled import (
     FILM,
     HOLED_TIMES,
@@ -193,6 +194,7 @@ def failing(flag: Path) -> str:
     return f"{refuse}; {FFV1}"
 
 
+@PROGRAM
 def test_failing_command_stops_at_its_segment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -230,6 +232,7 @@ def test_failing_command_stops_at_its_segment(
     assert sorted(path.name for path in out.iterdir()) == [listed[0], listed[1], *SEGMENTS]
 
 
+@SIGNALS
 def test_stopped_once_then_resumed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -304,8 +307,8 @@ def test_another_command_is_another_job(
     ("command", "said"),
     [
         ("ffmpeg -i - -c:v no_such_encoder {out}", "Unknown encoder 'no_such_encoder'"),
-        ("exit 3 # {out}", "the segment command exited with status 3"),
-        ("cat > /dev/null; true {out}", "seg_000000.mkv"),
+        pytest.param("exit 3 # {out}", "the segment command exited with status 3", marks=PROGRAM),
+        pytest.param("cat > /dev/null; true {out}", "seg_000000.mkv", marks=PROGRAM),
         ("ffmpeg -i - -frames:v 3 -c:v ffv1 {out}", "3 frames in the file"),
     ],
 )
@@ -361,6 +364,7 @@ def test_command_refused_by_its_form(
     assert not (tmp_path / "out").exists()
 
 
+@PROGRAM
 def test_plan_runs_the_command_for_its_trial_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
 ) -> None:
@@ -447,6 +451,7 @@ def test_assembled_from_command_segments(
 
 
 @needs_ffmpeg
+@POSIX_CALLS
 def test_a_damaged_command_segment_is_made_again_then_assembled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -543,6 +548,7 @@ def test_files_the_assembly_cant_join_refused_at_the_trial(
 
 
 @needs_ffmpeg
+@PROGRAM
 def test_segment_unlike_the_one_before_refused_as_it_is_finished(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -569,6 +575,7 @@ def test_segment_unlike_the_one_before_refused_as_it_is_finished(
     ("command", "accepted"),
     [("cat > {out}", True), ('cat > "{out}"', False), ("cat > '{out}'", False)],
 )
+@PROGRAM
 def test_out_quoted_by_the_command_refused_at_the_trial(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -630,6 +637,7 @@ def test_verify_fails_on_what_ffprobe_reports(
 
 
 @needs_ffmpeg
+@PROGRAM
 @pytest.mark.skipif(not has_encoder("libx265"), reason="needs ffmpeg with libx265")
 def test_segments_with_other_headers_that_decode_alike_are_assembled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture

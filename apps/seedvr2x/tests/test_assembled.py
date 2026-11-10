@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 import test_stop
 from levels import levels
+from posix_only import FLOCK, POSIX_CALLS, SIGNALS, SYMLINKS
 from test_cli_run import (
     CUT,
     HOLED_SEGMENTS,
@@ -125,6 +126,8 @@ def film(path: Path, rate: str = "24000/1001", frames: int = 96, late: int = 23)
             *("-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=fra"),
             *("-metadata:s:s:0", "language=eng", "-disposition:a:0", "default"),
             *("-attach", str(scratch / "font.ttf")),
+            # Its name given on Windows, whose ffmpeg names an attachment by the whole path.
+            *(("-metadata:s:t", "filename=font.ttf") if sys.platform == "win32" else ()),
             *("-metadata:s:t", "mimetype=application/x-truetype-font", str(path)),
         ],
         check=True,
@@ -354,13 +357,17 @@ def test_work_directory_keeps_what_is_not_the_jobs(tmp_path: Path) -> None:
         (work / name).parent.mkdir(parents=True, exist_ok=True)
         (work / name).write_bytes(b"mine")
     # A shot's directory not this job's is named whole, as a directory of anyone's is.
-    left = sorted([*foreign[:4], "resume/shot_000009", "sub"])
+    # Named as the platform writes a path (Windows' backslash).
+    left = sorted(
+        [*(str(Path(name)) for name in foreign[:4]), str(Path("resume/shot_000009")), "sub"]
+    )
     assert resume.clear(work, job_content()) == left
-    found = sorted(str(path.relative_to(work)) for path in work.rglob("*") if path.is_file())
+    found = sorted(path.relative_to(work).as_posix() for path in work.rglob("*") if path.is_file())
     assert found == sorted([NAME, *foreign])
     assert all((work / name).read_bytes() == b"mine" for name in foreign)
 
 
+@SYMLINKS
 def test_work_directory_follows_no_link(tmp_path: Path) -> None:
     # A link under one of the job's names isn't the job's file: left, and what it names with it.
     work = work_directory(tmp_path)
@@ -392,7 +399,7 @@ def same_file(one: Path, other: Path) -> None:
 
 
 def listing(directory: Path) -> list[str]:
-    return sorted(str(path.relative_to(directory)) for path in directory.rglob("*"))
+    return sorted(path.relative_to(directory).as_posix() for path in directory.rglob("*"))
 
 
 # What the film's work directory holds once its four segments are finished, before its assembly.
@@ -444,6 +451,7 @@ def flip_middle_byte(path: Path) -> None:
 
 
 @needs_ffmpeg
+@POSIX_CALLS
 def test_a_damaged_segment_is_made_again_then_the_file_assembled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -511,6 +519,7 @@ def test_a_damaged_segment_is_made_again_then_the_file_assembled(
 
 @pytest.mark.parametrize("how", ["deleted", "truncated"])
 @needs_ffmpeg
+@POSIX_CALLS
 def test_a_finished_segment_missing_or_changed_at_a_start_is_made_again_then_the_file_assembled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -719,6 +728,7 @@ def test_a_stop_during_the_segments_made_again_keeps_the_job_for_the_next_start(
 
 
 @needs_ffmpeg
+@SIGNALS
 def test_a_ctrl_c_during_the_hash_check_stops_before_the_first_unit_made_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -760,6 +770,7 @@ def test_a_ctrl_c_during_the_hash_check_stops_before_the_first_unit_made_again(
 
 
 @needs_ffmpeg
+@POSIX_CALLS
 def test_assembly_failed_keeps_everything_then_assembles_without_the_models(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -989,6 +1000,7 @@ def test_another_job_to_a_finished_file_refused_and_nothing_touched(
 
 
 @needs_ffmpeg
+@SYMLINKS
 def test_a_file_with_no_manifest_beside_it_refused_before_any_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1315,6 +1327,7 @@ def test_a_cover_picture_is_attached_to_the_finished_file(
 
 
 @needs_ffmpeg
+@SYMLINKS
 def test_work_directory_refusals(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1361,6 +1374,7 @@ def test_work_directory_refusals(
 
 
 @needs_ffmpeg
+@FLOCK
 def test_one_writer_at_a_time_from_the_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1507,7 +1521,8 @@ def test_missing_frames_filled_into_the_finished_file(
     options = (*SEEKING, *SPLIT)
     assert upscale(tmp_path, source, "x.mkv", *options) == 0
     final = tmp_path / "x.mkv"
-    assert f"{tmp_path / MISSING_SAID}" in caplog.text
+    # Joined by hand: the message holds the rate's slash, which a Path would make Windows' own.
+    assert f"{tmp_path}{os.sep}{MISSING_SAID}" in caplog.text
     wrote = f"wrote {final}: 40 frames from 4 segments, with its audio, and 0"
     assert wrote in caplog.text
     assert sorted(path.name for path in tmp_path.glob("x.mkv*")) == [
@@ -1641,6 +1656,7 @@ def alive(pid: int) -> bool:
 
 @needs_ffmpeg
 @pytest.mark.parametrize("ends_with_us", [True, False], ids=["with_us", "control_without"])
+@SIGNALS
 def test_a_killed_run_leaves_none_of_its_assemblys_ffmpeg(
     film_directory: Path, ends_with_us: bool
 ) -> None:
@@ -1694,6 +1710,7 @@ def film_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @needs_ffmpeg
+@SIGNALS
 def test_ctrl_c_once_stops_before_the_assembly_or_lets_it_finish(film_directory: Path) -> None:
     # The assembly is a unit, the job's last. Ctrl-C once while the last segment is decoded and
     # written: that unit finished, the run stops before the assembly, exit 130, every segment
@@ -1728,6 +1745,7 @@ def test_ctrl_c_once_stops_before_the_assembly_or_lets_it_finish(film_directory:
         ((signal.SIGTERM,), 143, "stopped at once (SIGTERM)"),
     ],
 )
+@SIGNALS
 def test_stopped_at_once_during_the_assembly(
     film_directory: Path, signals: tuple[int, ...], status: int, said: str
 ) -> None:
@@ -1791,6 +1809,7 @@ def test_first_frame_before_the_files_start_refused_before_any_unit(
 
 
 @needs_ffmpeg
+@SYMLINKS
 def test_output_that_is_the_source_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1950,12 +1969,13 @@ def test_removal_the_file_system_refuses_is_said(
 
     monkeypatch.setattr(Path, "rmdir", busy)
     assert upscale(tmp_path, source, "x.mkv", *JOB) == 0
-    assert f"{work}: not removed: [Errno 16] Device or resource busy" in caplog.text
+    assert f"{work}: not removed: [Errno 16] {os.strerror(errno.EBUSY)}" in caplog.text
     assert "its job is assembled" in caplog.text and "Traceback" not in caplog.text
     assert indexes(final) == list(range(25)) and cli.main(["verify", str(final)]) == 0
 
 
 @needs_ffmpeg
+@SIGNALS
 def test_sigterm_during_the_rehearsal_stops_its_ffmpeg(film_directory: Path) -> None:
     # SIGTERM while ffmpeg rehearses the other streams' remux, at the job's start, before the
     # run's handlers: unwound as during the run, exit 143, its ffmpeg stopped, nothing left.

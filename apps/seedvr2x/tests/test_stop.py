@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from posix_only import SIGNALS, TZSET
 
 import stop as stop_module
 from media import ffmpeg
@@ -167,6 +168,10 @@ class Slow(t.Steps):
         super().decode(models, merged, count, target, first_then_inside, *names, **tiled)
 
 t.stand_in_model(setattr)
+if sys.platform == "win32":
+    # conftest.the_linux_driver's answer, in this process of its own: no card is asked.
+    from seedvr2x import memory
+    memory.windows = lambda: False
 steps = Slow()
 run.encode_shot, run.sample_windows, run.decode_shot = steps.encode, steps.windows, steps.decode
 sys.argv = ["seedvr2x", *sys.argv[3:]]
@@ -190,6 +195,7 @@ def _usable() -> bool:
     return True
 
 
+@SIGNALS
 def test_handlers_while_running() -> None:
     before = signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)
     with Stop() as stop:
@@ -216,6 +222,7 @@ SIGINT_IGNORED = signal.getsignal(signal.SIGINT) is signal.SIG_IGN
 @pytest.mark.skipif(
     SIGINT_IGNORED, reason="SIGINT ignored as pytest started (a job started with &): no Ctrl-C"
 )
+@SIGNALS
 def test_terminable() -> None:
     # Around the model files' fetch, before the run's handlers (main.py): SIGTERM raised as
     # Terminated, so that a download unwinds; Ctrl-C left to Python, KeyboardInterrupt; Python's
@@ -232,6 +239,7 @@ def test_terminable() -> None:
     assert (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)) == before
 
 
+@SIGNALS
 def test_notice_lost_stop_kept(monkeypatch: pytest.MonkeyPatch) -> None:
     # stderr gone (| tee, ended by the same Ctrl-C): the notice is lost, the stop is not.
     from types import SimpleNamespace
@@ -390,6 +398,7 @@ def progress(directory: Path) -> tuple[list[bool], list[int]]:
         ("window 4:1", UNINTERRUPTED[:9], ([True, False], [1, 1, 2]), UNINTERRUPTED[9:]),
     ],
 )
+@SIGNALS
 def test_ctrl_c_once_finishes_the_unit(
     job: Path,
     slow: str,
@@ -414,6 +423,7 @@ def test_ctrl_c_once_finishes_the_unit(
         ((signal.SIGTERM,), 143, "stopped at once (SIGTERM)"),
     ],
 )
+@SIGNALS
 def test_stopped_at_once(job: Path, signals: tuple[int, ...], status: int, said: str) -> None:
     started = time.monotonic()
     found, calls, text = upscale(job, "out", "decode 0", signals)
@@ -448,6 +458,7 @@ SPOKEN = r"\d+ (?:s|min \d+ s|h \d+ min)"
         ((signal.SIGINT, signal.SIGINT), 130, "Ctrl-C"),
     ],
 )
+@SIGNALS
 def test_stopped_at_once_in_a_wait_on_the_gpu(
     job: Path, signals: tuple[int, ...], status: int, how: str
 ) -> None:
@@ -472,6 +483,7 @@ def test_stopped_at_once_in_a_wait_on_the_gpu(
 
 
 @pytest.mark.parametrize("mode", ["atexit", "finalizer"])
+@SIGNALS
 def test_a_teardown_that_never_ends_is_skipped(job: Path, mode: str) -> None:
     # atexit: a function blocked in C, as CUDA's teardown is when the GPU's work never ends.
     # finalizer: one blocked on an object the stop's traceback holds, which runs when main
@@ -484,6 +496,7 @@ def test_a_teardown_that_never_ends_is_skipped(job: Path, mode: str) -> None:
     assert "stopped at once (SIGTERM)" in text
 
 
+@SIGNALS
 def test_a_cuda_error_ends_the_process_without_waiting_for_the_gpu(job: Path) -> None:
     found, _, text = upscale(*(job, "out", "decode 0"), mode="cuda-error", within=ENDS_WITHIN)
     assert found == 1, text
@@ -496,6 +509,7 @@ def test_a_cuda_error_ends_the_process_without_waiting_for_the_gpu(job: Path) ->
     resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])
 
 
+@SIGNALS
 def test_any_error_once_cuda_was_used_ends_the_process_without_waiting_for_the_gpu(
     job: Path,
 ) -> None:
@@ -514,6 +528,7 @@ def test_any_error_once_cuda_was_used_ends_the_process_without_waiting_for_the_g
     resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])
 
 
+@SIGNALS
 def test_an_error_without_cuda_keeps_pythons_traceback_and_status(job: Path) -> None:
     found, _, text = upscale(*(job, "out", "decode 0"), mode="type-error-plain", within=60)
     assert found == 1, text
@@ -547,6 +562,7 @@ def png_segments(directory: Path) -> list[int]:
     ],
 )
 @pytest.mark.parametrize("form", ["gbrp16le", "png"])
+@SIGNALS
 def test_a_stop_asked_again_ends_a_held_main_thread_from_another_thread(
     job: Path, signals: tuple[int, ...], status: int, how: str, form: str
 ) -> None:
@@ -796,6 +812,7 @@ def test_on_windows_a_stop_asked_again_ends_a_held_main_thread_from_another_thre
     resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])
 
 
+@SIGNALS
 def test_one_signal_ends_nothing_of_a_held_main_thread(job: Path) -> None:
     # Python's handler can't run, so the one SIGTERM is unanswered, and a watcher that ended the
     # process on it would end it on a stop that only asked once.
@@ -803,6 +820,7 @@ def test_one_signal_ends_nothing_of_a_held_main_thread(job: Path) -> None:
         upscale(*(job, "out", "decode 0", (signal.SIGTERM,)), mode="held", within=3)
 
 
+@SIGNALS
 def test_a_main_thread_held_in_one_call_gets_the_stalls_line(job: Path) -> None:
     found, _, text = upscale(
         *(job, "out", "decode 0", (signal.SIGTERM, signal.SIGTERM)),
@@ -828,6 +846,7 @@ def test_a_main_thread_held_in_one_call_gets_the_stalls_line(job: Path) -> None:
     assert text.count("the main thread has been held in one call for") == 1
 
 
+@SIGNALS
 def test_a_main_thread_in_a_wait_says_its_own_line_not_the_watchers(job: Path) -> None:
     # A wait on the GPU polls (waiting.wait) and says its own; its frame is the same at every
     # sample (the sleep), which the watcher must not take for a hold.
@@ -926,6 +945,7 @@ def test_ctrl_c_is_a_stop_at_once_when_asked_after_a_first_or_with_no_stop(
 @pytest.mark.skipif(
     SIGINT_IGNORED, reason="SIGINT ignored as pytest started (a job started with &): no Ctrl-C"
 )
+@SIGNALS
 def test_signals_a_responsive_main_thread_answers_are_never_asked_again(leaving: Leaving) -> None:
     before = signal.getsignal(signal.SIGINT)
     assert before is signal.default_int_handler
@@ -1130,7 +1150,9 @@ def test_a_stop_asked_comes_before_the_deadline(monkeypatch: pytest.MonkeyPatch)
     # Ctrl-C's stop is said as such, whatever the clock says of the next unit.
     monkeypatch.setattr(stop_module, "now", lambda: AT)
     with Stop(AT + timedelta(seconds=10)) as stop:
-        os.kill(os.getpid(), signal.SIGINT)
+        # raise_signal, not os.kill: Windows' os.kill(pid, SIGINT) is TerminateProcess with
+        # status 2, which ended the native suite's pytest (impl-win-4, 2026-11-09).
+        signal.raise_signal(signal.SIGINT)
         with pytest.raises(Stopped) as raised:
             stop.check(100.0)
         assert not isinstance(raised.value, Deadline)
@@ -1139,6 +1161,9 @@ def test_a_stop_asked_comes_before_the_deadline(monkeypatch: pytest.MonkeyPatch)
 @pytest.fixture
 def paris() -> Generator[None]:
     """The local zone set to Europe/Paris for a test, the process's given back."""
+    if sys.platform == "win32":  # no time.tzset: its tests are posix_only.TZSET's
+        yield
+        return
     before = os.environ.get("TZ")
     os.environ["TZ"] = "Europe/Paris"
     posix_time.tzset()
@@ -1184,6 +1209,7 @@ def local(text: str) -> datetime:
         ("2027-03-27T22:00:00", "03:00", "2027-03-28T03:00:00+02:00"),
     ],
 )
+@TZSET
 def test_deadline_is_the_next_time_shown(now: str, until: str, expected: str) -> None:
     found = deadline(datetime.strptime(until, "%H:%M").time(), local(now))
     assert found == datetime.fromisoformat(expected)
@@ -1192,6 +1218,7 @@ def test_deadline_is_the_next_time_shown(now: str, until: str, expected: str) ->
 
 
 @pytest.mark.usefixtures("paris")
+@TZSET
 def test_deadline_from_another_zone() -> None:
     # now is an instant, whatever zone says it: 20:30 UTC is 22:30 in Paris.
     now = datetime(2026, 10, 10, 20, 30, tzinfo=UTC)
@@ -1205,6 +1232,7 @@ def test_now_is_aware_and_local() -> None:
 
 
 @pytest.mark.parametrize("mode", ["", "c-call"])
+@SIGNALS
 def test_sigusr1_prints_every_threads_stack(job: Path, mode: str) -> None:
     # SIGUSR1 (faulthandler, registered by main.command) inside a slow step, the main thread in
     # Python's sleep or in a C call: every thread's stack on stderr, the step's frame in the

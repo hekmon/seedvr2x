@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 import pytest
+from posix_only import PROGRAM
 
 from media import ffmpeg
 from media import writer as writer_module
@@ -123,6 +124,7 @@ def has_encoder(name: str) -> bool:
     return any(line.split()[1:2] == [name] for line in listed.stdout.splitlines())
 
 
+@PROGRAM
 def test_the_watchers_ending_kills_the_commands_running(tmp_path: Path) -> None:
     # A process the stop's watcher ends (stop.Watch, main._flush) never unwinds to
     # CommandWriter.abort, and its ffmpeg dies with it while the command's group would run on:
@@ -202,6 +204,7 @@ def appeared(path: Path, seconds: float = 10.0) -> bool:
         (Tags(), (1280, 720), Fraction(24000, 1001), "bt709"),
     ],
 )
+@PROGRAM
 def test_stream_is_the_master_s(
     tmp_path: Path, pix_fmt: str, tags: Tags, size: tuple[int, int], rate: Fraction, matrix: str
 ) -> None:
@@ -238,6 +241,7 @@ def test_stream_is_the_master_s(
     assert piped == expected
 
 
+@PROGRAM
 def test_stream_read_to_its_end_without_a_warning(tmp_path: Path) -> None:
     # A Matroska that can't be seeked has no duration (and no cues): ffmpeg reads it from a pipe
     # to its last frame and says nothing. Its timestamps are Matroska's milliseconds, each
@@ -279,6 +283,7 @@ def test_stream_read_to_its_end_without_a_warning(tmp_path: Path) -> None:
     [("libx265 -crf 16", "yuv420p10le"), ("mpeg4 -bf 2 -q:v 2", "yuv420p")],
 )
 @pytest.mark.parametrize("rate", [Fraction(24000, 1001), Fraction(25), Fraction(30000, 1001)])
+@PROGRAM
 def test_encoded_by_the_command(tmp_path: Path, encoder: str, pix_fmt: str, rate: Fraction) -> None:
     # The encoder gets every frame, the rate and the tags, and converts nothing it needn't:
     # libx265 keeps yuv420p10le.
@@ -303,6 +308,7 @@ def test_encoded_by_the_command(tmp_path: Path, encoder: str, pix_fmt: str, rate
     assert (found["color_primaries"], found["color_transfer"]) == ("bt709", "bt709")
 
 
+@PROGRAM
 def test_leftover_partial_is_no_obstacle(tmp_path: Path) -> None:
     # A run killed left its partial file: ffmpeg, without -y, would leave it there and exit with
     # status 0 ("already exists. Exiting."). The command never finds it.
@@ -314,6 +320,7 @@ def test_leftover_partial_is_no_obstacle(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == [path] and count_frames(path) == 6
 
 
+@PROGRAM
 def test_stale_checksums_removed_when_replaced(tmp_path: Path) -> None:
     # As FFV1Writer's: the checksums of what path held go only as the new file replaces it.
     path, stale = tmp_path / "segment.mkv", tmp_path / "segment.crc32"
@@ -331,6 +338,7 @@ def test_stale_checksums_removed_when_replaced(tmp_path: Path) -> None:
 # What the command's file is checked for.
 
 
+@PROGRAM
 def test_stale_checksums_stay_while_the_new_file_is_synced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -359,6 +367,7 @@ def test_stale_checksums_stay_while_the_new_file_is_synced(
     assert path.read_bytes() == b"the file before"
 
 
+@PROGRAM
 def test_fewer_frames_refused(tmp_path: Path) -> None:
     # The command ends well, having taken 3 frames of 10: only the count tells.
     path = tmp_path / "segment.mkv"
@@ -371,6 +380,7 @@ def test_fewer_frames_refused(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
+@PROGRAM
 def test_frames_are_decoded_to_be_counted(tmp_path: Path) -> None:
     # Packets are not frames: a stream no decoder takes holds its 5 packets, and is refused.
     path = tmp_path / "segment.mkv"
@@ -382,6 +392,7 @@ def test_frames_are_decoded_to_be_counted(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("command", ["cat > /dev/null # {out}", "exit 0 # {out}"])
+@PROGRAM
 def test_nothing_written_refused(tmp_path: Path, command: str) -> None:
     # The command ends well, having read the stream or not: ffmpeg's broken pipe, when it read
     # none of it, is no failure of its own, and the missing file is what is said.
@@ -392,6 +403,7 @@ def test_nothing_written_refused(tmp_path: Path, command: str) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
+@PROGRAM
 def test_no_video_stream_refused(tmp_path: Path) -> None:
     listed = subprocess.run(
         ["ffmpeg", "-hide_banner", "-demuxers"], capture_output=True, text=True, check=True
@@ -412,6 +424,7 @@ def test_no_video_stream_refused(tmp_path: Path) -> None:
     assert list(path.parent.iterdir()) == []
 
 
+@PROGRAM
 def test_unreadable_file_refused(tmp_path: Path) -> None:
     path = tmp_path / "segment.mkv"
     command = "cat > /dev/null; echo no video here > {out}"
@@ -424,6 +437,7 @@ def test_unreadable_file_refused(tmp_path: Path) -> None:
 # A failing command.
 
 
+@PROGRAM
 def test_failure_after_reading(tmp_path: Path) -> None:
     # Its status and its last lines, stdout's and stderr's; nothing left.
     path = tmp_path / "segment.mkv"
@@ -437,6 +451,7 @@ def test_failure_after_reading(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
+@PROGRAM
 def test_failure_at_once(tmp_path: Path) -> None:
     # The command is gone before it read anything: ffmpeg's broken pipe is its consequence, and
     # the command's status the cause reported, whether the frames were all sent or not.
@@ -456,6 +471,7 @@ def test_failure_at_once(tmp_path: Path) -> None:
         ("head -c 100000 > /dev/null; kill -KILL $$ # {out}", "was ended by SIGKILL"),
     ],
 )
+@PROGRAM
 def test_failure_while_writing(tmp_path: Path, command: str, how: str) -> None:
     # More frames than the pipes hold: the write finds ffmpeg gone, and the error names the
     # command's end, not a broken pipe.
@@ -472,6 +488,7 @@ def test_failure_while_writing(tmp_path: Path, command: str, how: str) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
+@PROGRAM
 def test_command_not_found(tmp_path: Path) -> None:
     path = tmp_path / "segment.mkv"
     with pytest.raises(MediaError, match=r"exited with status 127: .*no-such-encoder.*not found"):
@@ -480,6 +497,7 @@ def test_command_not_found(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
+@PROGRAM
 def test_ffmpeg_s_own_failure_reported(tmp_path: Path) -> None:
     # An unknown tag: seedvr2x's ffmpeg refuses its filter graph. A command that ends well on an
     # empty stream doesn't hide it; one that fails on it is reported first, ffmpeg's lines after.
@@ -521,6 +539,7 @@ def started(tmp_path: Path, command: str) -> tuple[CommandWriter, int, int]:
     return writer, shell, child
 
 
+@PROGRAM
 def test_abort_leaves_no_process_and_no_file(tmp_path: Path) -> None:
     # The shell, and the child it started: the whole group.
     writer, shell, _ = started(tmp_path, f"{TELL}; cat > {{out}}; wait")
@@ -531,6 +550,7 @@ def test_abort_leaves_no_process_and_no_file(tmp_path: Path) -> None:
     writer.abort()  # once more, as SegmentWriter's exit after a failed close
 
 
+@PROGRAM
 def test_exception_leaves_no_process_and_no_file(tmp_path: Path) -> None:
     writer, shell, _ = started(tmp_path, f"{TELL}; cat > {{out}}; wait")
     with pytest.raises(RuntimeError, match="stop"):
@@ -540,6 +560,7 @@ def test_exception_leaves_no_process_and_no_file(tmp_path: Path) -> None:
     assert list(writer.path.parent.iterdir()) == []
 
 
+@PROGRAM
 def test_groups_of_their_own(tmp_path: Path) -> None:
     # The command leads a group of its own: not the test's, which a terminal's Ctrl-C reaches,
     # nor that of seedvr2x's ffmpeg, which abort() must not signal with it.
@@ -554,6 +575,7 @@ def test_groups_of_their_own(tmp_path: Path) -> None:
     assert gone(shell)
 
 
+@PROGRAM
 def test_stop_is_sigterm_first(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
     # A command with something of its own to undo gets the time to: SIGTERM, which it catches,
     # and the stop waits no longer than it takes, saying nothing: a command that ends at once on
@@ -570,6 +592,7 @@ def test_stop_is_sigterm_first(tmp_path: Path, capfd: pytest.CaptureFixture[str]
     assert capfd.readouterr().err == ""
 
 
+@PROGRAM
 def test_stop_is_sigkill_in_the_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A command that ignores SIGTERM, its child with it, is not waited for beyond the grace.
     monkeypatch.setattr(writer_module, "STOP_GRACE", 0.3)
@@ -588,6 +611,7 @@ NOTICE = re.compile(
 )
 
 
+@PROGRAM
 def test_stop_gives_a_command_5_s_and_says_so(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
@@ -605,6 +629,7 @@ def test_stop_gives_a_command_5_s_and_says_so(
     assert NOTICE.fullmatch(capfd.readouterr().err)
 
 
+@PROGRAM
 def test_ctrl_c_again_kills_the_command_at_once(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
@@ -654,6 +679,7 @@ def alarm() -> Generator[None]:
         signal.signal(posix_signal.SIGALRM, previous)
 
 
+@PROGRAM
 def test_stop_at_once_while_the_command_finishes(tmp_path: Path, alarm: None) -> None:
     # The stream is over and the command still encodes: a stop at once, raised in close(),
     # stops it too and removes its file.
@@ -665,6 +691,7 @@ def test_stop_at_once_while_the_command_finishes(tmp_path: Path, alarm: None) ->
     assert list(writer.path.parent.iterdir()) == []
 
 
+@PROGRAM
 def test_a_command_s_leftovers_survive_its_success_only(tmp_path: Path) -> None:
     # What the shell left running is the user's business when the segment is good, and stopped
     # with a segment refused: it could still write the file a resume writes again.
@@ -684,6 +711,7 @@ def test_a_command_s_leftovers_survive_its_success_only(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("name", ["it's a segment.mkv", 'two  spaces $HOME `x` "q".mkv'])
+@PROGRAM
 def test_out_is_one_word(tmp_path: Path, name: str, caplog: pytest.LogCaptureFixture) -> None:
     # {out} is written bare and reaches the command as one word, each time it is named,
     # whatever the path holds; the command as run is logged at DEBUG, and nothing else is said.
@@ -704,6 +732,7 @@ def test_out_is_one_word(tmp_path: Path, name: str, caplog: pytest.LogCaptureFix
     ]
 
 
+@PROGRAM
 def test_out_is_never_an_option(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     words = tmp_path / "words"
@@ -714,6 +743,7 @@ def test_out_is_never_an_option(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert sorted(entry.name for entry in tmp_path.iterdir()) == ["-y.mkv", "words"]
 
 
+@PROGRAM
 def test_nothing_printed(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
     command = "echo to stdout; echo to stderr >&2; cat > {out}"
     with CommandWriter(command, tmp_path / "s.mkv", "gbrp16le", 16, 16, RATE, BT709) as writer:
@@ -754,6 +784,7 @@ def test_partial_keeps_the_suffix() -> None:
     assert command_partial(Path("a.b/film.mp4")) == Path("a.b/film.partial.mp4")
 
 
+@PROGRAM
 def test_open_writer_with_a_command(tmp_path: Path) -> None:
     path = tmp_path / "segment.mkv"
     with open_writer("yuv420p10le", path, 64, 48, RATE, BT709, command=COPY) as writer:
@@ -768,6 +799,7 @@ def test_open_writer_with_a_command(tmp_path: Path) -> None:
         writer.write(frames_of(1, 64, 48))
 
 
+@PROGRAM
 def test_segments_by_the_command(tmp_path: Path) -> None:
     # The command runs once per segment, each file whole when its segment closes, without
     # checksums; one that fails stops the output at its segment, the segments before it kept.
@@ -803,6 +835,7 @@ def test_segments_by_the_command(tmp_path: Path) -> None:
 # The command's output, kept bounded.
 
 
+@PROGRAM
 def test_megabytes_without_a_newline_neither_block_nor_grow(tmp_path: Path) -> None:
     # 8 MB on stderr before the stream is read, as an encoder's progress over a long segment: a
     # pipe nobody read would stop the command there (GNU timeout ends the wait, and the test).
@@ -817,6 +850,7 @@ def test_megabytes_without_a_newline_neither_block_nor_grow(tmp_path: Path) -> N
     assert kept == ["x" * TAIL_WIDTH + " [...]", "done"]
 
 
+@PROGRAM
 def test_failure_s_message_is_bounded(tmp_path: Path) -> None:
     # 2,000 progress lines, each replacing the last as on a terminal, 40 lines, then the error:
     # the last 20 lines, the progress one line of them.

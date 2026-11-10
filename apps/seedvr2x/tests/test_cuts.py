@@ -9,6 +9,7 @@ import itertools
 import logging
 import os
 import re
+import sys
 from fractions import Fraction
 from pathlib import Path
 from urllib.parse import unquote_to_bytes
@@ -16,6 +17,7 @@ from urllib.parse import unquote_to_bytes
 import numpy as np
 import pytest
 from levels import levels
+from posix_only import SYMLINKS
 from test_shotcuts import f32
 
 import cuts
@@ -342,8 +344,9 @@ def test_playlist_names_the_source_as_a_url() -> None:
         ),
         ("a&b=c+d;e,f!g$h@i:j?k.mkv", "a%26b%3Dc%2Bd%3Be%2Cf%21g%24h%40i%3Aj%3Fk.mkv"),
         ("a\nb\r.mkv", "a%0Ab%0D.mkv"),
-        # A name that isn't UTF-8, as Python reads it from Linux: its own bytes.
-        ("caf\udce9.mkv", "caf%E9.mkv"),
+        # A name that isn't UTF-8, as Python reads it from Linux: its own bytes (Windows' names
+        # are UTF-16, every one UTF-8's).
+        *([("caf\udce9.mkv", "caf%E9.mkv")] if sys.platform != "win32" else []),
     ):
         lines = playlist(index, [Cut(50, 0.2)], name).splitlines()
         assert lines[-1] == written and len(lines) == len(PLAYLIST_HEADER) + 4
@@ -372,6 +375,7 @@ def test_playlist_path() -> None:
     assert playlist_path(Path("."), OF_POSSIBLE) == Path(".possible.m3u8")
 
 
+@SYMLINKS
 def test_playlist_written_and_said(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -535,13 +539,19 @@ def test_a_write_that_fails_leaves_no_partial_file(
     assert not write_playlists(plan, index, cuts, maybe, source)
     assert sorted(os.listdir(tmp_path)) == [of_cuts.name, of_possible.name]
     [said] = [record.getMessage() for record in caplog.records if record.levelname == "ERROR"]
-    assert said.startswith(f"--plan {plan}: its playlist, {of_cuts}, not written: [Errno 21] Is a")
+    written = f"--plan {plan}: its playlist, {of_cuts}, not written: "
+    if sys.platform == "win32":
+        # A directory in a file's place is refused as access denied there (WinError 5).
+        assert said.startswith(written) and "(WinError 5)" in said, said
+    else:
+        assert said.startswith(f"{written}[Errno 21] Is a")
     # The same of any file written so, whatever fails: its place a directory; no room for the
     # partial file, some of it written; none to sync it in. An earlier file stays as it was.
     path = tmp_path / "whole.txt"
     files.write_whole(path, b"earlier")
     assert sorted(os.listdir(tmp_path)) == [of_cuts.name, of_possible.name, "whole.txt"]
-    with pytest.raises(IsADirectoryError):
+    # Windows refuses the replace (WinError 5): files.HeldFile, a PermissionError.
+    with pytest.raises(PermissionError if sys.platform == "win32" else IsADirectoryError):
         files.write_whole(of_cuts, b"new")
     write_bytes = Path.write_bytes
 

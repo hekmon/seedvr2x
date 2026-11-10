@@ -65,6 +65,9 @@ from seedvr2x.errors import (
 from seedvr2x.pull import Pin
 from seedvr2x.weights import ModelError
 
+# A file's time moved by a nanosecond, or a millisecond on Windows, whose NTFS keeps it to 100 ns.
+TOUCH = 1 if sys.platform != "win32" else 1_000_000
+
 REVISION = "c14a2bc4aab04cf38ad9b0d324014c4213f07048"
 SHORT = f"hekmon/seedvr2x at {REVISION[:8]}"
 ELSEWHERE = "or download the files elsewhere and give --model-dir with their directory"
@@ -535,7 +538,7 @@ def test_a_file_unknown_before_its_load_takes_the_load_s_sha256(
     assert hashes.mtime_ns(path) == path.stat().st_mtime_ns
     assert caplog.messages == [f"numz.safetensors: SHA-256 {digest}, read as it loaded"]
     hashes.unchanged(path)
-    os.utime(path, ns=(0, path.stat().st_mtime_ns + 1))
+    os.utime(path, ns=(0, path.stat().st_mtime_ns + TOUCH))
     with pytest.raises(ModelError, match="changed since its SHA-256 was read"):
         hashes.unchanged(path)
 
@@ -1044,7 +1047,7 @@ def test_changed_after_its_hash_refused(tmp_path: Path) -> None:
     state = path.stat()
 
     def touched() -> None:
-        os.utime(path, ns=(state.st_atime_ns, state.st_mtime_ns + 1))
+        os.utime(path, ns=(state.st_atime_ns, state.st_mtime_ns + TOUCH))
 
     def replaced() -> None:
         copy = tmp_path / "copy"
@@ -1100,7 +1103,7 @@ def test_load_refuses_a_file_changed_since_its_hash(
         hashes.sha256(path)
 
     def touch(path: Path) -> None:
-        os.utime(path, ns=(0, path.stat().st_mtime_ns + 1))
+        os.utime(path, ns=(0, path.stat().st_mtime_ns + TOUCH))
 
     done: list[str] = []
 

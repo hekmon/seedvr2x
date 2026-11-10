@@ -5,6 +5,7 @@ whatever step of the wall it adds."""
 
 import logging
 import os
+import sys
 import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from posix_only import TZSET
 
 import run
 import stop as stop_module
@@ -253,7 +255,11 @@ def at(ratio: float) -> Pace:
 @pytest.fixture(autouse=True)
 def zone_utc() -> Iterator[None]:
     """The local zone, which a job's end is said in (timing.ending), set to UTC here, the
-    process's given back."""
+    process's given back. Windows has no time.tzset: the tests that read the zone are marked
+    posix_only.TZSET, and the others need none."""
+    if sys.platform == "win32":
+        yield
+        return
     before = os.environ.get("TZ")
     os.environ["TZ"] = "UTC"
     posix_time.tzset()
@@ -343,6 +349,7 @@ UNITS = [Unit(("encode", 0), "the encode", (("encode", 1),))]  # 600 s of the ru
     ("ratio", "left", "end"),
     [(1.0, "10 min 0 s", "22:10"), (0.9, "9 min 0 s", "22:09"), (1.1, "11 min 0 s", "22:11")],
 )
+@TZSET
 def test_the_time_left_and_the_end_are_the_walls(ratio: float, left: str, end: str, paced) -> None:
     paced(ratio)
     progress = Progress(Clock(MODELS), UNITS, lambda: START)
@@ -352,6 +359,7 @@ def test_the_time_left_and_the_end_are_the_walls(ratio: float, left: str, end: s
     assert progress.cost(("encode", 0)) == pytest.approx(600.0)
 
 
+@TZSET
 def test_the_assembly_left_is_said_in_the_walls_seconds(paced) -> None:
     paced(0.9)
     progress = Progress(Clock(MODELS), [], lambda: START, lambda: 600.0)
@@ -404,6 +412,7 @@ def test_the_spent_time_is_said_in_the_walls_seconds(
     )
 
 
+@TZSET
 def test_the_time_of_day_is_the_walls_across_a_step() -> None:
     # Progress says the end from the wall's `now` at the moment it is asked: a step of the wall
     # clock moves the end it says with it, as the clock on the wall does.

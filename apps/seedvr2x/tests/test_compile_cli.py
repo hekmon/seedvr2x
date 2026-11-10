@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 import torch
+from posix_only import COMPILE, PROC, SYMLINKS
 from test_compile import (
     FakeVAE,
     fake_models,
@@ -443,12 +444,14 @@ MOUNTINFO = r"""22 1 8:16 / / rw,relatime - ext4 /dev/sdd rw,discard
         ("/mnt/plain9p/job", False),
     ],
 )
+@PROC
 def test_a_windows_drive_is_the_longest_mount_point_that_says_drvfs(path: str, drive: bool) -> None:
     # The longest mount point that is a prefix of the path decides (a Linux disk nested in the
     # drive is Linux's; /mnt/dd is not under /mnt/d); a 9p mount counts only with aname=drvfs.
     assert planner.on_windows_drive(Path(path), MOUNTINFO) is drive
 
 
+@PROC
 def test_an_unreadable_mountinfo_is_linuxs_disk_said_at_debug(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1072,6 +1075,7 @@ def manifest_of(directory: Path) -> dict[str, Any]:
     return json.loads((directory / "manifest.json").read_text())
 
 
+@COMPILE
 def test_the_flag_is_recorded_and_the_models_load_with_the_compilation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1126,6 +1130,7 @@ def test_without_the_flag_nothing_is_compiled(
     assert not (tmp_path / "out" / "compile-cache").exists()
 
 
+@COMPILE
 def test_a_resume_with_the_other_value_is_another_job(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1160,6 +1165,7 @@ def test_a_resume_with_the_other_value_is_another_job(
         )
 
 
+@COMPILE
 def test_a_job_outside_the_shapes_measured_is_refused_never_run_plain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1193,6 +1199,7 @@ def test_a_job_outside_the_shapes_measured_is_refused_never_run_plain(
     assert manifest_of(out)["plan"]["compile_vae"] is False
 
 
+@COMPILE
 def test_a_pin_beyond_the_shapes_measured_is_refused_by_the_command_with_its_advice(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1212,6 +1219,7 @@ def test_a_pin_beyond_the_shapes_measured_is_refused_by_the_command_with_its_adv
     assert loads.given == []
 
 
+@COMPILE
 def test_plan_says_the_compilations_time_and_the_estimate_counts_it_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1265,6 +1273,8 @@ def test_the_load_time_names_the_compilation_once_and_adds_nothing(
         assert "12 min" not in caplog.text and "11 min" not in caplog.text
 
 
+@SYMLINKS
+@COMPILE
 def test_the_cache_is_the_jobs_own_and_stays_where_the_job_does(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1330,6 +1340,7 @@ def test_a_compile_cache_is_the_jobs_own_only_when_the_job_asked_for_the_compile
     assert not foreign.exists()
 
 
+@COMPILE
 def test_a_vae_that_does_not_compile_refuses_the_job_before_anything_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1348,6 +1359,7 @@ def test_a_vae_that_does_not_compile_refuses_the_job_before_anything_runs(
     assert steps.calls == []
 
 
+@COMPILE
 def test_inductors_modules_are_imported_before_the_environment_is_read_with_the_flag(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1385,6 +1397,7 @@ def inductor_modules(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return imported
 
 
+@COMPILE
 def test_a_plan_with_no_unit_made_is_planned_again_for_the_other_value_with_no_flag(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1435,6 +1448,7 @@ def test_a_plan_with_no_unit_made_is_planned_again_for_the_other_value_with_no_f
     assert loads.given[-1][5] is not None
 
 
+@COMPILE
 def test_a_job_with_units_made_toggled_is_another_jobs_settings_not_its_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

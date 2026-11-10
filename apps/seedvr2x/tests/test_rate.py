@@ -45,6 +45,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 from levels import levels
+from posix_only import PROGRAM
 from test_conversion import UNTAGGED_HD
 from test_index import joined_ts
 from test_probe import has_encoder
@@ -2891,6 +2892,7 @@ def placed(index: FrameIndex | None) -> list[int]:
         ("mpeg2", "24000/1001", "ts", "variable frame rate: frames last from 21 to 42 ms"),
     ],
 )
+@PROGRAM
 def test_the_join_advised_keeps_every_frame_on_the_grid(
     tmp_path: Path, codec: str, fps: str, suffix: str, plain: str
 ) -> None:
@@ -2945,6 +2947,7 @@ def test_the_join_advised_keeps_every_frame_on_the_grid(
 
 
 @needs_ffmpeg
+@PROGRAM
 def test_the_join_advised_takes_the_segments_in_name_order(tmp_path: Path) -> None:
     # Why the message says what its commands ask of the segments' names. 12 segments of 20
     # frames named seg_1.mkv to seg_12.mkv, the join and the remake typed as the message gives
@@ -2979,6 +2982,7 @@ def test_the_join_advised_takes_the_segments_in_name_order(tmp_path: Path) -> No
 
 @needs_ffmpeg
 @pytest.mark.parametrize("shell", SHELLS)
+@PROGRAM
 def test_the_join_advised_takes_any_name(tmp_path: Path, shell: str) -> None:
     # The names the listing was written for (rate.LISTED; design, 2026-10-12): a segment whose
     # name begins with a hyphen, which listed by *.mkv is an option to ffprobe ("Missing
@@ -3049,6 +3053,7 @@ def test_the_join_advised_takes_any_name(tmp_path: Path, shell: str) -> None:
     ],
     ids=["audio in Matroska", "program streams", "a transport stream of one frame"],
 )
+@PROGRAM
 def test_segments_no_stream_copy_holds_are_remade(
     tmp_path: Path, codec: str, suffix: str, audio: bool, copied: str
 ) -> None:
@@ -3086,6 +3091,7 @@ def test_segments_no_stream_copy_holds_are_remade(
 
 
 @needs_ffmpeg
+@PROGRAM
 def test_a_directorys_remake_takes_the_rate_typed(tmp_path: Path) -> None:
     # A directory's refusal can't know its segments' rate: both its commands take it from the
     # shell's N and D, set at the start of each, 24000/1001 an example, said to be one before
