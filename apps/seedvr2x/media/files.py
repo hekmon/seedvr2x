@@ -26,6 +26,45 @@ SHARING_VIOLATION, ACCESS_DENIED = 32, 5
 HELD = (ACCESS_DENIED, SHARING_VIOLATION)
 
 
+# A directory where seedvr2x puts or removes a file, as Windows refuses it (impl-win-5, measured
+# natively on 2026-11-10): a replace onto it or its unlink, access denied (WinError 5), the words
+# of a file held, read-only or protected; its opening, errno 13 with no winerror, Linux's
+# IsADirectoryError. Said as what it is (in_the_way), its own way out; a directory seedvr2x means
+# to remove (rmdir, rmtree) is no such case, and keeps held's words.
+
+
+def in_the_way(path: str | None, action: str, error: OSError) -> str | None:
+    """The words of a refusal on Windows where `path` is a directory and seedvr2x meant a file
+    there, None where it isn't one: Windows' reason, and the way out, the directory moved or
+    renamed, or another name given."""
+    if path is None or not os.path.isdir(path):
+        return None
+    code = getattr(error, "winerror", None)
+    reason = (
+        f"{error.strerror} ({f'WinError {code}' if code is not None else f'errno {error.errno}'})"
+    )
+    return (
+        f"{path}: a directory, where seedvr2x needs a file: Windows refused to {action}: {reason};"
+        " move or rename that directory, or give another name, then run the same command again"
+    )
+
+
+# The removals of a directory seedvr2x means to remove (rmdir, shutil.rmtree and its helpers), by
+# a frame's name or the innermost frame's line: a refusal there is no directory in a file's place.
+_DIRECTORY_REMOVALS = re.compile(r"^(?:rmdir|removedirs|rmtree|_rmtree_\w+)$")
+_REMOVES_A_DIRECTORY = re.compile(r"\b(?:rmdir|removedirs|rmtree)\(")
+
+
+def _removing_a_directory(error: OSError) -> bool:
+    """Whether `error` was met removing a directory on purpose (_DIRECTORY_REMOVALS)."""
+    if error.__traceback__ is None:
+        return False
+    frames = traceback.extract_tb(error.__traceback__)
+    if any(_DIRECTORY_REMOVALS.match(frame.name) for frame in frames[1:]):
+        return True
+    return bool(frames) and _REMOVES_A_DIRECTORY.search(frames[-1].line or "") is not None
+
+
 class HeldFile(MediaError, PermissionError):
     """A replace or a removal Windows refused (held): the file, what was refused and Windows'
     reason. A PermissionError too, so that what caught a failed write's OSError still does."""
@@ -33,8 +72,9 @@ class HeldFile(MediaError, PermissionError):
 
 def held(error: OSError, what: str = "") -> str | None:
     """The words of a Windows refusal of a file's replace or removal (HELD), None for any other
-    error: the file (a rename's target, the file put in its place named too), `what` was refused
-    (else told by the error), Windows' reason, its likely causes, then the way out."""
+    error: a directory in the file's place said as one (in_the_way); else the file (a rename's
+    target, the file put in its place named too), `what` was refused (else told by the error),
+    Windows' reason, its likely causes, then the way out."""
     winerror = getattr(error, "winerror", None)
     if sys.platform != "win32" or winerror not in HELD:
         return None
@@ -44,6 +84,18 @@ def held(error: OSError, what: str = "") -> str | None:
         action = f"{action} it with {os.path.basename(error.filename)}, beside it"
     else:
         action = f"{action} it"
+    if (
+        winerror == ACCESS_DENIED
+        and not _removing_a_directory(error)
+        and not (
+            error.filename2 is not None
+            and error.filename is not None
+            and os.path.isdir(error.filename)
+        )
+    ):
+        directory = in_the_way(path, action, error)
+        if directory is not None:
+            return directory
     causes = (
         "another program has it open (a player, an editor, a file manager's preview): close it"
         " there"
@@ -86,10 +138,18 @@ def changing(error: OSError) -> bool:
 
 
 def refused(error: OSError) -> str | None:
-    """The words of a Windows refusal (HELD) of a file, None for any other error: a change or a
+    """The words of a Windows refusal (HELD) of a file, None for any other error: a directory where
+    the file goes said as one (in_the_way: its opening refused with errno 13 alone); a change or a
     removal said by `held`; anything else said as the file's opening refused, to read it or to
     write it (open() raises both, the same way), with Windows' reason and its likely causes
     (another program holding the file exclusively, or permissions), never as a change."""
+    if (
+        isinstance(error, PermissionError)
+        and sys.platform == "win32"
+        and getattr(error, "winerror", None) is None
+        and not changing(error)
+    ):
+        return in_the_way(error.filename, "open it", error)
     if sys.platform != "win32" or getattr(error, "winerror", None) not in HELD:
         return None
     if changing(error):

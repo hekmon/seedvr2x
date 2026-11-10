@@ -5,6 +5,7 @@ program holds it refused in its words (files.held), and a video's directory lock
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -103,6 +104,73 @@ def test_a_held_file_is_said_with_its_name_and_windows_reason(
     assert files.held(windows_error(2, tmp_path / "a.mkv")) is None
     # Still an OSError where a failed write's was caught, and a MediaError where a run's is.
     assert issubclass(files.HeldFile, PermissionError) and issubclass(files.HeldFile, MediaError)
+
+
+def test_a_directory_where_a_file_goes_is_said_as_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Windows refuses a replace onto a directory and its unlink with access denied (WinError 5),
+    # and its opening with errno 13 alone (measured natively, impl-win-5, 2026-11-10): said as a
+    # directory in the file's place, never as a file held, read-only or protected.
+    target = tmp_path / "a.mkv"
+    target.mkdir()
+    replace = windows_error(5, tmp_path / "a.partial", target)
+    opening = PermissionError(13, "Permission denied", str(target))
+    if sys.platform != "win32":
+        assert files.held(replace) is None and files.refused(opening) is None
+    monkeypatch.setattr(files.sys, "platform", "win32")
+    assert files.held(replace) == (
+        f"{target}: a directory, where seedvr2x needs a file: Windows refused to replace it with"
+        " a.partial, beside it: The process cannot access the file (WinError 5); move or rename"
+        " that directory, or give another name, then run the same command again"
+    )
+    assert files.refused(replace) == files.held(replace)
+    removal = files.held(windows_error(5, target))
+    assert removal is not None and removal.startswith(
+        f"{target}: a directory, where seedvr2x needs a file: Windows refused to change or remove"
+        " it: "
+    )
+    assert files.refused(opening) == (
+        f"{target}: a directory, where seedvr2x needs a file: Windows refused to open it:"
+        " Permission denied (errno 13); move or rename that directory, or give another name,"
+        " then run the same command again"
+    )
+    # A file there, or a directory put onto a directory (replace_whole's PNG segments): the
+    # words of before; a file's opening refused with no winerror is no refusal of Windows'.
+    assert "a directory, where" not in str(files.held(windows_error(5, tmp_path / "b.mkv")))
+    partial = tmp_path / "a.partial"
+    partial.mkdir()
+    assert "a directory, where" not in str(files.held(windows_error(5, partial, target)))
+    assert files.refused(PermissionError(13, "Permission denied", str(tmp_path / "b"))) is None
+    # A directory seedvr2x means to remove (rmdir, rmtree) keeps held's words: read-only or
+    # protected, it is no directory in a file's place.
+    (target / "inside").touch()
+    for remove in (target.rmdir, lambda: shutil.rmtree(tmp_path / "missing")):
+        with pytest.raises(OSError) as raised:
+            remove()
+        error = raised.value  # raised in the removal's own frames, given the directory's name
+        error.filename, error.winerror = str(target), 5  # type: ignore[attr-defined]
+        assert "a directory, where" not in str(files.held(error))
+        assert "Windows refused to change or remove it" in str(files.refused(error))
+    # Sharing violations are a holder's, whatever the path.
+    assert "another program has it open" in str(files.held(windows_error(32, partial, target)))
+
+
+@on_windows
+def test_on_windows_a_directory_where_a_file_goes_is_said_as_one(tmp_path: Path) -> None:
+    target = tmp_path / "out.mkv"
+    target.mkdir()
+    source = tmp_path / "out.partial"
+    source.write_bytes(b"x")
+    for call in (lambda: os.replace(source, target), lambda: os.unlink(target)):
+        with pytest.raises(OSError) as raised:
+            call()
+        said = files.refused(raised.value)
+        assert said is not None and said.startswith(f"{target}: a directory, where seedvr2x")
+    with pytest.raises(PermissionError) as opened:
+        open(target, "wb")
+    said = files.refused(opened.value)
+    assert said is not None and "Windows refused to open it" in said and "(errno 13)" in said
 
 
 def raised_by(call: str, winerror: int, path: Path) -> OSError:
