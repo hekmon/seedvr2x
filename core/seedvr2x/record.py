@@ -3,8 +3,9 @@ nothing of the source's but its size. The app that made it, its version and seed
 source's and the output's sizes, the short side asked and the sample aspect used, the DiT's and the
 VAE's files with their SHA-256, the seed, the colour correction, the encode's and the decode's
 tiles, the attention kernel, and for a video its window cap, --quality, --compile, whether it was
-planned again on a resume, and its cuts: what changes the output's bits, the GPU and the libraries'
-versions aside. With them, IPTC's digital source type as the AI mark. Always written, no option.
+planned again on a resume, its cuts, and the deband its frames were read through, when they were:
+what changes the output's bits, the GPU and the libraries' versions aside. With them, IPTC's
+digital source type as the AI mark. Always written, no option.
 
 One record, two forms: an XMP packet for a picture (png.py's iTXt chunk, webp.py's XMP chunk) and
 stream tags for a video (the CLI's FFV1 writer and assembly), the same fields in the same order.
@@ -80,7 +81,9 @@ class Video:
     resume (--accept-env-change: its values are then the job's plan, each unit's own in its
     manifest), and its cuts: cut_threshold, the threshold they were detected at as the job's
     settings write it ("0.3"), or cuts_sha256, the SHA-256 of the list --cuts named
-    (cuts_sha256()), one of the two."""
+    (cuts_sha256()), one of the two; and deband, the filter the frames were read through
+    (--deband: "deband=blur=0", the CLI's DEBAND), None for frames read as they are, the field
+    then not written, as in every record before it."""
 
     window: int
     quality: str
@@ -88,6 +91,7 @@ class Video:
     replanned: bool
     cut_threshold: str | None = None
     cuts_sha256: str | None = None
+    deband: str | None = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +141,8 @@ class Record:
                 raise ValueError("a video's cuts are a threshold or a list's SHA-256, one of two")
             if self.video.cuts_sha256 is not None and not _SHA256.fullmatch(self.video.cuts_sha256):
                 raise ValueError(f"not a SHA-256 in lower-case hex: {self.video.cuts_sha256!r}")
+            if self.video.deband is not None and not self.video.deband:
+                raise ValueError("a video's deband is a filter, or None for none")
 
     @property
     def creator(self) -> str:
@@ -180,6 +186,8 @@ class Record:
             else:
                 assert self.video.cuts_sha256 is not None
                 found.append(("cuts_sha256", self.video.cuts_sha256))
+            if self.video.deband is not None:
+                found.append(("deband", self.video.deband))
         return found
 
     def xmp(self) -> bytes:
@@ -226,11 +234,14 @@ class Record:
 
 
 def tag_names() -> frozenset[str]:
-    """Every tag name a video's record may hold (Record.tags), a video's fields and both forms of
-    its cuts included."""
+    """Every tag name a video's record may hold (Record.tags), a video's fields, both forms of
+    its cuts and its deband included."""
     model = Model("", "0" * 64)
     names: set[str] = set()
-    for video in (Video(0, "", False, False, "0"), Video(0, "", False, False, None, "0" * 64)):
+    for video in (
+        Video(0, "", False, False, "0", deband="deband"),
+        Video(0, "", False, False, None, "0" * 64),
+    ):
         sample = Record("a", "0", (1, 1), (1, 1), 1, Fraction(1), model, model, 0, "", 0, 0, video)
         names.update(name for name, _ in sample.tags())
     return frozenset(names)

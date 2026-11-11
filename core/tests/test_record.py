@@ -141,7 +141,22 @@ def test_the_tags_hold_the_same_fields_prefixed() -> None:
         ("seedvr2x_replanned", "true"),
         ("seedvr2x_cut_threshold", "0.3"),
     ]
-    assert record.tag_names() == {name for name, _ in MOVIE.tags()} | {"seedvr2x_cuts_sha256"}
+    assert record.tag_names() == {name for name, _ in MOVIE.tags()} | {
+        "seedvr2x_cuts_sha256",
+        "seedvr2x_deband",
+    }
+
+
+def test_a_video_read_through_a_deband_says_its_filter_and_one_read_plain_nothing() -> None:
+    # --deband's filter as the frames were read through it, last, in the packet and the tags;
+    # a video read without it writes no such field, the record of before it (MOVIE's above).
+    video = Video(20, "maximum", True, True, cut_threshold="0.3", deband="deband=blur=0")
+    debanded = dataclasses.replace(MOVIE, video=video)
+    _, _, fields = read_xmp(debanded.xmp())
+    assert fields[-2:] == [("cut_threshold", "0.3"), ("deband", "deband=blur=0")]
+    assert debanded.tags() == [*MOVIE.tags(), ("seedvr2x_deband", "deband=blur=0")]
+    assert not [name for name, _ in MOVIE.tags() if "deband" in name]
+    assert not [name for name, _ in MOVIE.fields() if "deband" in name]
 
 
 def test_the_bytes_are_the_fields_alone() -> None:
@@ -192,6 +207,7 @@ def test_a_path_given_for_a_model_is_written_as_its_file_name() -> None:
         {"video": Video(5, "standard", False, False)},
         {"video": Video(5, "standard", False, False, "0.3", "1" * 64)},
         {"video": Video(5, "standard", False, False, None, "not hex")},
+        {"video": Video(5, "standard", False, False, "0.3", deband="")},
     ],
 )
 def test_a_field_out_of_range_is_a_value_error(change: dict[str, object]) -> None:

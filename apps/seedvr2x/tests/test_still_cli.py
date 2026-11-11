@@ -631,6 +631,7 @@ GIVEN: dict[str, tuple[list[str], str]] = {
     "min_segment": (["--min-segment", "2"], "no output segments"),
     "input_matrix": (["--input-matrix", "bt709"], "no YUV matrix"),
     "frame_rate": (["--frame-rate", "25"], "no frame rate"),
+    "deband": (["--deband"], "read without ffmpeg"),
     "window": (["--window", "6"], "no windows"),
     "compile": (["--compile"], "not over one picture"),
     "until": (["--until", "07:00"], "one unit"),

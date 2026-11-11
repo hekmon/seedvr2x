@@ -36,7 +36,7 @@ from job import (
     SEED_LIMIT,
     default_smaller,
 )
-from media.conversion import MATRICES
+from media.conversion import DEBAND, MATRICES
 from media.ffmpeg import MediaError
 from media.writer import FORMATS
 from seedvr2x import waiting
@@ -651,6 +651,20 @@ def _parser() -> argparse.ArgumentParser:
         " a whole number (24000/1001, 25): its frames taken at that rate, only if every one lies"
         " within half a frame of that rate's timeline",
     )
+    # An input deband, opt-in, never a default (DESIGN.md, Input, "Banded sources", decided on
+    # 2026-11-09): ffmpeg's deband in the reads' conversion (media/conversion.py, DEBAND). The
+    # help names the sources the study found banded (impl-box-1: dark shaded animation, near-black
+    # haze) and what it may cost elsewhere, with no figure in it, as --compile's.
+    parser.add_argument(
+        "--deband",
+        action="store_true",
+        help="smooth the source's banding before the model sees it: ffmpeg's deband on every frame"
+        " the job reads, at the reads' full precision, before their conversion to RGB; the shot"
+        " detection reads the source as it is. For sources whose smooth gradients come in visible"
+        " steps, most often dark shaded animation and near-black haze, where the model draws the"
+        " steps as contour lines; elsewhere it may take faint lines or fine gradients for banding,"
+        " so it is never on by default. A setting, which a resume repeats; not for a picture",
+    )
     parser.add_argument(
         "--window",
         type=int,
@@ -1116,7 +1130,9 @@ def _run(args: argparse.Namespace) -> int:
         # line open): it stays, as the one fact of the line a user can give with a bug report.
         logger.info("ffmpeg %s", ffmpeg_version)
         logger.debug("ffmpeg's conversions' fingerprint %s", conversions[:16])
-        declared = declare(args.input, args.input_matrix, args.input_sar, args.frame_rate)
+        declared = declare(
+            args.input, args.input_matrix, args.input_sar, args.frame_rate, args.deband
+        )
         # The size the frames are resized to, from what the source declares; refused, before the
         # first pass, when too small to pad (frames.check_target).
         stream = declared.stream
@@ -1545,6 +1561,7 @@ def _run(args: argparse.Namespace) -> int:
             said = planner.said(
                 *(plan, peaks, card, target, shots, pins),
                 quality=args.quality,
+                deband=args.deband,
                 recorded=kept_plan is not None and reshaped is None,
                 layouts=None
                 if prior is None
@@ -3919,6 +3936,10 @@ def _settings(
         # "24" for a whole rate, "24000/1001" otherwise, either read back exactly (kept by
         # design, 2026-10-10).
         "frame_rate": None if args.frame_rate is None else str(args.frame_rate),
+        # --deband's filter as the reads run it (media/conversion.py, DEBAND), which changes every
+        # frame the model is given: a resume with the other value is another job. Written only
+        # when on, so that a job without it records the settings of before.
+        **({"deband": DEBAND} if args.deband else {}),
     }
     return settings
 
@@ -5104,6 +5125,12 @@ def _replan(record: "Manifest", prior: _Prior, shape: list[str]) -> None:
     )
 
 
+# The option a setting's difference names beside its key, where the key alone would not say
+# which option to give or leave out: --deband's is written only when on (_settings), its line
+# `settings.deband: null -> "deband=blur=0"`.
+SETTING_OPTIONS = {"deband": "--deband"}
+
+
 def _another_job(
     path: Path,
     found: list[str],
@@ -5114,9 +5141,17 @@ def _another_job(
     """A resume refused, each difference listed, `where: recorded -> now`; `units_made` when the
     settings differ alone in what a plan would take (_prior, resume.FIRST_PASS_SETTINGS), but the
     job has made units; `plan_elsewhere` when a plan's settings differ, which it takes, and its
-    environment too, which --accept-env-change takes."""
+    environment too, which --accept-env-change takes. A setting of SETTING_OPTIONS is said with
+    its option."""
+    import resume
     from seedvr2x.errors import JobError
 
+    found = [
+        f"{line} ({SETTING_OPTIONS[name]})"
+        if (name := resume.setting(line)) in SETTING_OPTIONS
+        else line
+        for line in found
+    ]
     return JobError(
         f"{path}: another job than the one asked, which differs in:\n  "
         + "\n  ".join(found[:20])
@@ -5218,6 +5253,7 @@ def _job_record(content: dict[str, Any]) -> "Record":
             plan["compile_vae"],
             replanned,
             cut_threshold=None if cuts is not None else settings["cut_threshold"],
+            deband=settings.get("deband"),
             cuts_sha256=None if cuts is None else cuts_sha256(cuts),
         ),
     )

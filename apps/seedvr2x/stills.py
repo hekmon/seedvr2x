@@ -91,6 +91,13 @@ REFUSED = {
         "a picture's decoder gives its RGB, with no YUV matrix to name",
     ),
     "frame_rate": ("--frame-rate", "a picture has no frame rate"),
+    # DESIGN.md, Input, "Banded sources": a deband in torch, written from the algorithm's
+    # description, comes for the nodes and pictures later.
+    "deband": (
+        "--deband",
+        "a picture is read without ffmpeg, whose deband filter the option runs; a picture's own"
+        " deband isn't built yet",
+    ),
     "window": ("--window", "a picture is one latent in the DiT, with no windows to cap"),
     "compile": (
         "--compile",

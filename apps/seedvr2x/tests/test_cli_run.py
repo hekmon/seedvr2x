@@ -9201,6 +9201,8 @@ def recorded_tags(
         "SEEDVR2X_COMPILE": "true" if plan["compile_vae"] else "false",
         "SEEDVR2X_REPLANNED": "true" if replanned else "false",
         **cuts,
+        # --deband's filter, only on a job that has it (test_deband_cli.py).
+        **({"SEEDVR2X_DEBAND": settings["deband"]} if "deband" in settings else {}),
     }
 
 
