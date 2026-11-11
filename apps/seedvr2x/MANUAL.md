@@ -648,6 +648,43 @@ Measured ([numerics.md](../../research/docs/numerics.md)):
 There is no strength or detail option in version 1. What remains of the over-rendering goes
 both ways with the content, and the one global blend measured washes lines out to the eye.
 
+### Banded sources: `--deband`
+
+An 8-bit source's smooth gradient comes in steps of one code, about 0.4% of the range, which no
+eye sees in the source. On a dark animated sky both 7B models drew them as contour lines across
+the gradient, at `standard` and at `maximum`, which the eye sees: most likely where a compressed
+source leaves the steps as wide flat plateaus with hard borders, the grain that would hide them
+taken off by its encoder.
+
+`--deband` smooths the steps before the model sees them: ffmpeg's own `deband` without its blur
+(`deband=blur=0`), on every frame the job reads, brought to 16 bits first so that the values it
+puts between two codes are kept, then converted to RGB as any read is. On that sky it brought
+the terraces under a plain bicubic upscale's, where ffmpeg's `gradfun` left lines by the edges;
+without its blur it left less speckle along the clouds' borders than with it, and kept most of
+the mountain's texture below. The model's input keeps that smoothing through its own casts and
+resize, whole in the dark tones where the banding was found: 99 to 101% of it on the study's
+scenes.
+
+- **Where it helps:** eight sources were scanned as the study's 540p re-encodes of them, the
+  downscale and the encode making most of the bands, as they would in a low-resolution source:
+  the banding found was in dark shaded animation and near-black haze with smooth gradients, and
+  in some dark live action; not in bright animation with clean lines, nor in finely painted
+  gradients.
+- **What it may cost:** on other sources it may take faint lines or fine gradients for banding
+  and smooth them, so it is never on by default.
+- **What it touches:** the frames the model is given and the colour correction's reference, the
+  input copies, which hold the frames the model saw; every read, a resume's too: a shot read from
+  its first frame gives the frames a read from the start gives. The shot detector reads the
+  source as it is, so the cuts are the same with it or without.
+- **A setting of the job:** in its manifest, in the record of each output (`seedvr2x_deband`)
+  and on a line of the plan. A resume with `--deband` given or left out otherwise than its job
+  began is another job, refused naming the option, once a unit is made; a plan that has made
+  none is planned again.
+- **What it doesn't do:** seedvr2x doesn't tell a banded source by itself, so the plan never
+  suggests `--deband`: the scores tried found the strongly banded scenes but missed the clip the
+  option was made for. A picture refuses it, being read without ffmpeg, and so do sources in
+  `yuv411p`, `yuv410p` or `yuv440p`, a chroma subsampling ffmpeg has no 16-bit format of.
+
 ## Several runs of a shot: `--quality`
 
 `--quality` is the one option that buys quality with time. `standard`, the default, runs the
@@ -1030,10 +1067,11 @@ output's, the short side asked and the sample aspect used, the DiT's and the VAE
 with their SHA-256, the seed, the colour correction, the tiles and the attention kernel (always
 "sdpa", kept so that an output made before
 says what made it), and for
-a video its window cap, `--quality`, `--compile` and its cuts (the threshold they were detected
+a video its window cap, `--quality`, `--compile`, its cuts (the threshold they were detected
 at, or, for a list given with `--cuts`, the SHA-256 of its cuts written one frame number a line,
-not of the file). That is what changes the output's bits, so an output can be made again from
-it, on the same GPU and libraries. It is always written, with no option to leave it out, and
+not of the file) and, with `--deband`, the filter its frames were read through. That is what
+changes the output's bits, so an output can be made again from it, on the same GPU and
+libraries. It is always written, with no option to leave it out, and
 holds nothing personal: no path, no date, no machine. Beside it is the mark platforms read to
 label a picture made or enhanced with a generative AI model, IPTC's digital source type
 `compositeWithTrainedAlgorithmicMedia`.
@@ -2239,6 +2277,8 @@ why it was taken, what it costs, and the option that changes it ([GPU memory](#g
   The two short shots fit whole; the long one runs in two windows, 1 join.
 - **quality:** the level, and what the others would cost ([several runs of a
   shot](#several-runs-of-a-shot---quality)).
+- **deband:** with `--deband` alone, after the quality line: the filter, where it runs, and the
+  shot detection reading the source as it is ([banded sources](#banded-sources---deband)).
 - **blocks swapped:** 33 of the DiT's 36 wait in system memory, so that the window gets their
   room. Slower, not worse: swapping changes no bit. A DiT file in float16 or int8 that swaps
   blocks may be followed by a line naming the smaller files that would plan the job better,
@@ -2410,6 +2450,7 @@ this manual is.
 | `--seed SEED` | The seed, 42 by default ([seeds](#seeds-and-reproducibility)). |
 | `--quality LEVEL` | `standard` (the default), `enhanced` or `maximum`: each shot run 1, 2 or 4 times ([several runs of a shot](#several-runs-of-a-shot---quality)). |
 | `--color-correction {split,none}` | `split` by default ([colour correction](#colour-correction)). |
+| `--deband` | Smooth the source's banding before the model: ffmpeg's deband at 16 bits on every frame the job reads, the shots found on the source as it is; never on by default, a setting of the job, refused for a picture ([banded sources](#banded-sources---deband)). |
 | `--compile` | Compile the VAE: about a tenth less time on a long job, minutes of compilation at every start, its frames not plain code's; a setting of the job ([compiling the VAE](#compiling-the-vae---compile)). |
 
 **What the source says of itself, when it is missing or wrong**

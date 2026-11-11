@@ -827,6 +827,32 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `tests/test_seek_sources.py` holds the index and its reads to measurement's real sources, on the
   CPU: opt-in, it reads the list of sources named by `SEEDVR2X_SEEK_SOURCES`, each with
   `seek_test.py`'s outputs for it (its docstring says the list's format), and skips without it.
+- `--deband` (DESIGN.md, Input, "Banded sources"; `media/conversion.py`'s `DEBAND`, `DEEP` and
+  `Conversion.deband`): the reads' chain brings the frames to their 16-bit format by zscale (a
+  limited range shifted, a full range scaled, exactly: swscale's full-range expansion is not),
+  runs `deband=blur=0` there and converts to RGB from that format; a conversion without it is
+  the chain of before, byte for byte. `tests/test_deband.py` holds the filter strings with and
+  without it against main's literals, every planar format's 16-bit twin (yuv411p, yuv410p and
+  yuv440p, which have none, refused naming `--deband`), the 16 bits exact (a full range's chroma
+  centred, v * 257 - 128), a read with it equal
+  frame for frame (MD5 of the reader's RGB) to the source debanded by ffmpeg alone (the format
+  filter, deband on one thread, into a 16-bit FFV1 file) and read without it, the first pass's
+  index and shot detector frames the same with it and without (a contract: the first pass
+  takes no conversion), and a shot read by the reader's
+  seek inside a GOP of an x264 source (B-frames) equal to a read from the start, with it;
+  `tests/test_zscale.py` its chain on one slice and its bytes the same on 1 and 16 filter
+  threads. `tests/test_deband_cli.py`: the frames each encode reads and the masters (the colour
+  correction's reference included) of a job with it those of a job without it on the source
+  debanded by ffmpeg, the settings' key, the record's `seedvr2x_deband` (masters and finished
+  file) and the plan's line only when on, a resume with the other value refused as another job
+  naming `--deband` (`main.SETTING_OPTIONS`), a plan with no unit made planned again with the
+  other value from its first pass's record, a resume with it, its input copy deleted and made
+  again, giving the uninterrupted job's masters, the help with no figure;
+  `tests/test_still_cli.py` a picture's refusal; `core/tests/test_record.py` the field. deband
+  is among `ffmpeg.FILTERS` and the conversions' fingerprint runs two of its chains, a limited
+  and a full range, at every start. No line suggests `--deband`: CAMBI found the strongly
+  banded scenes and missed the clip the option was made for (impl-box-1), so no detection is
+  built.
 - The shot detector in the first pass (`media/scan.py`) is held by `tests/test_detection.py`, a
   recording stand-in in its place: its frames are the official extraction command's byte for
   byte, on 18 pixel formats whatever the official command's scaler threads (1, 4, or ffmpeg's

@@ -168,6 +168,14 @@ time. On a long job, `--compile` saves about a tenth of the GPU time, for minute
 compilation at each start: a short job loses ([the manual](MANUAL.md#compiling-the-vae---compile)
 says where the line falls).
 
+A source whose smooth gradients come in fine steps, most often dark shaded animation and
+near-black haze, can come out with those steps drawn as contour lines across the sky or the
+shadows: the steps of an 8-bit source, invisible there, are what the model sharpens.
+`--deband` smooths them first, with ffmpeg's deband at 16 bits on every frame the job reads;
+the shots are still found on the source as it is ([the manual](MANUAL.md#banded-sources---deband)).
+Elsewhere it may take faint lines or fine gradients for banding, so it is never on by default.
+It is a setting of the job, which a resume repeats; a picture refuses it.
+
 Ctrl-C, once, also stops cleanly: it finishes the piece of work in progress first. The same
 command resumes.
 
@@ -416,8 +424,8 @@ the first pass and its shot detector, the pipeline per shot with its windows, `-
 colour correction, the memory planner with BlockSwap and VAE tiling, the time estimates and
 `--until`, resume and `--accept-env-change`, the lossless masters and their checksums, the
 finished file's assembly and its manifest beside it, `--segment-cmd`, `--compile` (the VAE
-alone), `seedvr2x verify`, still pictures (PNG or lossless WebP), the int8 and dynamic GGUF
-files of both 7Bs, and seedvr2x's record in every output. The [image
+alone), `--deband` (a video's), `seedvr2x verify`, still pictures (PNG or lossless WebP), the
+int8 and dynamic GGUF files of both 7Bs, and seedvr2x's record in every output. The [image
 server](../imgserver/README.md) is built beside the command, on the same library.
 
 What comes next: [the roadmap](../../README.md#roadmap).
