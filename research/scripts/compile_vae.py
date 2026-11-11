@@ -10,18 +10,18 @@ What runs is seedvr2x's runtime, imported from its venv and never edited: model.
 the 7B fp16 DiT and the fp16 VAE, as the CLI loads them, then the DiT dropped (runtime.dit = None,
 the allocator emptied: load_models builds both and has no VAE-only load): what stays allocated is
 the VAE's weights and the text embeddings (1.2 MiB), both figures recorded. The encode is
-shot.encode_shot, as the pipeline calls it: the VAE called slice by slice (5 frames, then 4), the
+shot_pass.encode_shot, as the pipeline calls it: the VAE called slice by slice (5 frames, then 4), the
 posterior's mode and the latent's shift and scale as model.encode_stream does them, or with
 --encode-tile PX tiling.encode_tiled (a tile's crop of the same slices per tile). The decode is
 model.decode_stream (2 latents, then 1), or with --decode-tile PX tiling.decode_tiled, each slice
-clamped and moved to the CPU as it comes, as shot.decode_shot does; the latent waits in system
+clamped and moved to the CPU as it comes, as shot_pass.decode_shot does; the latent waits in system
 memory, as the pipeline's does. The decode takes the first plain encode's latent, with no DiT in
 between: a VAE round trip has the same shapes, memory and time as the pipeline's decode, and every
 decode of a run has the same input, so that its frames compare bit for bit. The tiles' scratch is
 in RAM, or in --scratch DIR (a file there).
 
 The input is a clip read with ffmpeg (--clip), resized to --size as the pipeline resizes it
-(shot.encoder_inputs, model.input_transform), or without one random frames at --source-size: the
+(shot_pass.encoder_inputs, model.input_transform), or without one random frames at --source-size: the
 content changes no shape, memory or compilation, nor does it make bits comparable differently (the
 same frames go through every pass), but only a clip gives the pipeline's own values, so use a clip
 for figures that are meant to be the pipeline's.
@@ -179,7 +179,7 @@ def read_clip(clip, count):
 
 
 def reader(frames):
-    """read(n) as shot.encode_shot takes it: the next n frames, (n, H, W, 3) float32 in [0, 1]."""
+    """read(n) as shot_pass.encode_shot takes it: the next n frames, (n, H, W, 3) float32 in [0, 1]."""
     position = 0
 
     def read(n):
@@ -737,12 +737,14 @@ class Bench:
 
     def __init__(self, models, frames, target, meter, encode_tiles=None, decode_tiles=None,
                  scratch=None):
-        import shot
+        # shot_pass: the shot's pass moved from the CLI's shot.py to the library on 2026-11-04.
+        from scratch import Scratch
 
         from seedvr2x import frames as sizes
-        from seedvr2x import model, tilegrid, tiling
+        from seedvr2x import model, shot_pass, tilegrid, tiling
 
-        self.model, self.shot, self.tiling, self.tilegrid = model, shot, tiling, tilegrid
+        self.model, self.shot_pass, self.tiling, self.tilegrid = model, shot_pass, tiling, tilegrid
+        self.Scratch = Scratch
         self.sizes = sizes
         self.models = models
         self.vae = models.runner.vae
@@ -803,22 +805,25 @@ class Bench:
         return kept, record
 
     def encode(self, count):
-        """The latent of the clip's first `count` frames, on the CPU as shot.encode_shot gave
+        """The latent of the clip's first `count` frames, on the CPU as shot_pass.encode_shot gave
         it (tiled with encode_tiles)."""
         padded = self.sizes.padded_length(count)
         read = reader(self.frames[:count])
+        # encode_shot takes the store itself since 2026-11-04 (it took the scratch's directory
+        # and allowance, and made this Scratch): the same store, made here.
+        store = self.Scratch(self.scratch, self.allowance)
         return self.phase(
             "encode", padded,
-            lambda: self.shot.encode_shot(
+            lambda: self.shot_pass.encode_shot(
                 self.models, read, count, self.target, 0,
-                tiles=self.encode_tiles, scratch=self.scratch, allowance=self.allowance,
+                tiles=self.encode_tiles, store=store,
             ),
             lambda latent: latent.cpu(),
         )
 
     def decode(self, latent, count):
         """The frames decoded from latent (on the CPU, as the pipeline's waits), each slice
-        clamped to [0, 1] and moved to the CPU as it comes, as shot.decode_shot does: (count, H,
+        clamped to [0, 1] and moved to the CPU as it comes, as shot_pass.decode_shot does: (count, H,
         W, 3) float32. Tiled with decode_tiles."""
         height, width = self.output
         padded = self.sizes.padded_length(count)
@@ -827,9 +832,7 @@ class Bench:
             if self.decode_tiles is None:
                 slices = self.model.decode_stream(self.models, latent)
             else:
-                from scratch import Scratch
-
-                store = Scratch(self.scratch, self.allowance)
+                store = self.Scratch(self.scratch, self.allowance)
                 slices = self.tiling.decode_tiled(self.models, latent, self.decode_tiles, store)
             chunks = []
             written = 0
@@ -1129,6 +1132,7 @@ def run(args):
 
     from seedvr2x import memory, model
     from seedvr2x.frames import padded_size
+    from seedvr2x.record import ATTENTION
     from seedvr2x.vendor.models.video_vae_v3.modules.types import MemoryState
 
     results["versions"]["driver_spills"] = memory.spills()
@@ -1136,7 +1140,8 @@ def run(args):
     models = model.load_models(args.model_dir / args.dit, args.model_dir / args.vae, device)
     torch.cuda.synchronize()
     results["memory"]["after_load"] = device_memory()
-    results["attention"] = models.attention
+    # FlashAttention 2 went on 2026-11-08: the kernel is SDPA alone, models.attention is gone.
+    results["attention"] = ATTENTION
     # The DiT off the GPU, as milestone 3 has it in the VAE's phases (load_models loads both, and
     # has no VAE-only load): what stays is the VAE's weights and the text embeddings.
     models.runner.dit = None
@@ -1196,7 +1201,7 @@ def run(args):
         save()
 
     for length in shots:
-        entry = {"frames": length, "padded": bench.shot.padded_length(length)}
+        entry = {"frames": length, "padded": bench.sizes.padded_length(length)}
         bench.decode_latent = None
         plain_outputs = None
         for kind in "AB":
