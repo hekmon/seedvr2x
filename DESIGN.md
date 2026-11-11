@@ -582,8 +582,11 @@ seedvr2x/                the repository
     (10.24 GiB free against 10.69). On 8 GB everything was refused; with the changes
     decided that day, built on 2026-11-06 ([Allocator](#allocator), Small cards), the shipped
     code ran the 4K picture there in 10.6 and 12.1 s (two runs) and the 1080p clip in 98.0
-    and 102.5 s, the clip in 74.6 and 82.5 s on 16 GB. The same cards on Linux, and native
-    Windows' share kept back, are the 96 GB card's and v0.2.0's to measure.
+    and 102.5 s, the clip in 74.6 and 82.5 s on 16 GB. On Linux's driver the command line
+    planned and ran a 1080p job on every size from 8 to 96 GB on 2026-11-11, headless, the
+    8 GB card's in 4.0 min; beside a desktop's 0.54 GiB the 8 GB card is refused, 0.31 GiB
+    short (To measure, The cards v0.1.0 is tested on). Native Windows' share kept back is
+    v0.2.0's to measure.
   - **The shot's pass moves to the library.** The sliding windows, their blend and the plan
     that sizes them, over frames in memory, which the CLI and ComfyUI's nodes both need, are
     bricks of `core/` since 2026-11-04 (impl-shotpass), moved from the CLI: `shots.py`, a shot
@@ -792,8 +795,10 @@ failure by trimming the pool and retrying" each time it trims (see [Allocator](#
 108 times in a 2-hour job on the 96 GB card, about every 8 s in its longest windows, one glued
 to the sampler's progress bar. A whole run's default output is read line by line with it,
 memory tight, on both drivers: nothing but seedvr2x's lines and a download's bar (read so on
-the RTX 5090 under WSL2 on 2026-10-30, beside a program holding 13 GiB; Linux's driver with
-the 96 GB card). The plan's lines teach as they go (see
+the RTX 5090 under WSL2 on 2026-10-30, beside a program holding 13 GiB, and on Linux's driver
+with the 96 GB card on 2026-11-11, a 1080p job whose card line says the driver refuses memory
+the card doesn't have, with no word of a lending driver: impl-box-1). The plan's lines teach
+as they go (see
 [Memory planner](#memory-planner)).
 
 Milestone 7's four nights on an RTX 5090 under WSL2 (2026-10-24 to 27), read so, found the
@@ -1913,7 +1918,7 @@ The rule: the upscale must look like its source in any given player.
   - The correction is only a different target size for the input resize (step 0 of the
     [Pipeline](#pipeline-per-shot)).
 
-### Banded sources: an input deband, an option to come
+### Banded sources: `--deband`
 Decided by the user on 2026-11-09, on impl-win-4's renders of the user's dark animation's sky
 (240 frames at 540p, x2 to 1080p, seed 42, both 7B models; measured on 96 of the frames).
 - **What the model does with banding.** An 8-bit source's smooth gradient comes in steps of
@@ -1959,11 +1964,44 @@ Decided by the user on 2026-11-09, on impl-win-4's renders of the user's dark an
   `blur=0`: equal in every comparison, ffmpeg's threads its own or one. The clip is
   all-intra, and that the filter keeps nothing from one frame to the next is inferred, not
   read: the study's sources are checked the same way.
+- **The study, measured** (impl-box-1, 2026-11-10 and 11, on the GPU box's CPUs): 295
+  excerpts of one shot from 8 sources, each brought to 540p as the full-reference clips'
+  inputs are (a bicubic downscale, then an 8-bit x264 encode): the downscale and the encode
+  make most of the bands, as they would in a low-resolution source (the 1080p excerpts score
+  far lower). Banding (CAMBI, libvmaf's banding score, at 4.5 or more) sat in dark shaded
+  animation, a TV series' (12 excerpts of 46) and a film's (8 of 50), in a live-action
+  film's near-black haze (5 of 12) and in another's dark scenes (3 of 40); none in a third
+  live-action film, a cel film with its grain, a bright cartoon or a painted short. CAMBI on
+  the input tells those scenes from the rest (an AUC of 0.997 on 65 excerpts labelled by the
+  study's own eye, not blind and not the user's, 0.948 with 5 doubtful ones counted banded;
+  at 4.5, 11 of 11 banded, the lowest at 4.84, with one false alarm in 54), but the user's
+  banded clip scores 2.12, as the negatives do, and at 2 the scan fires on 80 excerpts of
+  295: no line of the plan says that `--deband` may help (decided on 2026-11-11), the
+  documents say when to take it. Every read gives the same frames on five inter-coded
+  sources (H.264, a shot starting inside a group of pictures, both settings, before and
+  after the conversion): 60 comparisons, all equal, so the filter keeps nothing from one
+  frame to the next. Its renders (four banded scenes, four at risk: thin faint lines on
+  grain, flat bright fields, live action's grain, painted gradients; and the user's clip,
+  each at `maximum` with and without `blur=0`) wait for the user's eyes.
 - **Then the CLI:** ffmpeg's own `deband` in the reader's chain at 16 bits, before the RGB
   conversion, and that conversion built from the 16-bit format: its chain begins with the
   source's own planar format (`yuv420p` on this clip), which after `deband` would cut its
   output back to 8 bits (impl-win-5). Its setting in the job's settings and record (it
-  changes the output). The nodes
+  changes the output). Built on 2026-11-11 (impl-deband-1) at `blur=0`, before the eyes'
+  verdict on the study's renders, the setting one constant whose string the settings and
+  the record hold, so that they say what ran. zscale brings the frames to their 16-bit
+  format exactly, their matrix, range and siting kept (a limited range shifted, a full range
+  scaled, where swscale's full-range expansion is not exact); a conversion without it is the
+  chain of before, byte for byte. Every read takes it: the model's frames, the input copies
+  and a copy made again, the calibration, a resume; the first pass doesn't, so the cuts are
+  the source's. `yuv411p`, `yuv410p` and `yuv440p` are refused with it, ffmpeg having no
+  16-bit format of their subsampling, and a picture refuses it until the deband in torch.
+  The settings' key, the record's field (`deband`) and the plan's line are there only when it
+  is on, a job without it as before; a resume with the other value is another job, and a
+  plan with no unit made is planned again. Every start checks ffmpeg for `deband`, and two
+  of its chains are in the conversions' fingerprint, so that a change of the filter alone
+  is an environment change for every job: narrowed to the jobs that take it, as inductor's
+  modules count only between two compiled jobs (decided on 2026-11-11, to build). The nodes
   and pictures after: their frames never pass through ffmpeg, so a deband in torch, written
   from the algorithm's description, never from ffmpeg's code (LGPL).
 - **The model's input precision.** The encoder's input is cast to bfloat16 (from float16 on
@@ -1974,8 +2012,13 @@ Decided by the user on 2026-11-09, on impl-win-4's renders of the user's dark an
   the terraces' measure above): they keep about 98% of `deband`'s smoothing in the luma,
   `blur=0`'s alike, and all of it in the red, 98% of whose pixels sit in [0.5, 1), where the
   step is one code. That measure blurs at σ = 2, which averages most of one step's rounding
-  out; the study measures through the resize and the normalisation, and on the bright
-  material against `gradfun`'s dither.
+  out. Measured through the resize and the normalisation too (impl-box-1, nine scenes, the
+  same measure at the output's size): `blur=0`'s smoothing reaches the model whole in the
+  dark tones (99 to 101%) and over all (99 to 101%, a bright cartoon's 95%, 92% in its flat
+  bright fields); the few mid and bright tones of a live-action haze, 6% and 1% of its
+  frame, keep 55 and 61% of it, lost by the resize itself (the float32 resize alone keeps
+  50 to 54%), not by the casts. `gradfun`'s dither reaches it at about half its amplitude,
+  as texture, the resize halving it (84% of it in the bright cartoon's flat fields).
 
 ## Pipeline, per shot
 
@@ -2807,8 +2850,8 @@ holds nothing personal.
     the attention kernel, `sdpa` (constant since 2026-11-08, SDPA being the one kernel: an
     output made before with `flash_attn_2` says so);
   - for a video, its window cap in latents (0 for one window per shot), `--quality`,
-    `--compile`, and its cuts: the threshold they were detected at, or the SHA-256 of the list
-    `--cuts` named.
+    `--compile`, its cuts (the threshold they were detected at, or the SHA-256 of the list
+    `--cuts` named) and, with `--deband`, the filter its frames were read through.
 
   That is what changes the output's bits, so an output can be made again from it, the GPU and
   the libraries' versions aside (a video's manifest records those); the tiles' overlap is fixed
@@ -3549,9 +3592,22 @@ first pass, whose shots are its input, and before the models load:
         caches and a resume with a fresh cache gave the same frames, at no measured cost;
       - the planner holding a compiled pass to 1.1 times its tile's plain peak, from its
         measured table, and choosing smaller tiles where that doesn't fit;
-      - only the VAE's shapes measured compiled: encode tiles up to 1856 px or the 1080p
-        frame whole, decode tiles up to 1152 px, until the 96 GB card measures larger ones
-        (decided on 2026-10-24: the planner keeps no blind spot);
+      - only the VAE's shapes measured compiled (decided on 2026-10-24: the planner keeps no
+        blind spot): tiles up to 2,048 px on both passes, a tile's side its edge-cut tiles'
+        too, and the 1080p frame whole for the encode. Up to 1856 and 1152 px until the
+        96 GB card measured larger ones on 2026-11-11 (impl-box-1): a 4K job's passes
+        compiled on tiles of 1,536 and 2,048 px, each at or under the plan's 1.1 times its
+        plain peak, the 2,048-px encode the closest (56.20 GiB allocated against 56.23), its
+        decode 82.89 against 85.55. Widened that day (impl-box-2), the planner's own compiled
+        plans then ran every step at or under plan, 4K at 96 and 48 GB, 1080p and 1440p at
+        96 GB, their edge-cut tiles too (1,104 px by 1,856 and by 128, 1,472 by 2,048 and by
+        576); other frames' edge-cut tiles are taken by their side, unmeasured (PROVISIONAL).
+        The widening moved compiled plans alone, none to a smaller tile or a refusal, and
+        10 refused before are planned; in one case of the matrix (int8, 48 GB, 4K, a host
+        of 6 GiB) the planner took 4 more blocks swapped for the same tiles, its host short
+        of a larger tile's room: the planner's next pass looks into it. The compiled decode
+        untiled at 1080p peaked 1.06 times plain, 22% faster (impl-box-2, one clip): it
+        takes the encode's rule, the 1080p frame whole (decided on 2026-11-11, to build);
       - the VAE compiled right after the plan, before the DiT loads (the user's idea,
         2026-10-24): the VAE alone on the card, its shapes compiled with torch's own
         workers, then the workers shut at once (`shutdown_compile_workers`), before the
@@ -3593,7 +3649,13 @@ first pass, whose shots are its input, and before the models load:
       Windows drive, fitted on those two jobs, and 40 and 15 s on Linux's disk, fitted on one
       1080p job; provisional until the 96 GB box measures. Replayed on those same two jobs, it
       said 6 min 30 s for 6 shapes and 8 min 40 s for 8, where the compilations took 6 min 27 s
-      and 8 min 38 s: a check of the fit, not of another host, disk or set of shapes.
+      and 8 min 38 s: a check of the fit, not of another host, disk or set of shapes. On
+      the 96 GB box (impl-box-1, 2026-11-11, Linux's disk and 48 CPUs), a 1080p job's 3
+      shapes compiled in 1 min 46 s new and 33 s on a resume, where the line said about 2
+      min and 45 s, and a 4K job's 8 in 4 min 9 s and 1 min 23 s, where it said about 5 min
+      20 s and 2 min: the line, fitted on one host, says more on that one, and stays. The
+      1080p job's calibration then compiled 3 graphs more, which the warm-up missed (under
+      main's range and the widened one, impl-box-1 and 2): the shape, to find.
     - The DiT isn't compiled in v0.1.0: 2–3% of a long 1080p job on a 32 GB card (the DiT is
       a fifth of its units; compiled block by block over seedvr2x's own swap, a window takes
       0.77–0.80 of plain's time), a loss on a short one (each new window length compiles
@@ -3631,15 +3693,23 @@ first pass, whose shots are its input, and before the models load:
       window goes under 5 latents to make the room. Both figures are the plain attention's:
       since the lean attention and the reserve by the step (2026-11-06) the planner plans a 4K
       shot in 11.63 GiB free (impl-fa2out's review, 2026-11-08: a 240-frame shot, 36 blocks
-      swapped), and since 2026-11-08 SDPA is the one kernel. The CLI's README and MANUAL still
-      give the old figures: the pre-release pass of the documents mends them.
+      swapped), and since 2026-11-08 SDPA is the one kernel. Run so on 2026-11-11 on a 16 GB
+      card emulated beside a desktop's still 0.54 GiB (impl-box-2): windows of 6 latents, 35
+      blocks swapped, tiles of 1024 and 768 px, every step under its plan, 9.5 min; 12 GB is
+      refused, 10.27 GiB free against 11.64, naming `--resolution 1984`. The CLI's README
+      and MANUAL still give the old figures: the pre-release pass of the documents mends
+      them.
     - A shot's length no longer bounds the DiT's phase (2026-10-16): with the noise drawn in
       system memory, that card plans a 4K shot of any length (2,661 latents and 10,000 tested),
       and no refusal names a cut. A long shot is bounded by the host's memory alone, its refusal
       naming the shot (see Host RAM, above).
     - The VAE has a floor too: its decode in 512-px tiles, with its room. At 1080p that is
       8.27 GiB of free VRAM (8.52 with the room of 1.5): an 8 GB card stays out, offered
-      `--resolution 288`.
+      `--resolution 288`. Since the lean attention, the reserve by the step and the floor's
+      last rungs (2026-11-06), a 1080p job's smallest plan takes 6.58 GiB free (a peak of
+      4.73 GiB, the VAE's room of 1.25 and the margin; impl-box-2, 2026-11-11): an 8 GB
+      card runs it headless, 6.82 GiB free (impl-box-1), and is refused beside a desktop's
+      0.54 GiB.
 - **Pins.** `--window N`, `--swap-blocks N`, `--encode-tile PX` and `--decode-tile PX` (0 for
   untiled) each fix one choice, and the planner makes the others around it. A pin is taken
   exactly or refused, never adjusted: the refusal names what fits, the longest window, the
@@ -3817,7 +3887,10 @@ first pass, whose shots are its input, and before the models load:
         seedvr2x's own context as 0.75 GiB (since 2026-10-30; 1.23 before, the rise once
         measured through a first pass): the RTX 5090 measured 0.67 on a resume under WSL2
         (the bare context 0.49, the probe and warm-up 0.18 more), the same to 0.01 GiB three
-        times; provisional until the 96 GB card measures Linux's driver. On Windows itself
+        times, and the 96 GB card 0.83 on Linux's driver (impl-box-2, 2026-11-11: three
+        resumes at 96 GB and three at 24, equal to the MiB), where 0.75 left a shortfall
+        under 0.08 GiB to the check alone. Decided that day: 0.83, the larger, an early
+        warning a little early under WSL2 rather than one missed on Linux. On Windows itself
         NVML counts what a process has made resident, not what it allocated, so the early
         reading is optimistic there: the CLI's, v0.2.0's to measure.
       - With `--accept-env-change`, a recorded shape that no longer fits is planned again for
@@ -4329,7 +4402,19 @@ run in one line, before the models load as after.
   - A driver that refuses keeps its plan, the pool trimming itself where the card is full
     (the planner's margin and the VAE's room were measured so): each step's reserve by its
     allocator stays a held run's. A desktop on such a card, its share growing mid-run, is the
-    96 GB card's to measure (the cards v0.1.0 is tested on).
+    96 GB card's to measure (the cards v0.1.0 is tested on). Measured on 2026-11-11
+    (impl-box-2, the cards emulated, a desktop played by a program beside the run, its
+    0.54 GiB growing toward 1.1 GiB and back): torch's cache filled the card as when
+    headless, so the desktop's growth was refused 5 to 18 times in each 1080p run from 12 to
+    48 GB, and every 4K job from 16 to 48 GB failed, out of memory in its first window once
+    the desktop had grown into the planner's 0.6 GiB margin: the window's next piece, 1.3 to
+    4.1 GiB, found 25 to 27 MiB free on the card and no piece that size in the pool. With the
+    desktop held still, 4K ran at 16, 24 and 48 GB. Decided on 2026-11-11: a card another
+    program uses under Linux's driver, a desktop or any process on it at the start, is held
+    as under WSL2 (above): torch's own allocator with expandable segments under torch's
+    limit, 0.5 GiB left to the rest of the card, each step's reserve by that allocator, and
+    a check before every unit with its re-hold; a card nothing else uses keeps
+    `cudaMallocAsync` and its plans. To build, then the same desktop to run again.
   - The abort's mechanism is torch's, and ComfyUI's own cleaning after such an error can
     still meet it: the restart the nodes ask for is the way out. A report to PyTorch with the
     minimal reproduction is the user's to send.
@@ -4541,8 +4626,10 @@ run in one line, before the models load as after.
     built: milestone 1's references made again under SDPA on the RTX 5090 (impl-fa2out, on main
     666a6cb), the regression passing against them on main's code (12, one skipped by its own
     rule) and on the final code (13 of 13), FlashAttention 2's set kept beside them under a
-    name that says so; the 96 GB card's are still FlashAttention 2's, to make again when it is
-    back. Windows gives bits of its own: a picture made natively differs from the same run
+    name that says so; the 96 GB card's, FlashAttention 2's until then, made again under SDPA
+    once it was back (impl-box-1, 2026-11-10, main 1491099: nine cases, the regression's 13
+    passing against them). Windows gives bits of its own: a picture made natively differs
+    from the same run
     under WSL2 on the same card (54 to 57 dB PSNR, 21 to 93% of the samples), and Windows
     repeats its own; torch's Windows wheel has no FlashAttention backend in SDPA, so another
     kernel runs there (inferred, not isolated). Decided that day: Windows' references are to be
@@ -4845,7 +4932,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | `--output` | `-o`, required: a `.mkv` path gives the finished file, any other path a directory of segments; for a picture, a new `.png` or `.webp` file; no default directory |
 | `--attention_mode` | dropped: SDPA, the one kernel since 2026-11-08 (FA2 when installed before); no kernel measured faster |
 | `--color_correction` | `split` (seedvr2x's own, beyond numz's `lab`) by default; `none` available; numz's `lab`, `wavelet`, `wavelet_adaptive`, `hsv` and `adain` dropped |
-| `--input_noise_scale` | dropped (numz's own addition, only degrades); on a banded source it hides the steps under grain without smoothing them, where an input deband, to come as `--deband`, smooths them (see [Banded sources](#banded-sources-an-input-deband-an-option-to-come)) |
+| `--input_noise_scale` | dropped (numz's own addition, only degrades); on a banded source it hides the steps under grain without smoothing them, where `--deband`, an input deband, smooths them (see [Banded sources](#banded-sources---deband)) |
 | `--latent_noise_scale` | dropped from v1 (ByteDance uses 0; corrected version possibly later as an experiment, see bug 08) |
 | `--batch_size`, `--temporal_overlap`, `--prepend_frames`, `--uniform_batch_size` | replaced by shots, windows and latent stitching, chosen by the planner; `--window` pins the window cap |
 | `--blocks_to_swap`, tile sizes, offload devices | chosen by the planner; `--swap-blocks`, `--encode-tile` and `--decode-tile` pin them, exactly or refused; no offload device, the DiT's host copy being pinned memory |
@@ -5454,11 +5541,11 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   patch reading each tensor in four pieces is held, level on a Linux NVMe drive; not measured on
   a hard disk, where four streams of one file may cost seeks, and not taken until it is.
 - **The cards v0.1.0 is tested on** (the user, 2026-10-24; once the 96 GB card is back, before
-  the release). One size per class of real cards: 8 GB (RTX 5060, 4060: the refusal, 1080p
-  taking 8.27 GiB free), 12 (RTX 5070, 4070, 3060), 16 (RTX 5080, 5070 Ti, 4080), 24 (RTX
-  4090, 3090, RTX PRO 4000: the edge of 4K), 32 (RTX 5090, RTX PRO 4500), 48 (RTX PRO 5000,
-  RTX 6000 Ada: the 1080p decode untiled from there), 72 (RTX PRO 5000's 72 GB version) and
-  96 GB (RTX PRO 6000). Each one two ways:
+  the release). One size per class of real cards: 8 GB (RTX 5060, 4060: 1080p when
+  headless), 12 (RTX 5070, 4070, 3060), 16 (RTX 5080, 5070 Ti, 4080: the edge of 4K), 24
+  (RTX 4090, 3090, RTX PRO 4000), 32 (RTX 5090, RTX PRO 4500), 48 (RTX PRO 5000, RTX 6000
+  Ada: the 1080p decode untiled from there), 72 (RTX PRO 5000's 72 GB version) and 96 GB
+  (RTX PRO 6000). Each one two ways:
   - headless, the whole card free, as the 96 GB box;
   - with a desktop on it, a few GiB held by the graphical environment, its share able to
     grow mid-run.
@@ -5466,11 +5553,30 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   headless or with a desktop's share played by a program holding memory and moving it), and
   WSL2's, which lends system memory (the RTX 5090 with its real desktop, emulating 32 GB and
   less). Windows itself, in v0.2.0, is a third, which lends too (2026-11-08, Allocator).
+  Headless on Linux's driver, measured on 2026-11-11 (impl-box-1: the 96 GB card emulated at
+  each size by a ballast held through the driver, leaving a run the size less 0.35 GiB; a
+  1080p job of 8 s, three shots, x2 from 540p, and from 24 GB up a 4K job of 120 frames, x2
+  from 1080p, at `standard`): every run finished, and no step went over its planned peak,
+  the DiT's windows within 0.1 GiB of it, the tiled decodes within 0.01, the other passes
+  0.4 to 4.9 GiB under; 1080p took 3.4 to 4.0 min and 4K 8.9 to 9.6 min whatever the card.
+  The 8 GB card plans and runs the 1080p job there: 6.82 GiB free, windows of 9 latents, 35
+  blocks swapped, tiles of 512 px, 4.0 min. Nothing holds torch to the plan's budget on
+  that driver, and its cache took the card down to its last 0.00 to 0.02 GiB from 48 GB
+  down, no run failing. Beside a desktop's share there (impl-box-2, the same jobs, the share
+  played by a program, its 0.54 GiB growing toward 1.1 GiB and back): 1080p ran from 12 to
+  96 GB, its steps under plan and its times the same, but the desktop's growth was refused
+  from 12 to 48 GB; 4K ran at 72 and 96 GB and failed from 16 to 48 GB, out of memory in
+  its first window once the desktop had grown; the desktop held still, 4K ran at 16, 24
+  and 48 GB, 16 GB's in 9.5 min. Beside it 8 GB is refused, 6.27 GiB free against the 6.58
+  its smallest plan takes, and 4K at 12 GB, 10.27 against 11.64. The hold decided for a
+  card shared on that driver (Allocator, 2026-11-11) is to run the same slice again.
 - **`torch.compile` on the 96 GB card** (see [Memory planner](#memory-planner)). The study ran
   on an RTX 5090 alone: the 96 GB card died before its part
   ([compile.md](research/docs/compile.md)). Left for it:
   - the VAE untiled at 1080p and on 4K's 1536 to 2048-px tiles: which tiles a compiled VAE
-    may take on 48 to 96 GB cards;
+    may take on 48 to 96 GB cards. Measured on 2026-11-11, the range widened to 2,048 px
+    (Memory planner, the shapes measured compiled); the 1080p decode untiled measured on one
+    clip and decided, its build and a job's check left;
   - the DiT above 22 latents and in long windows (76 and more), under SDPA, the one kernel
     since 2026-11-08: whether its compile pays on large cards, and what the jump at 20
     latents is;
@@ -5480,7 +5586,16 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
     blind spot in it): its speed against the convolutions left out, and its peaks, so that
     the planner can weigh it against its other ways of making room in the VAE's passes
     (the DiT's weights off the GPU, smaller tiles). Then it is built into the planner, made
-    an option, or left out, on those figures.
+    an option, or left out, on those figures. Measured on 2026-11-11 (impl-box-2: a 4K
+    clip's passes in tiles of 768 to 2,048 px, a fresh process each) and left out that day:
+    8 to 15% faster again than the convolutions left out, but the decode's peak grows with
+    the tile, 1.12 times plain at 768 px, 1.26 at 1,024 and 1.42 at 1,536, its first call
+    1.55 to 1.94, out of memory at 2,048 on the 96 GB card, and its compile 2 to 2.5 times
+    as long; the shipped way peaks 1.06 to 1.11 times plain at every tile, its first call
+    no higher, about a fifth faster than plain;
+  - the recompile limits at the larger shapes (PROVISIONAL): 671 compilations at 4K's
+    2,048-px tiles, a 5-frame shot's 120 among them, under the 1,024 per code object
+    (impl-box-2); the 3 graphs a compiled 1080p job meets after its warm-up, to find.
   Other window layouts were modelled on the 12 cut lists: none pays more than the balanced
   windows, and none has fewer lengths.
 - **A detail scale, not in v1.** The user proposed a "detail recreation" scale for the
