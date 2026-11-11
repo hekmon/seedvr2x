@@ -2020,19 +2020,18 @@ mid-job, at every new window length. Off by default.
   the tiles' seams, where the largest difference between two seeds sits too. So `--compile`
   is a setting of the job, recorded: a job that has made units can't be resumed with it
   switched, which is another job; a plan that has made none is planned again either way.
-- **Only the shapes measured compiled:** encode tiles up to 1856 px, or the 1080p frame whole;
-  decode tiles up to 1152 px, never untiled, until larger ones are measured. So with it, the
-  decode is tiled even on a card that would decode the frame whole, and at 4K in tiles no larger
-  than 1152 px: the slight colour drift of tiles, which `split` corrects for the most part, and a
-  tiled pass's scratch ([disk use](#disk-use)). A job outside them
+- **Only the shapes measured compiled:** encode tiles up to 2048 px, or the 1080p frame whole;
+  decode tiles up to 2048 px, never untiled. So with it, the decode is tiled even on a card
+  that would decode the frame whole: the slight colour drift of tiles, which `split` corrects
+  for the most part, and a tiled pass's scratch ([disk use](#disk-use)). A job outside them
   is refused, never run plain in its place: a tile pin beyond them, or a card where no compiled
   plan fits where a plain one would. The refusal names the pass and the shapes, and gives the
-  ways out; here, from the planner, for `--decode-tile 1600` at 1080p:
+  ways out; here, from the planner, for `--decode-tile 2112` at 4K (2160x3840):
 
   ```
-  --decode-tile 1600: the VAE compiled has the decode in tiles of 1600 px beyond the shapes measured (decode tiles up to 1152 px, never untiled)
+  --decode-tile 2112: the VAE compiled has the decode in tiles of 2112 px beyond the shapes measured (decode tiles up to 2048 px, never untiled)
   The same command without --compile fits
-  The same command with --decode-tile 1152 fits, within the shapes measured
+  The same command with --decode-tile 2048 fits, within the shapes measured
   ```
 
 - **A compilation that fails** stops the run before the DiT loads, nothing run: the same command

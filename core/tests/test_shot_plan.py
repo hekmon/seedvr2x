@@ -2513,16 +2513,18 @@ def test_each_refusal_of_the_planner_is_of_its_kind_with_its_facts() -> None:
     error = raised(segments, HD, shots(5), Pins(swap_blocks=36), None, recorded=Plan(5, None, None))
     assert type(error) is MemoryShort and error.phase == "decode" and error.reserve == own
     assert "the reserve left beyond its peak" in str(error) and "--" not in str(error)
-    # The VAE compiled: a pass pinned beyond the shapes measured, and the job the plain plan fits.
-    error = raised(our_free(96), HD, shots(76), Pins(decode_tile=1280), None, compile_vae=True)
+    # The VAE compiled: a pass pinned beyond the shapes measured (a decode tile of 2112 px, over the
+    # 2048 px measured on 2026-11-11, at 4K: no such tile is valid at 1080p), and the job the plain
+    # plan fits.
+    error = raised(our_free(96), UHD, shots(76), Pins(decode_tile=2112), None, compile_vae=True)
     assert type(error) is CompileRefused and error.kind == "compile" and error.phase == "decode"
-    assert error.within == (Setting("decode_tile", "1152"),)
+    assert error.within == (Setting("decode_tile", "2048"),)
     assert str(error).splitlines()[-2:] == [
         "The same command without compiling fits",
-        "The same command with decode tile 1152 fits, within the shapes measured",
+        "The same command with decode tile 2048 fits, within the shapes measured",
     ]
     error = raised(
-        *(our_free(96), HD, shots(76), Pins(decode_tile=1280), None),
+        *(our_free(96), UHD, shots(76), Pins(decode_tile=2112), None),
         *(),
         compile_vae=True,
         compile_fixed=True,
@@ -2544,7 +2546,7 @@ def test_a_plan_s_refusal_in_the_library_s_words_names_no_option() -> None:
         "--decode-tile 1856": raised(our_free(16), HD, shots(76), Pins(decode_tile=0), None),
         "--resolution 48": raised(our_free(6), (540, 960), shots(5), Pins(), None),
         "--compile": raised(
-            *(our_free(96), HD, shots(76), Pins(decode_tile=1280), None), compile_vae=True
+            *(our_free(96), UHD, shots(76), Pins(decode_tile=2112), None), compile_vae=True
         ),
     }
     for option, error in named.items():

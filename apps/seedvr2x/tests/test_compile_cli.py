@@ -58,12 +58,12 @@ def plain_and_compiled(
 
 def test_constants() -> None:
     # DESIGN.md, same section: a compiled pass 1.04 to 1.10 times plain's peak, held to 1.1; encode
-    # tiles up to 1856 px or the 1080p frame whole, decode tiles up to 1152 px; compilation,
-    # measured on 2026-10-31 and fitted a shape (1080p's 6 shapes and 4K's 8 on one host): 40 s
-    # a new job and 15 s a resume on Linux's disk, 65 s and 20 s on a Windows drive. The 1080p
-    # frame padded is 1104x1920.
+    # tiles up to 2048 px or the 1080p frame whole, decode tiles up to 2048 px (measured on the
+    # 96 GB card on 2026-11-11, peaks.py's comment); compilation, measured on 2026-10-31 and fitted
+    # a shape (1080p's 6 shapes and 4K's 8 on one host): 40 s a new job and 15 s a resume on
+    # Linux's disk, 65 s and 20 s on a Windows drive. The 1080p frame padded is 1104x1920.
     assert peaks.COMPILE_PEAK == 1.1
-    assert (peaks.COMPILE_ENCODE_TILE_MAX, peaks.COMPILE_DECODE_TILE_MAX) == (1856, 1152)
+    assert (peaks.COMPILE_ENCODE_TILE_MAX, peaks.COMPILE_DECODE_TILE_MAX) == (2048, 2048)
     assert peaks.COMPILE_ENCODE_WHOLE == padded_size(HD) == (1104, 1920)
     assert (planner.COMPILE_SHAPE_NEW, planner.COMPILE_SHAPE_RESUME) == (40, 15)
     assert (planner.COMPILE_SHAPE_NEW_DRIVE, planner.COMPILE_SHAPE_RESUME_DRIVE) == (65, 20)
@@ -150,17 +150,22 @@ def test_the_compiled_plans_predicted_peaks_are_its_passes_compiled_peaks() -> N
 def test_a_compiled_decode_is_always_tiled_and_in_the_measured_range() -> None:
     # On the 96 GB card a plain 1080p job decodes untiled and encodes untiled: compiled, the
     # encode stays untiled (the 1080p frame whole is measured) and the decode takes tiles of
-    # 1152 px or less, the largest that fit.
+    # 2048 px or less, the largest that fit: 1856 px, the largest tile under the padded frame's
+    # longer side (it was 1152 px under the range measured before 2026-11-11).
     (plain, _), (compiled, _) = plain_and_compiled(our_free(96), HD)
     assert plain.encode_tiles is None and plain.decode_tiles is None
     assert compiled.encode_tiles is None
-    assert compiled.decode_tiles is not None and compiled.decode_tiles.size == 1152
-    # 4K is beyond the frame measured: the encode is tiled too, up to 1856 px.
+    assert compiled.decode_tiles is not None and compiled.decode_tiles.size == 1856
+    # 4K is beyond the frame measured: the encode is tiled too, up to 2048 px.
     (plain, _), (compiled, _) = plain_and_compiled(our_free(96), UHD)
     assert compiled.compile_vae
-    assert compiled.encode_tiles is not None and compiled.encode_tiles.size <= 1856
-    assert compiled.decode_tiles is not None and compiled.decode_tiles.size <= 1152
-    assert plain.decode_tiles is None or plain.decode_tiles.size > compiled.decode_tiles.size
+    assert compiled.encode_tiles is not None and compiled.encode_tiles.size <= 2048
+    assert compiled.decode_tiles is not None and compiled.decode_tiles.size <= 2048
+    # The plain decode's tile, 2048 px, is within the range now (it was beyond 1152 px): the
+    # compiled plan takes it, and 2048-px tiles for the encode: the tiles of the job measured
+    # compiled on the 96 GB card.
+    assert plain.decode_tiles is not None and plain.decode_tiles.size == 2048
+    assert (compiled.encode_tiles.size, compiled.decode_tiles.size) == (2048, 2048)
 
 
 def refusal(
@@ -174,16 +179,17 @@ def refusal(
 
 
 def test_a_pass_pinned_beyond_the_measured_range_is_refused_with_its_advice() -> None:
-    # A pin is taken exactly: a decode tile of 1280 px, an untiled decode, an encode tile of 1920,
-    # an untiled encode at 4K. The job is refused, never run plain (DESIGN.md, decided on
-    # 2026-10-29): the pass, its tiles and the shapes measured, then the advice, each on a line of
-    # its own: the same command without --compile, and the pin within the shapes.
+    # A pin is taken exactly: a decode tile of 2112 px at 4K (no tile over 2048 px is valid at
+    # 1080p, where 1856 px is the largest under the padded frame), an untiled decode, an encode
+    # tile of 2112 at 4K, an untiled encode at 4K. The job is refused, never run plain (DESIGN.md,
+    # decided on 2026-10-29): the pass, its tiles and the shapes measured, then the advice, each
+    # on a line of its own: the same command without --compile, and the pin within the shapes.
     free = our_free(96)
     for pins, target, phase, pin, where, within in (
-        (Pins(decode_tile=1280), HD, "decode", 1280, "in tiles of 1280 px", 1152),
-        (Pins(decode_tile=0), HD, "decode", 0, "untiled", 1152),
-        (Pins(encode_tile=1920), UHD, "encode", 1920, "in tiles of 1920 px", 1856),
-        (Pins(encode_tile=0), UHD, "encode", 0, "untiled", 1856),
+        (Pins(decode_tile=2112), UHD, "decode", 2112, "in tiles of 2112 px", 2048),
+        (Pins(decode_tile=0), HD, "decode", 0, "untiled", 1856),
+        (Pins(encode_tile=2112), UHD, "encode", 2112, "in tiles of 2112 px", 2048),
+        (Pins(encode_tile=0), UHD, "encode", 0, "untiled", 2048),
     ):
         lines = refusal(free, target, pins).split("\n")
         assert lines[0].startswith(
@@ -196,21 +202,21 @@ def test_a_pass_pinned_beyond_the_measured_range_is_refused_with_its_advice() ->
         ]
     # Both passes pinned beyond them: the plan stops at the first it meets (the decode), and the
     # refusal names the other pass too, on a line of its own, then gives the advice for both pins.
-    lines = refusal(free, UHD, Pins(encode_tile=2048, decode_tile=1280)).split("\n")
-    assert lines[0].startswith("--decode-tile 1280: the VAE compiled has the decode in tiles of")
+    lines = refusal(free, UHD, Pins(encode_tile=2112, decode_tile=2112)).split("\n")
+    assert lines[0].startswith("--decode-tile 2112: the VAE compiled has the decode in tiles of")
     assert lines[1] == (
-        "--encode-tile 2048: the VAE compiled has the encode in tiles of 2048 px beyond the shapes"
+        "--encode-tile 2112: the VAE compiled has the encode in tiles of 2112 px beyond the shapes"
         f" measured ({peaks.compile_range_said('encode')})"  # pyright: ignore[reportPrivateUsage]
     )
     assert lines[2:] == [
         "The same command without --compile fits",
-        "The same command with --encode-tile 1856 fits, within the shapes measured",
-        "The same command with --decode-tile 1152 fits, within the shapes measured",
+        "The same command with --encode-tile 2048 fits, within the shapes measured",
+        "The same command with --decode-tile 2048 fits, within the shapes measured",
     ]
-    lines = refusal(free, UHD, Pins(encode_tile=1920, decode_tile=1280)).split("\n")
+    lines = refusal(free, UHD, Pins(encode_tile=2176, decode_tile=2112)).split("\n")
     assert lines[-2:] == [
-        "The same command with --encode-tile 1856 fits, within the shapes measured",
-        "The same command with --decode-tile 1152 fits, within the shapes measured",
+        "The same command with --encode-tile 2048 fits, within the shapes measured",
+        "The same command with --decode-tile 2048 fits, within the shapes measured",
     ]
     # A pass pinned within the range is taken, compiled.
     made, _ = planner.plan(
@@ -320,9 +326,9 @@ def test_a_recorded_compiled_plan_beyond_the_range_is_no_plans() -> None:
     # check_recorded: a record with compile_vae and a pass the planner never makes compiled
     # (edited) is refused, naming it; a plain record of the same passes is a plan.
     for recorded, target, where in (
-        (Plan(17, Tiles(1088), Tiles(1280), compile_vae=True), HD, "decode"),
+        (Plan(17, Tiles(1088), Tiles(2112), compile_vae=True), UHD, "decode"),
         (Plan(17, Tiles(1088), None, compile_vae=True), HD, "decode"),
-        (Plan(17, Tiles(1920), Tiles(1024), compile_vae=True), UHD, "encode"),
+        (Plan(17, Tiles(2112), Tiles(1024), compile_vae=True), UHD, "encode"),
         (Plan(17, None, Tiles(1024), compile_vae=True), UHD, "encode"),
     ):
         with pytest.raises(PlanError, match=rf"compile_vae is true and its {where}"):
@@ -330,6 +336,7 @@ def test_a_recorded_compiled_plan_beyond_the_range_is_no_plans() -> None:
         planner.check_recorded(replace(recorded, compile_vae=False), shots(40), target)
     planner.check_recorded(Plan(17, None, Tiles(1152), compile_vae=True), shots(40), HD)
     planner.check_recorded(Plan(17, Tiles(1856), Tiles(512), compile_vae=True), shots(40), UHD)
+    planner.check_recorded(Plan(17, Tiles(2048), Tiles(2048), compile_vae=True), shots(40), UHD)
 
 
 def test_a_plan_planned_again_keeps_the_recorded_compile_flag() -> None:
@@ -1213,7 +1220,7 @@ def test_a_pin_beyond_the_shapes_measured_is_refused_by_the_command_with_its_adv
     source_path = job(tmp_path, monkeypatch)
     text = refused(tmp_path, source_path, caplog, *JOB, *LARGER, "--compile", "--decode-tile", "0")
     assert "--decode-tile 0: the VAE compiled has the decode untiled beyond the shapes" in text
-    assert "(decode tiles up to 1152 px, never untiled)\n" in text
+    assert "(decode tiles up to 2048 px, never untiled)\n" in text
     assert "\nThe same command without --compile fits\n" in text
     assert "\nThe same command with --decode-tile 640 fits, within the shapes measured;" in text
     assert loads.given == []

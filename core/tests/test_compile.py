@@ -38,11 +38,11 @@ def test_the_range_is_the_1080p_frame_as_a_whole_not_its_area() -> None:
     assert inside((1104, 1920), "encode", None) and inside((752, 1280), "encode", None)
     assert not inside((1920, 1104), "encode", None) and not inside((1456, 2576), "encode", None)
     assert inside((1920, 1104), "encode", Tiles(1856))
-    assert not inside((1920, 1104), "encode", Tiles(1920))
-    assert inside((2192, 3840), "decode", Tiles(1152)) and inside(
+    assert not inside((2192, 3840), "encode", Tiles(2112))
+    assert inside((2192, 3840), "decode", Tiles(2048)) and inside(
         (2192, 3840), "decode", Tiles(512)
     )
-    assert not inside((2192, 3840), "decode", Tiles(1216))
+    assert not inside((2192, 3840), "decode", Tiles(2112))
     assert not inside((1104, 1920), "decode", None)
     assert inside((1104, 1920), "dit", None)
 

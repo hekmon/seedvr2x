@@ -492,18 +492,28 @@ def tail_ratio(side: int | None) -> float:
 # "A whole job, planned for the compiled peak"). The study scaled the fit alone, and so is it
 # here: ENCODE_EXTRA, the encode's margin on the fit, and the VAE's weights are not scaled.
 COMPILE_PEAK = 1.1
-# Only the shapes measured are compiled, until the 96 GB card measures larger ones (DESIGN.md,
-# decided on 2026-10-24: "the planner keeps no blind spot"): encode tiles up to 1856 px or the
-# 1080p frame whole, decode tiles up to 1152 px. The encode's whole frame is read as the padded
+# Only the shapes measured are compiled (DESIGN.md, decided on 2026-10-24: "the planner keeps no
+# blind spot"): encode tiles up to 2048 px or the 1080p frame whole, decode tiles up to 2048 px.
+# The tiles' range was widened from 1856 and 1152 px on 2026-11-11 (design's decision), measured
+# on the 96 GB card (RTX PRO 6000 Blackwell, Linux's driver) that day: a 4K job (x2 from 1080p,
+# 120 frames, 2 shots, standard), the VAE compiled, encode and decode pinned to one tile size,
+# the range lifted for that process alone, each step's allocated peak at or under its plan (GiB,
+# plan / measured): in tiles of 1536 px (2 down, 3 across) the encode 39.92 / 39.62, the DiT
+# window 56.67 / 56.59, the decode 56.29 / 55.23; in tiles of 2048 px the encode 56.23 / 56.20,
+# the DiT window 56.67 / 56.59, the decode 85.55 / 82.89, a budget of 93.58 GiB; the 2048-px
+# encode the tightest, 0.03 GiB under its plan. The range is read as a tile's side, the tiles
+# cut off at a frame's edge included (a 1080p decode in tiles of 1856 px is 1104 rows by 1856
+# and 128 columns): PROVISIONAL (impl-box-2, 2026-11-11: those measured were 4K's squares, and
+# their cut-off tiles at the frame's edges). The encode's whole frame is read as the padded
 # 1080p frame's two sides at most, rows and columns each (padded_size(1080x1920) = 1104x1920),
 # and not as its area, the narrower reading of "the 1080p frame": a frame of its area with
 # another shape is not the one measured. PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says "the
 # 1080p frame whole" and doesn't say what is as large as it); and an untiled decode is outside
-# the range, "decode tiles up to 1152 px" naming tiles alone: the study's decodes were all in
-# tiles (compile.md, the VAE's tables).
-COMPILE_ENCODE_TILE_MAX = 1856
+# the range, "decode tiles up to 2048 px" naming tiles alone: no untiled compiled decode was
+# measured (the study's decodes were all in tiles, compile.md, the VAE's tables).
+COMPILE_ENCODE_TILE_MAX = 2048
 COMPILE_ENCODE_WHOLE = (1104, 1920)
-COMPILE_DECODE_TILE_MAX = 1152
+COMPILE_DECODE_TILE_MAX = 2048
 
 
 def tokens(padded: tuple[int, int], latents: int) -> int:
