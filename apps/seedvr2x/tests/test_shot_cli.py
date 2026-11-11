@@ -402,6 +402,7 @@ def on_the_device(
     cap: int,
     monkeypatch: pytest.MonkeyPatch,
     directory: Path,
+    tables: list[tuple[int, int | None]] | None = None,
 ) -> OnDevice:
     """A shot of `latents` latents at CARD_TARGET through the run's own steps for its windows
     (run._sample over the units a run keeps, units.Units in `directory`, made here, its windows
@@ -409,7 +410,10 @@ def on_the_device(
     layout, which the steps read back as a resumed run does: what the device holds over them
     (OnDevice). The figures are read where the run's own are: as a unit starts,
     before the run resets the peak it logs (run._started), and as the window's output is given
-    to the units, where the run reads that peak."""
+    to the units, where the run reads that peak. With `tables`, what the vendored RoPE's tables
+    hold once the shot's last window is kept, by both counts, is appended to it: the tables are
+    cleared there to measure them (model.forget_rope_tables), as the run clears them right after,
+    at the shot's end (shot_pass.sample_windows)."""
     import run
 
     device = models.device
@@ -434,6 +438,15 @@ def on_the_device(
             torch.cuda.synchronize(device)
             peaks.append((torch.cuda.max_memory_allocated(device), asked("peak")))
             super().save_window(run, window, sampled)
+            if tables is not None and window == len(shot_layout(frames, cap)) - 1:
+                blocks, requested = torch.cuda.memory_allocated(device), asked()
+                model.forget_rope_tables()
+                torch.cuda.synchronize(device)
+                left_blocks, left_requested = torch.cuda.memory_allocated(device), asked()
+                freed = None
+                if requested is not None and left_requested is not None:
+                    freed = requested - left_requested
+                tables.append((blocks - left_blocks, freed))
 
     height, width = padded_size(CARD_TARGET)
     generator = torch.Generator().manual_seed(latents)
@@ -514,15 +527,23 @@ def test_a_shot_s_windows_hold_the_device_as_one_window_does(
     # latents in 16 windows of 8 against a shot of 8 latents in one window. Between two windows
     # the device holds what it held before the shot, and each window peaks where the one-window
     # shot's does: nothing of the shot waits there but the window being made, neither its
-    # latent, its noise nor a window's output (DESIGN.md, Memory planner, Per-phase peaks). A
-    # first one-window shot runs unmeasured: what a process's first window leaves on the device
-    # for good, the tables the DiT's blocks cache for a window's size, is no shot's.
+    # latent, its noise nor a window's output (DESIGN.md, Memory planner, Per-phase peaks), and
+    # the vendored RoPE's tables for the windows' shape, which the first window makes and the
+    # others take, cleared at the shot's start and end (model.forget_rope_tables; DESIGN.md,
+    # Allocator, the vendored RoPE's tables): 5,481,600 bytes asked at this size, on the RTX PRO
+    # 6000 on 2026-11-10, what windows 1 to 15 started over the shot's start before the test
+    # counted them, and what clearing the tables after each window freed. They are measured on
+    # the last one-window shot, at its window's end. A first one-window shot runs unmeasured:
+    # what a process's first window leaves on the device for good is no shot's.
     models = model.load_models(found(DITS), found(VAES), torch.device("cuda:0"))
+    tables: list[tuple[int, int | None]] = []
     try:
         on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch, tmp_path / "first")
         alone = on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch, tmp_path / "alone")
         windowed = on_the_device(models, WINDOWED, ONE_WINDOW, monkeypatch, tmp_path / "windowed")
-        again = on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch, tmp_path / "again")
+        again = on_the_device(
+            models, ONE_WINDOW, ONE_WINDOW, monkeypatch, tmp_path / "again", tables
+        )
     finally:
         models.runner.dit = models.runner.vae = None
         gc.collect()
@@ -532,6 +553,8 @@ def test_a_shot_s_windows_hold_the_device_as_one_window_does(
     assert (len(alone.peaks), len(windowed.peaks), len(again.peaks)) == (1, MANY, 1)
     # What the figures are compared on, for the whole run, and to what.
     doubts = [read.doubt() for read in (alone, windowed, again) if read.doubt()]
+    if any(asked is None for _, asked in tables):
+        doubts.append("torch gives no requested_bytes")
     on, column, tolerance = ("requested", 1, ASKED_TOLERANCE)
     if doubts:
         on, column, tolerance = (f"allocated ({doubts[0]})", 0, BLOCKS_TOLERANCE)
@@ -549,14 +572,20 @@ def test_a_shot_s_windows_hold_the_device_as_one_window_does(
             f" peaks {[blocks for blocks, _ in read.peaks]}"
         )
     before, peak = figures(alone.starts)[0], figures(alone.peaks)[0]
-    said = f"on the {on} bytes, {before} held before the one-window shot, its peak {peak}"
+    assert len(tables) == 1
+    rope = figures(tuple(tables))[0]
+    said = (
+        f"on the {on} bytes, {before} held before the one-window shot, its peak {peak},"
+        f" the RoPE tables {rope}"
+    )
     # A window takes gigabytes over the weights, at this size.
     assert peak - before > 256 << 20, said
     for name, read in (("one window", alone), ("16 windows", windowed), ("one window", again)):
-        # Between two windows, and after the last, what the device held before the shot.
+        # As the first window starts, and after the last, what the device held before the shot;
+        # between two windows, that and the windows' RoPE tables.
         for window, start in enumerate(figures(read.starts)):
             held = f"{name}: {start} held as window {window} starts: {said}"
-            assert abs(start - before) <= tolerance, held
+            assert abs(start - before - (rope if window else 0)) <= tolerance, held
         left = figures((read.left,))[0]
         assert abs(left - before) <= tolerance, f"{name}: {left} left: {said}"
         # Each window's peak, the one-window shot's.
