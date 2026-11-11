@@ -14,7 +14,7 @@ import pytest
 
 import seedvr2x
 from media import ffmpeg, fingerprint
-from media.conversion import CHROMA_LOCATIONS, MATRICES, PIXEL_FORMATS, Conversion
+from media.conversion import CHROMA_LOCATIONS, DEEP, MATRICES, PIXEL_FORMATS, Conversion
 from media.decode import decode_output
 from media.ffmpeg import MediaError
 from media.reader import read_command
@@ -114,6 +114,19 @@ def test_reads_on_one_slice() -> None:
 
 
 @needs_ffmpeg
+def test_debanded_reads_on_one_slice() -> None:
+    # --deband's chain (Conversion.deband): its two zscales on one slice, and deband's own slices,
+    # which follow the graph's threads too, giving the same bytes on 1 and 16 (impl-box-1 and
+    # impl-win-5 found the same on real sources).
+    frame = _samples("yuv420p10le debanded", WIDTH * HEIGHT * 3 // 2, 10)
+    conversion = Conversion("yuv420p10le", "709", "limited", "left", deband=True)
+    command = read_command(Path("in.mkv"), conversion, None, 0, "pipe:3")
+    output = command[command.index("-map") : command.index("pipe:1")]
+    assert output[output.index("-vf") + 1].count(ONE_SLICE) == 2
+    _on_one_slice(frame, "yuv420p10le", output, "-filter_threads")
+
+
+@needs_ffmpeg
 def test_writer_on_one_slice() -> None:
     # The yuv420p10le master changes with the slice count: up to 1.7% of its chroma samples
     # (numerics.md, as above). In a -filter_complex graph, as FFV1Writer runs it.
@@ -155,14 +168,16 @@ def _text(chain: str, options: list[str]) -> str:
 
 def test_every_chain_on_one_slice() -> None:
     # The decode's chains: every planar format zscale is fed, with each matrix ("gbr" for RGB),
-    # both ranges and every chroma location (RGB's always left, as conversion_for gives it).
+    # both ranges and every chroma location (RGB's always left, as conversion_for gives it),
+    # with --deband's filter and without.
     # shot.py's COPY_READ (gbrp16le, gbr, full, left) is one of them.
     decodes = [
-        Conversion(planar, matrix, color_range, location).filters()
+        Conversion(planar, matrix, color_range, location, deband=deband).filters()
         for planar in sorted({pixel_format.planar for pixel_format in PIXEL_FORMATS.values()})
         for matrix in (["gbr"] if PIXEL_FORMATS[planar].family == "rgb" else MATRICES.values())
         for color_range in ("limited", "full")
         for location in (["left"] if matrix == "gbr" else sorted(CHROMA_LOCATIONS))
+        for deband in ([False, True] if planar in DEEP else [False])
     ]
     # The FFV1 masters' chains and options with each matrix yuv_matrix gives (at HD sizes and
     # below, for every matrix the decode reads), PNG's, and the startup fingerprint's.

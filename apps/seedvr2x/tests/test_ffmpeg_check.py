@@ -13,7 +13,7 @@ from media.ffmpeg import MediaError
 
 pytestmark = SHELL_FAKE
 
-FILTERS = ("zscale", "format", "scale", "setparams", "split", "select", "idet", "null")
+FILTERS = ("zscale", "format", "scale", "setparams", "split", "select", "idet", "deband", "null")
 
 # setparams' options as ffmpeg n9.0.2's -h filter=setparams lists them, each with its help, and
 # the named values of two of them (the others' left out): (name, value, help).
@@ -232,12 +232,13 @@ def without(names: tuple[str, ...], name: str) -> tuple[str, ...]:
     ("filters", "encoders", "decoders", "muxers", "missing"),
     [
         # Each one seedvr2x's own commands use (ffmpeg.FILTERS, ENCODERS, DECODERS, MUXERS):
-        # idet, which the first pass runs, select and split, which the reads use, the null graph
+        # idet, which the first pass runs, select and split, which the reads use, deband,
+        # --deband's, which the conversions' fingerprint runs at every start, the null graph
         # of an output without filters; rawvideo, the frames raw on a pipe or hashed;
         # wrapped_avframe and null, idet's output; framehash, the frame index's CRC-32s.
         *(
             (without(FILTERS, name), ENCODERS, DECODERS, MUXERS, f"the {name} filter")
-            for name in ("idet", "select", "split", "scale", "null")
+            for name in ("idet", "select", "split", "scale", "deband", "null")
         ),
         (FILTERS, ("png", "rawvideo", "wrapped_avframe"), DECODERS, MUXERS, "the ffv1 encoder"),
         *(

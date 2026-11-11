@@ -261,13 +261,15 @@ def examine(
     matrix: str | None = None,
     sample_aspect: Fraction | None = None,
     frame_rate: Fraction | None = None,
+    deband: bool = False,
 ) -> Source:
     """Probe path, refuse what seedvr2x doesn't read (declare), then decode it once to count and
     time its frames (first_pass). `matrix` (ffprobe's name), `sample_aspect` and `frame_rate`
-    (frames per second) override what the source declares.
+    (frames per second) override what the source declares; `deband`, --deband, puts its filter in
+    the frames' conversion (conversion_for).
 
     Raises MediaError with the reason for a refusal."""
-    declared = declare(path, matrix, sample_aspect, frame_rate)
+    declared = declare(path, matrix, sample_aspect, frame_rate, deband)
     return counted(declared, first_pass(declared))
 
 
@@ -276,11 +278,14 @@ def declare(
     matrix: str | None = None,
     sample_aspect: Fraction | None = None,
     frame_rate: Fraction | None = None,
+    deband: bool = False,
 ) -> Declared:
     """Probe path and refuse what seedvr2x doesn't read, by what it declares and its first frame
     carries; its colour tags resolved (resolved). `matrix` (ffprobe's name) and `sample_aspect`
     override the source's tags; `frame_rate` (--frame-rate, frames per second) its rate, checked
-    against its frames by the first pass (timing_refusal).
+    against its frames by the first pass (timing_refusal); `deband`, --deband, puts its filter in
+    the conversion every read of the frames takes (conversion_for), never in the first pass's,
+    whose frames are the source's as decoded.
 
     Raises MediaError with the reason for a refusal."""
     if frame_rate is not None and frame_rate > MOST_FPS:
@@ -307,7 +312,7 @@ def declare(
         if refusal:
             raise MediaError(refusal)
         stream = resolved(probed)
-        conversion = conversion_for(stream, matrix)
+        conversion = conversion_for(stream, matrix, deband)
     except MediaError as error:
         raise MediaError(f"{path}: {error}") from None
     waived = contradicted(probed).get("color_space")

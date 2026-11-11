@@ -34,6 +34,10 @@ FILTERS = (
     # whose trim fftools would put in front of each graph (fftools/ffmpeg_filter.c:1945-1947).
     "select",
     "idet",  # the first pass's combing detection (media/scan.py)
+    # --deband's filter in the reads' conversion (media/conversion.py, DEBAND), run by the
+    # conversions' fingerprint at every start whatever the job (media/fingerprint.py): libavfilter's
+    # own, with no library behind it, in any build not configured without it.
+    "deband",
     # The graph fftools gives an output without filters (fftools/ffmpeg_mux_init.c:436): the
     # first pass's hashes, the checksums' decode (media/checksums.py).
     "null",

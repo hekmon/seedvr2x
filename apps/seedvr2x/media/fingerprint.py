@@ -19,7 +19,8 @@ from media.writer import Tags, master_filters, png_filters
 
 # The decode's conversions run: the most common source first, then each depth, chroma
 # subsampling, matrix, range and chroma location zscale is given, at least once; RGB, expanded to
-# 16 bits.
+# 16 bits; then --deband's (Conversion.deband), its zscale bringing a limited and a full range to
+# 16 bits before the filter.
 DECODES = (
     Conversion("yuv420p", "709", "limited", "left"),
     Conversion("yuv420p10le", "2020_ncl", "limited", "topleft"),
@@ -36,6 +37,8 @@ DECODES = (
     Conversion("gbrp10le", "gbr", "full", "left"),
     Conversion("gbrp12le", "gbr", "full", "left"),
     Conversion("gbrp16le", "gbr", "full", "left"),
+    Conversion("yuv420p", "709", "limited", "left", deband=True),
+    Conversion("yuvj420p", "470bg", "full", "center", deband=True),
 )
 
 # The writers' tags, which they copy, never convert.
