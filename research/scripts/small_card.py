@@ -5,7 +5,7 @@ measuring scripts alike:
 
   small_card.py ballast --card N|whole [--keep 4] [--alarm GIB] [--watch PIDFILE] --ready FILE
       [--log FILE]
-  small_card.py run [--keep 4] [--attention sdpa] [--pidfile FILE] -- \
+  small_card.py run [--keep 4] [--attention sdpa] [--pidfile FILE] [--ballast READY] -- \
       (cli ARGS... | SCRIPT.py ARGS...)
 
 `ballast` is a process of its own, with a CUDA context of its own and no torch: F0 is the card's
@@ -28,6 +28,12 @@ on, the desktop's keep never in it. The driver's own figure (torch's mem_get_inf
 is: under WSL2 it is a fixed budget less the process's own use (hold.md, "What the driver's free
 figure counts"), over T, and seedvr2x plans in the smaller of the two. `--attention sdpa` hides
 FlashAttention 2 from the run (the vendored model and the plan then take PyTorch's SDPA).
+`--ballast READY` is the ballast's `--ready` file: on Linux seedvr2x holds a run for another
+program on the card (memory.share, by NVML), and the ballast's CUDA context is one NVML lists, so
+that every emulated run was taken for shared and held, which a card nothing else uses is not. With
+the option, `run` leaves the pid in that file (its "pid") out of the share's processes, so that
+the card is planned as that card alone; a desktop, or desktop_share.py (a CUDA process too),
+still makes it shared, as it should.
 `--set module.NAME=value` sets one of the library's figures before the run (a number keeps its
 type), `--lean` installs dit_lean.py's attention (with `--lean-chunk`, 4096 tokens by default)
 and `--gelu-inplace` its MLP, `--tail-frames` slice_probe.py's decoder tail a frame at a time,
@@ -39,6 +45,7 @@ The emulation is of memory alone: the speed, the PCIe link and the system memory
 
 import argparse
 import ctypes
+import dataclasses
 import json
 import os
 import runpy
@@ -193,6 +200,24 @@ def install(keep_gib: float) -> None:
     memory._read_all = capped
 
 
+def leave_out(pid: int) -> None:
+    """memory.share (seedvr2x's reading of who else uses the card, startup and the early reading
+    call it by the module's name) without the process `pid` among the processes it lists: the
+    ballast's, whose CUDA context NVML counts as another program's. The display and the unread
+    reason are kept, and any other process stays."""
+    from seedvr2x import memory
+
+    original = memory.share
+
+    def apart(index: int = 0) -> Any:
+        found = original(index)
+        return dataclasses.replace(
+            found, processes=tuple(each for each in found.processes if each[0] != pid)
+        )
+
+    memory.share = apart
+
+
 def hide_flash_attention() -> None:
     """FlashAttention 2 not importable in this process: the model and the plan take SDPA."""
     sys.modules["flash_attn"] = None  # type: ignore[assignment]
@@ -209,6 +234,9 @@ def run(args: argparse.Namespace) -> int:
     if args.attention == "sdpa":
         hide_flash_attention()
     install(args.keep)
+    if args.ballast:
+        with open(args.ballast) as handle:
+            leave_out(int(json.load(handle)["pid"]))
     for setting in args.set:
         name, _, value = setting.partition("=")
         module_name, _, attribute = name.rpartition(".")
@@ -278,6 +306,7 @@ def main() -> int:
     r.add_argument("--keep", type=float, default=4.0)
     r.add_argument("--attention", choices=("default", "sdpa"), default="default")
     r.add_argument("--pidfile", default="")
+    r.add_argument("--ballast", default="", help="the ballast's --ready file: its pid left out")
     r.add_argument("--set", action="append", default=[], help="module.NAME=value, before the run")
     r.add_argument("--lean", action="store_true", help="dit_lean.py's attention")
     r.add_argument("--lean-chunk", type=int, default=4096)
