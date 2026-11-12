@@ -849,10 +849,19 @@ marker. The image server, Linux's alone by its lock, has no such line.
   other value from its first pass's record, a resume with it, its input copy deleted and made
   again, giving the uninterrupted job's masters, the help with no figure;
   `tests/test_still_cli.py` a picture's refusal; `core/tests/test_record.py` the field. deband
-  is among `ffmpeg.FILTERS` and the conversions' fingerprint runs two of its chains, a limited
-  and a full range, at every start. No line suggests `--deband`: CAMBI found the strongly
-  banded scenes and missed the clip the option was made for (impl-box-1), so no detection is
-  built.
+  is among `ffmpeg.FILTERS`, so a build without it is refused. Its two chains, a limited and a
+  full range, are a digest of their own (`media/fingerprint.py`'s `deband_fingerprint`, run on a
+  gradient frame that deband changes 77% and 88% of the samples of, where the noise frame the
+  conversions run on changed 0.32% and 2.3%), run and recorded by a job with `--deband` alone,
+  under `environment.deband_conversions`, and counted in a resume's comparison and in an
+  accepted change's record only between two jobs that both took it (`resume.DEBAND_KEY`,
+  `debands`, as inductor's packages count between two compiled jobs): a change in ffmpeg's
+  deband alone refuses no job that never used it, and the conversions' digest holds the fifteen
+  decodes and the writers' alone. `tests/test_fingerprint.py` holds the two digests apart, the
+  deband one moving with the chain alone, and the gradient's share of changed samples;
+  `tests/test_deband_cli.py` the comparison and the resume of each kind of job. No line
+  suggests `--deband`: CAMBI found the strongly banded scenes and missed the clip the option was
+  made for (impl-box-1), so no detection is built.
 - The shot detector in the first pass (`media/scan.py`) is held by `tests/test_detection.py`, a
   recording stand-in in its place: its frames are the official extraction command's byte for
   byte, on 18 pixel formats whatever the official command's scaler threads (1, 4, or ffmpeg's

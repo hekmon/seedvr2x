@@ -4100,7 +4100,12 @@ def _identity(
         import environment
 
         found = environment.current(
-            None, ffmpeg_version, conversions, made_in, compiling=args.compile
+            None,
+            ffmpeg_version,
+            conversions,
+            made_in,
+            compiling=args.compile,
+            deband=_deband_fingerprint(args),
         )
         return _Identity(settings, torch.device("cuda", 0), found)
     if not torch.cuda.is_available():
@@ -4110,8 +4115,25 @@ def _identity(
     device = torch.device("cuda", 0)
     import environment
 
-    found = environment.current(device, ffmpeg_version, conversions, compiling=args.compile)
+    found = environment.current(
+        device,
+        ffmpeg_version,
+        conversions,
+        compiling=args.compile,
+        deband=_deband_fingerprint(args),
+    )
     return _Identity(settings, device, found)
+
+
+def _deband_fingerprint(args: argparse.Namespace) -> str | None:
+    """--deband's chains' fingerprint (media/fingerprint.py) for a job that took --deband, which
+    runs and records it; None for any other, whose start then runs no deband chain and whose
+    record has no such key (resume.DEBAND_KEY)."""
+    if not args.deband:
+        return None
+    from media.fingerprint import deband_fingerprint
+
+    return deband_fingerprint()
 
 
 def _prior(

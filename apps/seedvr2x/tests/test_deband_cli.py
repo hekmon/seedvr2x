@@ -10,6 +10,7 @@ import logging
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from test_cli import _option_help  # pyright: ignore[reportPrivateUsage]
@@ -29,6 +30,7 @@ from test_cli_run import (
 from test_deband import TAGS, needs_ffmpeg
 
 import main as cli
+import resume
 from media.conversion import DEBAND
 
 pytestmark = needs_ffmpeg
@@ -215,6 +217,68 @@ def test_a_resume_with_it_reads_on_as_the_uninterrupted_job(
     assert "input.mkv missing: its input copy made again from the input" in caplog.text
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
         assert decoded(tmp_path / "out" / name) == decoded(tmp_path / "whole" / name)
+
+
+def content(deband: bool, digest: str) -> dict[str, Any]:
+    return {
+        "settings": {"seed": 1, **({"deband": DEBAND} if deband else {})},
+        "environment": {
+            "torch": "2.14.1",
+            **({"deband_conversions": digest} if deband else {}),
+        },
+        "segments": [],
+        "shots": [],
+    }
+
+
+def test_the_deband_digest_counts_only_between_two_deband_jobs() -> None:
+    # resume.differences and environment_change: the environment's deband_conversions is left
+    # out of both sides unless both jobs took --deband (as inductor's packages are).
+    plain, one, other = content(False, ""), content(True, "a" * 64), content(True, "b" * 64)
+    assert resume.differences(one, other) == [
+        f'environment.deband_conversions: "{"a" * 64}" -> "{"b" * 64}"'
+    ]
+    assert resume.differences(one, content(True, "a" * 64)) == []
+    # A plain job and a deband one differ by the setting alone, either way.
+    assert resume.differences(plain, one) == [f'settings.deband: null -> "{DEBAND}"']
+    assert resume.differences(one, plain) == [f'settings.deband: "{DEBAND}" -> null']
+    # The accepted change's record.
+    change = resume.environment_change(one, other["environment"], other["settings"])
+    assert change["before"] == {"deband_conversions": "a" * 64}
+    assert change["after"] == {"deband_conversions": "b" * 64}
+    for old, new in ((plain, one), (one, plain)):
+        change = resume.environment_change(old, new["environment"], new["settings"])
+        assert change["before"] == {} and change["after"] == {}
+    # A plain job that carries the key (it should not) has it left out against a plain one.
+    stray = content(False, "")
+    stray["environment"]["deband_conversions"] = "c" * 64
+    assert resume.differences(plain, stray) == []
+
+
+def test_ffmpegs_deband_changing_refuses_a_deband_resume_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A change in the deband chains' digest alone: the resume of a job with --deband is refused
+    # as an environment change naming the key, that of a job without it resumes untouched.
+    from media import fingerprint
+
+    banded, _ = clips(tmp_path, monkeypatch)
+    for options, refusal in (((), False), (("--deband",), True)):
+        out = "deband" if options else "plain"
+        steps.stop = "window 4:1"
+        stopped(tmp_path, banded, out, *JOB, *options)
+        steps.stop = None
+        with monkeypatch.context() as patch:
+            patch.setattr(fingerprint, "deband_fingerprint", lambda: "0" * 64)
+            if refusal:
+                text = refused(tmp_path, banded, caplog, *JOB, *options, output=out)
+                assert "environment.deband_conversions" in text
+                assert "Only its environment differs" in text
+            else:
+                assert upscale(tmp_path, banded, out, *JOB, *options) == 0
 
 
 def test_the_help_says_what_it_does_and_when_with_no_figure(

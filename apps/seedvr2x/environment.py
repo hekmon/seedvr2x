@@ -68,6 +68,7 @@ def current(
     made_in: Mapping[str, object] | None = None,
     *,
     compiling: bool = False,
+    deband: str | None = None,
 ) -> dict[str, object]:
     """The environment of a run on device: torch, CUDA, cuDNN, the GPU, the attention kernel
     (record.ATTENTION), ffmpeg and its conversions' fingerprint (media/fingerprint.py), Python and
@@ -105,7 +106,12 @@ def current(
     and doesn't say for which jobs): only with --compile, so that no other job's record moves.
     What they add (jinja2, markupsafe, networkx, setuptools: resume.INDUCTOR_PACKAGES) counts in
     a resume's comparison only between two jobs that both compile (DESIGN.md, decided on
-    2026-10-29), so a plan switched to or from --compile needs no --accept-env-change."""
+    2026-10-29), so a plan switched to or from --compile needs no --accept-env-change.
+
+    deband: --deband's chains' fingerprint (media/fingerprint.py, deband_fingerprint), given by a
+    job that took --deband and recorded under "deband_conversions" for it alone: it counts in a
+    resume's comparison only between two jobs that both took --deband (resume.DEBAND_KEY), so
+    that a change in ffmpeg's deband refuses no job that never used it."""
     from seedvr2x import model, record
 
     if compiling:
@@ -116,7 +122,7 @@ def current(
     else:
         gpu, driver = torch.cuda.get_device_name(device), model.nvidia_driver()
         cudnn = torch.backends.cudnn.version()
-    return {
+    found: dict[str, object] = {
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
         "cudnn": cudnn,
@@ -131,6 +137,9 @@ def current(
         "python": f"{platform.python_implementation()} {platform.python_version()}",
         "packages": versions(),
     }
+    if deband is not None:
+        found["deband_conversions"] = deband
+    return found
 
 
 def import_inductor() -> None:

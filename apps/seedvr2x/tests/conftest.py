@@ -23,6 +23,7 @@ from library_fixtures import no_card_failed, no_driver_asked, one_to_one_clock  
 
 import timing
 from media import ffmpeg, fingerprint
+from media.decode import decode_output
 
 
 @pytest.fixture(autouse=True)
@@ -54,9 +55,10 @@ def the_linux_driver(monkeypatch: pytest.MonkeyPatch) -> None:
 #
 # A run of the command line checks the build (media/ffmpeg.py's check: six or eight ffmpeg
 # processes, its listings) and takes the conversions' fingerprint (media/fingerprint.py: one
-# ffmpeg of 19 conversions) at its start. Counted on 2026-11-07, tests/test_cli_run.py alone
-# made 814 checks and 834 fingerprints, 177 s of its 459, about 6,300 of its 8,898 ffmpeg
-# processes. Here an unchanged build is asked each listing and the fingerprint once: what
+# ffmpeg of 19 conversions; --deband's 2 are asked apart, by a job with it) at its start.
+# Counted on 2026-11-07, tests/test_cli_run.py alone made 814 checks and 834 fingerprints,
+# 177 s of its 459, about 6,300 of its 8,898 ffmpeg processes. Here an unchanged build is asked
+# each listing and the fingerprint once: what
 # ffmpeg prints is kept by the program PATH finds (its path, inode, size and times, and its
 # bytes where it is a script of under a mebibyte: the fake builds of the tests), the
 # environment its loader reads, and the options asked; the fingerprint by the same program
@@ -99,6 +101,7 @@ def _program(name: str) -> tuple[object, ...] | None:
 
 _listing = ffmpeg._run  # pyright: ignore[reportPrivateUsage]
 _fingerprint = fingerprint.fingerprint
+_deband_fingerprint = fingerprint.deband_fingerprint
 
 
 def _remembered_listing(*options: str) -> str:
@@ -126,9 +129,26 @@ def _remembered_fingerprint() -> str:
     return _Memo.fingerprints[key]
 
 
+def _remembered_deband_fingerprint() -> str:
+    """The same for --deband's chains, which a job with --deband asks at its start: the key holds
+    their chains and the gradient frame they run on."""
+    program = _program("ffmpeg") if _Memo.on else None
+    if program is None:
+        return _deband_fingerprint()
+    chains = [decode_output(each) for each in fingerprint.DEBANDS]
+    frame = fingerprint._gradient("yuv420p")  # pyright: ignore[reportPrivateUsage]
+    key = (program, "deband", repr(chains), frame, fingerprint.WIDTH, fingerprint.HEIGHT)
+    if key in _Memo.fingerprints:
+        _Memo.saved["fingerprints"] += 1
+    else:
+        _Memo.fingerprints[key] = _deband_fingerprint()
+    return _Memo.fingerprints[key]
+
+
 # At import, before the test modules: their skip marks ask for the check while collected.
 ffmpeg._run = _remembered_listing  # pyright: ignore[reportPrivateUsage]
 fingerprint.fingerprint = _remembered_fingerprint
+fingerprint.deband_fingerprint = _remembered_deband_fingerprint
 
 
 @pytest.fixture(autouse=True)

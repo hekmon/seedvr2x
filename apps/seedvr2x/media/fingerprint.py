@@ -2,7 +2,13 @@
 decode's and the writers' conversions make of the same frames, run at startup. A resume compares
 it with the job's record, as it does the rest of the environment: zimg, which does the
 conversions (zscale), is a library of its own, and an ffmpeg linked to the system's libzimg takes
-its upgrades without a new version string."""
+its upgrades without a new version string.
+
+Two digests, not one: the conversions every job runs (`fingerprint`), and --deband's chains
+(`deband_fingerprint`), which only a job that took --deband runs and records, under a key of its
+own (environment.current), and which a resume compares only between two such jobs
+(resume.differences), as inductor's packages count only between two compiled jobs. One digest of
+both would refuse the resume of a job that never debanded when ffmpeg's deband alone changed."""
 
 import hashlib
 import re
@@ -19,8 +25,7 @@ from media.writer import Tags, master_filters, png_filters
 
 # The decode's conversions run: the most common source first, then each depth, chroma
 # subsampling, matrix, range and chroma location zscale is given, at least once; RGB, expanded to
-# 16 bits; then --deband's (Conversion.deband), its zscale bringing a limited and a full range to
-# 16 bits before the filter.
+# 16 bits.
 DECODES = (
     Conversion("yuv420p", "709", "limited", "left"),
     Conversion("yuv420p10le", "2020_ncl", "limited", "topleft"),
@@ -37,6 +42,14 @@ DECODES = (
     Conversion("gbrp10le", "gbr", "full", "left"),
     Conversion("gbrp12le", "gbr", "full", "left"),
     Conversion("gbrp16le", "gbr", "full", "left"),
+)
+
+# --deband's chains (Conversion.deband), their zscale bringing a limited and a full range to 16
+# bits before the filter, run on a gradient frame (_gradient), not the noise of _frame: deband
+# changed 0.32% of the output samples of the noise frame in a limited range and 2.3% in a full
+# one, and 77% and 88% of the gradient's (ffmpeg 9.0.2, 256x64 yuv420p, the chain with deband
+# against the same without it, 2026-11-11), so a change in the filter moves this digest.
+DEBANDS = (
     Conversion("yuv420p", "709", "limited", "left", deband=True),
     Conversion("yuvj420p", "470bg", "full", "center", deband=True),
 )
@@ -63,13 +76,28 @@ def fingerprint() -> str:
     """The SHA-256 of the test conversions' output, in hex.
 
     Raises MediaError when ffmpeg fails them."""
-    conversions = _conversions()
+    return _digest(_conversions())
+
+
+def deband_fingerprint() -> str:
+    """The SHA-256 of --deband's test chains' output, in hex, on a gradient frame: the digest a
+    --deband job records beside the conversions' (environment.current).
+
+    Raises MediaError when ffmpeg fails them."""
+    return _digest(
+        [(conversion.planar, decode_output(conversion)) for conversion in DEBANDS], gradient=True
+    )
+
+
+def _digest(conversions: list[tuple[str, list[str]]], gradient: bool = False) -> str:
+    """The SHA-256 of what ffmpeg makes of the test frames of `conversions`: those of _frame, or
+    of _gradient."""
     with tempfile.TemporaryDirectory(prefix="seedvr2x-") as name:
         directory = Path(name)
         command = ["ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-y"]
         for index, (pix_fmt, _) in enumerate(conversions):
             frame = directory / f"{index}.in"
-            frame.write_bytes(_frame(pix_fmt))
+            frame.write_bytes(_gradient(pix_fmt) if gradient else _frame(pix_fmt))
             command += ["-f", "rawvideo", "-pix_fmt", pix_fmt, "-s", f"{WIDTH}x{HEIGHT}"]
             command += ["-i", str(frame)]
         for index, (_, output) in enumerate(conversions):
@@ -137,3 +165,22 @@ def _frame(pix_fmt: str) -> bytes:
     if depth in (8, 16):
         return data
     return (np.frombuffer(data, dtype="<u2") & ((1 << depth) - 1)).astype("<u2").tobytes()
+
+
+def _gradient(pix_fmt: str) -> bytes:
+    """A yuv420p or yuvj420p frame, WIDTH x HEIGHT, of smooth ramps across, the kind of frame
+    banding lives on: luma from 40 to 200 over the width, the chroma planes 100 to 140 and 140 to
+    100. Deterministic, 24 KiB. Deband changed 77% (limited) and 88% (full) of the samples
+    ffmpeg made of it, against 0.32% and 2.3% of _frame's noise (DEBANDS)."""
+    if pix_fmt not in ("yuv420p", "yuvj420p"):
+        raise ValueError(f"no gradient frame in {pix_fmt}")
+
+    def ramp(width: int, height: int, start: int, end: int) -> bytes:
+        across = start + (end - start) * np.arange(width) // (width - 1)
+        return np.tile(across.astype(np.uint8), (height, 1)).tobytes()
+
+    return (
+        ramp(WIDTH, HEIGHT, 40, 200)
+        + ramp(WIDTH // 2, HEIGHT // 2, 100, 140)
+        + ramp(WIDTH // 2, HEIGHT // 2, 140, 100)
+    )

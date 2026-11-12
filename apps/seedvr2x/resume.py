@@ -115,6 +115,13 @@ def replannable(difference: str) -> bool:
 INDUCTOR_PACKAGES = frozenset({"jinja2", "markupsafe", "networkx", "setuptools"})
 
 
+# The environment's record of --deband's chains (media/fingerprint.py, deband_fingerprint), written
+# by a job that took --deband alone: counted, as inductor's packages are, only between two jobs
+# that both did (debands), so that a change in ffmpeg's deband alone is no environment change of
+# a job that never used it.
+DEBAND_KEY = "deband_conversions"
+
+
 def identity(content: dict[str, Any]) -> dict[str, Any]:
     """Of a job's manifest content, what a resume compares before the first pass: the settings,
     the environment, and the source's content, its size and SHA-256. The first pass's record is
@@ -156,6 +163,8 @@ def differences(recorded: dict[str, Any], asked: dict[str, Any]) -> list[str]:
     one, other = _job(recorded), _job(json.loads(json.dumps(asked)))
     if not (compiles(recorded) and compiles(asked)):
         one, other = _without_inductor(one), _without_inductor(other)
+    if not (debands(recorded) and debands(asked)):
+        one, other = _without_deband(one), _without_deband(other)
     _compare(one, other, "", found)
     return found
 
@@ -166,6 +175,29 @@ def compiles(content: dict[str, Any]) -> bool:
     shot_plan.plan)."""
     settings: Any = content.get("settings")
     return isinstance(settings, dict) and cast(dict[str, Any], settings).get("compile_vae") is True
+
+
+def debands(content: dict[str, Any]) -> bool:
+    """Whether a job's content, recorded or asked, took --deband (settings.deband, written only
+    when on: main._settings)."""
+    settings: Any = content.get("settings")
+    return isinstance(settings, dict) and bool(cast(dict[str, Any], settings).get("deband"))
+
+
+def _without_deband(content: dict[str, Any]) -> dict[str, Any]:
+    """content without the environment's DEBAND_KEY: what --deband's chains make counts only
+    between two jobs that both took --deband (differences, environment_change)."""
+    environment: Any = content.get("environment")
+    if not isinstance(environment, dict) or DEBAND_KEY not in environment:
+        return content
+    return {
+        **content,
+        "environment": {
+            name: value
+            for name, value in cast(dict[str, Any], environment).items()
+            if name != DEBAND_KEY
+        },
+    }
 
 
 def _without_inductor(content: dict[str, Any]) -> dict[str, Any]:
@@ -327,13 +359,16 @@ def environment_change(
 ) -> dict[str, Any]:
     """The record of a resume in another environment, accepted (--accept-env-change): when, what
     changed (the driver too, for information; of the packages, those changed, but what a
-    compilation imports unless both jobs compile: `settings` are the job asked's, INDUCTOR_
-    PACKAGES), and how far the job had gone, in units made in the environment before (a run
+    compilation imports unless both jobs compile, INDUCTOR_PACKAGES; the fingerprint of
+    --deband's chains unless both jobs took --deband, DEBAND_KEY: `settings` are the job
+    asked's), and how far the job had gone, in units made in the environment before (a run
     takes them in one order: segments, then their shots, then each shot's windows)."""
     old = {"settings": recorded.get("settings"), "environment": recorded["environment"]}
     new = json.loads(json.dumps({"settings": settings, "environment": environment}))
     if not (compiles(old) and compiles(new)):
         old, new = _without_inductor(old), _without_inductor(new)
+    if not (debands(old) and debands(new)):
+        old, new = _without_deband(old), _without_deband(new)
     before, after = _changes(
         cast(dict[str, Any], old["environment"]), cast(dict[str, Any], new["environment"])
     )
