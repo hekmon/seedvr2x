@@ -2189,7 +2189,9 @@ def _refused(error: BaseException) -> str:
     The card's memory and what the driver had free of it, torch's "GPU 0 has a total capacity
     of 31.82 GiB of which 9.36 GiB is free", are kept on a driver that refuses, where they are
     the card's; they go on a run held to its card, whose driver's figure isn't (it leaves other
-    programs' memory out, and stands under the card's near a full card: seedvr2x/memory.py).
+    programs' memory out, and stands under the card's near a full card: seedvr2x/memory.py), but
+    for a run held for another program on the card under Linux's driver (memory.shared), whose
+    driver's figure is the card's.
     There too, cudaMallocAsync's message, DESIGN.md's allocator on such a driver, is read
     beyond its first line, which says no figure: what was asked, what torch had allocated, and
     the same two figures, from its own lines (torch 2.14.1's words under each allocator, its
@@ -2202,13 +2204,22 @@ def _refused(error: BaseException) -> str:
     Windows' commit there (_commit_said)."""
     from seedvr2x import memory
 
-    held = " (held to the card's own memory: its driver gives more)" * memory.spills()
+    shared = memory.shared()
+    held = (
+        ""
+        if not memory.spills()
+        else " (held to the card's own memory: its driver gives more)"
+        if shared is None
+        else f" (held to the card's own memory, shared: {shared})"
+    )
+    # The driver's figures are the card's under Linux's driver, a shared card's too.
+    lends = memory.spills() and shared is None
     whole = str(error)
     said = whole.partition(chr(10))[0]
     asked = _OOM_ASKED.match(said)
     if asked is not None:
         words = f"CUDA out of memory. Tried to allocate {asked[1]}"
-        card = None if memory.spills() else _OOM_CARD.search(said)
+        card = None if lends else _OOM_CARD.search(said)
         if card is not None:
             words += f", {card[2]} free of the GPU's {card[1]}"
         counted, allowed = _OOM_HELD.search(said), _OOM_ALLOWED.search(said)
@@ -2216,7 +2227,7 @@ def _refused(error: BaseException) -> str:
             words += f", torch holding {counted[1]} allocated and {counted[2]} more reserved"
         said = words + (f", {allowed[1]} allowed" if allowed is not None else "")
     elif (lines := _OOM_ASYNC.search(whole)) is not None:
-        if memory.spills():
+        if lends:
             said += f": {lines['asked']} asked, torch holding {lines['held']} allocated"
         else:
             said += (

@@ -536,3 +536,16 @@ def test_a_verbose_plan_log_still_parses(
         monkeypatch,
     )
     assert verdict.agrees, verdict
+
+
+def test_a_run_held_for_a_shared_card_fails_the_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The references under Linux's driver are a card nothing else used: a run held for another
+    # program on it (this pytest process's own CUDA context included) fails, saying the way out.
+    monkeypatch.setattr(reg, "card", lambda: "a card")
+    reg.shared_card("12:00:00 INFO no other program on the GPU at the start (...): not held")
+    held = (
+        "12:00:00 WARNING the GPU is shared: another program on it (python3); held so that the"
+        " rest of the card keeps room to grow into"
+    )
+    with pytest.raises(AssertionError, match="a pytest process of its own"):
+        reg.shared_card(held)

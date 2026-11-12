@@ -358,10 +358,10 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   ComfyUI's models and less the room left to the rest of the card, and ComfyUI is asked to free
   only the room the plan needs, with 0.25 GiB over it for the buffer its partial unloads keep: its
   models stay where both fit. That room is one figure, the larger of ComfyUI's own reserve for the
-  system (its `--reserve-vram`, 0.4 to 0.7 GiB by default) and the least seedvr2x leaves on a
-  driver that lends system memory (0.5 GiB), not the two added; the plan says which set it, and
-  raising `--reserve-vram` raises the room. The card is freed
-  when the node ends, on Cancel and on an error too.
+  system (its `--reserve-vram`, 0.4 to 0.7 GiB by default) and the least seedvr2x leaves on a held
+  run (0.5 GiB: a driver that lends system memory, or a Linux card another program uses), not the
+  two added; the plan says which set it, and raising `--reserve-vram` raises the room. The card is
+  freed when the node ends, on Cancel and on an error too.
 - **A driver that lends system memory** (Windows, WSL2): seedvr2x's plan leaves room on the card,
   because the driver can borrow your computer's RAM where the card is full, which Windows shows as
   "shared GPU memory" and which slows a run. Turning NVIDIA's "CUDA - Sysmem Fallback Policy" to
@@ -382,6 +382,10 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   fails where a step is short). The nodes say which applies once, in the console, where the
   driver lends system memory. The nodes set no limit on torch's memory: ComfyUI's process is
   shared with its other nodes, and a limit set there cannot be taken back.
+- **A card another program uses, on Linux** (a display active on it, or a program other than
+  ComfyUI listed on it): Linux's driver lends nothing, but that program has only the room the plan
+  leaves to grow into, so the plan leaves the same room as on a driver that lends, and the console
+  says so, with what it found. A card ComfyUI alone uses is planned as before.
 - **A card too small** is refused before any model loads, with the way out in the nodes' own
   words: a smaller file in seedvr2x Models, a tile or the blocks swapped connected to the upscale
   node.

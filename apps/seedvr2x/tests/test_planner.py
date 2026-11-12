@@ -1666,6 +1666,14 @@ def test_the_card_line_leaves_the_drivers_figure_to_its_debug_record() -> None:
         f" card's, NVML's, wasn't read){HELD_LINE}"
     )
     assert detail["driver"] is None and detail["unread"] is None
+    # A card shared under Linux's driver: held, the share the reason the line gives
+    # (memory.Reading.shared; DESIGN.md, Allocator, decided on 2026-11-11).
+    shared = replace(held_to_card["smaller"], shared="a display active on it")
+    made, peaks = planner.plan(shared, HD, film, Pins(), None)
+    assert planner.said(made, peaks, "a card", HD, film, Pins())[0] == (
+        "plan: card: a card, 28.05 GiB free on the whole card by NVML: the run is held to the"
+        " card's own memory, the card shared: a display active on it"
+    )
     # A driver that refuses has no such record, nor does an early reading.
     made, peaks = planner.plan(round(22.75 * GIB), HD, film, Pins(), None)
     assert planner.card_detail(peaks) is None

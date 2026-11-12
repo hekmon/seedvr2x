@@ -1165,6 +1165,13 @@ def test_said_on_a_held_run_names_the_figures() -> None:
     )
     assert "budget: 20.00 GiB, the 25.00 GiB free less torch's limit, 0.50 GiB under it" in text
     assert "the reserve of 4.50 GiB left to torch's allocator" in text
+    # Why it is held: a driver that lends, or a card another program uses under Linux's driver
+    # (memory.Reading.shared, memory.held_why; DESIGN.md, Allocator, decided on 2026-11-11).
+    assert "own memory, its driver giving more than the card has" in text
+    shared = replace(reading, shared="a display active on it")
+    text = "\n".join(still_plan.said(made(FOUR_K, shared)))
+    assert "own memory, the card shared: a display active on it" in text
+    assert "driver giving more" not in text
     # Under the segments each step has its own, beyond its peak, which the lines say.
     segments = replace(reading, allocator=memory.SEGMENTS)
     text = "\n".join(still_plan.said(made(FOUR_K, segments), (2160, 3840)))

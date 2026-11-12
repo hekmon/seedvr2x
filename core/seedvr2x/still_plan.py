@@ -1849,7 +1849,7 @@ def _memory_said(plan: StillPlan) -> list[str]:
     free = _held_under(reading)
     head = (
         f"memory: {_gib(free)} GiB free {_named(reading, _gib, driver=False)}: the run is held"
-        " to the card's own memory, its driver giving more than the card has"
+        f" to the card's own memory, {memory.held_why(reading)}"
     )
     if reading.allocator == memory.PLAIN:
         return [

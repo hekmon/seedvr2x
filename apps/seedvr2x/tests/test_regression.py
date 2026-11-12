@@ -417,6 +417,7 @@ def upscaled(
     if run.returncode == 1 and refused is not None:
         pytest.skip(f"{card()}: the case can't run there: {refused}")
     assert run.returncode == 0, run.stderr[-3000:]
+    shared_card(run.stderr)
     # The plan's reserve is the step's own (peaks.reserve; DESIGN.md, Allocator, Small cards,
     # 2026-11-06): the 2.5 GiB reserve and its second line, "reserve: ... slow", retired, so no
     # plan line of a case says a slower reserve was taken.
@@ -430,6 +431,20 @@ def upscaled(
     resumes = re.search(r"^(\d\d:\d\d:\d\d|.* INFO cli\.main:) resuming ", run.stderr, re.M)
     detected(planned if planned is not None and resumes is not None else run.stderr)
     return run.stderr
+
+
+def shared_card(log: str) -> None:
+    """A run held for another program on its card under Linux's driver (memory.SHARED; DESIGN.md,
+    Allocator, decided on 2026-11-11) fails the case: the references under Linux's driver were made
+    on a card nothing else used, cudaMallocAsync's plans, and a held run plans otherwise. The
+    other program may be this pytest process, whose in-process GPU tests (test_clip_cli.py,
+    test_still_cli.py, test_shot_cli.py) leave it a CUDA context on the card: run this file in a
+    pytest process of its own, nothing else on the card."""
+    said = next((line for line in log.splitlines() if memory.SHARED in line), None)
+    assert said is None, (
+        f"{card()}: the run was held, its card shared ({said}): run tests/test_regression.py in a"
+        " pytest process of its own, with no desktop or other program on the card"
+    )
 
 
 def detected(log: str) -> None:

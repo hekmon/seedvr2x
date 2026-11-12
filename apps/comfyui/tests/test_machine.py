@@ -238,6 +238,55 @@ def test_the_lending_driver_is_told_in_the_nodes_words_once(
     assert "reserve" not in line and "torch" not in line
 
 
+def test_a_card_nvml_cannot_read_is_told_as_one_that_may_be_shared(
+    machine: StandIn, tmp_path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # NVML unread at the start: taken for shared, and said as a card another program may use.
+    monkeypatch.setattr(memory, "_shared", memory.Share(unread="nvmlInit: 999").said())
+    machine.lends = True
+    machine.held_card = 32 * GIB
+    with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui.models"):
+        run_image(handle(tmp_path))
+    lines = [line.removeprefix("[seedvr2x] ") for line in caplog.messages]
+    assert (
+        "seedvr2x's plan leaves room on the card: another program may use this graphics card"
+        " (maybe, NVML unread (nvmlInit: 999)), and it needs room to grow"
+    ) in lines
+    said = [line for line in lines if "ComfyUI runs torch" in line]
+    assert said and said[0].startswith("another program may use this graphics card, and ComfyUI")
+
+
+@pytest.mark.parametrize("allocator", ["cudaMallocAsync", "native"])
+def test_a_shared_card_is_told_in_the_nodes_words_once(
+    machine: StandIn,
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    allocator: str,
+) -> None:
+    # A card a desktop shares under Linux's driver, held for it (memory.shared; DESIGN.md,
+    # Allocator, decided on 2026-11-11): the share is the reason said, never a driver that lends,
+    # and the allocator's way out is the same, its opener the share.
+    monkeypatch.setattr(memory, "_shared", "a display active on it")
+    machine.lends = True
+    machine.held_card = 32 * GIB
+    machine.allocator_name = allocator
+    machine.expandable = False
+    with caplog.at_level(logging.INFO, logger="seedvr2x_comfyui.models"):
+        run_image(handle(tmp_path))
+        run_image(handle(tmp_path))
+    lines = [line.removeprefix("[seedvr2x] ") for line in caplog.messages]
+    assert [line for line in lines if "another program" in line and "room" in line][:1] == [
+        "seedvr2x's plan leaves room on the card: another program uses this graphics card (a"
+        " display active on it), and it needs room to grow"
+    ]
+    assert not [line for line in lines if "borrow" in line or "lends" in line]
+    said = [line for line in lines if "ComfyUI runs torch" in line]
+    assert len(said) == 1
+    assert said[0].startswith("another program uses this graphics card, and ComfyUI runs torch")
+    assert "expandable_segments:True" in said[0]
+
+
 def test_the_librarys_command_line_warnings_are_not_shown_in_comfyuis_process(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -266,12 +315,23 @@ def test_the_librarys_command_line_warnings_are_not_shown_in_comfyuis_process(
         # WSL2's driver that didn't answer, taken for one that lends: the same finding, said by
         # the nodes' own line too.
         memory.logger.warning("%s", memory.UNANSWERED)
+        # A card shared under Linux's driver, and one no other program uses: the command line's
+        # start lines, the nodes' own INFO line saying a share
+        # (test_a_shared_card_is_told_in_the_nodes_words_once).
+        memory.logger.warning(
+            "%s", memory.shared_line(memory.Share(display=True, processes=((7, "Xorg"),)))
+        )
+        memory.logger.warning("%s", memory.shared_line(memory.Share(unread="nvmlInit: 999")))
+        memory.logger.info(
+            "no other program on the GPU at the start (no display active on it, none listed by"
+            " NVML): not held, its driver refusing what the card can't hold"
+        )
         memory.logger.warning("another warning of the library's")
         return ""
 
     monkeypatch.setattr(memory, "startup", startup)
     monkeypatch.setattr(torch.cuda, "get_allocator_backend", lambda: "native")
-    with caplog.at_level(logging.WARNING, logger=memory.logger.name):
+    with caplog.at_level(logging.INFO, logger=memory.logger.name):
         models._startup()  # pyright: ignore[reportPrivateUsage]
         assert caplog.messages == ["[seedvr2x] another warning of the library's"]
         # The filter is taken off with the call: the command line's own runs say it.

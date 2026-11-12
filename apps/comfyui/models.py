@@ -279,13 +279,17 @@ class CudaMachine:
 # cannot be taken back in a process shared with other nodes); and the driver that lends system
 # memory (memory.LENDS), worded for a run that passes the card, which the nodes' plan keeps from
 # (the user, 2026-11-08: the nodes' own INFO line alone says it), and WSL2's driver that didn't
-# answer, taken for one that lends (memory.UNANSWERED), the same finding in other words. The nodes
-# say their own words, once (_allocator_note).
+# answer, taken for one that lends (memory.UNANSWERED), the same finding in other words; and a
+# card shared with another program under Linux's driver (memory.SHARED), held for it, and the
+# line that no other program is on the card at the start (memory.ALONE). The nodes say their own
+# words, once (_allocator_note).
 _COMMAND_LINE_WORDS = (
     "the allocator is the environment's",
     "seedvr2x holds itself to the card's own memory",
     memory.LENDS,
     memory.UNANSWERED,
+    memory.SHARED,
+    memory.ALONE,
 )
 
 
@@ -924,10 +928,24 @@ def _allocator_note(machine: Machine) -> None:
     before ComfyUI starts, ComfyUI setting no segments of its own (impl-nodes' reading of
     v0.44.0). Torch's own allocator without the segments plans with the 4.5 GiB reserve alone,
     and a step short of room fails there where the segments slow it down. On Windows, whose torch
-    has no segments, the allocator ComfyUI runs is said with no way to them."""
+    has no segments, the allocator ComfyUI runs is said with no way to them. On a card another
+    program uses under Linux's driver (memory.shared; DESIGN.md, Allocator, decided on
+    2026-11-11), held as a lending driver's is, the same, its reason the share."""
     if not machine.spills():
         return
-    if "lends" not in _told:
+    shared = memory.shared()
+    if shared is not None and "shared" not in _told:
+        _told.add("shared")
+        # Linux's driver refuses what the card can't hold, but another program on the card, a
+        # desktop's, has only the room the plan leaves to grow into (memory.SHARED: on 2026-11-11
+        # a desktop growing by 0.6 GiB stopped 4K runs from 16 to 48 GB under cudaMallocAsync).
+        found = (
+            f"another program may use this graphics card ({shared})"
+            if shared.startswith(memory.UNREAD)
+            else f"another program uses this graphics card ({shared})"
+        )
+        logger.info(f"seedvr2x's plan leaves room on the card: {found}, and it needs room to grow")
+    elif shared is None and "lends" not in _told:
         _told.add("lends")
         # What seedvr2x does first, then why, NVIDIA's setting named by what was measured (the
         # user, 2026-11-08, read the line as a contradiction of the setting the README leads to):
@@ -947,6 +965,13 @@ def _allocator_note(machine: Machine) -> None:
             f" {setting}"
         )
     allocator = machine.allocator()
+    why = (
+        "this driver lends system memory where the card is full"
+        if shared is None
+        else "another program may use this graphics card"
+        if shared.startswith(memory.UNREAD)
+        else "another program uses this graphics card"
+    )
     if memory.windows():
         # Torch's Windows build has no expandable segments (memory._allocator): under its own
         # allocator a step short of room fails, as ComfyUI's --disable-cuda-malloc did on an RTX
@@ -971,7 +996,7 @@ def _allocator_note(machine: Machine) -> None:
     elif allocator == "cudaMallocAsync":
         _once(
             "allocator",
-            "this driver lends system memory where the card is full, and ComfyUI runs"
+            f"{why}, and ComfyUI runs"
             " torch on cudaMallocAsync, its default allocator. Nothing slows down and no picture"
             " changes for it, but it holds more of the card than it uses, which the plan counts:"
             " on an 8 GB card a picture fits either way, a 1080p clip only under torch's own"
@@ -982,7 +1007,7 @@ def _allocator_note(machine: Machine) -> None:
     elif not machine.reading(machine.free()).expandable:
         _once(
             "allocator",
-            "this driver lends system memory where the card is full, and ComfyUI runs"
+            f"{why}, and ComfyUI runs"
             " torch's own allocator without expandable segments, under which a step short of"
             " room fails and the plan keeps %.1f GiB of the card free beside the model's work: set"
             " PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True before starting ComfyUI, and a"

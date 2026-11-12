@@ -53,11 +53,15 @@ def no_driver_asked(
         monkeypatch.setattr(memory, "paravirtual", lambda: False)
         monkeypatch.setattr(memory, "NVML", "libnvidia-ml.so.none-in-a-cpu-test")
         monkeypatch.setattr(memory, "_torch_loaded", lambda: False)  # as a run's start finds it
+        # A card no other program uses, whatever the machine's: NVML's library is none here, which
+        # memory.share would take for a shared card (unread).
+        monkeypatch.setattr(memory, "share", lambda index=0: memory.Share())
         for name in memory.VARIABLES:
             monkeypatch.delenv(name, raising=False)
     state = (("_spills", False), ("_native", False), ("_limit", None), ("_footing", None))
     held = (("_segments", False), ("_plan_s_limit", None), ("_base", None), ("_kept", None))
-    for name, value in (*state, *held, ("_planned", None), ("_left", memory.HELD_BACK)):
+    shared = (("_planned", None), ("_left", memory.HELD_BACK), ("_shared", None))
+    for name, value in (*state, *held, *shared):
         monkeypatch.setattr(memory, name, value)
     yield
 

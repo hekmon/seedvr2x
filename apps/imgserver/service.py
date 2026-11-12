@@ -151,7 +151,8 @@ class Card:
             raise Refusal("the GPU doesn't compute in bfloat16, which the models run in")
         self.torch = torch
         self.device = torch.device("cuda", 0)
-        # Where the driver spills, torch is held to the card first (DESIGN.md, Allocator).
+        # Where the run is held (a driver that lends, or a card another program uses under
+        # Linux's driver: memory.startup), torch is held to the card first (DESIGN.md, Allocator).
         memory.hold(self.device, first=True)
 
     def device_name(self) -> str:

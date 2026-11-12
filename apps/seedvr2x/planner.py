@@ -1008,7 +1008,9 @@ def _card_said(card: str, peaks: Peaks) -> list[str]:
     (_Job.margin); under the segments and cudaMallocAsync nothing is taken off the figure and the
     line says the reserve of each step, by its peak (Peaks.reserves; DESIGN.md, Allocator, Small
     cards, 2026-11-06). There is no second line: the 2.5 GiB reserve and its "up to 1.5 times as
-    long" retired with the segments' reserve measured by the step."""
+    long" retired with the segments' reserve measured by the step. The first line says why the
+    run is held: its driver giving more than the card has, or the card shared with another
+    program under Linux's driver (memory.Reading.shared)."""
     reading = peaks.reading
     # An early reading (memory.early) says what NVML read and what was counted off it, never
     # "its driver reports", which it did not ask.
@@ -1040,7 +1042,7 @@ def _card_said(card: str, peaks: Peaks) -> list[str]:
     named = _named(reading, _gib, driver=False) if early is None else f"({early})"
     lines = [
         f"card: {card}, {_gib(free)} GiB free {named}: the run is held to the card's own memory,"
-        " its driver giving more than the card has",
+        f" {memory.held_why(reading)}",
         budget,
     ]
     return lines

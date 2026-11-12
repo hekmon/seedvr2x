@@ -637,7 +637,14 @@ def test_a_linux_driver_is_asked_nothing(
     monkeypatch.setattr(memory, "probe", lambda: asked.append("probe"))
     assert startup(monkeypatch, None) == "backend:cudaMallocAsync"
     assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:cudaMallocAsync"
-    assert not asked and not memory.spills() and not caplog.messages
+    assert not asked and not memory.spills()
+    # Its card no other program uses (library_fixtures.no_driver_asked's share), said so: a shared
+    # one is held (tests/test_share.py).
+    assert caplog.messages == [
+        "no other program on the GPU at the start (no display active on it, none listed by"
+        " NVML): not held, its driver refusing what the card can't hold"
+    ]
+    caplog.clear()
     # The whole free memory is the plan's, and the card's own figure is read nowhere: neither
     # of the driver's libraries is loaded, NVML's no more than CUDA's.
     loaded = libraries(monkeypatch, Card(30 * GIB, spills=False), Nvml({NAMED: 20 * GIB}))

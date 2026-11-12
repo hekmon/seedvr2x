@@ -115,7 +115,7 @@ import sys
 import uuid
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -377,6 +377,84 @@ class Driver:
         )
 
 
+# A card another program uses under Linux's driver is held as under WSL2 (DESIGN.md, Allocator,
+# Windows itself, decided on 2026-11-08, its first bullet holding the decision of 2026-11-11).
+# Linux's driver refuses what the card can't hold, so nothing spills; but torch's cache, unheld,
+# keeps the whole card it has had, and another program on the card has only the planner's margin
+# to grow into. Measured on the 96 GB card (RTX PRO 6000 Blackwell, Linux's driver, impl-box-2,
+# 2026-11-11), the cards emulated by a ballast, a desktop played by a process beside the run, its
+# 0.54 GiB growing to 1.1 GiB and back, the run on cudaMallocAsync: the reserved peak was the
+# run's whole free reading from 12 to 48 GB, so the desktop's growth was refused 5 to 18 times in
+# each 1080p run from 12 to 48 GB, and every 4K job from 16 to 48 GB failed, out of memory in its
+# first window once the desktop had grown into the 0.6 GiB margin (1.3 to 4.1 GiB asked, 25 to 27
+# MiB free on the card); with the desktop held still, 4K ran at 16, 24 and 48 GB. So the share is
+# read at the start, before torch: a display active on the card, or a process other than this one
+# listed on it by NVML (compute or graphics), and where NVML can't say, the card is taken for
+# shared, as WSL2's driver that doesn't answer is taken for one that lends: a run held for nothing
+# loses some memory, a run not held where another program grows loses its frames. SHARED opens
+# the line on every platform it is said on, so that an app that says it in its own words leaves
+# it out by these words (the nodes').
+SHARED = "the GPU is shared"
+# The start's line where no other program is on the card at the start, and the words an unread
+# share is said in (Share.said), each a constant for the apps that leave them out or word them
+# (the nodes').
+ALONE = "no other program on the GPU at the start"
+UNREAD = "maybe, NVML unread"
+# NVML's status for a buffer too small for its answer (nvml.h: NVML_ERROR_INSUFFICIENT_SIZE) and
+# for a query the card doesn't support (NVML_ERROR_NOT_SUPPORTED): a card that can't drive a
+# display has none active.
+INSUFFICIENT_SIZE, NOT_SUPPORTED = 7, 3
+# The processes named in a line at the most, the rest counted.
+NAMED = 3
+
+
+class _ProcessInfo(ctypes.Structure):
+    """NVML's nvmlProcessInfo_t (nvml.h), as nvmlDeviceGetComputeRunningProcesses_v3 and
+    nvmlDeviceGetGraphicsRunningProcesses_v3 fill it: the process's identifier, the bytes it holds
+    on the card, and the MIG instances it runs in."""
+
+    _fields_ = (
+        ("pid", ctypes.c_uint),
+        ("usedGpuMemory", ctypes.c_ulonglong),
+        ("gpuInstanceId", ctypes.c_uint),
+        ("computeInstanceId", ctypes.c_uint),
+    )
+
+
+@dataclass(frozen=True)
+class Share:
+    """Whether another program uses the card behind a CUDA device, by NVML (share): `display`,
+    whether a display is active on it (nvidia-smi's "Display Active"); `processes`, the processes
+    other than this one listed on it, compute or graphics, each its identifier and its name where
+    the system says it ("" where it doesn't); `unread`, why NVML gave no answer, in words, None
+    where it gave one. A card is shared where NVML says so or can't say (`shared`)."""
+
+    display: bool = False
+    processes: tuple[tuple[int, str], ...] = ()
+    unread: str | None = None
+
+    @property
+    def shared(self) -> bool:
+        """Whether the run holds itself to the card for the share (startup)."""
+        return self.unread is not None or self.display or bool(self.processes)
+
+    def said(self) -> str:
+        """The share in a few words, for the plan's card line and the refusals (Reading.shared):
+        "a display active on it", "2 other programs on it (Xorg, gnome-shell)", both, or "maybe,
+        NVML unread (the reason)" (UNREAD)."""
+        if self.unread is not None:
+            return f"{UNREAD} ({self.unread})"
+        parts = ["a display active on it"] if self.display else []
+        if self.processes:
+            count = len(self.processes)
+            names = [name or f"process {pid}" for pid, name in self.processes[:NAMED]]
+            if count > NAMED:
+                names.append(f"{count - NAMED} more")
+            programs = "another program" if count == 1 else f"{count} other programs"
+            parts.append(f"{programs} on it ({', '.join(names)})")
+        return " and ".join(parts) if parts else "no other program on it"
+
+
 def counted(taken: int, reading: "Reading") -> int:
     """What a plan may count its peaks in, in bytes, of `taken`, the free memory a held run goes
     by (the smaller of the driver's figure and the card's, or the driver's alone where the card
@@ -417,7 +495,12 @@ class Reading:
     - margin: the allocator's margin the environment probe measured (probe.Probed.
       allocator_margin), as a share of a step's P, which peaks.reserve counts where it is larger
       than the rule's share; None where none is measured, which is every run today (the
-      measurement is not built)."""
+      measurement is not built);
+    - shared: on a run held for another program on the card under Linux's driver (Share), the
+      share in words (Share.said), which the plan's card line says as the reason the run is held;
+      None where the run is held for a driver that lends, or not held. Left out of the repr: it
+      words a plan and moves none (the plan matrix's text, which prints the reading, is the
+      plans')."""
 
     reported: int
     card: int | None
@@ -428,6 +511,7 @@ class Reading:
     nvml: int | None
     nvml_used: int | None
     margin: float | None
+    shared: str | None = field(default=None, repr=False)
 
     def __init__(
         self,
@@ -440,9 +524,10 @@ class Reading:
         nvml: int | None = None,
         nvml_used: int | None = None,
         margin: float | None = None,
+        shared: str | None = None,
     ) -> None:
         if not held:
-            allocator = PLAIN
+            allocator, shared = PLAIN, None
         for name, value in (
             ("reported", reported),
             ("card", card),
@@ -453,6 +538,7 @@ class Reading:
             ("nvml", nvml),
             ("nvml_used", nvml_used),
             ("margin", margin),
+            ("shared", shared),
         ):
             object.__setattr__(self, name, value)
 
@@ -498,16 +584,18 @@ def reading(free: int) -> Reading:
     if card is None:
         logger.warning(
             "the whole card's free memory couldn't be read through NVML as the plan was made,"
-            " asked twice (%s): what the driver reports free to this process is taken alone,"
-            " which leaves other programs' memory out while the card has room: the plan counts"
-            " on that figure, torch is held %.1f GiB under it and the run's units are checked on"
-            " it",
+            " asked twice (%s): what the driver reports free to this process is taken alone, %s:"
+            " the plan counts on that figure, torch is held %.1f GiB under it and the run's units"
+            " are checked on it",
             read,
-            HELD_BACK_UNREAD / GIB,
+            _driver_s_figure(),
+            _held_back(None) / GIB,
         )
     _footing, _planned = (DRIVER if card is None else CARD), card
     taken = free if card is None else min(free, card)
-    made = Reading(free, card, 0, True, _held_back(card), _chosen(_native, _segments))
+    made = Reading(
+        free, card, 0, True, _held_back(card), _chosen(_native, _segments), shared=_shared
+    )
     made = replace(made, counted=counted(taken, made))
     logger.debug(
         "the plan counts on %.2f GiB of the GPU's memory, of the %.2f GiB free %s: %.1f GiB are"
@@ -546,16 +634,23 @@ def early(card: int, used: int | None = None) -> Reading:
     driver reports to the process counted as the card's (the smaller of the two figures, as
     reading takes it), torch's own allocator with expandable segments unless the environment's
     setting says otherwise (_allocator, as startup reads it); elsewhere the driver refuses and
-    its figure is the card's. Nothing is remembered and nothing is logged: the module's state is
-    startup's, and a run's own reading comes later (DESIGN.md, Memory planner, A plan shapes the
-    output a little, decided on 2026-10-28: "the room is read through NVML ... NVML only")."""
+    its figure is the card's, the run held all the same where another program uses the card
+    (share, read here as startup reads it, the share in `shared`). Nothing is remembered and
+    nothing is logged: the module's state is startup's, and a run's own reading comes later
+    (DESIGN.md, Memory planner, A plan shapes the output a little, decided on 2026-10-28: "the
+    room is read through NVML ... NVML only")."""
     free = max(card - CONTEXT, 0)
-    if not (paravirtual() or windows()):
+    lends = paravirtual() or windows()
+    found = share() if not lends and sys.platform == "linux" else None
+    if not lends and (found is None or not found.shared):
         return Reading(free, None, free, False, nvml=card, nvml_used=used)
     given = next((os.environ[name] for name in VARIABLES if os.environ.get(name)), None)
     native, segments = _allocator(EXPANDABLE if given is None else given)
     made = Reading(
-        free, free, 0, True, HELD_BACK, _chosen(native, segments), nvml=card, nvml_used=used
+        *(free, free, 0, True, HELD_BACK, _chosen(native, segments)),
+        nvml=card,
+        nvml_used=used,
+        shared=None if found is None else found.said(),
     )
     return replace(made, counted=counted(free, made))
 
@@ -565,6 +660,10 @@ def early(card: int, used: int | None = None) -> Reading:
 # under which a check that finds the card short holds torch again (check); and, once hold has
 # set it, torch's limit in bytes.
 _spills = False
+# Where the run is held for another program on the card under Linux's driver (share), the share in
+# words (Share.said), for the plan's card line (Reading.shared) and the refusals' words; None where
+# it is held for a driver that lends, or not held.
+_shared: str | None = None
 _native = False
 _segments = False
 _limit: int | None = None
@@ -671,6 +770,14 @@ def startup() -> str:
     the card didn't have every time it was asked, and a run held for nothing loses memory, a
     run not held where it should be loses its frames.
 
+    Under Linux's driver the run is held where another program uses the card (share, SHARED:
+    DESIGN.md, Allocator, decided on 2026-11-11): a display active on it, a process other than
+    this one listed on it, or NVML unable to say; held as under WSL2, torch's own allocator with
+    expandable segments by default, torch limited, each step's reserve by that allocator and
+    every unit checked. A card nothing else uses keeps ASYNC and the plans of a driver that
+    refuses, said at INFO. The share is said in a warning after what seedvr2x does, the whole
+    finding at debug.
+
     On Windows itself the driver is taken for one that lends, unasked (design's ruling for the
     Windows baton, 2026-11-08: counted as lending unless a reading on the machine says otherwise):
     the probe's answer is not what a run meets there. Measured in ComfyUI's process
@@ -685,8 +792,9 @@ def startup() -> str:
     it); planned held, each step keeps its allocator's reserve (peaks.reserve) under the smaller
     of the driver's and NVML's figures, less HELD_BACK."""
     global _spills, _native, _segments, _limit, _left, _footing, _planned, _plan_s_limit, _base
-    global _reserve, _kept
+    global _reserve, _kept, _shared
     _spills, _limit, _left, _footing, _planned = False, None, HELD_BACK, None, None
+    _shared = None
     _plan_s_limit, _base, _reserve, _kept = None, None, RESERVE, None
     # Why the run is held, said after what seedvr2x does about it (below): each warning a line,
     # the whole finding at debug after it.
@@ -708,6 +816,20 @@ def startup() -> str:
     elif windows():
         _spills = True
         why.append((lends_line(), None))
+    elif sys.platform == "linux":
+        # Linux's driver refuses what the card can't hold; a card another program uses is held
+        # all the same, its share read before torch (SHARED; DESIGN.md, Allocator, decided on
+        # 2026-11-11).
+        found = share()
+        if found.shared:
+            _spills, _shared = True, found.said()
+            why.append((shared_line(found), _share_finding(found)))
+        else:
+            logger.info(
+                "%s (no display active on it, none listed by NVML): not held, its driver refusing"
+                " what the card can't hold",
+                ALONE,
+            )
     # An empty setting is no setting, and goes from the environment. torch takes the first of
     # the two variables that is set, empty or not: left there, an empty PYTORCH_CUDA_ALLOC_CONF
     # would hide a PYTORCH_ALLOC_CONF that names an allocator, and itself names none, which is
@@ -773,13 +895,13 @@ def startup() -> str:
             "seedvr2x holds itself to the card there: %s to the"
             " memory free less %.1f GiB, and %s; a run that passes the"
             " limit is refused. The memory free is the smaller of two figures: what the driver"
-            " reports free to this process, which leaves other programs' memory out while the"
-            " card has room, and what the whole card has free, read through NVML; where NVML"
-            " doesn't answer, the driver's figure less %.1f GiB",
+            " reports free to this process, %s, and what the whole card has free, read through"
+            " NVML; where NVML doesn't answer, the driver's figure less %.1f GiB",
             named,
             HELD_BACK / GIB,
             plans,
-            HELD_BACK_UNREAD / GIB,
+            _driver_s_figure(),
+            _held_back(None) / GIB,
         )
         for line, finding in why:
             logger.warning("%s", line)
@@ -892,8 +1014,51 @@ def watched(device: Any, unit: str, output: str) -> Generator[None]:
 
 def spills() -> bool:
     """Whether the run holds itself to the card: its driver was found to give memory the card
-    doesn't have, or is Windows' and gave no answer (startup)."""
+    doesn't have, or is Windows' and gave no answer, or, under Linux's driver, another program
+    uses the card (startup; shared says which)."""
     return _spills
+
+
+def shared() -> str | None:
+    """Where the run holds itself to the card for another program on it under Linux's driver
+    (startup, share), the share in words (Share.said); None where it is held for a driver that
+    lends, or not held."""
+    return _shared
+
+
+def held_why(reading: Reading) -> str:
+    """Why a held run is held, for the plan's card line (the CLI's planner, still_plan): its
+    driver giving more than the card has, or the card shared under Linux's driver
+    (Reading.shared)."""
+    if reading.shared is None:
+        return "its driver giving more than the card has"
+    return f"the card shared: {reading.shared}"
+
+
+def shared_line(found: Share) -> str:
+    """The shared card's warning, a line (SHARED, then the share, then why it is held), said
+    after what seedvr2x does about it, as a lending driver's is (lends_line)."""
+    if found.unread is not None:
+        return (
+            f"{SHARED} or may be: NVML can't say whether another program uses it"
+            f" ({found.unread}), so it is taken for shared, and held"
+        )
+    return f"{SHARED}: {found.said()}; held so that the rest of the card keeps room to grow into"
+
+
+def _share_finding(found: Share) -> str:
+    """The share's whole finding, at debug after its line: each process listed, and what holding
+    the run means under Linux's driver."""
+    listed = ", ".join(f"{pid} ({name or 'unnamed'})" for pid, name in found.processes)
+    return (
+        f"the GPU's share by NVML: display active {found.display}; processes other than this one"
+        f" (compute or graphics): {listed or 'none'}"
+        + ("" if found.unread is None else f"; NVML unread: {found.unread}")
+        + ". Linux's driver refuses what the card can't hold, but torch's cache keeps what the"
+        " run has had of the card, and another program's growth is refused where it has filled it:"
+        " the run is held as a run behind a driver that lends is, torch limited and every unit"
+        " checked against the card"
+    )
 
 
 def usable(free: int) -> int:
@@ -1429,10 +1594,10 @@ def _limit_s_card(index: int, first: bool) -> int | None:
         logger.debug(
             "the whole card's free memory couldn't be read through NVML as torch was held a first"
             " time, asked twice (%s): the first pass is held %.1f GiB under what the driver"
-            " reports free to this process, which leaves other programs' memory out while the"
-            " card has room",
+            " reports free to this process, %s",
             read,
-            HELD_BACK_UNREAD / GIB,
+            _held_back(None) / GIB,
+            _driver_s_figure(),
         )
         return None
     if _planned is None:
@@ -1442,7 +1607,7 @@ def _limit_s_card(index: int, first: bool) -> int | None:
             " the driver reports free to this process, and the run's units are checked on that"
             " figure",
             read,
-            HELD_BACK_UNREAD / GIB,
+            _held_back(None) / GIB,
         )
         return None
     logger.warning(
@@ -1469,8 +1634,19 @@ def _held_back(card: int | None) -> int:
     """What a held run leaves of the free memory its plan or its limit took, outside torch's
     limit, in bytes: HELD_BACK where the whole card's figure was read (`card`), whichever of the
     two figures is the smaller; HELD_BACK_UNREAD under the driver's figure alone, where it
-    wasn't."""
-    return HELD_BACK_UNREAD if card is None else HELD_BACK
+    wasn't: a lending driver's figure leaves other programs' memory out while the card has room.
+    Under Linux's driver, a run held for another program on the card (shared), the driver's figure
+    is the card's own, and HELD_BACK stands either way (DESIGN.md, Allocator, decided on
+    2026-11-11: 0.5 GiB left to the rest of the card)."""
+    return HELD_BACK_UNREAD if card is None and _shared is None else HELD_BACK
+
+
+def _driver_s_figure() -> str:
+    """What the driver's figure is, said where it is taken alone (NVML unread): a lending driver's
+    leaves other programs' memory out while the card has room; Linux's is the card's own."""
+    if _shared is not None:
+        return "which is the whole card's under Linux's driver"
+    return "which leaves other programs' memory out while the card has room"
 
 
 def _read_figures(reported: int, card: int | None) -> str:
@@ -1646,6 +1822,97 @@ def _read_all(index: int, busy: bool = False) -> tuple[int, ...] | str:
     except (OSError, AttributeError) as error:
         # No such library, or one without a function asked of it (ctypes: AttributeError).
         return str(error)
+
+
+def share(index: int = 0) -> Share:
+    """Whether another program uses the card behind CUDA's device `index`, by NVML (Share): a
+    display active on it, or a process other than this one listed on it, compute or graphics;
+    where NVML can't say, asked twice, why (Share.unread), which startup and early take for
+    shared. For Linux's driver, before torch is imported: nothing of this process is on the card
+    then (startup), and its own identifier is left out where it is (an app whose process has a
+    context already: the nodes'). In a container, NVML is likely to list no process of another
+    PID namespace at all (unmeasured), so that another program there is seen by a display alone:
+    the image server's container beside another CUDA job runs unheld. Never raises; nothing
+    remembered or logged; no CUDA context made (the card found as card_free finds it)."""
+    found = _share_read(index)
+    if isinstance(found, str):
+        found = _share_read(index)
+    return Share(unread=found) if isinstance(found, str) else found
+
+
+def _share_read(index: int) -> Share | str:
+    """share's one reading: the Share, or why NVML gave none, in words."""
+    try:
+        nvml, cuda = _libraries()
+        device, identifier = ctypes.c_int(), (ctypes.c_ubyte * 16)()
+        handle, active = ctypes.c_void_p(), ctypes.c_int()
+        steps = (
+            ("cuInit", lambda: cuda.cuInit(0)),
+            ("cuDeviceGet", lambda: cuda.cuDeviceGet(ctypes.byref(device), index)),
+            ("cuDeviceGetUuid", lambda: cuda.cuDeviceGetUuid_v2(ctypes.byref(identifier), device)),
+            ("nvmlInit", lambda: nvml.nvmlInit_v2()),
+        )
+        for name, step in steps:
+            status: int = step()
+            if status != SUCCESS:
+                return f"{name}: {status}"
+        try:
+            named = f"GPU-{uuid.UUID(bytes=bytes(identifier))}"
+            status = nvml.nvmlDeviceGetHandleByUUID(named.encode(), ctypes.byref(handle))
+            if status != SUCCESS:
+                return f"nvmlDeviceGetHandleByUUID, {named}: {status}"
+            status = nvml.nvmlDeviceGetDisplayActive(handle, ctypes.byref(active))
+            if status not in (SUCCESS, NOT_SUPPORTED):
+                return f"nvmlDeviceGetDisplayActive: {status}"
+            display = status == SUCCESS and active.value != 0
+            listed: dict[int, None] = {}
+            for name in (
+                "nvmlDeviceGetComputeRunningProcesses_v3",
+                "nvmlDeviceGetGraphicsRunningProcesses_v3",
+            ):
+                found = _processes(getattr(nvml, name), handle)
+                if isinstance(found, str):
+                    return f"{name}: {found}"
+                listed.update(dict.fromkeys(found))
+        finally:
+            nvml.nvmlShutdown()
+    except (OSError, AttributeError) as error:
+        # No such library, or one without a function asked of it (ctypes: AttributeError).
+        return str(error)
+    own = os.getpid()
+    others = tuple((pid, _program(pid)) for pid in sorted(listed) if pid != own)
+    return Share(display=display, processes=others)
+
+
+def _processes(call: Any, handle: ctypes.c_void_p) -> list[int] | str:
+    """The identifiers of the processes one of NVML's process lists names on the card, or the
+    status it failed with, in words. Asked first for their count, then with room for it and a
+    few more, a list grown in between asked again (nvml.h: NVML_ERROR_INSUFFICIENT_SIZE sets the
+    count it needs)."""
+    count = ctypes.c_uint(0)
+    status: int = call(handle, ctypes.byref(count), None)
+    if status == SUCCESS:
+        return []  # none listed: the count is 0 and nothing was written
+    for _ in range(4):
+        if status != INSUFFICIENT_SIZE:
+            return str(status)
+        room = count.value + 8
+        infos = (_ProcessInfo * room)()
+        count = ctypes.c_uint(room)
+        status = call(handle, ctypes.byref(count), infos)
+        if status == SUCCESS:
+            return [int(infos[number].pid) for number in range(count.value)]
+    return str(status)
+
+
+def _program(pid: int) -> str:
+    """A process's name as the system gives it (Linux's /proc/PID/comm), "" where it doesn't: a
+    process of another PID namespace, gone, or not to be read."""
+    try:
+        with open(f"/proc/{pid}/comm", encoding="utf-8", errors="replace") as file:
+            return file.read().strip()
+    except OSError:
+        return ""
 
 
 def paravirtual() -> bool:

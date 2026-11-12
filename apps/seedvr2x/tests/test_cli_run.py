@@ -249,6 +249,9 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     # The stand-in's GPU has no driver to ask (seedvr2x/memory.py): in a process of its own too,
     # where conftest.py's fixture doesn't reach.
     patch(memory, "paravirtual", lambda: False)
+    # Nor an NVML to list the other programs on it: a process of its own would find the
+    # machine's own card shared by whatever else runs there, and be held to its free memory.
+    patch(memory, "share", lambda index=0: memory.Share())
     patch(detector, "Detector", StandInDetector)
     patch(pull, "PINNED", {**pull.PINNED, pull.DETECTOR: STAND_IN_DETECTOR})
     StandInDetector.built.clear()
@@ -1638,6 +1641,111 @@ def test_gpu_memory_refused_at_the_load_stops_the_run(
         " run" + kept(tmp_path / "out")
     ]
     assert all(record.exc_info is None for record in errors) and steps.calls == []
+
+
+def shared_card(monkeypatch: pytest.MonkeyPatch, card: int) -> list[float]:
+    """A card under Linux's driver (no WSL2 device) that a desktop shares, as NVML would say it
+    (memory.share stood in: a display active on it and its server listed), the whole card
+    having `card` bytes free by NVML; returns the limits torch is given, as fractions."""
+    from seedvr2x import memory
+
+    monkeypatch.setattr(
+        memory, "share", lambda index=0: memory.Share(display=True, processes=((101, "Xorg"),))
+    )
+    monkeypatch.setattr(memory, "probe", lambda *a: pytest.fail("Linux's driver is asked"))
+    monkeypatch.setattr(memory, "_read", lambda index: card)
+    limits: list[float] = []
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 0)
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_per_process_memory_fraction",
+        lambda fraction, device: limits.append(fraction),
+    )
+    return limits
+
+
+SHARED_SAID = "a display active on it and another program on it (Xorg)"
+
+
+def test_a_card_another_program_uses_under_linux_s_driver_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Allocator, decided on 2026-11-11: a card a desktop shares under Linux's driver
+    # is held as under WSL2: torch's own allocator with its segments, torch limited to the card's
+    # free memory less 0.5 GiB before the first pass and again once the plan is made, the plan
+    # held, each step its reserve; the start's and the plan's card line saying why. The run's
+    # units are those of an unheld run.
+    from seedvr2x import memory
+
+    caplog.set_level(logging.INFO)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    card = FREE - 2 * GIB
+    limits = shared_card(monkeypatch, card)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native,expandable_segments:True"
+    assert limits == [(card - memory.HELD_BACK) / TOTAL] * 2
+    assert steps.calls == UNINTERRUPTED
+    assert (
+        "seedvr2x holds itself to the card's own memory: torch limited to the memory free less"
+        " 0.5 GiB, and each step planned with a reserve by its own peak"
+    ) in caplog.messages
+    assert (
+        f"the GPU is shared: {SHARED_SAID}; held so that the rest of the card keeps room to grow"
+        " into"
+    ) in caplog.messages
+    assert (
+        f"plan: card: a stand-in, {(card - 0) / GIB:.2f} GiB free on the whole card by NVML: the"
+        f" run is held to the card's own memory, the card shared: {SHARED_SAID}"
+    ) in caplog.text
+    recorded = json.loads((tmp_path / "out" / "manifest.json").read_text())["plan"]["memory"]
+    assert recorded["card_free"] == card and recorded["budget"] == card - memory.HELD_BACK
+
+
+def test_a_card_no_other_program_uses_under_linux_s_driver_is_not_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The same job on a card nothing else uses (library_fixtures' share): cudaMallocAsync, no
+    # limit, the plan of a driver that refuses, the start saying so.
+    caplog.set_level(logging.INFO)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    limits = shared_card(monkeypatch, FREE)
+    from seedvr2x import memory
+
+    monkeypatch.setattr(memory, "share", lambda index=0: memory.Share())
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:cudaMallocAsync"
+    assert limits == [] and steps.calls == UNINTERRUPTED
+    assert (
+        "no other program on the GPU at the start (no display active on it, none listed by"
+        " NVML): not held, its driver refusing what the card can't hold"
+    ) in caplog.messages
+    assert "the driver refusing memory the card doesn't have" in caplog.text
+
+
+def test_gpu_memory_refused_on_a_shared_card_says_why_it_was_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The refusal names the share as the run's reason to be held, and keeps the card's figures:
+    # under Linux's driver the driver's are the card's.
+    from seedvr2x import model
+
+    shared_card(monkeypatch, FREE)
+
+    def refused(*arguments: object) -> None:
+        raise torch.OutOfMemoryError(TORCH_REFUSED)
+
+    monkeypatch.setattr(model, "load_models", refused)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    errors = [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR]
+    assert errors == [
+        f"the GPU's memory was refused (held to the card's own memory, shared: {SHARED_SAID}):"
+        " CUDA out of memory. Tried to allocate 456.00 MiB, 9.36 GiB free of the GPU's 31.82 GiB,"
+        " torch holding 19.27 GiB allocated and 1.43 GiB more reserved, 20.98 GiB allowed, as the"
+        " models loaded: nothing was run" + kept(tmp_path / "out")
+    ]
 
 
 # torch's own words when its limit refuses a request (torch 2.14.1, an RTX 5090 under WSL2,
