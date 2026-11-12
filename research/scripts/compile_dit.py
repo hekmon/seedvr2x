@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """DiT compile probe for seedvr2x: what torch.compile gives and costs across window lengths.
 
-seedvr2x runs its DiT on windows of a shot's latents (shot.py, sample_windows): a window's
-length L, in latents, takes every value up to a cap, where numz's batches had one length. This
+seedvr2x runs its DiT on windows of a shot's latents (seedvr2x/shot_pass.py, sample_windows): a
+window's length L, in latents, takes every value up to a cap, where numz's batches had one
+length. This
 probe measures, on seedvr2x's own runtime, what compiling the DiT gives and costs per length,
 whether one compilation can serve every length, whether it works over seedvr2x's BlockSwap, and
 whether the output keeps its bits.
@@ -16,7 +17,8 @@ noise, on the CPU, from the seed), both go to the device, the "sr" condition is 
 back to the CPU. That is sampling.window's body, with the sample timed alone. Before each step,
 models.enter("dit") is called as the pipeline does. The models are loaded as the CLI loads them
 (seedvr2x/model.py, load_models), the allocator chosen as the CLI chooses it (seedvr2x/memory.py,
-startup, before torch is imported), and the attention backend it reports is recorded.
+startup, before torch is imported), and the attention recorded is seedvr2x.record.ATTENTION (SDPA,
+the one kernel).
 
 Variants (--variant, or the names of --seq), put on the DiT between steps of one process:
   plain   the module as loaded
@@ -41,11 +43,10 @@ marks the token dimension of the block's (or the DiT's) video input dynamic befo
 the tokens are the one dimension that changes with L (text stays 58 tokens), so a graph
 specialised on it is what a length costs; it implies "auto" where dynamic is None.
 
-Options of `run`: --attention sdpa|flash_attn_2 (sdpa: the vendor modules' FLASH_ATTN_2_AVAILABLE
-flags put False before the load, so that the backend runs on SDPA where FlashAttention 2 is
-installed; flash_attn_2 is refused where it is not), --swap N (a Plan with the last N blocks
-swapped, as tests/test_placement.py loads one: the blocks' weights in pinned copies, streamed
-through two slots by the placement's hooks), --dynamic, --auto-dynamic, --mark-dynamic,
+Options of `run`: --attention sdpa (the default and the only value: FlashAttention 2 went on
+2026-11-08, and flash_attn_2 is refused, naming that), --swap N (a ModelPlan with the last N
+blocks swapped, as tests/test_blockswap.py loads one: the blocks' weights in pinned copies,
+streamed through two slots by the placement's hooks), --dynamic, --auto-dynamic, --mark-dynamic,
 --mode, --recompile-limit N (torch's default 8 where not given), --numz-limits (numz's two
 limits: cache_size_limit 64, recompile_limit 128), --accumulated-limit.
 
@@ -437,19 +438,15 @@ def main_entries(entries):
     return 0
 
 
-# ---------------------------------------------------------------- attention backend
+# ---------------------------------------------------------------- attention kernel
 
-def force_attention(backend):
-    """The vendor modules' FlashAttention 2 flags (what seedvr2x/model.py's attention_backend reads)
-    put False for sdpa, before the load; flash_attn_2 only where they are true."""
-    from seedvr2x.vendor.models.dit_3b import attention as attention_3b
-    from seedvr2x.vendor.models.dit_7b import attention as attention_7b
-
-    if backend == "sdpa":
-        attention_7b.FLASH_ATTN_2_AVAILABLE = attention_3b.FLASH_ATTN_2_AVAILABLE = False
-    elif backend == "flash_attn_2" and not (
-            attention_7b.FLASH_ATTN_2_AVAILABLE and attention_3b.FLASH_ATTN_2_AVAILABLE):
-        sys.exit("compile_dit: --attention flash_attn_2: FlashAttention 2 is not installed")
+def check_attention(backend):
+    """SDPA is the one kernel: FlashAttention 2 went on 2026-11-08 (DESIGN.md, AGENTS.md
+    Environment), and the vendored attention refuses any other mode, so there is nothing to
+    force."""
+    if backend not in (None, "sdpa"):
+        sys.exit(f"compile_dit: --attention {backend}: FlashAttention 2 was removed on 2026-11-08, "
+                 "SDPA is the one attention kernel (the default)")
 
 
 # ---------------------------------------------------------------- variants
@@ -675,6 +672,7 @@ def cmd_run(args):
 
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("seedvr2x").setLevel(logging.INFO)
+    check_attention(args.attention)
     # The allocator as the CLI chooses it, once, before torch is imported (cli._run).
     from seedvr2x import memory
     if "torch" in sys.modules:
@@ -685,9 +683,9 @@ def cmd_run(args):
     import torch
     from seedvr2x import model, sampling
     from seedvr2x.frames import padded_size
+    from seedvr2x.record import ATTENTION
 
     keep_deterministic(torch, args.keep_deterministic)
-    force_attention(args.attention)
     events = install_events(torch)
     compilations = Compilations(torch)
     dynamo, inductor = torch._dynamo.config, torch._inductor.config
@@ -706,8 +704,10 @@ def cmd_run(args):
         f"(PYTORCH_CUDA_ALLOC_CONF={alloc_conf})")
     plan = None
     if args.swap:
-        from plan import Plan
-        plan = Plan(None, swapped=args.swap).model_plan
+        # The CLI's Plan (plan.py) went into the library's passes.ModelPlan on 2026-11-04; its
+        # defaults are the old Plan's, so Plan(None, swapped=N).model_plan is this.
+        from seedvr2x.passes import ModelPlan
+        plan = ModelPlan(swapped=args.swap)
     started = time.perf_counter()
     model_dir = pathlib.Path(os.path.abspath(args.model_dir))
     models = model.load_models(model_dir / args.dit_model, model_dir / args.vae_model, device, model_plan=plan)
@@ -717,8 +717,6 @@ def cmd_run(args):
     log(f"mem_get_info after load: free {free1 / GIB:.2f} GiB; allocated "
         f"{torch.cuda.memory_allocated(device) / GIB:.2f} GiB")
     dit = models.runner.dit
-    if args.attention and models.attention != args.attention:
-        sys.exit(f"compile_dit: --attention {args.attention} but the backend is {models.attention}")
     frames = Frames(args.frames)
     codes = tracked_codes()
 
@@ -742,7 +740,7 @@ def cmd_run(args):
         "env": {
             "torch": str(torch.__version__), "cuda": torch.version.cuda, "python": sys.version.split()[0],
             "triton": triton_version, "flash_attn": flash, "gpu": torch.cuda.get_device_name(0),
-            "attention": models.attention, "dit_model": args.dit_model, "vae_model": args.vae_model,
+            "attention": ATTENTION, "dit_model": args.dit_model, "vae_model": args.vae_model,
             "dit_param_dtype": str(next(dit.parameters()).dtype), "compute_dtype": str(model.COMPUTE_DTYPE),
             "blocks": len(dit.blocks),
             "block_types": dict(collections.Counter(type(b).__name__ for b in dit.blocks)),
@@ -761,7 +759,7 @@ def cmd_run(args):
         "loaded_alloc_gib": round(torch.cuda.memory_allocated(device) / GIB, 4),
         "cache_dir_start": dir_stats(cache_dir), "steps": [], "error": None,
     }
-    log(f"loaded in {res['load_s']} s, attention {models.attention}, swap {args.swap}: "
+    log(f"loaded in {res['load_s']} s, attention {ATTENTION}, swap {args.swap}: "
         f"{res['loaded_alloc_gib']} GiB allocated, free {res['free_at_start_gib']} then "
         f"{res['free_after_load_gib']} of {res['total_gib']} GiB; torch {res['env']['torch']}, "
         f"blocks {res['env']['block_types']}, dynamo {res['env']['dynamo']}")
@@ -1129,7 +1127,8 @@ def add_options(parser, limit=False):
                         help="mark the token dimension of the video input dynamic before each call")
     parser.add_argument("--mode", default="default", help="torch.compile's mode")
     parser.add_argument("--attention", choices=("sdpa", "flash_attn_2"),
-                        help="force the backend (sdpa where FlashAttention 2 is installed)")
+                        help="sdpa, the default and the one kernel; flash_attn_2 is refused "
+                        "(removed on 2026-11-08)")
     parser.add_argument("--swap", type=int, default=0, help="BlockSwap: the last N blocks swapped, as a Plan")
     parser.add_argument("--numz-limits", action="store_true",
                         help="set dynamo's limits as numz does: cache_size_limit 64, then recompile_limit 128")
