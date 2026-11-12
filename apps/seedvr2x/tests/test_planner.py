@@ -55,7 +55,7 @@ def test_an_early_reading_refusal_says_nvml_s_figure_and_the_context_counted(
     # "its driver reports" a figure that was computed, and no driver was asked. Behind WSL2's
     # device (held) and where the driver refuses (not held). A later reading's words are as ever.
     shot = [Shot(0, 300)]
-    said = "NVML's 5.00 GiB free on the whole card, less 0.75 GiB counted for this process's CUDA"
+    said = "NVML's 5.00 GiB free on the whole card, less 0.83 GiB counted for this process's CUDA"
     for behind in (False, True):
         monkeypatch.setattr(memory, "paravirtual", lambda behind=behind: behind)
         with pytest.raises(PlanError) as refused:
@@ -77,7 +77,7 @@ def test_an_early_reading_refusal_says_nvml_s_figure_and_the_context_counted(
         monkeypatch.setattr(memory, "paravirtual", lambda behind=behind: behind)
         made, peaks = planner.plan(memory.early(96 * GIB), HD, shot, Pins(), None, recorded=Plan(8))
         first = planner.said(made, peaks, "a card", HD, shot, Pins())[0]
-        assert "NVML's 96.00 GiB free on the whole card, less 0.75 GiB" in first
+        assert "NVML's 96.00 GiB free on the whole card, less 0.83 GiB" in first
         assert "driver reports" not in first
     # A run's own reading keeps the words it had.
     with pytest.raises(PlanError) as later:

@@ -250,11 +250,17 @@ RESERVE = round(4.5 * GIB)
 # the card (main._free_memory), so the earlier reading, taken without them, counts them off.
 # Measured on an RTX 5090 under WSL2 on 2026-10-29 (torch 2.14.1+cu130): the card's free memory
 # fell 0.67 GiB from no seedvr2x CUDA context to the check that refuses, on a resume (NVML's 16.32
-# GiB free before the checks, 15.65 at the check), the same to 0.01 GiB in three runs; 0.08 GiB
-# are added to it (DESIGN.md, Memory planner, A resume whose recorded shape no longer fits,
-# decided on 2026-10-29). PROVISIONAL (design, 2026-10-29: until the 96 GB card measures Linux's
-# own driver). The warning it feeds says it is an early reading (main._early_memory).
-CONTEXT = round(0.75 * GIB)
+# GiB free before the checks, 15.65 at the check), the same to 0.01 GiB in three runs; 0.75 was
+# taken from it (decided on 2026-10-29). Measured on the 96 GB card (RTX PRO 6000 Blackwell,
+# Linux's driver, impl-box-2, 2026-11-11), a 1080p job stopped after its first unit and resumed
+# from a copy of its directory, NVML read every 50 ms: 0.831 GiB on the whole card (95.013 GiB
+# free before, 94.182 at the check) in three resumes, 0.827 on a card emulated at 24 GB (23.648,
+# 22.821) in three, each three equal to the MiB, the driver's figure rising 0.833 and 0.828; 0.75
+# left the early warning 0.08 GiB short of the check's figure there ("lacks 15.11 GiB" where the
+# check said 15.18). Decided that day (DESIGN.md, Memory planner, A resume whose recorded shape no
+# longer fits): 0.83, the larger, an early warning a little early under WSL2 rather than one
+# missed on Linux. The warning it feeds says it is an early reading (main._early_memory).
+CONTEXT = round(0.83 * GIB)
 # The allocator's setting by the driver: DESIGN.md's default (Allocator), and torch's own
 # allocator where the driver spills.
 ASYNC, NATIVE = "backend:cudaMallocAsync", "backend:native"

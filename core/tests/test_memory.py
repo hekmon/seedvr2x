@@ -1953,9 +1953,11 @@ def test_the_early_reading_counts_off_this_process_s_context(
     # process's CUDA context is on the card: that context off the figure, which the later reading
     # has counted; the module's state, startup's, untouched, and nothing logged.
     caplog.set_level(logging.DEBUG, logger="seedvr2x")
-    # 0.67 GiB measured on an RTX 5090 under WSL2 (2026-10-29) plus 0.08 (DESIGN.md, Memory
-    # planner, A resume whose recorded shape no longer fits); 1.23 until then.
-    assert memory.CONTEXT == round(0.75 * GIB)
+    # The larger of the two cards measured: 0.83 GiB on the 96 GB card under Linux's driver
+    # (2026-11-11), where the RTX 5090 under WSL2 measured 0.67 (2026-10-29) and 0.75 was taken
+    # from it (DESIGN.md, Memory planner, A resume whose recorded shape no longer fits); 1.23
+    # until 2026-10-29.
+    assert memory.CONTEXT == round(0.83 * GIB)
     state = (memory._spills, memory._native, memory._segments, memory._limit)  # pyright: ignore[reportPrivateUsage]
     free = 28 * GIB - memory.CONTEXT
     # A driver that refuses (no WSL2 device): its figure is the card's, nothing held.

@@ -3192,7 +3192,7 @@ def test_the_early_warning_s_debug_line_says_nvml_s_reading_and_the_context_coun
         if r.levelno == logging.DEBUG and r.getMessage().startswith("before the checks")
     ]
     assert re.search(
-        r"NVML's \d+\.\d\d GiB free on the whole card, less 0\.75 GiB counted for this process's"
+        r"NVML's \d+\.\d\d GiB free on the whole card, less 0\.83 GiB counted for this process's"
         r" CUDA context to come",
         line,
     ), line
