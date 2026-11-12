@@ -1193,7 +1193,8 @@ marker. The image server, Linux's alone by its lock, has no such line.
   range of shapes) for the library's side and by `test_compile_cli.py` (the compiled
   passes of `seedvr2x/shot_plan.py`'s plan, `planner.py`'s shapes, the job's plan and record)
   for the CLI's: the plan holding a compiled pass to 1.1 times
-  its tile's plain peak and to the measured range of shapes, the shapes warmed (the decoder's latent
+  its tile's plain peak and to the measured range of shapes (the 1080p frame whole for the decode
+  as for the encode, one constant, `COMPILE_ENCODE_WHOLE`), the shapes warmed (the decoder's latent
   in one layout, the DiT's, dense channels last, for the run's decodes and the calibration's: the
   run's own calls, shots of 1 to 64 latents, are compared with the warm-up's), the order of the load
   with fakes (the VAE compiled before the DiT loads, the compile workers shut before its blocks),
@@ -1204,18 +1205,19 @@ marker. The image server, Linux's alone by its lock, has no such line.
   kept; a limit hit in the warm-up is a refusal naming the way out, with
   `fail_on_recompile_limit_hit` on and `suppress_errors` off while it runs (torch calls them
   incompatible), both as they were afterwards, on the refusal too. A job outside the shapes measured
-  (a pin beyond them, a frame too small for a tile, an untiled decode) is refused, never run plain,
-  the refusal naming the pass, its tiles and the shapes, then its advice; a plan with no unit made
-  is planned again for the other value of `--compile` without a flag, and units made make it another
-  job's settings; inductor's modules count in the environment's comparison only between two compiled
-  jobs. The plan's compile line gives the time by the shapes the warm-up compiles (an untiled pass
-  is one, never counted by tiles), by kind of job (new, or a resume with the cache warm, found so
-  only where the recorded plan is kept as it is: a re-planned resume or a start killed while
-  compiling is a new job's figure) and by disk, the line saying only "on a Windows drive" and the
-  cache's many small files at debug. A Windows drive is found in `/proc/self/mountinfo`, the longest
-  mount point deciding, a 9p mount counting only with `aname=drvfs`. Compiled for real only on a
-  tiny module, in a subprocess so that no state of inductor stays in the suite (two tests, skipped
-  without a C++ compiler); the VAE's compile on a GPU is not in the default suite.
+  (a pin beyond them, an untiled pass pinned on a frame past the 1080p one) is refused, never run
+  plain, the refusal naming the pass, its tiles and the shapes, then its advice; a plan with no unit
+  made is planned again for the other value of `--compile` without a flag, and units made make it
+  another job's settings; inductor's modules count in the environment's comparison only between two
+  compiled jobs. The plan's compile line gives the time by the shapes the warm-up compiles (an
+  untiled pass is one, never counted by tiles), by kind of job (new, or a resume with the cache
+  warm, found so only where the recorded plan is kept as it is: a re-planned resume or a start
+  killed while compiling is a new job's figure) and by disk, the line saying only "on a Windows
+  drive" and the cache's many small files at debug. A Windows drive is found in
+  `/proc/self/mountinfo`, the longest mount point deciding, a 9p mount counting only with
+  `aname=drvfs`. Compiled for real only on a tiny module, in a subprocess so that no state of
+  inductor stays in the suite (two tests, skipped without a C++ compiler); the VAE's compile on a
+  GPU is not in the default suite.
 - The default output (DESIGN.md, Architecture, What it prints): `tests/test_cli.py` holds
   `TORCH_CPP_LOG_LEVEL` set before torch is imported (seen by a finder at each import, in a
   subprocess) and the user's own value winning, and the early reading of the card in a

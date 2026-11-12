@@ -3072,9 +3072,10 @@ def test_a_compile_job_no_plain_plan_fits_is_refused_as_it_was_before_the_rungs(
 
 def test_a_compile_job_whose_pin_is_beyond_the_shapes_keeps_the_plain_refusal() -> None:
     # A rung helps a VAE pass short of memory, not a pin beyond the shapes measured compiled: a
-    # 1080p job pinned untiled on a 32 GiB card, which the plain plan fits only with the tail, is
+    # 1200x2133 job (past the 1080p frame, whose untiled compiled passes are measured) pinned
+    # untiled on a 40 GiB card, which the plain plan fits only with the tail, is
     # refused as before the rungs (the plain plan's PinRefused), not told to drop --compile.
-    job = (32 * GIB, HD, shots(300), Pins(encode_tile=0, decode_tile=0), None)
+    job = (40 * GIB, (1200, 2133), shots(300), Pins(encode_tile=0, decode_tile=0), None)
     options: dict[str, Any] = {"split": True}
     made, _ = shot_plan.plan(*job, **options)
     assert made.tail_frames

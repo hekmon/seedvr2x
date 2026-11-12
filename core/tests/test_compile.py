@@ -43,7 +43,14 @@ def test_the_range_is_the_1080p_frame_as_a_whole_not_its_area() -> None:
         (2192, 3840), "decode", Tiles(512)
     )
     assert not inside((2192, 3840), "decode", Tiles(2112))
-    assert not inside((1104, 1920), "decode", None)
+    # The decode untiled is the encode's whole frame (the 96 GB card, 2026-11-11: 1080p untiled
+    # compiled, 1.06 times plain): the same two sides, rows and columns each.
+    assert inside((1104, 1920), "decode", None) and inside((752, 1280), "decode", None)
+    assert not inside((1920, 1104), "decode", None) and not inside((1456, 2576), "decode", None)
+    assert not inside((2192, 3840), "decode", None)
+    assert peaks.compile_range_said("decode") == (
+        "decode tiles up to 2048 px, or untiled on a frame padded to 1920x1104 at most"
+    )
     assert inside((1104, 1920), "dit", None)
 
 

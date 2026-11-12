@@ -493,7 +493,8 @@ def tail_ratio(side: int | None) -> float:
 # here: ENCODE_EXTRA, the encode's margin on the fit, and the VAE's weights are not scaled.
 COMPILE_PEAK = 1.1
 # Only the shapes measured are compiled (DESIGN.md, decided on 2026-10-24: "the planner keeps no
-# blind spot"): encode tiles up to 2048 px or the 1080p frame whole, decode tiles up to 2048 px.
+# blind spot"): encode tiles up to 2048 px or the 1080p frame whole, decode tiles up to 2048 px
+# or the 1080p frame whole.
 # The tiles' range was widened from 1856 and 1152 px on 2026-11-11 (design's decision), measured
 # on the 96 GB card (RTX PRO 6000 Blackwell, Linux's driver) that day: a 4K job (x2 from 1080p,
 # 120 frames, 2 shots, standard), the VAE compiled, encode and decode pinned to one tile size,
@@ -508,9 +509,16 @@ COMPILE_PEAK = 1.1
 # 1080p frame's two sides at most, rows and columns each (padded_size(1080x1920) = 1104x1920),
 # and not as its area, the narrower reading of "the 1080p frame": a frame of its area with
 # another shape is not the one measured. PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says "the
-# 1080p frame whole" and doesn't say what is as large as it); and an untiled decode is outside
-# the range, "decode tiles up to 2048 px" naming tiles alone: no untiled compiled decode was
-# measured (the study's decodes were all in tiles, compile.md, the VAE's tables).
+# 1080p frame whole" and doesn't say what is as large as it).
+# The decode's whole frame is the encode's, COMPILE_ENCODE_WHOLE, one constant for both (the VAE
+# is compiled once and a frame is the same frame on either side). Measured on the 96 GB card
+# (RTX PRO 6000 Blackwell, Linux's driver) on 2026-11-11 (impl-box-2, research/scripts/
+# compile_vae.py, the VAE compiled with its causal convolutions left out of the graph as --compile
+# ships, 1080p frames, 21 frames): the decode untiled peaked +33.31 GiB above the VAE's weights
+# plain and +35.31 GiB compiled, 1.06 times plain (under COMPILE_PEAK), its first call no higher;
+# 22% faster than plain (steady seconds a frame, compiled over plain 0.785); 143 compilations in
+# 41 s. Decided by design, 2026-11-11: the compiled decode may be untiled up to the padded 1080p
+# frame, as the encode.
 COMPILE_ENCODE_TILE_MAX = 2048
 COMPILE_ENCODE_WHOLE = (1104, 1920)
 COMPILE_DECODE_TILE_MAX = 2048
@@ -1220,26 +1228,29 @@ def in_compile_range(padded: tuple[int, int], phase: Phase, tiles: Tiles | None)
     """Whether a VAE pass over padded frames is within the shapes measured compiled (COMPILE_*,
     DESIGN.md, Memory planner, decided on 2026-10-24): the encode's tiles up to
     COMPILE_ENCODE_TILE_MAX px, or untiled where the padded frame is no larger than the 1080p
-    frame's, rows and columns each; the decode's tiles up to COMPILE_DECODE_TILE_MAX px, never
-    untiled. The DiT's phase is no pass of the VAE: always within."""
+    frame's, rows and columns each (COMPILE_ENCODE_WHOLE); the decode's the same, with
+    COMPILE_DECODE_TILE_MAX px for its tiles. The DiT's phase is no pass of the VAE: always
+    within."""
     if phase == "encode":
         if tiles is None:
             return padded[0] <= COMPILE_ENCODE_WHOLE[0] and padded[1] <= COMPILE_ENCODE_WHOLE[1]
         return tiles.size <= COMPILE_ENCODE_TILE_MAX
     if phase == "decode":
-        return tiles is not None and tiles.size <= COMPILE_DECODE_TILE_MAX
+        if tiles is None:
+            return padded[0] <= COMPILE_ENCODE_WHOLE[0] and padded[1] <= COMPILE_ENCODE_WHOLE[1]
+        return tiles.size <= COMPILE_DECODE_TILE_MAX
     return True
 
 
 def compile_range_said(phase: str) -> str:
     """The shapes measured compiled for a VAE pass, in words (in_compile_range)."""
-    if phase == "encode":
-        rows, columns = COMPILE_ENCODE_WHOLE
-        return (
-            f"encode tiles up to {COMPILE_ENCODE_TILE_MAX} px, or untiled on a frame padded to"
-            f" {columns}x{rows} at most"
-        )
-    return f"decode tiles up to {COMPILE_DECODE_TILE_MAX} px, never untiled"
+    rows, columns = COMPILE_ENCODE_WHOLE
+    tile_max = COMPILE_ENCODE_TILE_MAX if phase == "encode" else COMPILE_DECODE_TILE_MAX
+    kind = "encode" if phase == "encode" else "decode"
+    return (
+        f"{kind} tiles up to {tile_max} px, or untiled on a frame padded to"
+        f" {columns}x{rows} at most"
+    )
 
 
 def covers(padded: tuple[int, int], tiles: Tiles) -> bool:

@@ -502,16 +502,16 @@ def plan(
     (encode_peak), so that the tiles are chosen smaller where it doesn't fit, and only passes
     within the shapes measured compiled are made or taken (in_compile_range): the encode's tiles
     up to COMPILE_ENCODE_TILE_MAX px or the 1080p frame whole, the decode's up to
-    COMPILE_DECODE_TILE_MAX px. Where a pin gives a pass beyond them, or no compiled plan fits
-    where a plain one would, the job is refused, never run plain in its place (DESIGN.md, same
-    section, decided on 2026-10-29): the refusal names the pass and the shapes measured and
-    advises, each on a line of its own, the same command without --compile and, for a pin, the
-    pin within them (_compile_refusal). A job no plain plan fits is refused as it was, whatever
-    --compile asked. The plan's compile_vae is the setting's, always. A recorded plan keeps its
-    own compile_vae, whatever is asked (the units made are what they are), and is refused as
-    any recorded shape; compile_fixed is the same for a plan planned again around a recorded
-    shape (planner.plan_again), and for the compiled plan itself, whose refusal is
-    _compile_refusal's.
+    COMPILE_DECODE_TILE_MAX px or the same frame whole. Where a pin gives a pass beyond them, or
+    no compiled plan fits where a plain one would, the job is refused, never run plain in its
+    place (DESIGN.md, same section, decided on 2026-10-29): the refusal names the pass and the
+    shapes measured and advises, each on a line of its own, the same command without --compile
+    and, for a pin, the pin within them (_compile_refusal). A job no plain plan fits is refused
+    as it was, whatever --compile asked. The plan's compile_vae is the setting's, always. A
+    recorded plan keeps its own compile_vae, whatever is asked (the units made are what they
+    are), and is refused as any recorded shape; compile_fixed is the same for a plan planned
+    again around a recorded shape (planner.plan_again), and for the compiled plan itself, whose
+    refusal is _compile_refusal's.
 
     held: the weights' pinned copies exist already, the models kept in system memory between
     runs (model.Models.place, passes.HELD; DESIGN.md, Repository and apps, the nodes): the plan

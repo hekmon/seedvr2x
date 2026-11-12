@@ -147,15 +147,17 @@ def test_the_compiled_plans_predicted_peaks_are_its_passes_compiled_peaks() -> N
             )
 
 
-def test_a_compiled_decode_is_always_tiled_and_in_the_measured_range() -> None:
-    # On the 96 GB card a plain 1080p job decodes untiled and encodes untiled: compiled, the
-    # encode stays untiled (the 1080p frame whole is measured) and the decode takes tiles of
-    # 2048 px or less, the largest that fit: 1856 px, the largest tile under the padded frame's
-    # longer side (it was 1152 px under the range measured before 2026-11-11).
-    (plain, _), (compiled, _) = plain_and_compiled(our_free(96), HD)
+def test_a_compiled_decode_is_untiled_up_to_the_1080p_frame_and_tiled_in_range_above() -> None:
+    # On the 96 GB card a plain 1080p job decodes untiled and encodes untiled: compiled, both stay
+    # untiled (the 1080p frame whole is measured for the decode too, the 96 GB card's run of
+    # 2026-11-11: 1.06 times the plain peak, under the 1.1 held), so the compiled plan is
+    # the plain one's. Above that frame the decode takes tiles of 2048 px or less.
+    (plain, _), (compiled, predicted) = plain_and_compiled(our_free(96), HD)
     assert plain.encode_tiles is None and plain.decode_tiles is None
-    assert compiled.encode_tiles is None
-    assert compiled.decode_tiles is not None and compiled.decode_tiles.size == 1856
+    assert compiled.encode_tiles is None and compiled.decode_tiles is None
+    assert predicted.decode == peaks.decode_peak(
+        padded_size(HD), output_size(HD), None, compiled.resident_decode, 0, False, True
+    )
     # 4K is beyond the frame measured: the encode is tiled too, up to 2048 px.
     (plain, _), (compiled, _) = plain_and_compiled(our_free(96), UHD)
     assert compiled.compile_vae
@@ -187,7 +189,7 @@ def test_a_pass_pinned_beyond_the_measured_range_is_refused_with_its_advice() ->
     free = our_free(96)
     for pins, target, phase, pin, where, within in (
         (Pins(decode_tile=2112), UHD, "decode", 2112, "in tiles of 2112 px", 2048),
-        (Pins(decode_tile=0), HD, "decode", 0, "untiled", 1856),
+        (Pins(decode_tile=0), (1200, 2133), "decode", 0, "untiled", 2048),
         (Pins(encode_tile=2112), UHD, "encode", 2112, "in tiles of 2112 px", 2048),
         (Pins(encode_tile=0), UHD, "encode", 0, "untiled", 2048),
     ):
@@ -218,7 +220,9 @@ def test_a_pass_pinned_beyond_the_measured_range_is_refused_with_its_advice() ->
         "The same command with --encode-tile 2048 fits, within the shapes measured",
         "The same command with --decode-tile 2048 fits, within the shapes measured",
     ]
-    # A pass pinned within the range is taken, compiled.
+    # A pass pinned within the range is taken, compiled: the decode untiled at 1080p too.
+    made, _ = planner.plan(free, HD, shots(76), Pins(decode_tile=0), None, compile_vae=True)
+    assert made.compile_vae and made.decode_tiles is None
     made, _ = planner.plan(
         free, HD, shots(76), Pins(encode_tile=1024, decode_tile=1024), None, compile_vae=True
     )
@@ -254,12 +258,12 @@ def test_a_pin_in_the_range_that_fits_plain_and_not_compiled_is_refused_with_its
     ]
 
 
-def test_a_frame_too_small_for_a_tile_has_no_compiled_decode_and_is_refused() -> None:
-    # A decode can't be untiled compiled, and a frame under 576 px a side has no tile to make
-    # (shot_plan._tile_sizes): refused, with no pin to advise.
-    lines = refusal(our_free(96), (96, 128), Pins(), (3,)).split("\n")
-    assert lines[0].startswith("the VAE compiled has no decode pass within the shapes measured")
-    assert lines[1:] == ["The same command without --compile fits"]
+def test_a_frame_too_small_for_a_tile_has_its_compiled_decode_untiled() -> None:
+    # A frame under 576 px a side has no tile to make (shot_plan._tile_sizes) and is within the
+    # 1080p frame whole, so its compiled decode is untiled, as its encode: planned, not refused
+    # (it was refused while no untiled decode was measured compiled).
+    made, _ = planner.plan(our_free(96), (96, 128), shots(3), Pins(), None, compile_vae=True)
+    assert made.compile_vae and (made.encode_tiles, made.decode_tiles) == (None, None)
 
 
 def test_a_job_that_fits_no_card_plain_is_refused_as_it_was() -> None:
@@ -327,7 +331,7 @@ def test_a_recorded_compiled_plan_beyond_the_range_is_no_plans() -> None:
     # (edited) is refused, naming it; a plain record of the same passes is a plan.
     for recorded, target, where in (
         (Plan(17, Tiles(1088), Tiles(2112), compile_vae=True), UHD, "decode"),
-        (Plan(17, Tiles(1088), None, compile_vae=True), HD, "decode"),
+        (Plan(17, Tiles(1088), None, compile_vae=True), UHD, "decode"),
         (Plan(17, Tiles(2112), Tiles(1024), compile_vae=True), UHD, "encode"),
         (Plan(17, None, Tiles(1024), compile_vae=True), UHD, "encode"),
     ):
@@ -335,6 +339,7 @@ def test_a_recorded_compiled_plan_beyond_the_range_is_no_plans() -> None:
             planner.check_recorded(recorded, shots(40), target)
         planner.check_recorded(replace(recorded, compile_vae=False), shots(40), target)
     planner.check_recorded(Plan(17, None, Tiles(1152), compile_vae=True), shots(40), HD)
+    planner.check_recorded(Plan(17, None, None, compile_vae=True), shots(40), HD)
     planner.check_recorded(Plan(17, Tiles(1856), Tiles(512), compile_vae=True), shots(40), UHD)
     planner.check_recorded(Plan(17, Tiles(2048), Tiles(2048), compile_vae=True), shots(40), UHD)
 
@@ -415,9 +420,9 @@ def test_the_plan_says_the_compilation_and_its_time() -> None:
     said = lines(made, peaks)
     assert (
         "plan: compile: the VAE compiled (--compile), each pass held to 1.1 times its plain peak,"
-        " in the shapes measured only; compiling its 3 shapes takes about 2 min for this new job,"
-        " about 45 s on a resume, its cache warm (measured on an RTX 5090's host), paid before the"
-        " DiT loads, at every start and resume, its cache kept in the job's directory" in said
+        " in the shapes measured only; compiling its 2 shapes takes about 1 min 20 s for this new"
+        " job, about 30 s on a resume, its cache warm (measured on an RTX 5090's host), paid before"
+        " the DiT loads, at every start and resume, its cache kept in the job's directory" in said
     )
     # No line without the option, and none where the plan is plain and nothing was asked.
     plain, plain_peaks = planner.plan(free, HD, shots(76), Pins(), None)
@@ -1103,16 +1108,15 @@ def test_the_flag_is_recorded_and_the_models_load_with_the_compilation(
     [(*_, plan, compilation)] = loads.given
     assert plan.compile_vae
     assert compilation.cache == tmp_path / "out" / "compile-cache"
-    # 704x560 frames: the decode in tiles of 640 px (the frame whole is no compiled decode), the
-    # encode the frame whole, which the 1080p frame measured holds; JOB's shots are 2, 1 and 6
-    # latents.
-    # The tiles are the plan's, not the loaded models': the manifest records them.
+    # 704x560 frames: the encode and the decode the frame whole, which the 1080p frame measured
+    # holds for both; JOB's shots are 2, 1 and 6 latents.
+    # The tiles are the plan's, not the loaded models': the manifest records them (none).
     assert out["plan"]["encode_tiles"] is None
-    assert out["plan"]["decode_tiles"] == {"size": 640, "overlap": Tiles(640).overlap}
+    assert out["plan"]["decode_tiles"] is None
     assert compilation.shapes.padded == LARGER_PADDED
     assert compilation.shapes.encode == (LARGER_PADDED,)
-    # 704 columns in tiles of 640 px sharing 64, a stride of 576: a second tile of 128.
-    assert compilation.shapes.decode == ((560, 640), (560, 128))
+    # An untiled decode is one shape, the padded frame, warmed with its real shape.
+    assert compilation.shapes.decode == (LARGER_PADDED,)
     assert compilation.shapes.latents == (1, 2, 3)
     assert "plan: compile: the VAE compiled (--compile)" in caplog.text
     assert "--compile is not used" not in caplog.text
@@ -1179,26 +1183,31 @@ def test_a_job_outside_the_shapes_measured_is_refused_never_run_plain(
     steps: Steps,  # noqa: F811
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # The stand-in's frames, 128x96 padded, are too small for a decode tile, and an untiled
-    # decode is no compiled decode: the job is refused (DESIGN.md, Memory planner, decided on
-    # 2026-10-29), nothing loaded or run, the first pass kept as after any refusal, with the
-    # advice; --plan gives the same refusal, and the same command without --compile takes the
-    # first pass up.
+    # A decode pinned untiled on a 1200-row output is beyond the shapes measured compiled (the 1080p
+    # frame whole at most; the stand-in's own small frames are within it, and plan untiled): the
+    # job is refused (DESIGN.md, Memory planner, decided on 2026-10-29), nothing loaded or run,
+    # the first pass kept as after any refusal, with the advice; --plan gives the same refusal,
+    # and the same command without --compile takes the first pass up.
     loads = Loads(monkeypatch)
     caplog.set_level(logging.INFO)
     source_path = job(tmp_path, monkeypatch)
-    text = refused(tmp_path, source_path, caplog, *JOB, "--compile")
-    assert "the VAE compiled has no decode pass within the shapes measured" in text
-    assert "\nThe same command without --compile fits; the first pass is kept in " in text
+    beyond = ("--resolution", "1200", "--decode-tile", "0")
+    text = refused(tmp_path, source_path, caplog, *JOB, *beyond, "--compile")
+    assert "--decode-tile 0: the VAE compiled has the decode untiled beyond the shapes" in text
+    assert "\nThe same command without --compile fits\n" in text
+    assert (
+        "\nThe same command with --decode-tile 1536 fits, within the shapes measured;"
+        " the first pass is kept in " in text
+    )
     assert "--compile is not used" not in text
     assert loads.given == [] and steps.calls == []
     out = tmp_path / "out"
     assert (out / "manifest.json").is_file() and manifest_of(out)["settings"]["compile_vae"] is True
     assert manifest_of(out).get("plan") is None
     # The same refusal for --plan, whose first pass is the one kept.
-    asked = refused(tmp_path, source_path, caplog, *JOB, "--compile", "--plan", "p.txt")
-    assert "the VAE compiled has no decode pass within the shapes measured" in asked
-    assert "\nThe same command without --compile fits; " in asked
+    asked = refused(tmp_path, source_path, caplog, *JOB, *beyond, "--compile", "--plan", "p.txt")
+    assert "--decode-tile 0: the VAE compiled has the decode untiled beyond the shapes" in asked
+    assert "\nThe same command without --compile fits\n" in asked
     assert "the first pass is kept in " in asked and loads.given == []
     caplog.clear()
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
@@ -1213,16 +1222,28 @@ def test_a_pin_beyond_the_shapes_measured_is_refused_by_the_command_with_its_adv
     steps: Steps,  # noqa: F811
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # An untiled decode pinned is beyond the shapes whatever the frame (a decode compiled is
-    # always tiled): on the stand-in's 704x560 frames, refused naming the pass, the tiles and the
-    # shapes, with the advice on a line of its own each.
+    # An untiled decode pinned is beyond the shapes on a frame past the 1080p one (a 1200-row output
+    # here; within them at the stand-in's 704x560 frames, where the pin is taken): refused naming
+    # the pass, the tiles and the shapes, with the advice on a line of its own each.
     loads = Loads(monkeypatch)
     source_path = job(tmp_path, monkeypatch)
-    text = refused(tmp_path, source_path, caplog, *JOB, *LARGER, "--compile", "--decode-tile", "0")
+    text = refused(
+        tmp_path,
+        source_path,
+        caplog,
+        *JOB,
+        "--resolution",
+        "1200",
+        "--compile",
+        "--decode-tile",
+        "0",
+    )
     assert "--decode-tile 0: the VAE compiled has the decode untiled beyond the shapes" in text
-    assert "(decode tiles up to 2048 px, never untiled)\n" in text
+    assert (
+        "(decode tiles up to 2048 px, or untiled on a frame padded to 1920x1104 at most)\n" in text
+    )
     assert "\nThe same command without --compile fits\n" in text
-    assert "\nThe same command with --decode-tile 640 fits, within the shapes measured;" in text
+    assert "\nThe same command with --decode-tile 1536 fits, within the shapes measured;" in text
     assert loads.given == []
 
 
@@ -1234,7 +1255,7 @@ def test_plan_says_the_compilations_time_and_the_estimate_counts_it_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # --plan loads the models for its calibration, so compiles the VAE as a run does: the plan's
-    # line says the new job's time from its shapes (3 here, 40 s each: 2 min on Linux's disk,
+    # line says the new job's time from its shapes (2 here, 40 s each: 1 min 20 s on Linux's disk,
     # whatever disk the test's directory is on), and the time of the load, which the compilation
     # is part of, says its share of it, once, in the load's own seconds.
     monkeypatch.setattr(planner, "on_windows_drive", lambda path: False)
@@ -1243,7 +1264,7 @@ def test_plan_says_the_compilations_time_and_the_estimate_counts_it_once(
     caplog.set_level(logging.INFO)
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, *LARGER, "--compile", "--plan", "p.txt") == 0
-    assert "compiling its 3 shapes takes about 2 min for this new job, about 45 s on a resume" in (
+    assert "compiling its 2 shapes takes about 1 min 20 s for this new job, about 30 s on a" in (
         caplog.text
     )
     [load] = [r.getMessage() for r in caplog.records if "the models loaded in" in r.getMessage()]
