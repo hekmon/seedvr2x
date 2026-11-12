@@ -1891,7 +1891,7 @@ def test_a_refusal_under_torch_s_limit_is_said_as_the_driver_s_with_windows_comm
         " is allowed: the driver refused it, not torch's limit; Windows counts the GPU memory a"
         " process holds in its commit charge, which the system's memory and page file bound,"
         " and a job's memory limit where the process runs in one: 94.60 GiB committed of the"
-        " system's 94.70"
+        " system's 94.70 GiB"
     )
     # At torch's limit, by less than its sizes' rounding, the refusal may be torch's own: no
     # more is said.

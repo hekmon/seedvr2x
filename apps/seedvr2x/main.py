@@ -2266,7 +2266,7 @@ def _commit_said() -> str:
     return (
         "; Windows counts the GPU memory a process holds in its commit charge, which the"
         " system's memory and page file bound, and a job's memory limit where the process runs"
-        f" in one: {committed / 2**30:.2f} GiB committed of the system's {most / 2**30:.2f}"
+        f" in one: {committed / 2**30:.2f} GiB committed of the system's {most / 2**30:.2f} GiB"
     )
 
 

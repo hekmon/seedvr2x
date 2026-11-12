@@ -1,6 +1,7 @@
 """Decoding to 16-bit RGB through an ffmpeg pipe, frames read as they are needed."""
 
 import io
+import mmap
 import os
 import subprocess
 import tempfile
@@ -191,8 +192,21 @@ class Decoder:
             self.stop()
 
     def _check(self) -> None:
-        """When strict, fail if ffmpeg has reported anything yet."""
-        if self._strict and os.fstat(self._log.fileno()).st_size:
+        """When strict, fail if ffmpeg has reported anything yet: a line once it ends, or the
+        log's last line once ffmpeg has exited. ffmpeg writes a line in pieces (a context's
+        address, then its message), and the log is shared with it at one offset, so that a
+        failure taken at the first piece killed ffmpeg before the rest: the message read
+        "[ffv1 @ 0x...]" without "slice CRC mismatch" (test_strict_read_enforces_slice_crcs under
+        load). The next check, or the one after the exit, sees the line whole."""
+        if not self._strict:
+            return
+        size = os.fstat(self._log.fileno()).st_size
+        if not size:
+            return
+        # A mapping reads the log's end without moving the offset ffmpeg writes at.
+        with mmap.mmap(self._log.fileno(), size, access=mmap.ACCESS_READ) as seen:
+            ended = seen[size - 1 : size] == b"\n"
+        if ended or self._process.poll() is not None:
             raise self._error("an error reported, which fails a strict read")
 
     def _error(self, what: str) -> MediaError:

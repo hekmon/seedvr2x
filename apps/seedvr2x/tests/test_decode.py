@@ -3,9 +3,13 @@ the refusals (DESIGN.md, Input). Skipped without an ffmpeg seedvr2x accepts."""
 
 import dataclasses
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
+import time
 from fractions import Fraction
 from pathlib import Path
 
@@ -675,6 +679,75 @@ def test_strict_read_enforces_slice_crcs(tmp_path: Path) -> None:
     assert all(np.array_equal(frame, frames[index]) for index, frame in enumerate(given))
     with Decoder(input_args(copy), RGB16, WIDTH, HEIGHT, 200, strict=True) as decoder:
         assert np.array_equal(decoder.read(200), frames)
+
+
+class _Process:
+    """A stand-in for the decode's Popen: running until `exited`, never waited on."""
+
+    def __init__(self) -> None:
+        self.exited = False
+
+    def poll(self) -> int | None:
+        return 0 if self.exited else None
+
+    def kill(self) -> None:
+        pass
+
+    def wait(self) -> int:
+        return 0
+
+
+def test_strict_read_takes_a_line_of_the_log_whole() -> None:
+    # ffmpeg writes a line in pieces ("[ffv1 @ 0x...] " then the message) into the log it shares
+    # with the decoder: a strict read that failed at the first piece killed ffmpeg before the
+    # rest and read "[ffv1 @ 0x...]" alone, without "slice CRC mismatch" (seen under load). A
+    # line is taken once it ends, or the log's last once ffmpeg has exited.
+    decoder = object.__new__(Decoder)
+    process = _Process()
+    decoder._strict = True
+    decoder._process = process  # type: ignore[assignment]
+    decoder._log = tempfile.TemporaryFile()
+    descriptor = decoder._log.fileno()
+    decoder._check()  # nothing reported
+    os.write(descriptor, b"[ffv1 @ 0x55d0c8] ")
+    decoder._check()  # a piece of a line: ffmpeg is still writing it
+    os.write(descriptor, b"slice CRC mismatch 1234\n")
+    with pytest.raises(MediaError, match=r"fails a strict read: \[ffv1 @ 0x55d0c8\] slice CRC"):
+        decoder._check()
+    # ffmpeg gone with a last line that has no newline: the log is whole, taken as it is.
+    decoder = object.__new__(Decoder)
+    decoder._strict = True
+    decoder._process = process  # type: ignore[assignment]
+    decoder._log = tempfile.TemporaryFile()
+    descriptor = decoder._log.fileno()
+    os.write(descriptor, b"[ffv1 @ 0x55d0c8] slice CRC mismatch")
+    decoder._check()
+    process.exited = True
+    with pytest.raises(MediaError, match=r"fails a strict read: .*slice CRC mismatch$"):
+        decoder._check()
+    # A line written in two pieces by a process of its own, a delay between: never taken cut.
+    log = tempfile.TemporaryFile()
+    writer = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os, sys, time; os.write(2, b'[ffv1 @ 0x1] '); time.sleep(1);"
+            " os.write(2, b'slice CRC mismatch\\n')",
+        ],
+        stderr=log,
+    )
+    decoder = object.__new__(Decoder)
+    decoder._strict = True
+    decoder._process = writer  # type: ignore[assignment]
+    decoder._log = log
+    deadline = time.monotonic() + 30
+    while not os.fstat(log.fileno()).st_size:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    with pytest.raises(MediaError, match=r"fails a strict read: \[ffv1 @ 0x1\] slice CRC mismatch"):
+        while True:
+            decoder._check()
+            time.sleep(0.05)
 
 
 def test_checksums_catch_what_ffmpeg_decodes_silently(tmp_path: Path) -> None:

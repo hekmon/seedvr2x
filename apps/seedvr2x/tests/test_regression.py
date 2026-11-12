@@ -18,9 +18,8 @@ kernel, DESIGN.md, Vendored model code), they were made again under SDPA on the 
 666a6cb, each case's command in an environment where FlashAttention 2 doesn't import, at the
 card's sizes of cases.json, and this test held its every case to them on that code, then on the
 code that removed FlashAttention 2. SDPA's are the only references since; the FlashAttention 2
-ones are kept aside, under a name that says so, unused. Another card's references made before
-(the 96 GB card's) are FlashAttention 2's, which an SDPA run never matches: they are made again
-under SDPA before that card's next gate.
+ones are kept aside, under a name that says so, unused. The 96 GB card's (RTX PRO 6000 Blackwell, on
+Linux's driver) were made under SDPA on 2026-11-10 (impl-box-1), as the RTX 5090's were.
 
 Until 2026-11-04 the references were numz's, and seedvr2x ran in three modes for the tests only to
 reproduce them: numz's padding, numz's mirrored tail and numz's draw of the noise on the GPU.
