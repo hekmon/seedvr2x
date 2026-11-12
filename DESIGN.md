@@ -1622,7 +1622,12 @@ Decoding goes through an ffmpeg pipe:
   - When the timestamps follow no rate exactly, as a file joined by ffmpeg's concat demuxer
     does, timestamps alone can't tell a drifting join from a retagged file: the message says
     how far the frames wander and from which frame, and the ways out are a join that keeps the
-    frame grid, or the remake at the declared rate. `--frame-rate` can't hold there.
+    frame grid, or the remake at the declared rate. `--frame-rate` can't hold there. Met on a
+    real source on 2026-11-11 (impl-box-3: an episode's 156 lossless segments joined so,
+    18,395 of its 34,548 frames half a frame or more off their places from frame 15,909, up to
+    39.9 ms): the first join the message gives, each segment's exact duration and every
+    timestamp snapped to the grid, made a file seedvr2x read, its 34,548 frames and 1,440.94 s
+    the disc's.
   - Missing frames are filled, not refused (decided with the user, 2026-10-10). Frames that
     sit on the declared rate's grid with places left empty, as when a decoder drops a
     keyframe's leading pictures (found on a Blu-ray episode: two frames right after its first
@@ -3683,7 +3688,15 @@ first pass, whose shots are its input, and before the models load:
       min and 45 s, and a 4K job's 8 in 4 min 9 s and 1 min 23 s, where it said about 5 min
       20 s and 2 min: the line, fitted on one host, says more on that one, and stays. The
       1080p job's calibration then compiled 3 graphs more, which the warm-up missed (under
-      main's range and the widened one, impl-box-1 and 2): the shape, to find.
+      main's range and the widened one, impl-box-1 and 2). Found on 2026-11-12 (impl-box-3):
+      the untiled encode is given `input_transform`'s view of the frames, channels first by a
+      `permute` and not contiguous, where the warm-up gives contiguous zeros, so that the
+      encoder's guards failed on the stride, once for each kind of slice; a tiled encode's
+      crops are copies, so 4K and 1440p met none. The same job with the encoder's input made
+      contiguous compiled none, its 192 frames the same bits. Decided that day: the warm-up
+      makes its zeros in the layout the run gives each pass, the untiled encode's through the
+      run's own transform, which costs the run nothing (a copy in the run would take 64 MB a
+      slice at 1080p). To build, then a compiled 1080p job to check it.
     - The DiT isn't compiled in v0.1.0: 2–3% of a long 1080p job on a 32 GB card (the DiT is
       a fifth of its units; compiled block by block over seedvr2x's own swap, a window takes
       0.77–0.80 of plain's time), a loss on a short one (each new window length compiles
@@ -3692,7 +3705,15 @@ first pass, whose shots are its input, and before the models load:
       process's leftover. The whole model compiled fails over seedvr2x's swap; one
       compilation for every length (dynamic shapes) compiled again anyway, and ran slower.
       Later, maybe: only the lengths that pay, PyTorch's recompile limit (8) raised, once the
-      jump is explained, on the 96 GB card too.
+      jump is explained, on the 96 GB card too. Measured there on 2026-11-12 (impl-box-3, the
+      shipped sharp 7B at 1080p under SDPA, each block compiled, 36 swapped or none): a step
+      14 to 18% faster from 45 to 104 latents (22% at 20), and every peak, the first call's
+      included, at or under plain's from 20 to 104 latents: the jump at 20 latents is gone
+      under SDPA and the lean attention. But each new length compiles anew, 85 s at 20
+      latents to 220 s at 104, torch's limit of 8 stopping it after three lengths, and a job
+      meets many (that episode 71): its compiles would take hours to save some 10 minutes of
+      its windows' 1.17 h. Its bits are its own, each step equal to its first and not to
+      plain's. Still not in v0.1.0; one compile for many lengths, or few lengths, after it.
 
     The plan's record keeps both flags: compile_vae as the user sets it, compile_dit false.
     A job that `--compile` can't run within the shapes measured compiled is refused, never run
@@ -4056,10 +4077,13 @@ forward, about 30% on a window of one latent with all 36 swapped and 6% at 6 lat
 it, 2 to 10% at one latent and nothing measurable at 6.
 
 ### Allocator
-`cudaMallocAsync` is the allocator where the driver refuses a full card (it trims its pool
-there; `native` fragments and fails), and torch's own where the driver gives memory the card
-doesn't have (below); on Windows itself, whose torch has no expandable segments, it stays
-`cudaMallocAsync`, its pool counted beside each step (Windows itself, below). Set by seedvr2x
+Torch's own allocator with expandable segments is the allocator where the driver gives memory
+the card doesn't have and on a card another program uses (below), and, PROVISIONAL since
+2026-11-12, where the driver refuses a full card too: `cudaMallocAsync`, there before (it
+trims its pool; `native` fragments and fails), could not give a window's 31.65 GiB piece that
+the segments gave (below, a driver that refuses). On Windows itself, whose torch has no
+expandable segments, the allocator stays `cudaMallocAsync`, its pool counted beside each
+step (Windows itself, below). Set by seedvr2x
 before torch is imported, documented, overridable: a user's `PYTORCH_CUDA_ALLOC_CONF` or
 `PYTORCH_ALLOC_CONF` stands, an empty one being no setting. The GPU's memory refused stops a
 run in one line, before the models load as after.
@@ -4223,10 +4247,12 @@ run in one line, before the models load as after.
       again (about 0.46 of today's), not scaled. Built so: the regression and the windows bit
       for bit, the DiT's working set refitted on 19 windows of the sharp 7B (1 to 19 latents
       at 1080p and 1 to 4 at 4K, 36 blocks swapped or none) at 61.24 KiB a token and 1.0 MiB
-      a window over 0.081 GiB, where the plain code's was 127.16 KiB and 2.73 MiB. The two
-      kernels peak alike to the MiB; on the RTX 5090 the lean SDPA ran as fast as
-      FlashAttention 2 or faster (a 4K picture's DiT step 2.80 s against 2.87, a 1080p window
-      of 11 latents 7.37 against 8.16), so neither is said to be the faster.
+      a window over 0.081 GiB, where the plain code's was 127.16 KiB and 2.73 MiB. A job's
+      368 windows of 2 to 104 latents at 1080p peaked 0.06 to 0.08 GiB under the fit (the
+      96 GB card, 2026-11-12). The two kernels peak alike to the MiB; on the RTX 5090 the lean
+      SDPA ran as fast as FlashAttention 2 or faster (a 4K picture's DiT step 2.80 s against
+      2.87, a 1080p window of 11 latents 7.37 against 8.16), so neither is said to be the
+      faster.
     - The reserve under the segments is measured by the step (decided 2026-11-06, after the
       night below): max(0.6, 0.33 × P) GiB beyond a DiT step's peak P, P its peak over the
       weights it keeps resident, by the lean attention, and max(1.25, 0.2 × P) beyond a VAE
@@ -4455,6 +4481,29 @@ run in one line, before the models load as after.
     held run: `pytest -m gpu` runs that file in a process of its own on Linux. Then the desktop
     to run again, the emulation's own ballast left out of the share (research's
     `small_card.py`: it holds a CUDA context, which NVML lists).
+  - The pool where the driver refuses, on a real job (impl-box-3, 2026-11-11 and 12, the 96 GB
+    card headless): the release's defaults on the user's 720p descale of a 24-minute animated
+    episode planned its longest shot, 167 latents, as one window with 10 blocks swapped,
+    0.07 GiB under the budget, the planner's margin of 0.6 GiB (measured on short windows)
+    the room beside it. The window's calibration asked for 31.65 GiB at once, the MLP's
+    intermediate for 1.38 M tokens, and `cudaMallocAsync` refused it after trimming its pool
+    31 times. Under expandable segments the same plan's calibration ran, torch recovering from
+    137 refused 20-MiB mappings, the card down to 21 MB free. The plan's figures were not at
+    fault: the job's 368 windows, run at 120 latents at most, peaked 0.06 to 0.08 GiB under
+    their predictions. Decided on 2026-11-12, PROVISIONAL: torch's own allocator with
+    expandable segments where the driver refuses too, the plans unchanged (no reserve on that
+    driver, the margin kept), the hold, its limit and its checks a shared card's alone;
+    `cudaMallocAsync` stays Windows itself's. To build, then to measure on the 96 GB card
+    before it stands: that window in a run, the cards emulated headless at 1080p and 4K under
+    the segments, their speed against the pool's on the same plans (the pool by the user's
+    setting), and the room the pool would need at that window.
+  - A display active no longer makes a card shared (decided on 2026-11-12): the 96 GB card,
+    no program on it and no display server running, reads one through NVML (its text console,
+    inferred), with no process listed and 10 MiB used, so that every run there would be held
+    and fail the regression. Another program is seen by the processes NVML lists, compute or
+    graphics (a desktop's display server holds a graphics context; a real desktop on Linux's
+    driver is unmeasured here), or by NVML unread; in a container a share is then seen by
+    nothing (unmeasured). To build.
   - The abort's mechanism is torch's, and ComfyUI's own cleaning after such an error can
     still meet it: the restart the nodes ask for is the way out. A report to PyTorch with the
     minimal reproduction is the user's to send.
@@ -5611,6 +5660,13 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   its smallest plan takes, and 4K at 12 GB, 10.27 against 11.64. The hold decided for a
   card shared on that driver (Allocator, 2026-11-11), built on 2026-11-12, is to run the
   same slice again, the emulation's ballast left out of the share.
+  The release's defaults on a real job there (impl-box-3, 2026-11-11 and 12: the user's 720p
+  descale of a 24-minute animated episode, 365 shots, to 1080p on the whole card) ran out of
+  memory in their calibration, a window of 167 latents (Allocator, 2026-11-12). Run with
+  `--window 120` (3 shots in two windows each, none swapped, both passes untiled), it took
+  7 h 12 min, 1.6% over its estimate, the VAE 84% of the GPU's time, every step under its
+  plan. The user's eyes on it, beside the disc's own 1080p (an upscale of the same 720p
+  master), are to come.
   Under WSL2, measured on 2026-11-11 (impl-wsl2-1: the RTX 5090 with the user's desktop on it,
   the same jobs, the sizes emulated by the same ballast with room kept for the desktop's
   growth, and the whole card): every run held itself (the lending driver's two warnings, torch
@@ -5642,7 +5698,8 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
     clip, decided and built (2026-11-12), a job's check left;
   - the DiT above 22 latents and in long windows (76 and more), under SDPA, the one kernel
     since 2026-11-08: whether its compile pays on large cards, and what the jump at 20
-    latents is;
+    latents is. Measured on 2026-11-12 (Memory planner): 14 to 18% a step, the jump gone,
+    each length compiled anew; not in v0.1.0;
   - the convolutions in the graph: 21–23% faster at 768-px tiles, but a first call 1.4 to
     1.6 times plain's peak, its cause not isolated. Measured on that card, by tile and for
     the first call and the next (the user, 2026-10-24: the planner is seedvr2x's own, no
@@ -5658,7 +5715,9 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
     no higher, about a fifth faster than plain;
   - the recompile limits at the larger shapes (PROVISIONAL): 671 compilations at 4K's
     2,048-px tiles, a 5-frame shot's 120 among them, under the 1,024 per code object
-    (impl-box-2); the 3 graphs a compiled 1080p job meets after its warm-up, to find.
+    (impl-box-2); the 3 graphs a compiled 1080p job meets after its warm-up, found on
+    2026-11-12 (the untiled encode's layout, Memory planner), the warm-up's fix to build and
+    check.
   Other window layouts were modelled on the 12 cut lists: none pays more than the balanced
   windows, and none has fewer lengths.
 - **A detail scale, not in v1.** The user proposed a "detail recreation" scale for the
