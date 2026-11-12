@@ -517,7 +517,10 @@ def test_the_vae_stays_where_the_host_is_short() -> None:
     # (The line's total is its parts' as said, the scratch's allowance, 0.47 GiB, among them.)
     # Down to what that plan takes, 17.94 GiB; a byte under, its window pinned or not, the DiT
     # stays on the GPU in the VAE's phases and their tiles shrink, the next step
-    # (test_on_a_short_host_the_tiles_shrink_before_the_window).
+    # (test_on_a_short_host_the_tiles_shrink_before_the_window), and there the VAE away gives
+    # the same tiles with a block fewer swapped, which is taken (shot_plan._fewer_swapped,
+    # 2026-11-11; 33 and the VAE kept before), the plan shrunk from being the VAE away's, 18.40
+    # GiB (the VAE kept's 17.94 before).
     least = least_of(kept)
     assert f"{gib(least):.2f}" == "17.94" and first - least == paged(peaks.VAE_WEIGHTS)
     scarce, predicted = planner.plan(free, *job, least)
@@ -525,8 +528,8 @@ def test_the_vae_stays_where_the_host_is_short() -> None:
     for pins in (Pins(), Pins(window=39)):
         shrunk, predicted = planner.plan(free, HD, shots(76), pins, least - 1)
         assert (shrunk.encode_tiles, shrunk.decode_tiles) == (Tiles(1856), Tiles(1024))
-        assert (shrunk.swapped, shrunk.vae_in_dit) == (33, True)
-        assert predicted.shrunk == planner.Shrunk(Tiles(1856), Tiles(1088), 1794, 1793)
+        assert (shrunk.swapped, shrunk.vae_in_dit) == (32, False)
+        assert predicted.shrunk == planner.Shrunk(Tiles(1856), Tiles(1088), 1840, 1793)
     # --swap-blocks is taken exactly, the VAE's place around it as on any host; the tiles still
     # shrink around it.
     pins = Pins(swap_blocks=32, window=39)
@@ -625,11 +628,13 @@ def test_the_planner_takes_the_longest_window_the_host_holds() -> None:
     # the VAE's phases, 36 blocks pinned whatever the cap, and the job was refused: the DiT kept
     # on the GPU there, their tiles shrunk, before the window shortens (test_on_a_short_host_the_
     # tiles_shrink_before_the_window), it runs windows of 27, the encode in tiles of 1600 px for
-    # the card's 1856 and the decode in tiles of 960 for 1024.
+    # the card's 1856 and the decode in tiles of 960 for 1024, the VAE away; the plan shrunk from
+    # the VAE away's, 18.39 GiB (17.93 before shot_plan._fewer_swapped, 2026-11-11).
     made, peaks = planner.plan(22 * GIB, *job, Pins(), host, split=True)
     assert (made.window, made.encode_tiles, made.decode_tiles) == (27, Tiles(1600), Tiles(960))
+    assert made.vae_in_dit is False
     assert peaks.shortened == shot_plan.Shortened(39, 1736, 1600)
-    assert peaks.shrunk == planner.Shrunk(Tiles(1856), Tiles(1024), 1793, 1600)
+    assert peaks.shrunk == planner.Shrunk(Tiles(1856), Tiles(1024), 1839, 1600)
     # Where no window's plan fits both, the job is refused, and nothing more is said of the
     # window: under the process's own 2.4 GiB.
     assert "and 2.00 GiB are available, " in refused(22 * GIB, *job, Pins(), 2 * GIB, split=True)
@@ -724,20 +729,22 @@ def test_on_a_short_host_the_tiles_shrink_before_the_window() -> None:
     # With 1 GiB more, the card alone takes the decode in tiles of 1728 px, which keep 5 blocks
     # of the DiT on the GPU, 14 pinned with the VAE's weights kept: 17.38 GiB, 0.05 over. The
     # window fell to 15 for 0.005 GiB of the shot's latents; the tiles shrink instead, 1664 px,
-    # and the window stays.
+    # and the window stays. There the VAE away gives the same tiles with a block fewer swapped,
+    # 13, and is taken (shot_plan._fewer_swapped, 2026-11-11; 14 and the VAE kept before), the
+    # plan shrunk from the VAE away's, 17.85 GiB (the VAE kept's 17.38 before).
     planned, peaks = planner.plan(made, qhd, film, Pins(), host, split=True)
-    assert (planned.window, planned.swapped, planned.vae_in_dit) == (39, 14, True)
+    assert (planned.window, planned.swapped, planned.vae_in_dit) == (39, 13, False)
     assert (planned.encode_tiles, planned.decode_tiles) == (None, Tiles(1664))
     assert (planned.resident_encode, planned.resident_decode) == (19, 5)
     assert peaks.shortened is None and peaks.host <= host
-    assert peaks.shrunk == planner.Shrunk(None, Tiles(1728), 1738, 1733)
+    assert peaks.shrunk == planner.Shrunk(None, Tiles(1728), 1785, 1733)
     said = planner.said(planned, peaks, "a card", qhd, film, Pins())
     assert said_line(said, "encode") == (
         "plan: encode: untiled, the whole frame fitting the budget; --encode-tile PX tiles it"
     )
     assert said_line(said, "decode") == (
         "plan: decode: tiles of 1664 px overlapping by 64, 2 across, 1 down, shrunk from 1728 px"
-        " for the host's memory (that plan 17.38 GiB of 17.33 available): a slight colour drift,"
+        " for the host's memory (that plan 17.85 GiB of 17.33 available): a slight colour drift,"
         " which split corrects; --decode-tile PX"
     )
     # The plan --window 39 makes, which a pinned window's never shortens; nor a pass pinned in

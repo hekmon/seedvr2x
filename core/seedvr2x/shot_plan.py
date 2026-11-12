@@ -1048,8 +1048,19 @@ def _made(
         # (tests/test_shot_plan.py, test_the_vae_kept_first_costs_no_window). PROVISIONAL
         # (implementation, 2026-10-16): DESIGN.md orders the VAE kept before the tiles, the
         # window last; its order is kept where it fits, the plan with the VAE away taken where it
-        # alone does, or where it takes less.
+        # alone does, or where it takes less, or where both fit and the VAE away gives tiles no
+        # smaller with fewer blocks swapped (_fewer_swapped): the blocks the VAE kept swapped
+        # more for a larger tile are no longer needed once the tile has shrunk. Found on the plan
+        # matrix's case 2385 (int8, 48 GB, 4K, 6 GiB of system memory, decode pinned at 768 px,
+        # compiled): with the compiled range at 2,048 px the card alone gave a 1,984-px encode the
+        # host couldn't hold, the VAE kept swapped 4 blocks, and the tiles shrunk back to 1,856
+        # px kept them, where the VAE away reaches the same tiles with none (DESIGN.md, Memory
+        # planner, Choices: the fewest swapped blocks before the VAE kept). PROVISIONAL
+        # (implementation, 2026-11-11): the two plans' times on a card are not measured; a
+        # swapped block costs 2 to 10% at one latent and nothing measurable at 6, with the
+        # prefetch (DESIGN.md, BlockSwap cost).
         least = None
+        fitting = None
         for start in dict.fromkeys((made, ordered)):
             kept = _dit_kept(job, start, host_available, pins)
             if kept is None:
@@ -1057,8 +1068,12 @@ def _made(
             if least is None or _peaks(job, kept).host < _peaks(job, least[1]).host:
                 least = start, kept
             if _unfit(job, kept, host_available) is None:
-                least = start, kept
-                break
+                # The first start that fits is kept unless the other fits with tiles no
+                # smaller (the decode's and the encode's each) and fewer blocks swapped.
+                if fitting is None or _fewer_swapped(fitting[1], kept):
+                    fitting = start, kept
+        if fitting is not None:
+            least = fitting
         if least is not None and _peaks(job, least[1]).host < _peaks(job, made).host:
             start, kept = least
             shrunk = Shrunk(
@@ -1066,6 +1081,21 @@ def _made(
             )
             made, refused = kept, _unfit(job, kept, host_available)
     return made, refused, shrunk
+
+
+def _fewer_swapped(first: Plan, second: Plan) -> bool:
+    """Whether `second`, fitting as `first` does, has tiles no smaller than its (the decode's and
+    the encode's each; a pass untiled is the largest) and fewer blocks swapped: the VAE kept
+    swaps blocks more, which a window's DiT pays at every window, for the same tiles."""
+
+    def size(tiles: Tiles | None) -> float:
+        return float("inf") if tiles is None else tiles.size
+
+    return (
+        size(second.decode_tiles) >= size(first.decode_tiles)
+        and size(second.encode_tiles) >= size(first.encode_tiles)
+        and second.swapped < first.swapped
+    )
 
 
 def _window_that_runs(

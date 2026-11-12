@@ -1582,6 +1582,38 @@ def floor_named(
     return True
 
 
+def test_fewer_swapped_compares_each_pass_on_its_own() -> None:
+    # The second plan of a host-short search is taken over the first (fitting as it does) only
+    # with tiles no smaller on the decode and on the encode each, and fewer blocks swapped: not
+    # by the two sizes as a tuple, whose comparison is lexicographic and would pass a larger
+    # decode with a smaller encode. Plans made from a real one by `replace`.
+    fewer_swapped = shot_plan._fewer_swapped  # pyright: ignore[reportPrivateUsage]
+    base, _ = shot_plan.plan(60 * GIB, UHD, [Shot(0, 24)], Pins(), 40 * GIB)
+
+    def made(decode: Tiles | None, encode: Tiles | None, swapped: int) -> Plan:
+        return replace(base, decode_tiles=decode, encode_tiles=encode, swapped=swapped)
+
+    first = made(Tiles(1024), Tiles(1024), 6)
+    fewer = first.swapped - 1
+    assert fewer_swapped(first, made(Tiles(1024), Tiles(1024), fewer))
+    # A larger decode with a smaller encode, and the reverse.
+    assert not fewer_swapped(first, made(Tiles(1280), Tiles(768), fewer))
+    assert not fewer_swapped(first, made(Tiles(768), Tiles(1280), fewer))
+    # Both larger.
+    assert fewer_swapped(first, made(Tiles(1280), Tiles(1280), fewer))
+    # Both smaller.
+    assert not fewer_swapped(first, made(Tiles(768), Tiles(768), fewer))
+    # A pass untiled is the largest, on either pass.
+    assert fewer_swapped(first, made(None, Tiles(1024), fewer))
+    assert fewer_swapped(first, made(Tiles(1024), None, fewer))
+    assert fewer_swapped(first, made(None, None, fewer))
+    assert not fewer_swapped(made(None, Tiles(1024), 6), made(Tiles(1024), None, fewer))
+    assert not fewer_swapped(made(None, None, 6), made(None, Tiles(2048), fewer))
+    # The same count swapped, or more, is no gain.
+    assert not fewer_swapped(first, made(Tiles(1024), Tiles(1024), first.swapped))
+    assert not fewer_swapped(first, made(None, None, first.swapped + 1))
+
+
 def test_the_vae_kept_first_costs_no_window() -> None:
     # The VAE's weights kept on the GPU for the DiT's phase (test_the_vae_stays_where_the_host_
     # is_short) swap one or two blocks more, each pinned whatever the VAE's phases keep: the
@@ -1630,12 +1662,16 @@ def test_the_vae_kept_first_costs_no_window() -> None:
     # GiB, not 16.5.)
     made, peaks = shot_plan.plan(19 * GIB, (720, 1280), shots(12, 133), Pins(), round(12.0 * GIB))
     assert made.window == 46 and peaks.shortened == shot_plan.Shortened(68, 1605, 1200)
-    # Where the VAE kept and the tiles shrunk fit, that is the plan, as before: the grid's job
-    # whose window fell (test_on_a_short_host_the_tiles_shrink_before_the_window).
+    # Where the VAE kept and the tiles shrunk fit, that is the plan, but where the VAE away fits
+    # too with tiles no smaller and fewer blocks swapped (shot_plan._fewer_swapped, 2026-11-11):
+    # the grid's job whose window fell (test_on_a_short_host_the_tiles_shrink_before_the_window),
+    # the same window and tiles with one block fewer swapped, the VAE away (39, 14 and the VAE
+    # kept before; windows of 21 and 24 before 2026-10-16).
     made, _ = shot_plan.plan(
         48_855_253_769, (1440, 2560), shots(5, 39), Pins(), 18_616_624_832, split=True
     )
-    assert (made.window, made.swapped, made.vae_in_dit) == (39, 14, True)  # 21 and 24 before
+    assert (made.window, made.swapped, made.vae_in_dit) == (39, 13, False)
+    assert (made.encode_tiles, made.decode_tiles) == (None, Tiles(1664))
 
 
 def test_the_tiles_shrunk_for_the_host_are_the_largest_that_fit_it() -> None:
@@ -1714,15 +1750,17 @@ def test_the_host_s_window_is_searched_from_the_next_one_down_to_the_smallest() 
     # that counts on 17.05 GiB (16.95 before the DiT's share went from 0.3 to 0.33 of P, which
     # left the card alone windows of 5 there), 18 GiB of system memory: the card
     # alone holds windows of 6, every part of the weights pinned, 18.66 GiB; windows of 5, the
-    # smallest, plan, with the VAE's weights kept on the GPU, and are taken, where the job was
-    # refused had the search stopped a window short. The figure counted is the card's less
+    # smallest, plan, and are taken, where the job was refused had the search stopped a window
+    # short: the VAE away, 30 blocks swapped, the tiles those the VAE kept gives with 31
+    # (shot_plan._fewer_swapped, 2026-11-11). The figure counted is the card's less
     # torch's limit, each step left its own reserve beyond its peak (peaks.reserve; it was 13.125
     # GiB when the flat 4.5 GiB was taken off it, 17.625 less 4.5).
     held = Reading(13 * GIB, None, round(17.05 * GIB), True, round(0.5 * GIB))
     job = (held, UHD, shots(45))
     alone, _ = shot_plan.plan(*job, Pins(), None)
     made, predicted = shot_plan.plan(*job, Pins(), 18 * GIB)
-    assert (alone.window, made.window, made.vae_in_dit) == (6, 5, True)
+    assert (alone.window, made.window, made.swapped, made.vae_in_dit) == (6, 5, 30, False)
+    assert (made.encode_tiles, made.decode_tiles) == (Tiles(1088), Tiles(832))
     assert predicted.shortened == shot_plan.Shortened(6, 1866, 1800)
     assert "of system memory" in refused(*job, Pins(window=6), 18 * GIB)
 
