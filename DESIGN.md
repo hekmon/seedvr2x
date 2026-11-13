@@ -356,13 +356,15 @@ seedvr2x/                the repository
       ComfyUI's Preview as Text wired to it shows, is the cuts themselves, a line a cut ("Cut
       #1 - 0:00:01.440 (frame 36)"; the user, 2026-11-08: a readable cut list, not the
       console's text), the time the cut frame's at the clip's frame rate, in the command line's
-      form (`shotcuts.timecode`, moved to the library), counted from the clip's first frame
-      (ComfyUI's frames keep no timestamps); the rate an optional socket with no widget, which
-      Get Video Components' fps gives; unwired, the frame alone; a clip with no cut one line
-      (built 2026-11-09, impl-nodes-7). No STRING output: the text shows in the user's own
-      preview node, not in seedvr2x's status box. The frames are
-      ComfyUI's, already decoded, shrunk to the detector's 48×27 in torch (antialiased
-      bicubic), with no ffmpeg. Checked before the node relied on them (impl-nodes,
+      form (`shotcuts.timecode`, moved to the library), counted from the clip's first frame at
+      a constant rate; a clip with no cut one line (built 2026-11-09, impl-nodes-7). The rate
+      is the VIDEO's own since Cuts takes a VIDEO (2026-11-13, the VIDEO path below), its
+      optional frame rate socket gone with the frames. No STRING output: the text shows in the
+      user's own preview node, not in seedvr2x's status box. The frames are shrunk to the
+      detector's 48×27 in torch (antialiased bicubic), with no ffmpeg: a file's read a few at a
+      time through the library's conversion, their probabilities those of the same frames
+      taken whole, bit for bit; Create Video's frames as ComfyUI holds them. Checked on
+      ComfyUI's own frames before the node relied on them (impl-nodes,
       2026-11-06): on nine films of 240 frames, the study's own sources not at hand, the cuts
       and the possible cuts at 0.3 equal those of TransNetV2's own extraction, the largest
       difference in a probability 0.014, from the decode (ffmpeg's 8-bit RGB against
@@ -490,17 +492,19 @@ seedvr2x/                the repository
       The nodes' texts for all this became one line each on 2026-11-08 (impl-nodes-5):
       "freeing the GPU… Cancel again to leave", "GPU busy: run again or restart ComfyUI",
       "GPU failed: restart ComfyUI", their sentences in the console and ComfyUI's error.
-    - A clip is whole in RAM, as ComfyUI's Load Video gives it: the nodes stream nothing, keep
-      nothing on disk and resume nothing. The plan counts the clip's frames in host memory and
-      refuses past it, saying first what the CLI does instead: it streams the clip from its
-      file, shot by shot, never holding it whole, so that a clip of any length fits, resumes
-      after a stop and writes lossless masters (the user, 2026-11-08: the refusal named the CLI
-      without the one feature that fixes it; and no "film" in a user's text, a 4K clip of 360
-      frames taking 33.4 GiB of output already: built 2026-11-09, impl-nodes-7). ComfyUI's
-      console says the CLI once, when the nodes load, by its place beside the nodes (the user,
-      2026-11-05: the repository that brings the nodes brings it); never at each run. The
-      nodes' README opens with it: a clip must fit in RAM; the nodes are a convenience for
-      pictures and clips that fit, the command line seedvr2x's full tool.
+    - A clip was whole in RAM until the VIDEO path (below): the plan counted its frames in host
+      memory and refused past it, saying first what the CLI does instead: it streams the clip
+      from its file, shot by shot, never holding it whole, so that a clip of any length fits,
+      resumes after a stop and writes lossless masters (the user, 2026-11-08: the refusal named
+      the CLI without the one feature that fixes it; and no "film" in a user's text, a 4K clip
+      of 360 frames taking 33.4 GiB of output already: built 2026-11-09, impl-nodes-7). Since
+      2026-11-13 the nodes read a VIDEO from its file shot by shot and write the result as it
+      comes, their RAM the same whatever the length; Create Video's frames are still taken
+      whole, under that refusal; nothing resumes. ComfyUI's console says the CLI once, when the
+      nodes load, by its place beside the nodes (the user, 2026-11-05: the repository that
+      brings the nodes brings it), with what it adds to a long run (a resume after a stop, a
+      stop at a time of day, its own read of the source, a command on each segment, lossless
+      masters); never at each run. The nodes' README opens with it.
     - A path through ComfyUI's VIDEO, studied on 2026-11-12 on the user's question
       (impl-videostudy: ComfyUI 0.45.3 read, PyAV 19.0.2 measured). Load Video gives a file's
       path and decodes nothing until a node asks for the frames, which then come whole; Save
@@ -529,11 +533,8 @@ seedvr2x/                the repository
       whole, as frames are today, under the same RAM plan. Upscale Video takes and gives a
       VIDEO alone, with no input or output of frames (the user, the same day): a generation's
       frames enter through Create Video and leave through Get Video Components. Its file
-      carries seedvr2x's record, as every output does (The record in each output). To settle
-      at the pass's start: Crop Video's crop (ComfyUI keeps it private), a trimmed VIDEO's
-      audio (a copy cuts at its packets), a temp folder that grows by a file a run, and the
-      rate the VIDEO passes on (libavformat reads a Matroska file's 60000/1001 as 19001/317:
-      Input, the frame rate). Built on 2026-11-13 (impl-video-1), the first half:
+      carries seedvr2x's record, as every output does (The record in each output). Built on
+      2026-11-13 in two halves, the first by impl-video-1:
       - the conversion a brick of the library (`seedvr2x/yuv.py`): the command line's table of
         formats, matrices and sitings, its guesses and its refusals moved there, the command
         line taking them with its own words; `to_rgb` converting as zimg does, in float32, a
@@ -552,6 +553,58 @@ seedvr2x/                the repository
         imported into the command line's test process, it hung the command line's first pass
         under pytest (the cause not isolated), so those tests decode with it in a process of
         their own.
+      The second by impl-video-2 the same day, ComfyUI 0.45.3 read for each point:
+      - Upscale Video and Cuts take a VIDEO. A VIDEO from a file (Load Video's, Trim Video's,
+        Crop Video's; a path or bytes) is read forward through PyAV, a few frames at a time,
+        each converted on the card by `yuv.to_rgb`, then turned and cropped as ComfyUI's own
+        decode does (Crop Video's crop read where ComfyUI keeps it and resolved by its rule;
+        a crop that can't be read refused, never left out). Its frames are counted by decoding
+        them once before the run (a count of packets misses frames a decoder drops or packs;
+        Cuts thus decodes twice), its sample aspect honoured ([Colour and
+        shape](#colour-and-shape-sd-sources-included)), and a frame half a frame or more off
+        its rate's timeline refused: the audio, copied by its own times, would drift (the
+        command line fills missing frames on its grid instead, from its index). Any other
+        VIDEO (Create Video's, a concatenation) is taken by its components, whole, under the
+        RAM plan, its audio left out with a warning.
+      - The pass is the command line's, in ComfyUI's process: its plan (the windows in files,
+        not in RAM), its windows, the tiled passes' scratch beyond their allowance, the shot's
+        input copy (16-bit codes, exact: 6 bytes a pixel, 2 to 3 times FFV1's) and the earlier
+        runs' frames in files of a run directory in ComfyUI's temp folder, removed at the run's
+        end however it ends, a removal Windows refuses retried as the command line retries it;
+        the output's planes made and encoded on the CPU by a writer thread, two slices behind
+        the decode. The file's planes are bit for bit `yuv.master_planes` of the library's pass
+        in memory on the same frames, at every quality, tiled and not, corrected and not, on the
+        CPU's stand-ins.
+      - The RAM is the plan's, plus the frames on their way (5 read and 5 for the correction,
+        the decode's slice, the writer's 2 queued and the one it encodes, a preview): 0.78 GiB
+        from 1080p to 1080p, 2.41 from 1080p to 4K, 3.11 at 4K, whatever the length; on the
+        stand-ins, a clip ten times as long peaked within 2 MiB of the shorter one. In no plan:
+        the source frame's conversion on the card, about 50 MB at 1080p and 200 at 4K
+        (inferred). The disk the run takes is said in the plan beside the temp folder's free
+        room, with a warning where it looks short and never a refusal, as the command line
+        says it; the file counted at 4.8 bytes a pixel (synthetic frames' 3.95 and a fifth:
+        PROVISIONAL).
+      - The file: one a run, kept in the temp folder until ComfyUI empties it, as it starts and
+        as it closes (a VIDEO made from it, Trim Video's, shares its path, so nothing deletes it
+        sooner); the source's audio and subtitles copied packet for packet, a trimmed VIDEO's
+        packets overlapping its window copied whole, which is said once; data streams,
+        attachments and cover pictures left out, each said; seedvr2x's record ([The record in
+        each output](#the-record-in-each-output)). The VIDEO given reports the source's own
+        rate (a Matroska NTSC reading taken back to N × 1000/1001 within 2 parts in 10^6:
+        PROVISIONAL, the command line's exact rule not yet the library's); Save Video never
+        asks for it: its copy keeps the frames' times, and its new encode takes the file's
+        reading, 19001/317 for 60000/1001, 5 parts in 10^8 off.
+      - Each kind of a source's refusal is worded in ComfyUI's terms, its way out the file
+        made again, or ComfyUI's own decode through Get Video Components and Create Video
+        (whole in RAM, an untagged file read as BT.601).
+      - ComfyUI being GPL-3.0, what the nodes follow of its decode (Crop Video's rectangle, the
+        rotation) and the tests' stand-ins of its classes are written from a description of its
+        behaviour, never from its code: decided that day, when design's check found such
+        functions copied, which were written again so before the commit.
+      - Left: on the GPU, the streamed pass against `clip.upscale` and the conversion's memory
+        ([To measure](#to-measure), the nodes' VIDEO path); a cover picture and attachments,
+        which PyAV 19 can attach and 17 can't; the audio of Create Video's frames, a waveform
+        with no packets to copy; the user's own run.
     - No node saves: Upscale Image gives ComfyUI's image, float32, which ComfyUI's savers or
       others write, and Upscale Video its VIDEO, which Save Video copies or re-encodes; a 16-bit
       PNG with seedvr2x's record is the CLI's. Writing no file, Upscale Image carries no record;
@@ -1615,8 +1668,8 @@ Decoding goes through an ffmpeg pipe:
     reader's "ffmpeg's frames end before frame 0", which names no cause (impl-video-1's
     review, 2026-11-13). Decided that day: such a source is refused at the start, naming its
     size and its subsampling, with the lossless remake that crops it to the subsampling's
-    multiple; the library's conversion refuses it already (`yuv.to_rgb`, built that day), the
-    command line's refusal to build.
+    multiple; the library's conversion refuses it already (`yuv.to_rgb`, built that day), and
+    so does the command line, before its first pass (built the same day, impl-video-2).
 - colour tags read per property from the stream and from the first decoded frame: ffmpeg
   gives the stream the container's primaries, transfer and matrix as a group as soon as the
   container declares one of them, and its range or chroma location each when declared
@@ -3007,7 +3060,10 @@ holds nothing personal.
   (`--accept-env-change`) says so (`replanned`), its values the manifest's for the job, each
   unit's own in the manifest. A PNG directory's frames carry none: the directory's manifest
   holds the record. Upscale Video's file in ComfyUI carries the same tags, its app
-  `seedvr2x-comfyui` (decided on 2026-11-13, the nodes' next pass writing a file; to build).
+  `seedvr2x-comfyui` (decided on 2026-11-13), on its video stream and as the file's own:
+  ComfyUI's Save Video drops a stream's tags, in its copy (measured with PyAV 19.0.2) and in
+  its new encode (read in ComfyUI 0.45.3), and keeps the file's in both, so the record reaches
+  the file a user saves (built that day, impl-video-2).
   The source's video tags stay dropped, its language and title aside (`media/assembly.py`,
   `VIDEO_TAGS`): they describe an encode that seedvr2x's redraw replaces (the user). sptenc,
   the masters' usual next step, keeps its input's stream tags by ffmpeg's default copy unless
@@ -5857,6 +5913,13 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   environment (diffusers 0.40.0, torch 2.14.1): the same bits, or how close. Only the CPU
   suites ran there (impl-nodes-8, 2026-11-13). Before v0.2.0's publication, which lists the
   versions tested.
+- **The nodes' VIDEO path on the GPU** (see [Repository and apps](#repository-and-apps), the
+  nodes' VIDEO path, built on the CPU on 2026-11-13): the streamed pass's file against
+  `clip.upscale` on the card, at standard and maximum; `yuv.to_rgb`'s division there (CUDA
+  divides by a number from the host as a product with its reciprocal, 512 of the 65,536
+  16-bit codes an ulp off in float32: divided by a tensor on the card since, unrun there); the
+  source frame's conversion on the card, in no plan; the file's bytes a pixel on real content
+  (4.8 counted); Cuts' probabilities on the library's frames against the command line's.
 - **A detail scale, not in v1.** The user proposed a "detail recreation" scale for the
   over-rendering at 4K. With the sharp 7B the eyes' main complaint, invented skin texture, is
   gone, and what remains goes both ways with the content: the 7B's sharper thin cel lines, the
