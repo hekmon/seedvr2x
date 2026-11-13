@@ -2,12 +2,12 @@
 nodes use, and what the executor does around a node, as the tests need them.
 
 What it keeps of the real one:
-- a type (Boolean, Int, Float, String, Combo, Image, and Custom(io_type) for a node's own) has
-  an `Input` and an `Output` class; an input has an id, a display name, a tooltip, whether it is
+- a type (Boolean, Int, Float, String, Combo, Image, Video, and Custom(io_type) for a node's own)
+  has an `Input` and an `Output` class; an input has an id, a display name, a tooltip, whether it is
   optional, and for a widget (Int, Float, Boolean, String, Combo, a WidgetInput) a default and its
   options, among them `force_input` (forceInput: a socket and no widget) and a BOOLEAN's labels;
-  `as_dict` is the options dictionary the frontend reads, with every field that is None left
-  out, False kept;
+  `as_dict` is the options dictionary the frontend reads, with every field that is None left out,
+  False kept;
 - a Schema lists the inputs and outputs in order (the order the frontend builds its widgets in:
   `v1_inputs`, the INPUT_TYPES the loader reads off a V3 node, keeps it), its hidden inputs, its
   category and description; an output with no id gets `_<index>_<TYPE>_`, and ids must be unique;
@@ -280,6 +280,19 @@ class Image:
 
     class Output(Output):
         io_type = "IMAGE"
+
+
+class Video:
+    """ComfyUI 0.45.3's VIDEO type (comfy_api/latest/_io.py:660): a VideoInput object, as Load
+    Video, Create Video and the other video nodes give it (_input_impl.py here)."""
+
+    io_type = "VIDEO"
+
+    class Input(Input):
+        io_type = "VIDEO"
+
+    class Output(Output):
+        io_type = "VIDEO"
 
 
 def Custom(io_type: str) -> Any:

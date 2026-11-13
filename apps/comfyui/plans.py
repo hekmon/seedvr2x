@@ -647,24 +647,31 @@ def clip_text(
     notes: tuple[str, ...] = (),
     held: int = 0,
     quality: str = QUALITY_DEFAULT,
+    streamed: int = 0,
+    from_file: bool = True,
 ) -> str:
     """The plan of a clip, the frames of its shots each in sliding windows, in the same words: a
     clip of one shot says its windows in its first line, a clip of several a line for each shot.
     `cuts` are the shots, frames [start, end) covering the clip; `quality` the level
-    (shotruns.QUALITY), said with the runs it makes."""
+    (shotruns.QUALITY), said with the runs it makes. The clip is streamed (stream.py): `streamed`
+    the bytes of frames the pass holds on their way (stream.held_bytes), `from_file` whether it
+    is read from its file or from frames ComfyUI holds whole."""
     frames = sum(each.frames for each in cuts)
     inputs = frames * source[0] * source[1] * 3 * 4
-    outputs = frames * output[0] * output[1] * 3 * 4
     counts = [
-        f"this run needs about {gib(expected.host + outputs)}: {gib(outputs)} for the clip's"
-        f" output, kept whole, and {gib(expected.host)} for seedvr2x's own work"
+        f"this run needs about {gib(expected.host + streamed)}, whatever the video's length:"
+        f" {gib(streamed)} for the frames on their way, read, decoded and written, and"
+        f" {gib(expected.host)} for seedvr2x's own work"
         + (
             ""
             if expected.scratch == 0
-            else f" ({gib(expected.scratch)} of it for a pass made in tiles)"
+            else f" ({gib(expected.scratch)} of it for a pass made in tiles, a file beyond that)"
         ),
-        f"the input's frames, {gib(inputs)}, are not in that: ComfyUI has them in memory already,"
-        " so they are out of the RAM available",
+        "the video is read from its file shot by shot and written to a file as it comes, never"
+        " in memory all at once"
+        if from_file
+        else f"the video's frames, {gib(inputs)}, are not in that: ComfyUI has them in memory"
+        " already, so they are out of the RAM available",
     ]
     first = f"plan{' (plan only)' if room.plan_only else ''}: a clip of {frames} frames"
     first += f" {source[0]}x{source[1]} to {output[0]}x{output[1]}"
@@ -835,6 +842,8 @@ class CutList:
 
     shots: tuple[shots.Shot, ...]
     text: str
+    # The threshold the cuts were found at, for the record of Upscale Video's file.
+    threshold: float | None = None
 
     def __str__(self) -> str:
         return self.text

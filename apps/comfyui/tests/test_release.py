@@ -126,7 +126,7 @@ def test_cancel_between_a_clips_runs_frees_the_card_and_makes_no_run_after(
     # The flag was cleared as it raised: the next run goes through, at any level.
     ProgressBar.on_update = None
     out, _ = upscale_video(h, plans.Settings(), clip_frames(5), RESOLUTION, "1", quality="enhanced")
-    assert out.shape == (5, 48, 80, 3)
+    assert out.shape == (5, 3, 48, 80)
 
 
 def test_an_error_in_the_pass_frees_the_card_and_is_not_swallowed(

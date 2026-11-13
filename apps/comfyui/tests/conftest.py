@@ -6,6 +6,7 @@ import logging
 import sys
 import threading
 from collections.abc import Iterator
+from pathlib import Path
 
 import comfy.model_management as management
 import pytest
@@ -108,3 +109,15 @@ def linux_memory_unless_faked(monkeypatch: pytest.MonkeyPatch) -> None:
         from seedvr2x import memory
 
         monkeypatch.setattr(memory, "sys", _Platform("linux"))
+
+
+@pytest.fixture(autouse=True)
+def comfy_temp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """ComfyUI's temp folder, where Upscale Video writes its file and its run's directory: the
+    test's own (folder_paths.get_temp_directory)."""
+    import folder_paths
+
+    folder = tmp_path / "comfy-temp"
+    folder.mkdir()
+    monkeypatch.setattr(folder_paths, "temp_directory", str(folder))
+    return folder

@@ -5,13 +5,14 @@ command line."""
 
 import ast
 import importlib
+import re
 from pathlib import Path
 
 import comfyui
 import pytest
 import torch
 from comfyui import models, nodes, plans, words
-from standins import GIB, execute
+from standins import GIB, execute, frames_video
 
 from seedvr2x import clip, frames, peaks, pull, still_plan, weights, yuv
 from seedvr2x.errors import (
@@ -284,48 +285,54 @@ def test_a_host_short_of_memory_names_what_pins_less() -> None:
     assert "choose the int8 file" in str(words.refusal(error, smaller=small))
 
 
-def test_a_clips_output_that_the_host_cant_hold_is_worded_with_the_hosts_figures() -> None:
+def test_a_videos_frames_that_the_host_cant_hold_are_worded_with_the_hosts_figures() -> None:
+    # The frames on their way through the run alone are over what the computer has: said as such.
     error = clip_refusal(24 * GIB, 100_000, 8 * GIB)
-    assert isinstance(error, HostShort)
-    size = words.ClipSize(100_000, clip.output_bytes(100_000, TARGET))
+    assert isinstance(error, HostShort) and error.need is not None
+    size = words.ClipSize(100_000, error.need)
     text = str(words.refusal(error, clip=size))
-    assert text.startswith("The output of this clip, 100000 frames kept whole, takes 2317.43 GiB")
-    assert "the computer has 8.00 GiB available" in text
+    assert text.startswith(
+        f"The frames on their way through this run take {error.need / GIB:.2f} GiB of RAM, and"
+        " the computer has 8.00 GiB available"
+    )
     assert "--" not in text
 
 
-def test_a_clip_the_host_cant_hold_is_told_what_the_command_line_does() -> None:
-    """The clip's output and the run's own work summed, the input not counted (ComfyUI holds it
-    already, so it is out of the RAM available), and, first of the ways out, the command line's
-    one feature that fixes it: it streams the clip, so a clip of any length fits (the user,
-    2026-11-08); then the nodes' own ways."""
+def test_a_video_the_host_cant_hold_is_told_the_ways_out_of_a_streamed_video_or_of_frames() -> None:
+    """A video's plan the host can't hold: the run's own work and the frames on their way summed.
+    A video read from its file (streamed) is never held whole, so no way out is the command
+    line's and none promises a RAM figure; frames ComfyUI holds whole have the way of loading the
+    video from its file first."""
     error = clip_refusal(24 * GIB, 33, 1 * GIB)
     assert isinstance(error, HostShort) and error.need is not None and error.available is not None
-    size = words.ClipSize(33, clip.output_bytes(33, TARGET))
-    text = str(words.refusal(error, clip=size))
-    total = error.need + size.output
-    assert text.startswith(f"This clip needs about {total / GIB:.2f} GiB of your computer's RAM")
-    assert f"{size.output / GIB:.2f} GiB for the output, 33 frames kept whole" in text
-    assert f"{(error.available + size.output) / GIB:.2f} GiB are available" in text
-    assert "These nodes hold a clip whole in RAM, its frames and its output" in text
-    # The command line's stream the first way out, by its place beside the nodes and not by an
-    # address, and no RAM figure promised for it; then the nodes' own, as before.
-    reason, ways = text.split("\nYou can ", 1)
-    assert "command line" not in reason
-    first, *others = ways.split("; or ")
-    assert first.startswith("upscale it with seedvr2x's command line, which streams it")
-    for part in (
-        "apps/seedvr2x",
-        "shot by shot, never holding it whole",
-        "a clip of any length fits",
-        "its RAM follows the longest shot and the models",
-        "lossless files",
-    ):
-        assert part in first, part
-    assert "GiB" not in first and "GB" not in first
-    assert others[0].startswith("close programs") or others[0].startswith("set keep in RAM")
-    assert "give it fewer frames" in text and "http" not in text
-    assert "film" not in text.lower()
+    on_the_way = clip.output_bytes(33, TARGET)
+    assert on_the_way != error.need
+    for streamed in (True, False):
+        size = words.ClipSize(33, on_the_way, streamed)
+        text = str(words.refusal(error, clip=size))
+        total = error.need + on_the_way
+        assert text.startswith(
+            f"This video needs about {total / GIB:.2f} GiB of your computer's RAM"
+        )
+        assert f"the frames on their way, {on_the_way / GIB:.2f} GiB)" in text
+        assert f"{(error.available + on_the_way) / GIB:.2f} GiB are available" in text
+        assert f"{(total - error.available - on_the_way) / GIB:.2f} GiB short" in text
+        _, ways = text.split("\nYou can ", 1)
+        first, *others = ways.split("; or ")
+        # No way out is the command line's stream, whichever the video is.
+        assert "command line" not in text and "apps/seedvr2x" not in text
+        assert "any length fits" not in text and "kept whole" not in text
+        assert "lower resolution on this node" in ways and "film" not in text.lower()
+        assert "http" not in text and "--" not in text
+        if streamed:
+            assert "Load Video" not in text
+            assert first.startswith("close programs") or first.startswith("set keep in RAM")
+        else:
+            assert first == (
+                "load the video from its file with Load Video: this node then reads it shot by"
+                " shot, never all in memory at once"
+            )
+            assert others[0].startswith("close programs") or others[0].startswith("set keep in")
     # A picture's host refusal says none of it.
     picture_text = str(words.refusal(picture(24 * GIB, host=1 * GIB)))
     assert "command line" not in picture_text and "give it fewer images" in picture_text
@@ -472,6 +479,9 @@ def test_what_the_nodes_refuse_themselves() -> None:
         words.channels(2),
         words.frames_missing(),
         words.non_finite("the picture's decode holds NaN or inf"),
+        words.cuts_wrong(100, 120),
+        words.crop_unread(),
+        words.stream_unholdable("subtitle stream 2 (hdmv_pgs_subtitle)", "no Matroska mapping"),
     ):
         assert isinstance(refused, words.Refused) and "--" not in str(refused)
     assert "the 2.00 GiB that ComfyUI's models still use" in str(
@@ -481,6 +491,23 @@ def test_what_the_nodes_refuse_themselves() -> None:
         words.not_freed(need=20 * GIB, there=7 * GIB, comfy=0)
     )
     assert peaks.BLOCKS == 36 and plans.DIT_LABELS
+    # The cut list made for another video: the words speak of the video, not of a clip's images.
+    wrong = str(words.cuts_wrong(100, 120))
+    assert "the cut list covers 100 frames and the video has 120" in wrong
+    assert "images" not in wrong and "clip" not in wrong
+    assert "connect the video that seedvr2x Cuts was given to this node too" in wrong
+    # A crop this ComfyUI keeps out of reach is refused, never ignored, with the way out.
+    unread = str(words.crop_unread())
+    assert "Crop Video's" in unread and "refused rather than upscaled uncropped" in unread
+    assert "crop the frames after this node" in unread
+    # A stream Matroska can't hold: what it is, why, and the way out in ComfyUI's terms.
+    unholdable = str(
+        words.stream_unholdable("subtitle stream 2 (hdmv_pgs_subtitle)", "no Matroska mapping")
+    )
+    assert "the source's subtitle stream 2 (hdmv_pgs_subtitle) can't go into the upscaled file" in (
+        unholdable
+    )
+    assert "(no Matroska mapping)" in unholdable and "load that file instead" in unholdable
 
 
 # ---- The library's own refusals, from its real code paths ----------------------------------------
@@ -670,9 +697,90 @@ def test_comfyuis_error_report_names_the_nodes_exceptions_seedvr2x_never_their_f
         execute(
             nodes.Cuts,
             "7",
-            images=torch.zeros(2, 8, 8, 3),
+            video=frames_video(torch.zeros(2, 8, 8, 3)),
             models=models.Handle(plans.DEFAULT_DIT, ""),
             threshold=2.0,
         )
     named = full_type_name(type(refused.value))
     assert named == "seedvr2x.Refused" and "comfyui" not in named and "/" not in named
+
+
+def _source_refusals() -> dict[str, Refusal]:
+    """The library's real refusals of a video's frames, one of each kind of yuv.KINDS."""
+    made: dict[str, Refusal] = {}
+    cases = {
+        "pixel-format, alpha": lambda: yuv.reading("yuva420p", 64, 16),
+        "pixel-format, palette": lambda: yuv.reading("pal8", 64, 16),
+        "pixel-format, grey": lambda: yuv.reading("gray", 64, 16),
+        "matrix": lambda: yuv.reading("yuv420p", 64, 16, color_space="bt2020c"),
+        "rgb-limited": lambda: yuv.reading("gbrp", 64, 16, color_range="tv"),
+        "jpeg-limited": lambda: yuv.reading("yuvj420p", 64, 16, color_range="tv"),
+        "rgb-matrix": lambda: yuv.reading("gbrp", 64, 16, matrix="bt709"),
+        "size": lambda: yuv.check_size("yuv420p", 63, 16),
+    }
+    for name, make in cases.items():
+        try:
+            make()
+        except Refusal as refused:
+            made[name] = refused
+    return made
+
+
+SOURCE_BANNED = re.compile(
+    r"\b(pins?|pinned|caps?|held|holds?|phases?|latents?|untiled|host|film)\b|--", re.IGNORECASE
+)
+SOURCE_KINDS = {
+    "pixel-format, alpha": "pixel-format",
+    "pixel-format, palette": "pixel-format",
+    "pixel-format, grey": "pixel-format",
+    "matrix": "matrix",
+    "rgb-limited": "rgb-limited",
+    "jpeg-limited": "jpeg-limited",
+    "rgb-matrix": "rgb-matrix",
+    "size": "size",
+}
+
+
+def test_every_kind_of_yuv_is_refused_by_the_library_and_covered_here() -> None:
+    made = _source_refusals()
+    assert set(made) == set(SOURCE_KINDS)
+    assert {made[name].kind for name in made} == set(yuv.KINDS)
+    assert all(made[name].kind == SOURCE_KINDS[name] for name in made)
+
+
+@pytest.mark.parametrize("name", list(SOURCE_KINDS))
+def test_a_source_refused_says_its_reason_then_both_ways_out_in_comfyuis_terms(name: str) -> None:
+    error = _source_refusals()[name]
+    said = words.refusal(error)
+    text = str(said)
+    assert type(said).__module__ == words.ERRORS_MODULE
+    assert text.startswith("seedvr2x can't read this video file: ")
+    assert error.reason in text
+    assert not SOURCE_BANNED.search(text), text
+    # The way every kind has: ComfyUI's own decode, its cost and its colours said.
+    assert "Get Video Components" in text and "Create Video" in text
+    assert "seedvr2x Upscale Video" in text
+    assert "whole in RAM" in text and "BT.601" in text
+    assert "ffmpeg" not in text and "command" not in text.lower()
+    # And a file made again, in plain words: no command.
+    assert "make the file again" in text.lower() or name == "rgb-matrix"
+
+
+def test_each_kind_of_source_has_its_own_way_of_making_the_file_again() -> None:
+    said = {name: str(words.refusal(error)) for name, error in _source_refusals().items()}
+    assert "cropped to the multiples it needs" in said["size"]
+    assert "63x16 in yuv420p" in said["size"]
+    assert "has an alpha channel" in said["pixel-format, alpha"]
+    assert "no alpha" in said["pixel-format, alpha"]
+    assert "gives the alpha apart" in said["pixel-format, alpha"]
+    for name in ("pixel-format, palette", "pixel-format, grey"):
+        assert "ordinary colour format" in said[name]
+        assert "alpha" not in said[name]
+    assert "bt2020c" in said["matrix"] and "BT.709 is the usual one" in said["matrix"]
+    for name in ("rgb-limited", "jpeg-limited"):
+        assert "right range tag, without re-encoding" in said[name]
+    assert "limited range" in said["jpeg-limited"] and "yuvj420p" in said["jpeg-limited"]
+    assert "has no matrix" in said["rgb-matrix"]
+    assert "a fault in seedvr2x" in said["rgb-matrix"]
+    # The line the node shows is the nodes' own, not the message.
+    assert words.refusal(_source_refusals()["size"]).line == words.REFUSED

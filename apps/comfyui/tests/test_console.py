@@ -225,6 +225,8 @@ def test_comfyuis_console_shows_the_nodes_import_line_prefixed(tmp_path: Path) -
         env=environment,
     )
     lines = done.stdout.splitlines()
-    assert lines[0].startswith("[seedvr2x] seedvr2x's nodes hold a clip whole in RAM"), lines
+    assert lines[0].startswith(
+        "[seedvr2x] seedvr2x's nodes read a video from its file shot by shot"
+    ), lines
     # The check of a model file is DEBUG there, below the console's INFO.
     assert lines[-2:] == ["[seedvr2x] a library line", "ComfyUI line"]

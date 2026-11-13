@@ -19,20 +19,23 @@ What the V3 schema changes for a node, read in ComfyUI v0.44.0:
   runs (auto, on, off) and, as an optional input, a model folder (unwired: Hugging Face's cache,
   where what is missing is downloaded here, on a bar of the node's). Gives a light handle
   (models.Handle); no file is read here.
-- seedvr2x Cuts: the shot detector on a clip's frames, its file the one seedvr2x Models provides,
-  giving the cut list Upscale Video takes (an optional input there, recommended; unwired, the clip
-  is one shot); the cuts and the possible cuts are said in ComfyUI's console.
-- seedvr2x Upscale Image and seedvr2x Upscale Video: the pictures and the models' handle, then
-  the settings as widgets (resolution, colour correction, seed, plan only), then the
+- seedvr2x Cuts: the shot detector on a video's frames (a VIDEO: a file's read a few frames at a
+  time, never whole), its file the one seedvr2x Models provides, giving the cut list Upscale Video
+  takes (an optional input there, recommended; unwired, the video is one shot), timed at the
+  video's own rate; the cuts and the possible cuts are said in ComfyUI's console.
+- seedvr2x Upscale Image and seedvr2x Upscale Video: the pictures, or the VIDEO, and the models'
+  handle, then the settings as widgets (resolution, colour correction, seed, plan only), then the
   numbers the plan makes as optional inputs of seedvr2x's own types (each pass's tile, the blocks
   swapped, a clip's window length; the user's Desktop test, 2026-11-05): unwired, the plan
   chooses; wired, the value is taken exactly. No value stands for auto. The plan is made at run
   time, where the input's size and the card are known (models.session), said in ComfyUI's
-  console, then the library's pass over the pictures or the frames in memory; a clip's, one pass
-  for each shot of its cut list (an optional input of seedvr2x's own type, a clip's fact;
-  unwired, the clip is one shot), the plan made once for the longest shot's windows. With "plan
-  only" the node stops there: the plan is in the console, the node's first line says its main
-  numbers and what follows its pictures is not run.
+  console, then the library's pass over the pictures, or over the video's shots, streamed
+  (stream.py: read from its file, or from the frames ComfyUI holds for a VIDEO with no file),
+  each shot of its cut list a pass (an optional input of seedvr2x's own type, a clip's fact;
+  unwired, the video is one shot), the plan made once for the longest shot's windows, the frames
+  written to a lossless file of the node's own, which the VIDEO it gives is. With "plan only" the
+  node stops there: the plan is in the console, the node's first line says its main numbers and
+  what follows its output is not run.
 
 A node's text box is a status of two lines at most (progress.py), never a log: what a node has to
 say besides goes to ComfyUI's console through the module's logger, and a refusal shows "refused:
@@ -43,15 +46,22 @@ V3 classes hold no state (the executor runs `execute` on a clone of the class, a
 Every use of `comfy_api` is in this module, which is the one place to change for another version
 of it (`comfy_api.latest` is unstable).
 
-Nothing here saves a file: the nodes give ComfyUI's image, float32, which its savers write, and so
-carry no seedvr2x record (the CLI's 16-bit PNG has one)."""
+Upscale Image saves no file: it gives ComfyUI's image, float32, which its savers write, and so
+carries no seedvr2x record (the CLI's 16-bit PNG has one). Upscale Video's file, in ComfyUI's temp
+folder, carries it (DESIGN.md, The record in each output), and Save Video copies or re-encodes
+it."""
 
+import dataclasses
 import logging
-import math
+import shutil
 import time
+import uuid
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from fractions import Fraction
+from io import BytesIO
+from pathlib import Path
 from typing import Any, cast, override
 
 import comfy.model_management as management
@@ -59,22 +69,29 @@ import numpy as np
 import numpy.typing as npt
 import torch
 from comfy.utils import ProgressBar
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.latest import ComfyExtension, InputImpl, io
 from comfy_execution.graph_utils import ExecutionBlocker
 
-from seedvr2x import clip, frames, peaks, pull, shotcuts, still, still_plan, waiting
 from seedvr2x import detector as shot_detector
+from seedvr2x import files as seedvr2x_files
+from seedvr2x import frames, peaks, pull, shotcuts, still, still_plan, waiting
+from seedvr2x import record as records
 from seedvr2x.clock import spoken, wall
-from seedvr2x.errors import Refusal
+from seedvr2x.errors import HostShort, Refusal
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Plan
+from seedvr2x.shot_pass import NonFinite
 from seedvr2x.shot_plan import HOST_RESIDENT, PHASES, Peaks
-from seedvr2x.shotruns import QUALITY, shot_runs, taken_from
+from seedvr2x.shot_plan import plan as shot_plan
+from seedvr2x.shotruns import QUALITY, shot_runs
 from seedvr2x.shots import Shot
 from seedvr2x.weights import Architecture
 
-from . import console, plans, progress, words
+from . import console, plans, progress, stream, words
+from . import master as master_module
 from . import models as models_module
+from . import video as video_module
+from .master import Master, Others, other_streams
 
 logger = logging.getLogger("seedvr2x_comfyui.nodes")
 
@@ -230,11 +247,15 @@ def _array(images: torch.Tensor) -> npt.NDArray[np.float32]:
     return array
 
 
-def _target(width: int, height: int, resolution: int, *, picture: bool) -> tuple[int, int]:
+def _target(
+    width: int, height: int, resolution: int, *, picture: bool, aspect: Fraction = Fraction(1)
+) -> tuple[int, int]:
     """(height, width) the input is resized to: the output's short side at `resolution`, square
-    pixels (frames.target_size), refused where the padding can't be made on it: on the target for
-    a clip, on the output's even crop too for a picture (frames.check_picture_target)."""
-    target = frames.target_size(width, height, Fraction(1), resolution)
+    pixels (frames.target_size) from pixels of sample aspect `aspect` (a video file's own, as the
+    command line takes it: DESIGN.md, Colour and shape), refused where the padding can't be made
+    on it: on the target for a clip, on the output's even crop too for a picture
+    (frames.check_picture_target)."""
+    target = frames.target_size(width, height, aspect, resolution)
     try:
         if picture:
             frames.check_picture_target(target, resolution)
@@ -707,30 +728,61 @@ CutsType = io.Custom("SEEDVR2X_CUTS")
 
 
 def clip_planner(
-    settings: plans.Settings, target: tuple[int, int], cuts: Sequence[Shot]
+    settings: plans.Settings, target: tuple[int, int], cuts: Sequence[Shot], held_frames: int
 ) -> models_module.Planner[ClipPlan]:
-    """The planner of a clip cut into `cuts` and resized to `target`: clip.plan with the settings'
-    pins and colour correction, the plan made once for the longest shot's windows, and what it asks
-    of the card, its largest phase (Peaks.need: a VAE pass with the room it is held to)."""
+    """The planner of a clip cut into `cuts` and resized to `target`, streamed (stream.py): the
+    command line's plan (shot_plan.plan, its windows in files and a tiled pass's scratch beyond the
+    plan's allowance in a file) with the settings' pins and colour correction, the plan made once
+    for the longest shot's windows, `held_frames` (the bytes of frames the pass holds on their way:
+    stream.held_bytes) taken off the memory the host has available first; and what it asks of the
+    card, its largest phase (Peaks.need: a VAE pass with the room it is held to)."""
 
     def planner(
         reading: Reading, host: int | None, architecture: Architecture, held: bool
     ) -> models_module.Planned[ClipPlan]:
-        made, expected = clip.plan(
-            reading,
-            target,
-            cuts,
-            settings.clip_pins(),
-            host,
-            correct=settings.split,
-            dit_model=architecture,
-            held=held,
+        made, expected = _stream_plan(
+            reading, target, cuts, settings, host, architecture, held, held_frames
         )
         peak = max(expected.need(phase) for phase in PHASES)
         needs = models_module.Needs(peak, expected.free - expected.budget, expected.reading)
         return models_module.Planned((made, expected), made.model_plan, needs)
 
     return planner
+
+
+def _stream_plan(
+    reading: Reading,
+    target: tuple[int, int],
+    cuts: Sequence[Shot],
+    settings: plans.Settings,
+    host: int | None,
+    architecture: Architecture,
+    held: bool,
+    held_frames: int,
+) -> ClipPlan:
+    """shot_plan.plan for the streamed clip, `held_frames` off `host` first: a host that can't hold
+    them is refused as one short of memory (HostShort), with the figures."""
+    available = host
+    if available is not None:
+        if held_frames >= available:
+            raise HostShort(
+                f"the frames on their way through the run take {held_frames / peaks.GIB:.2f} GiB"
+                f" of system memory and {available / peaks.GIB:.2f} GiB are available",
+                need=held_frames,
+                available=available,
+                short=held_frames - available,
+            )
+        available -= held_frames
+    return shot_plan(
+        reading,
+        target,
+        list(cuts),
+        settings.clip_pins(),
+        available,
+        split=settings.split,
+        dit_model=architecture,
+        held=held,
+    )
 
 
 def _cut_list(cuts: object, frames_: int) -> tuple[Shot, ...]:
@@ -766,7 +818,8 @@ def _check_seed(settings: plans.Settings, shots: tuple[Shot, ...]) -> None:
 
 
 class UpscaleVideo(io.ComfyNode):
-    """The frames of a clip, shot by shot, each in sliding windows."""
+    """A VIDEO's frames, shot by shot, each in sliding windows, into a VIDEO of the node's own
+    lossless file."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -775,25 +828,27 @@ class UpscaleVideo(io.ComfyNode):
             display_name="seedvr2x Upscale Video",
             category=CATEGORY,
             description=(
-                "Upscales a clip's frames with seedvr2x, each shot of the cut list on its own, in"
+                "Upscales a video with seedvr2x, each shot of the cut list on its own, in"
                 " overlapping windows that fit your graphics card: no window crosses a cut, so no"
                 " two scenes blend. The cuts input takes the output of seedvr2x Cuts, which finds"
-                " the cuts (recommended); unwired, the clip is upscaled as one shot. The clip is"
-                " kept whole in your computer's RAM, its frames and its output, and a run stopped"
-                " part way starts over from its first frame. For a clip that doesn't fit in RAM,"
-                " use seedvr2x's command line: it streams the clip from its source file shot by"
-                " shot, never holding it whole, so that a clip of any length fits, and resumes"
-                " after a stop."
+                " the cuts (recommended); unwired, the video is upscaled as one shot. A video"
+                " loaded from a file is read from it shot by shot, never whole, and the result is"
+                " written as it comes to a lossless file in ComfyUI's temp folder, with the"
+                " source's audio and subtitles: the video this node gives, for Save Video or any"
+                " node that takes one. Frames made in ComfyUI go in through Create Video, and"
+                " come out through Get Video Components. A run stopped part way starts over from"
+                " its first frame; seedvr2x's command line resumes after a stop."
                 " Each time it runs, seedvr2x works out how to fit the job on your card: the"
                 " plan, said shot by shot in ComfyUI's console, while the node shows where the"
                 " run is. The optional numbers are the plan's: unconnected, it chooses them; a"
                 " number connected is used exactly, and the plan is built around it."
             ),
             inputs=[
-                io.Image.Input(
-                    "images",
-                    display_name="images",
-                    tooltip="The clip's frames, in order.",
+                io.Video.Input(
+                    "video",
+                    display_name="video",
+                    tooltip="The video: Load Video's, Trim Video's or Crop Video's, read from its"
+                    " file shot by shot; or Create Video's, from frames ComfyUI has in memory.",
                 ),
                 _models_input(),
                 _resolution_input(),
@@ -807,8 +862,8 @@ class UpscaleVideo(io.ComfyNode):
                     "cuts",
                     optional=True,
                     display_name="cuts",
-                    tooltip="Recommended: the shots from seedvr2x Cuts. Unwired, the clip is"
-                    " upscaled as one shot, and a clip with cuts would have frames mixed across"
+                    tooltip="Recommended: the shots from seedvr2x Cuts. Unwired, the video is"
+                    " upscaled as one shot, and a video with cuts would have frames mixed across"
                     " them.",
                 ),
                 _window_input(),
@@ -817,10 +872,13 @@ class UpscaleVideo(io.ComfyNode):
                 _swap_input(),
             ],
             outputs=[
-                io.Image.Output(
-                    "images",
-                    display_name="images",
-                    tooltip="The upscaled frames, in order, for ComfyUI's video nodes.",
+                io.Video.Output(
+                    "video",
+                    display_name="video",
+                    tooltip="The upscaled video, a lossless file in ComfyUI's temp folder (FFV1,"
+                    " 16 bits a channel) with the source's audio and subtitles and seedvr2x's"
+                    " record: Save Video copies it into an .mkv as it is, or encodes it to the"
+                    " format chosen.",
                 ),
             ],
             hidden=[io.Hidden.unique_id],
@@ -829,7 +887,7 @@ class UpscaleVideo(io.ComfyNode):
     @classmethod
     def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
         cls,
-        images: torch.Tensor,
+        video: Any,
         models: models_module.Handle,
         resolution: int,
         color_correction: bool,
@@ -859,22 +917,26 @@ class UpscaleVideo(io.ComfyNode):
                 color_correction=color_correction,
                 seed=seed,
             )
-            clip_frames = _array(images)
-            count, height, width = clip_frames.shape[:3]
+            device = management.get_torch_device()
+            if getattr(device, "type", "") != "cuda" or not torch.cuda.is_available():
+                device = torch.device("cpu")
+            source = _video_source(video)
+            count = source.frames
+            width, height = source.size
             if cuts is None:
                 logger.info(
-                    "no cut list: the clip is upscaled as one shot (wire seedvr2x Cuts for a clip"
-                    " with several shots)"
+                    "no cut list: the video is upscaled as one shot (wire seedvr2x Cuts for a"
+                    " video with several shots)"
                 )
                 shot_list = (Shot(0, count),)
             else:
                 shot_list = _cut_list(cuts, count)
             _check_seed(settings, shot_list)
-            target = _target(width, height, resolution, picture=False)
+            target = _target(width, height, resolution, picture=False, aspect=source.aspect)
             out_height, out_width = frames.output_size(target)
-
-            planner = clip_planner(settings, target, shot_list)
-            size = words.ClipSize(count, clip.output_bytes(count, target))
+            held = stream.held_bytes((width, height), (out_width, out_height))
+            planner = clip_planner(settings, target, shot_list, held)
+            size = words.ClipSize(count, held, streamed=source.file)
 
             started = time.monotonic()
             with models_module.session(
@@ -902,7 +964,19 @@ class UpscaleVideo(io.ComfyNode):
                         notes=run.notes,
                         held=run.held,
                         quality=quality,
+                        streamed=held,
+                        from_file=source.file,
                     ),
+                )
+                _disk(
+                    shot_list,
+                    (width, height),
+                    (out_width, out_height),
+                    frames.padded_size(target),
+                    quality,
+                    settings.split or QUALITY[quality] > 1,
+                    made,
+                    source.file,
                 )
                 if plan_only:
                     show(progress.status(plans.clip_line(made), progress.IN_THE_CONSOLE))
@@ -920,95 +994,431 @@ class UpscaleVideo(io.ComfyNode):
                     ProgressBar(progress.BAR),
                     show,
                 )
-                # The clip's one output array, each shot written into its place in it (the plan
-                # counts it once, clip.output_bytes), the shots one after the other: the windows
-                # of a shot never reach another's frames.
-                out = np.empty((count, out_height, out_width, 3), dtype=np.float32)
-                # The time said each second, Cancel the waits' check and the units named for them
-                # (progress.Progress.running), stopped however the run ends.
-                with moving.running():
-                    for number, each in enumerate(shot_list, 1):
-                        if len(shot_list) > 1:
-                            logger.info(
-                                "shot %d of %d, frames %d to %d",
-                                number,
-                                len(shot_list),
-                                each.start,
-                                each.end - 1,
-                            )
-                        cls._shot(
-                            *(run.models, clip_frames, each, target, settings, made, moving, out),
-                            *(quality, number),
+                assert run.files is not None
+                record = _record(
+                    run.files,
+                    models,
+                    settings,
+                    made,
+                    quality,
+                    cuts,
+                    source.stored,
+                    (out_width, out_height),
+                    resolution,
+                    source.aspect,
+                )
+                path = _output_path()
+                with (
+                    stream.Workspace(path.parent) as workspace,
+                    source.opened(device) as opened,
+                    stream.Closing(
+                        Master(
+                            path,
+                            out_width,
+                            out_height,
+                            source.rate,
+                            source.primaries,
+                            source.transfer,
+                            record.tags(),
+                            opened.others,
                         )
-                    moving.finish(_count(count, "frame"))
+                    ) as master,
+                ):
+                    writer = stream.Writer(master)
+                    try:
+                        # The time said each second, Cancel the waits' check and the units named
+                        # for them (progress.Progress.running), stopped however the run ends.
+                        with moving.running():
+                            for number, each in enumerate(shot_list, 1):
+                                if len(shot_list) > 1:
+                                    logger.info(
+                                        "shot %d of %d, frames %d to %d",
+                                        number,
+                                        len(shot_list),
+                                        each.start,
+                                        each.end - 1,
+                                    )
+                                cls._shot(
+                                    *(run.models, opened, each, target, settings, made, moving),
+                                    *(quality, number, workspace, writer),
+                                )
+                            writer.finish()
+                            moving.finish(_count(count, "frame"))
+                    except BaseException:
+                        writer.abort()
+                        raise
+                    opened.said()
             took = spoken(wall(time.monotonic() - started))
             logger.info("%s upscaled in %s", _count(count, "frame"), took)
-            return io.NodeOutput(_output(out))
+            if writer.frames:
+                logger.info(
+                    "the file written at %.2f s a frame beside the card's work, %s",
+                    writer.seconds / writer.frames,
+                    seedvr2x_files.size_said(path.stat().st_size),
+                )
+            return io.NodeOutput(_upscaled(path, source.rate))
 
     @staticmethod
     def _shot(
         loaded: Any,
-        clip_frames: npt.NDArray[np.float32],
+        opened: "_Opened",
         shot: Shot,
         target: tuple[int, int],
         settings: plans.Settings,
         made: Plan,
         moving: progress.Progress,
-        out: npt.NDArray[np.float32],
-        quality: str = plans.QUALITY_DEFAULT,
-        number: int = 1,
+        quality: str,
+        number: int,
+        workspace: stream.Workspace,
+        writer: stream.Writer,
     ) -> None:
-        """One shot of the clip, `clip_frames` [start, end) of the (T, H, W, 3) float32 in [0, 1]
-        clip, through the library's clip pass at `quality` in the plan's windows and tiles, written
-        into the same frames of `out`. The bar, the text, the preview (the newest frame written, a
-        view of `out`) and ComfyUI's Cancel follow the pass's steps and its tiles, and each run's
-        start (several at enhanced and maximum; the shot is its number `number`, from 1, of the
-        clip's): what is told the library only observes. A shot of one run begins here; one of
-        several, as each run starts."""
+        """One shot of the video through the streamed pass (stream.upscale_shot) at `quality` in
+        the plan's windows and tiles, its frames written to the file. The bar, the text, the
+        preview (the newest frame a run keeps) and ComfyUI's Cancel follow the pass's steps and its
+        tiles, and each run's start (several at enhanced and maximum; the shot is its number
+        `number`, from 1): what is told the library only observes."""
         level = QUALITY[quality]
-        offsets = [each.offset for each in shot_runs(Shot(0, shot.frames), level)]
-        taken = taken_from(shot.frames, level)
-        if len(offsets) == 1:
+        if len(shot_runs(Shot(0, shot.frames), level)) == 1:
             moving.run(number - 1, 1)
-        run = 0
 
-        def step(stage: clip.Stage, done: int, count: int) -> None:
-            nonlocal run
+        def step(stage: stream.Stage, done: int, count: int) -> None:
             if stage == "run":
-                run = done - 1
                 moving.run(number - 1, done)
             elif stage == "encode":
                 moving.encoded()
             elif stage == "window":
                 moving.window(done)
-            else:
-                # The preview is the newest frame decoded so far that this run keeps (the clip's
-                # frames offset to offset + done - 1): the others' are dropped from `out`, where
-                # a run's slice may hold none of its own. Its first frame is always its own.
-                offset = offsets[run]
-                newest_first = range(offset + done - 1, offset - 1, -1)
-                kept = next(i for i in newest_first if taken[i] == offset)
-                moving.decoded(done, count, out[shot.start + kept])
 
+        def preview(done: int, count: int, frame: npt.NDArray[np.float32] | None) -> None:
+            moving.decoded(done, count, frame)
+
+        passes = stream.Passes(
+            made.window,
+            made.encode_tiles,
+            made.decode_tiles,
+            made.tail_frames,
+            made.scratch_allowance,
+        )
         try:
-            clip.upscale(
-                loaded,
-                clip_frames[shot.start : shot.end],
-                target,
-                settings.seed,
-                window=made.window,
-                encode_tiles=made.encode_tiles,
-                decode_tiles=made.decode_tiles,
-                tail_frames=made.tail_frames,
-                correct=settings.split,
-                step=step,
-                start=shot.start,
-                output=out[shot.start : shot.end],
-                quality=quality,
-                tile=moving.tile,
-            )
-        except clip.NonFinite as error:
+            with opened.shot(shot, settings.split or level > 1, workspace) as shot_frames:
+                stream.upscale_shot(
+                    loaded,
+                    shot_frames,
+                    shot,
+                    target,
+                    settings.seed,
+                    passes,
+                    correct=settings.split,
+                    quality=quality,
+                    workspace=workspace,
+                    writer=writer,
+                    step=step,
+                    tile=moving.tile,
+                    preview=preview,
+                )
+        except NonFinite as error:
             raise words.non_finite(str(error)) from error
+
+
+# ---- A VIDEO's frames ----------------------------------------------------------------------------
+
+
+@dataclass
+class _Source:
+    """What Upscale Video reads a VIDEO from: its file (`probe`, `stream_source`, `trim`) or the
+    frames ComfyUI holds (`frames`, a VIDEO with no file of its own); the frames given, their size
+    (width, height), the size as stored, the rate, and the primaries and transfer (H.273's code
+    points) the file carries over."""
+
+    frames: int
+    size: tuple[int, int]
+    stored: tuple[int, int]
+    rate: Fraction
+    primaries: int = master_module.UNSPECIFIED
+    transfer: int = master_module.UNSPECIFIED
+    probe: video_module.Probe | None = None
+    stream_source: str | BytesIO | None = None
+    trim: video_module.Trim | None = None
+    held: npt.NDArray[np.float32] | None = None
+
+    @property
+    def file(self) -> bool:
+        return self.probe is not None
+
+    @property
+    def aspect(self) -> Fraction:
+        """The sample aspect of the frames given: a file's own, square for frames ComfyUI holds."""
+        return Fraction(1) if self.probe is None else self.probe.sample_aspect
+
+    @contextmanager
+    def opened(self, device: torch.device, others: bool = True) -> Generator["_Opened"]:
+        if self.probe is None:
+            assert self.held is not None
+            yield _Opened(self, None, None)
+            return
+        assert self.stream_source is not None
+        probe = self.probe
+        first = Fraction(probe.first_pts) * probe.time_base
+        window = None
+        if self.trim is not None and (self.trim.start or self.trim.duration):
+            end = None if probe.end_pts is None else Fraction(probe.end_pts) * probe.time_base
+            window = (Fraction(probe.start_pts) * probe.time_base, end)
+        copying = (
+            Others(_reopened(self.stream_source), probe.index, first, window) if others else None
+        )
+        try:
+            with video_module.Decoded(_reopened(self.stream_source), self.probe, device) as decoded:
+                yield _Opened(self, decoded, copying)
+        except BaseException:
+            if copying is not None:
+                copying.close()
+            raise
+
+
+def _reopened(source: str | BytesIO) -> str | BytesIO:
+    """A source to open once more: a path as it is, a VIDEO's bytes in memory as a reader of its
+    own over the same bytes, so that two readers never move each other's position."""
+    return source if isinstance(source, str) else BytesIO(source.getvalue())
+
+
+class _Opened:
+    """A source open for a run: its shots' frames in order (shot), and the other streams the file
+    copies (others)."""
+
+    def __init__(
+        self, source: _Source, decoded: video_module.Decoded | None, others: Others | None
+    ) -> None:
+        self.source, self.decoded, self.others = source, decoded, others
+
+    @contextmanager
+    def shot(
+        self, shot: Shot, again: bool, workspace: stream.Workspace
+    ) -> Generator[stream.ShotFrames]:
+        """The frames of `shot`, read again (`again`: the colour correction, the later runs) from
+        a copy of them in the run's directory where they come from the file."""
+        if self.decoded is None:
+            assert self.source.held is not None
+            yield stream.InMemory(self.source.held[shot.start : shot.end])
+            return
+        copy = (
+            stream.Copy(workspace.path(f"copy-{shot.start}"), self.source.size) if again else None
+        )
+        try:
+            yield stream.FromFile(self.decoded.next_frames, self.source.size, copy)
+        finally:
+            if copy is not None:
+                copy.close()
+                copy.path.unlink(missing_ok=True)
+
+    def said(self) -> None:
+        """What the file holds of the source's other streams, said in the console."""
+        if self.others is None:
+            return
+        if self.others.untimed:
+            logger.warning(
+                "%d packets of the source's other streams had no time to place them by, and are"
+                " left out of the upscaled file",
+                self.others.untimed,
+            )
+        for stream_, (packets, first, last) in sorted(self.others.copied.items()):
+            logger.info(
+                "the source's stream %d copied into the file: %d packets, %.3f s to %.3f s of the"
+                " source",
+                stream_,
+                packets,
+                float(first),
+                float(last),
+            )
+
+
+def _video_source(video: Any, *, streams: bool = True) -> _Source:
+    """The VIDEO as Upscale Video reads it (_Source): a file ComfyUI's VideoFromFile names (a path
+    or its bytes in memory), read through PyAV, its trim and crop honoured as ComfyUI's own decode
+    honours them; any other VIDEO by its components, the frames ComfyUI holds, whole."""
+    if isinstance(video, InputImpl.VideoFromFile):
+        return _file_source(video, streams)
+    if not hasattr(video, "get_components"):
+        raise words.Refused("video: this input takes a VIDEO, as Load Video or Create Video gives.")
+    components = video.get_components()
+    held = _array(components.images)
+    rate = plans.rate_of(float(components.frame_rate))
+    if streams and getattr(components, "audio", None) is not None:
+        logger.warning(
+            "the video's audio is not carried into the upscaled file: a video made from frames"
+            " has no audio packets to copy (load the video from its file to keep its audio)"
+        )
+    count, height, width = held.shape[:3]
+    return _Source(count, (width, height), (width, height), rate, held=held)
+
+
+# The name Python gives VideoFromFile's private crop (ComfyUI 0.45.3, video_types.py:413): Crop
+# Video's rectangle, which ComfyUI's decode applies and no getter gives.
+_CROP = "_VideoFromFile__crop"
+_NO_CROP = object()
+
+
+def _file_source(video: Any, streams: bool) -> _Source:
+    source = video.get_stream_source()
+    start, duration = video.get_active_trim_window()
+    crop = getattr(video, _CROP, _NO_CROP)
+    if crop is _NO_CROP:
+        raise words.crop_unread()
+    trim = video_module.Trim(float(start), float(duration))
+    try:
+        found = video_module.probe(_reopened(source), trim, cast(Any, crop))
+        copied, left = other_streams(_reopened(source), found.index) if streams else ([], [])
+    except Refusal as error:
+        raise words.refusal(error) from error
+    except ValueError as error:
+        raise words.Refused(f"video: {error}.") from error
+    del copied
+    for each in left:
+        logger.warning("the source's %s is left out of the upscaled file", each)
+    if streams and (trim.start or trim.duration):
+        logger.info(
+            "the video is trimmed: its audio and subtitles are copied packet for packet, whole"
+            " packets at the trim's two ends, so that they may begin and end a packet beyond it"
+        )
+    return _Source(
+        found.frames,
+        found.size,
+        found.stored,
+        found.rate,
+        found.primaries,
+        found.transfer,
+        found,
+        source,
+        trim,
+    )
+
+
+def _disk(
+    shots: Sequence[Shot],
+    source: tuple[int, int],
+    output: tuple[int, int],
+    padded: tuple[int, int],
+    quality: str,
+    again: bool,
+    made: Plan,
+    from_file: bool,
+) -> None:
+    """The disk the run takes in ComfyUI's temp folder (stream.disk_bytes), said in the console
+    with the room free there, and said at WARNING where the room looks short: never refused, as
+    the command line's disk line (its disk.py), the figure being an estimate."""
+    import folder_paths
+
+    passes = stream.Passes(
+        made.window, made.encode_tiles, made.decode_tiles, made.tail_frames, made.scratch_allowance
+    )
+    file, working = stream.disk_bytes(
+        shots, source, output, padded, quality, again and from_file, passes
+    )
+    folder = Path(folder_paths.get_temp_directory())
+    folder.mkdir(parents=True, exist_ok=True)
+    free = shutil.disk_usage(folder).free
+    said = (
+        f"disk: the upscaled file takes up to about {plans.gib(file)} in ComfyUI's temp folder,"
+        f" kept until ComfyUI empties it, and the run's working files up to {plans.gib(working)},"
+        f" removed at its end; {plans.gib(free)} free there"
+    )
+    if file + working > free:
+        logger.warning("%s: that may not be enough, and the run would stop when it is full", said)
+    else:
+        logger.info("%s", said)
+
+
+def _output_path() -> Path:
+    """A new file in ComfyUI's temp folder, seedvr2x/upscaled-<id>.mkv: ComfyUI empties the folder
+    as it starts and as it ends, and keeps it meanwhile, a file a run (the README says so)."""
+    import folder_paths
+
+    folder = Path(folder_paths.get_temp_directory()) / "seedvr2x"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"upscaled-{uuid.uuid4().hex}.mkv"
+
+
+class _Upscaled(InputImpl.VideoFromFile):
+    """ComfyUI's VideoFromFile on the node's file, its frame rate the source's (_upscaled)."""
+
+    def __init__(self, path: str, rate: Fraction) -> None:
+        super().__init__(path)
+        self.seedvr2x_rate = rate
+
+    @override
+    def get_frame_rate(self) -> Fraction:
+        return self.seedvr2x_rate
+
+    @override
+    def get_components(self) -> Any:
+        components: Any = super().get_components()
+        return dataclasses.replace(components, frame_rate=self.seedvr2x_rate)
+
+
+def _upscaled(path: Path, rate: Fraction) -> Any:
+    """The VIDEO of the node's file: ComfyUI's VideoFromFile on it, its frame rate the source's
+    own, where the file's Matroska gives libavformat's reading of it (60000/1001 read back as
+    19001/317: DESIGN.md, Input, the frame rate), for Get Video Components and any node that asks
+    the VIDEO its rate. Save Video takes its stream's own reading (ComfyUI 0.45.3, save_to never
+    asks get_frame_rate): its copy keeps the frames' times, its new encode takes 19001/317 for
+    60000/1001, 5 parts in 10^8; a Trim Video or Crop Video of this VIDEO is ComfyUI's own class
+    again, with ComfyUI's reading."""
+    return _Upscaled(str(path), rate)
+
+
+def _record(
+    files: Any,
+    handle: models_module.Handle,
+    settings: plans.Settings,
+    made: Plan,
+    quality: str,
+    cuts: plans.CutList | tuple[Shot, ...] | None,
+    source: tuple[int, int],
+    output: tuple[int, int],
+    resolution: int,
+    aspect: Fraction = Fraction(1),
+) -> records.Record:
+    """seedvr2x's record in the node's file (DESIGN.md, The record in each output, its app
+    `seedvr2x-comfyui`): the model files by name and the SHA-256 their load proved, the plan's
+    choices, the cuts (the threshold seedvr2x Cuts found them at, or the SHA-256 of the cut
+    frames of a list given otherwise, an empty list's for one shot unwired), the sample aspect the
+    frames were read with."""
+    hashes = files.hashes
+    threshold = cuts.threshold if isinstance(cuts, plans.CutList) else None
+    shots_given = cuts.shots if isinstance(cuts, plans.CutList) else cuts or ()
+    cut_frames = [each.start for each in shots_given[1:]]
+    return records.Record(
+        app=APP,
+        version=_version(),
+        source=source,
+        output=output,
+        resolution=resolution,
+        sample_aspect=aspect,
+        dit=records.Model(handle.dit, hashes.sha256(files.dit.path)),
+        vae=records.Model(plans.VAE_FILE, hashes.sha256(files.vae.path)),
+        seed=settings.seed,
+        color_correction="split" if settings.split else "none",
+        encode_tile=0 if made.encode_tiles is None else made.encode_tiles.size,
+        decode_tile=0 if made.decode_tiles is None else made.decode_tiles.size,
+        video=records.Video(
+            window=made.window or 0,
+            quality=quality,
+            compiled=False,
+            replanned=False,
+            cut_threshold=None if threshold is None else f"{threshold:g}",
+            cuts_sha256=None if threshold is not None else records.cuts_sha256(cut_frames),
+        ),
+    )
+
+
+# The record's app, the nodes' (DESIGN.md, The record in each output); their version is the
+# library's distribution's, the apps being released at one version.
+APP = "seedvr2x-comfyui"
+
+
+def _version() -> str:
+    from importlib import metadata
+
+    return metadata.version("seedvr2x-core")
 
 
 # ---- seedvr2x Cuts -------------------------------------------------------------------------------
@@ -1030,18 +1440,19 @@ class Cuts(io.ComfyNode):
                 " shot on its own so that no two scenes blend. seedvr2x's shot detector, TransNetV2"
                 " (about 30 MB, provided by seedvr2x Models, which takes it from its model folder"
                 " or Hugging Face's cache), runs on your graphics card while the node runs, and on"
-                " the processor without one; frames are shrunk to its small input in torch, with"
-                " no ffmpeg. It gives the cut list, which ComfyUI's Preview as Text shows one line"
-                " a cut, timed where the clip's frame rate is connected; ComfyUI's console has"
-                " each cut's probability, and the possible cuts (scenes it is less sure of, to"
-                " check by eye)."
+                " the processor without one; a video loaded from a file is read from it a few"
+                " frames at a time, each shrunk to the detector's small input, never in memory"
+                " all at once."
+                " It gives the cut list, which ComfyUI's Preview as Text shows one line a cut,"
+                " timed at the video's frame rate; ComfyUI's console has each cut's probability,"
+                " and the possible cuts (scenes it is less sure of, to check by eye)."
             ),
             inputs=[
-                io.Image.Input(
-                    "images",
-                    display_name="images",
-                    tooltip="The clip's frames, in order: the same images that go to seedvr2x"
-                    " Upscale Video.",
+                io.Video.Input(
+                    "video",
+                    display_name="video",
+                    tooltip="The video: the same that goes to seedvr2x Upscale Video. One loaded"
+                    " from a file is read from it, never in memory all at once.",
                 ),
                 _models_input(
                     "The output of seedvr2x Models: it gives the shot detector's file (and the"
@@ -1061,28 +1472,16 @@ class Cuts(io.ComfyNode):
                     " a few false ones, which cost little: a shot cut for nothing only gets its"
                     " own windows. A lower value finds more cuts, with more false ones.",
                 ),
-                # An optional input and no widget, as Models' folder: ComfyUI's images carry no
-                # frame rate, and the one the clip has comes from the node that loaded it.
-                io.Float.Input(
-                    "frame_rate",
-                    optional=True,
-                    force_input=True,
-                    display_name=plans.LABELS["frame_rate"],
-                    tooltip="Optional. The clip's frames per second, for the time of each cut in"
-                    " the cut list: connect the fps output of ComfyUI's Get Video Components, the"
-                    " node that gives these images. Not connected: each cut is given by its frame"
-                    " alone.",
-                ),
             ],
             outputs=[
                 CutsType.Output(
                     "cuts",
                     display_name="cuts",
-                    tooltip="The clip's shots, for seedvr2x Upscale Video's cuts input. Wired to"
+                    tooltip="The video's shots, for seedvr2x Upscale Video's cuts input. Wired to"
                     " ComfyUI's Preview as Text node (PreviewAny) too, it shows the cut list, a"
-                    " line a cut: its time, with the frame rate connected, and the frame it starts"
-                    " on, counted from 0 (Cut #1 - 0:00:01.440 (frame 36)). The console says each"
-                    " cut's probability and the possible cuts, to check by eye.",
+                    " line a cut: its time and the frame it starts on, counted from 0 (Cut #1 -"
+                    " 0:00:01.440 (frame 36)). The console says each cut's probability and the"
+                    " possible cuts, to check by eye.",
                 ),
             ],
             hidden=[io.Hidden.unique_id],
@@ -1091,31 +1490,20 @@ class Cuts(io.ComfyNode):
     @classmethod
     def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
         cls,
-        images: torch.Tensor,
+        video: Any,
         models: models_module.Handle,
         threshold: float,
-        frame_rate: float | None = None,
     ) -> io.NodeOutput:
         show = _shower(_node_id(cls))
         with _refusing(show):
             _checked(models, words.CUTS)
-            if images.ndim != 4 or images.shape[0] < 1:
-                raise words.frames_missing()
-            if images.shape[3] not in (3, 4):
-                raise words.channels(int(images.shape[3]))
-            count = int(images.shape[0])
             if isinstance(threshold, bool) or not isinstance(threshold, int | float):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise words.Refused(f"threshold {threshold!r}: must be a number")
             if not 0 < threshold <= 1:
                 raise words.Refused(f"threshold {threshold}: must be above 0 and at most 1")
-            if frame_rate is not None and (
-                isinstance(frame_rate, bool)
-                or not isinstance(frame_rate, int | float)  # pyright: ignore[reportUnnecessaryIsInstance]
-                or not math.isfinite(frame_rate)
-                or frame_rate <= 0
-            ):
-                raise words.frame_rate_wrong(frame_rate)
-            found = cls._probabilities(images, models, show)
+            source = _video_source(video, streams=False)
+            count = source.frames
+            found = cls._probabilities(source, models, show)
             cuts = shotcuts.detected(found, float(threshold))
             maybe = shotcuts.possible(found, float(threshold))
             text = plans.cuts_text(count, float(threshold), cuts, maybe)
@@ -1126,15 +1514,12 @@ class Cuts(io.ComfyNode):
                 Shot(start, end) for start, end in zip(starts, [*starts[1:], count], strict=True)
             )
             return io.NodeOutput(
-                plans.CutList(
-                    cut_list,
-                    plans.cut_lines(cuts, None if frame_rate is None else float(frame_rate)),
-                )
+                plans.CutList(cut_list, plans.cut_lines(cuts, float(source.rate)), float(threshold))
             )
 
     @staticmethod
     def _probabilities(
-        images: torch.Tensor, handle: models_module.Handle, show: Callable[[str], None]
+        source: "_Source", handle: models_module.Handle, show: Callable[[str], None]
     ) -> npt.NDArray[np.float32]:
         """The detector's probability for each frame, (T,) float32: its file the one seedvr2x Models
         provided: with a model folder, the folder's alone, refused where the folder lacks it
@@ -1181,15 +1566,16 @@ class Cuts(io.ComfyNode):
             # ComfyUI's Cancel the check of the detector's waits on the card, its close's among
             # them (detector.Detector.close waits through the poll): a card that stops answering
             # there is left by Cancel, the model kept, as the upscale nodes' waits are.
+            scanned = progress.scanned(ProgressBar(source.frames), show)
             with (
                 waiting.checking(management.throw_exception_if_processing_interrupted),
                 shot_detector.Detector(path, device, hashes=hashes) as found,
             ):
-                return shot_detector.probabilities(
-                    found,
-                    images[..., :3].detach().to("cpu", torch.float32),
-                    progress.scanned(ProgressBar(int(images.shape[0])), show),
-                )
+                if source.held is not None:
+                    return shot_detector.probabilities(found, torch.as_tensor(source.held), scanned)
+                with source.opened(device, others=False) as opened:
+                    assert opened.decoded is not None
+                    return _streamed_probabilities(found, opened.decoded, source.frames, scanned)
         except Refusal as error:
             raise words.refusal(error, model_dir=directory is not None) from error
         except BaseException as error:
@@ -1202,6 +1588,30 @@ class Cuts(io.ComfyNode):
         finally:
             if waiting.failed(card) is None:
                 management.soft_empty_cache()
+
+
+def _streamed_probabilities(
+    found: shot_detector.Detector,
+    decoded: video_module.Decoded,
+    count: int,
+    scanned: Callable[[int, int], None],
+) -> npt.NDArray[np.float32]:
+    """The detector's probability of each of a file's `count` frames, the frames read forward a
+    few at a time (shot_detector.SHRINK_CHUNK), each shrunk (shot_detector.shrink) and pushed:
+    never the video whole. The same bits as shot_detector.probabilities on the frames whole (its
+    shrink is a frame's own, and the pushes' cut changes no window: tests/test_cuts_node.py).
+    `scanned` is told as probabilities tells it, after each 4 x STEP frames."""
+    out: list[npt.NDArray[np.float32]] = []
+    done, told = 0, 0
+    while done < count:
+        part = decoded.next_frames(min(shot_detector.SHRINK_CHUNK, count - done))
+        out.append(found.push(shot_detector.shrink(torch.as_tensor(part))))
+        done += part.shape[0]
+        if done - told >= 4 * shot_detector.STEP or done == count:
+            scanned(done, count)
+            told = done
+    out.append(found.finish())
+    return np.concatenate(out)
 
 
 # ---- The value nodes: a setting of the plan's, its range, step and description -------------------

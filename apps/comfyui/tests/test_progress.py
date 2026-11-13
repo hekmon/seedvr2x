@@ -20,7 +20,16 @@ import server
 from comfy.cli_args import args
 from comfy.utils import ProgressBar
 from comfyui import console, models, nodes, plans, progress
-from standins import READ_PIECE, RESOLUTION, StandIn, handle, not_a_status, upscale_image, where
+from standins import (
+    READ_PIECE,
+    RESOLUTION,
+    StandIn,
+    handle,
+    master_of,
+    not_a_status,
+    upscale_image,
+    where,
+)
 from standins import upscale_video as run_video
 from test_nodes import TARGET, fresh, pictures
 from test_still import TILES
@@ -867,7 +876,7 @@ def test_a_tiled_clips_bar_text_and_previews_and_the_bits_of_the_library(
         decode_tiles=TILES,
         correct=True,
     )
-    assert out.numpy().tobytes() == expected.tobytes(), "the callbacks only observe"
+    assert out.tobytes() == master_of(expected).tobytes(), "the callbacks only observe"
     (bar,) = ProgressBar.created
     assert bar.updates == sorted(bar.updates) and bar.updates[-1] == progress.BAR
     said = status(node_texts("4"))
@@ -934,10 +943,13 @@ def test_at_maximum_each_runs_previews_are_frames_the_output_then_holds(
     out, _ = run_video(
         handle(tmp_path), plans.Settings(window=5), pictures(33), RESOLUTION, "7", quality="maximum"
     )
-    rows = [each for each in out.numpy()]
+    rows = list(out)
     sent = [frame for _, _, frame in told if frame is not None]
-    # A frame sent is one the output holds in the end: a run's dropped frames are never shown.
-    assert sent and all(any(np.array_equal(frame, row) for row in rows) for frame in sent)
+    # A frame sent is one the output holds in the end, its planes the file's: a run's dropped
+    # frames are never shown.
+    assert sent and all(
+        any(np.array_equal(master_of(frame[None])[0], row) for row in rows) for frame in sent
+    )
     # Every slice sends one, the newest frame its run keeps so far, the last of each of the four
     # runs among them.
     assert all(frame is not None for _, _, frame in told)

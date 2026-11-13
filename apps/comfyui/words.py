@@ -23,6 +23,7 @@ The node raises the result, `Refused`, an exception ComfyUI shows with its messa
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 from seedvr2x import peaks, pull
@@ -43,6 +44,7 @@ from seedvr2x.errors import (
     PlanRefused,
     Refusal,
     Setting,
+    SourceRefused,
     TargetTooSmall,
 )
 from seedvr2x.memory import GIB
@@ -153,12 +155,14 @@ def _smaller(smaller: Sequence[pull.Smaller], model_dir: bool) -> str:
 
 @dataclass(frozen=True)
 class ClipSize:
-    """What a refusal needs to know of the clip being upscaled, which only the node knows: its
-    frames and the bytes of the output array it holds whole (clip.output_bytes). None for a
-    picture's, whose arrays the plan counts itself."""
+    """What a refusal needs to know of the video being upscaled, which only the node knows: its
+    frames, the bytes of the frames the streamed pass holds on their way (stream.held_bytes,
+    `output`), and whether it is read from its file (`streamed`) or from frames ComfyUI holds
+    whole. None for a picture's, whose arrays the plan counts itself."""
 
     frames: int
     output: int
+    streamed: bool = True
 
 
 # Where a refusal's memory is needed, in the nodes' words, by the phase of the run the library
@@ -168,23 +172,6 @@ _WHERE = {
     "dit": "while the model works",
     "decode": "to turn the model's result back into images",
 }
-
-# Why the clip can't be had here, said in the clip's host refusal after its figures.
-_WHOLE = (
-    "These nodes hold a clip whole in RAM, its frames and its output, as ComfyUI holds any video"
-)
-
-# The clip's host refusal's first way out (the user, 2026-11-08: the refusal named the command
-# line without the one feature that fixes the error): the command line streams the clip, so a
-# clip of any length fits. No RAM figure is promised: the command line's follows the longest
-# shot and the models, not the clip's length (MANUAL.md, GPU memory, "Then the system memory").
-# The repository's folder, not a URL (the user, 2026-11-06).
-_STREAMS = (
-    "upscale it with seedvr2x's command line, which streams it: it reads the clip from its source"
-    " file and writes lossless files shot by shot, never holding it whole, so that its RAM follows"
-    " the longest shot and the models and a clip of any length fits (it is in this repository's"
-    " apps/seedvr2x folder, beside these nodes; its README says how to use it)"
-)
 
 
 def _host_way(keep: bool) -> str:
@@ -324,12 +311,39 @@ def _host(error: HostShort, keep: bool, clip: ClipSize | None) -> Words:
     plan takes off the memory available first (clip.plan), the sum is said (the output, held
     whole, and the rest of the run's own), and the first way out is the command line's stream,
     which fits a clip of any length; then the nodes' own."""
+    if clip is not None:
+        return _clip_host(error, keep, clip)
+    ways = [_host_way(keep), "lower resolution on this node, or give it fewer images"]
+    window = _instead(error.instead)
+    if window:
+        ways.append(window)
+    need, available = error.need, error.available
+    if need is None or available is None:
+        return "this run needs more RAM than the computer has available", ways
+    return (
+        f"this run needs about {_gib(need)} of your computer's RAM, and {_gib(available)} are"
+        f" available ({_gib(need - available)} short)",
+        ways,
+    )
+
+
+# A video's host refusal's way out where its frames are ComfyUI's, whole (Create Video's): the
+# same video loaded from its file is read shot by shot.
+_FROM_FILE = (
+    "load the video from its file with Load Video: this node then reads it shot by shot, never"
+    " all in memory at once"
+)
+
+
+def _clip_host(error: HostShort, keep: bool, clip: ClipSize) -> Words:
+    """A video's plan that takes more RAM than the computer has available. The node streams the
+    video (stream.py): what it holds is the command line's, the parts of the model that wait in
+    RAM, the longest shot's windows and the tiles' working copies, with the frames on their way
+    (clip.output), which the plan takes off the memory available first: the sum is said."""
     ways = [
-        *([_STREAMS] if clip is not None else []),
+        *([] if clip.streamed else [_FROM_FILE]),
         _host_way(keep),
-        "lower resolution on this node, or give it fewer frames"
-        if clip is not None
-        else "lower resolution on this node, or give it fewer images",
+        "lower resolution on this node",
     ]
     window = _instead(error.instead)
     if window:
@@ -337,27 +351,20 @@ def _host(error: HostShort, keep: bool, clip: ClipSize | None) -> Words:
     need, available = error.need, error.available
     if need is None or available is None:
         return "this run needs more RAM than the computer has available", ways
-    if clip is None:
-        return (
-            f"this run needs about {_gib(need)} of your computer's RAM, and {_gib(available)} are"
-            f" available ({_gib(need - available)} short)",
-            ways,
-        )
     if need == clip.output:
-        # The output alone is over what is available: the plan stopped there.
         said = (
-            f"the output of this clip, {clip.frames} frames kept whole, takes {_gib(need)} of RAM,"
-            f" and the computer has {_gib(available)} available"
+            f"the frames on their way through this run take {_gib(need)} of RAM, and the computer"
+            f" has {_gib(available)} available"
         )
     else:
         total, there = need + clip.output, available + clip.output
         said = (
-            f"this clip needs about {_gib(total)} of your computer's RAM: {_gib(clip.output)} for"
-            f" the output, {clip.frames} frames kept whole, and {_gib(need)} for seedvr2x's own"
-            " work (the parts of the model that wait in RAM, the longest shot's windows and the"
-            f" tiles' working copies); {_gib(there)} are available ({_gib(total - there)} short)"
+            f"this video needs about {_gib(total)} of your computer's RAM for seedvr2x's work"
+            " (the parts of the model that wait in RAM, the longest shot's windows, the tiles'"
+            f" working copies and the frames on their way, {_gib(clip.output)}); {_gib(there)}"
+            f" are available ({_gib(total - there)} short)"
         )
-    return f"{said}. {_WHOLE}", ways
+    return said, ways
 
 
 def _plan(
@@ -545,11 +552,64 @@ def refusal(
         return Refused(_probe(error))
     if isinstance(error, TargetTooSmall):
         return Refused(_too_small(error))
+    if isinstance(error, SourceRefused):
+        return Refused(_source(error))
     if isinstance(error, ModelError):
         return Refused(_model_files(error, model_dir, node))
     if isinstance(error, HostMemoryError):
         return Refused(_host_memory(error, keep))
     return Refused(error.words(lambda setting: say(setting, node)))
+
+
+# The way out every video refusal has: ComfyUI's own decode, which reads any file, then the frames
+# whole in RAM (the nodes' VIDEO path, DESIGN.md: a VIDEO of frames is taken as the frames
+# ComfyUI decoded). Get Video Components gives the colour frames and the alpha apart
+# (video_types.py's VideoComponents, ComfyUI 0.45.3), and Create Video takes the frames alone.
+_DECODE = (
+    "Or let ComfyUI decode the video: connect it to Get Video Components, then its images and"
+    " frame rate to Create Video, and Create Video to seedvr2x Upscale Video. The node then takes"
+    " those frames as ComfyUI decoded them, whole in RAM, so a long video needs that much"
+    " memory, and reads the colours as ComfyUI does (a file with no colour tag as BT.601,"
+    " whatever its size)."
+)
+
+
+def _source(error: SourceRefused) -> str:
+    """A video file seedvr2x won't read, worded by its kind (yuv.KINDS): what its frames are, as
+    the library's reason says it, then the ways out in ComfyUI's terms: a file made again, or
+    ComfyUI's own decode (_DECODE). No ffmpeg command: the nodes' users make files as they like."""
+    reason = error.reason or str(error)
+    if error.kind == "size":
+        way = (
+            "Make the file again with its width and height cropped to the multiples it needs"
+            " (even numbers for most videos), and load that one."
+        )
+    elif error.kind == "pixel-format":
+        way = (
+            "Make the file again in an ordinary colour format (8-bit 4:2:0 YUV, as most videos"
+            " are), and load that one."
+        )
+        if "alpha" in reason:
+            way += (
+                " Get Video Components gives the alpha apart from the colour frames and Create"
+                " Video takes the colour frames alone, so the upscaled video has no alpha."
+            )
+    elif error.kind == "matrix":
+        way = (
+            "Make the file again with one of those matrices (BT.709 is the usual one),"
+            " converting its colours, and load that one."
+        )
+    elif error.kind in ("rgb-limited", "jpeg-limited"):
+        way = (
+            "If the tag is wrong, make the file again with the right range tag, without"
+            " re-encoding it, and load that one."
+        )
+    else:
+        way = (
+            "The nodes never give a matrix, so this is a fault in seedvr2x: report it, with the"
+            " file's pixel format."
+        )
+    return f"seedvr2x can't read this video file: {reason}. {way} {_DECODE}"
 
 
 def _too_small(error: TargetTooSmall) -> str:
@@ -643,6 +703,54 @@ def frames_missing() -> Refused:
     return Refused("the images input is empty: the node got no image")
 
 
+def crop_unread() -> Refused:
+    """A VIDEO whose crop this ComfyUI keeps where seedvr2x can't read it: never ignored."""
+    return Refused(
+        "this ComfyUI keeps a video's crop (Crop Video's) where seedvr2x can't read it, so the"
+        " video is refused rather than upscaled uncropped: crop the frames after this node"
+        " instead, or update seedvr2x's nodes"
+    )
+
+
+def stream_unholdable(described: str, reason: str) -> Refused:
+    """A stream of the source that Matroska, the node's file, can't hold."""
+    return Refused(
+        f"the source's {described} can't go into the upscaled file, a Matroska file ({reason}):"
+        " remux the source without it, or with it converted (subtitles to SRT, for one), and load"
+        " that file instead"
+    )
+
+
+def off_the_rate(frame: int, at: Fraction, rate: Fraction) -> Refused:
+    """A video whose frames don't keep its frame rate (a variable rate): the node numbers its
+    file's frames at the rate, and the audio would drift from them."""
+    return Refused(
+        f"this video's frames don't keep its frame rate, {float(rate):.3f} per second: frame"
+        f" {frame} is at {float(at):.3f} s, where that rate puts it at {frame / float(rate):.3f} s"
+        " (a variable frame rate, as phones record, or frames missing). Make the file again at a"
+        " constant frame rate and load that file instead; or connect the video to Get Video"
+        " Components, then its images and frame rate to Create Video, and Create Video to this"
+        " node, which then takes the frames whole in RAM at that rate, without the audio"
+    )
+
+
+def undecodable(error: str) -> Refused:
+    """A video whose file the decoder can't read through."""
+    return Refused(
+        f"the video's file could not be decoded through ({error}): make the file again, or load"
+        " another"
+    )
+
+
+def not_written(path: Path, error: BaseException) -> Refused:
+    """The node's file that could not be written: a full disk most often."""
+    return Refused(
+        f"the upscaled video could not be written to {path.name} in ComfyUI's temp folder"
+        f" ({error}): make room on that disk, or start ComfyUI with its temp folder on another"
+        " disk, and run again"
+    )
+
+
 def non_finite(message: str) -> Refused:
     return Refused(f"{message}, so nothing is output; run it again, or with a different seed")
 
@@ -650,8 +758,8 @@ def non_finite(message: str) -> Refused:
 def cuts_wrong(covered: int, frames: int) -> Refused:
     """A cut list that does not cover the frames it is given: it was made for another clip."""
     return Refused(
-        f"the cut list covers {covered} frames and the clip has {frames}: connect the images that"
-        " seedvr2x Cuts was given to this node too, or its output is for another clip"
+        f"the cut list covers {covered} frames and the video has {frames}: connect the video that"
+        " seedvr2x Cuts was given to this node too, or its output is for another video"
     )
 
 

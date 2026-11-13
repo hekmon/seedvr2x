@@ -552,6 +552,9 @@ class Run[T]:
         self.keeping = keeping
         self.notes = notes
         self.held = held  # bytes of the weights already pinned when the plan was made
+        # The model files the run loaded, their SHA-256 known by their load (pull.Hashes): the
+        # record of Upscale Video's file names them. None for a plan only.
+        self.files: ModelFiles | None = None
 
     @property
     def models(self) -> Models:
@@ -1364,6 +1367,7 @@ def _session[T](
             tuple(notes),
             0 if entry is None else entry.host,
         )
+        run.files = files
         try:
             yield run
         except BaseException as error:

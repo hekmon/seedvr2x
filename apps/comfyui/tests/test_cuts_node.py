@@ -2,12 +2,11 @@
 does) and over scripted probabilities: the cut list it gives Upscale Video, the text of the cuts
 and the possible cuts, the detector's file the one seedvr2x Models provided (the handle's folder's
 alone, refused where the folder lacks it, or Hugging Face's cache's) found, checked and given
-back; the cut list as Preview as Text shows it, a line a cut, timed at the frame rate wired.
+back; the cut list as Preview as Text shows it, a line a cut, timed at the VIDEO's own rate.
 """
 
 import json
 import logging
-import math
 import re
 from fractions import Fraction
 from pathlib import Path
@@ -25,6 +24,7 @@ from standins import (
     RESOLUTION,
     StandIn,
     execute,
+    frames_video,
     handle,
     nodes_console,
     upscale_video,
@@ -62,27 +62,27 @@ def run_cuts(
 
 
 def run_cuts_value(
-    images: torch.Tensor,
+    images: "torch.Tensor | Any",
     threshold: float = shotcuts.THRESHOLD,
     model_dir: str = "",
     unique_id: str | None = "7",
-    frame_rate: object = None,
+    rate: Fraction = Fraction(24),
 ) -> tuple[plans.CutList, str]:
-    """run_cuts' run, its output as the node gives it, plans.CutList; `frame_rate` given where it
-    is not None, as a link gives it (unwired, ComfyUI gives no value at all)."""
-    rate = {} if frame_rate is None else {"frame_rate": frame_rate}
+    """run_cuts' run, its output as the node gives it, plans.CutList; frames are made a VIDEO of
+    frames at `rate` (Create Video's), any other value is the VIDEO given."""
+    video = frames_video(images, rate) if isinstance(images, torch.Tensor) else images
     with nodes_console() as said:
         out = execute(
             nodes.Cuts,
             unique_id,
-            images=images,
+            video=video,
             models=models.Handle(plans.DEFAULT_DIT, model_dir),
             threshold=threshold,
-            **rate,
         )
-    # The one text the node says whole: the cuts.
+    # The one text the node says whole: the cuts, its last message (nodes._array says an opaque
+    # alpha's being left out first).
     assert isinstance(out[0], plans.CutList), out[0]
-    return out[0], said.messages[0] if said.messages else ""
+    return out[0], said.messages[-1] if said.messages else ""
 
 
 @pytest.fixture(autouse=True)
@@ -246,7 +246,10 @@ def test_the_node_shows_one_line_and_the_alpha_is_left_out(
         return np.zeros(len(images), np.float32)
 
     monkeypatch.setattr(shot_detector, "probabilities", probabilities)
-    _, text = run_cuts(clip_images(12, channels=4), model_dir=str(weights_dir), unique_id="9")
+    # Four channels with an opaque alpha (nodes._array): the first three are taken.
+    opaque = clip_images(12, channels=4)
+    opaque[..., 3] = 1.0
+    _, text = run_cuts(opaque, model_dir=str(weights_dir), unique_id="9")
     instance = server.PromptServer.instance
     # The one short line (the cuts themselves are in the console): shots and possible cuts.
     assert instance is not None and instance.texts == [("1 shot \u00b7 no possible cut", "9")]
@@ -387,7 +390,9 @@ def test_a_refusal_shows_its_line_and_is_said_once(
 
 def test_a_value_that_is_no_handle_is_refused_naming_the_node(weights_dir: Path) -> None:
     with pytest.raises(TypeError, match="seedvr2x Cuts takes the output of seedvr2x Models"):
-        execute(nodes.Cuts, "7", images=clip_images(3), models="a folder", threshold=0.3)
+        execute(
+            nodes.Cuts, "7", video=frames_video(clip_images(3)), models="a folder", threshold=0.3
+        )
 
 
 def test_images_that_are_no_clip_are_refused(weights_dir: Path) -> None:
@@ -426,7 +431,12 @@ def test_the_cut_lists_text_is_the_cuts_a_line_each_and_no_json_so_preview_any_s
     values = {8: 0.9, 20: 0.7, 25: 0.2}
     scripted(monkeypatch, values, 33)
     found, said = run_cuts_value(clip_images(33), model_dir=str(weights_dir))
-    assert str(found) == found.text == "Cut #1 - frame 9\nCut #2 - frame 21"
+    # At the VIDEO's own rate, 24 fps here: the time of each frame beside its number.
+    assert (
+        str(found)
+        == found.text
+        == ("Cut #1 - 0:00:00.375 (frame 9)\nCut #2 - 0:00:00.875 (frame 21)")
+    )
     probabilities = np.zeros(33, np.float32)
     for frame, value in values.items():
         probabilities[frame] = value
@@ -438,7 +448,7 @@ def test_the_cut_lists_text_is_the_cuts_a_line_each_and_no_json_so_preview_any_s
         shotcuts.possible(probabilities, threshold),
     )
     assert "cut at frame 9 (probability" in said and "possible cut at frame 26" in said
-    assert "probability" not in found.text and "26" not in found.text
+    assert "probability" not in found.text and "frame 26" not in found.text
     with pytest.raises(TypeError):
         json.dumps(found)
     tooltip = nodes.Cuts.GET_SCHEMA().outputs[0].tooltip or ""
@@ -446,56 +456,40 @@ def test_the_cut_lists_text_is_the_cuts_a_line_each_and_no_json_so_preview_any_s
     assert "Cut #1 - 0:00:01.440 (frame 36)" in tooltip
 
 
-def test_with_the_frame_rate_each_cut_has_its_time_as_the_command_line_writes_it(
+def test_each_cut_has_its_time_at_the_videos_own_rate_as_the_command_line_writes_it(
     monkeypatch: pytest.MonkeyPatch, weights_dir: Path
 ) -> None:
     # 25 fps: frame 36 at 1.44 s, the user's form; the time the command line's (shotcuts.timecode,
     # H:MM:SS.mmm rounded up to the millisecond), the frame's on a constant rate from frame 0.
     scripted(monkeypatch, {35: 0.9, 2249: 0.8}, 2300)
-    found, _ = run_cuts_value(clip_images(2300), model_dir=str(weights_dir), frame_rate=25.0)
+    found, _ = run_cuts_value(clip_images(2300), model_dir=str(weights_dir), rate=Fraction(25))
     assert found.text.splitlines() == [
         "Cut #1 - 0:00:01.440 (frame 36)",
         "Cut #2 - 0:01:30.000 (frame 2250)",
     ]
-    # The float Get Video Components gives for 24000/1001 is read as 24000/1001 again: frame 36 at
-    # 1.5015 s exactly, rounded up to 0:00:01.502, frame 1 at 41.708 ms to 0:00:00.042.
+    # The rate a VideoFromComponents holds as a float is read as the fraction it stands for
+    # (plans.rate_of): 24000/1001, frame 36 at 1.5015 s exactly, rounded up to 0:00:01.502,
+    # frame 1 at 41.708 ms to 0:00:00.042.
     scripted(monkeypatch, {0: 0.9, 35: 0.9}, 40)
     found, _ = run_cuts_value(
-        clip_images(40), model_dir=str(weights_dir), frame_rate=float(Fraction(24000, 1001))
+        clip_images(40), model_dir=str(weights_dir), rate=Fraction(24000, 1001)
     )
     assert found.text.splitlines() == [
         "Cut #1 - 0:00:00.042 (frame 1)",
         "Cut #2 - 0:00:01.502 (frame 36)",
     ]
-    # A whole number from a link is a rate too.
-    scripted(monkeypatch, {35: 0.9}, 40)
-    found, _ = run_cuts_value(clip_images(40), model_dir=str(weights_dir), frame_rate=25)
-    assert found.text == "Cut #1 - 0:00:01.440 (frame 36)"
+    # The cut list carries its threshold.
+    assert found.threshold == shotcuts.THRESHOLD
 
 
 def test_a_clip_with_no_cut_says_so_in_one_line(
     monkeypatch: pytest.MonkeyPatch, weights_dir: Path
 ) -> None:
-    for rate in (None, 25.0):
+    for rate in (Fraction(24), Fraction(25)):
         scripted(monkeypatch, {39: 0.9}, 40)  # a peak on the last frame cuts nothing
-        found, _ = run_cuts_value(clip_images(40), model_dir=str(weights_dir), frame_rate=rate)
+        found, _ = run_cuts_value(clip_images(40), model_dir=str(weights_dir), rate=rate)
         assert found.shots == (Shot(0, 40),)
         assert str(found) == "no cut: the clip is one shot"
-
-
-@pytest.mark.parametrize("rate", [0.0, -25.0, math.nan, math.inf, -math.inf, True, "25"])
-def test_a_frame_rate_that_is_no_positive_finite_number_is_refused_before_the_detector_runs(
-    monkeypatch: pytest.MonkeyPatch, weights_dir: Path, rate: object
-) -> None:
-    made = scripted(monkeypatch, {8: 0.9}, 20)
-    with pytest.raises(words.Refused) as refused:
-        run_cuts_value(clip_images(20), model_dir=str(weights_dir), frame_rate=rate)
-    message = str(refused.value)
-    assert message.startswith(
-        f"frame rate {rate!r}: the clip's frames per second, a finite number above 0"
-    )
-    assert "Get Video Components" in message and "fps" in message and "--" not in message
-    assert not made
 
 
 def test_a_rate_given_as_a_float_is_the_fraction_it_stands_for() -> None:
@@ -522,21 +516,17 @@ def test_the_node_has_the_cuts_output_and_a_hidden_id() -> None:
     inputs: dict[str, Any] = {each.id: each for each in schema.inputs}
     # No mode (wired, it detects) and no folder (seedvr2x Models' alone): the detector's file
     # comes with the models handle, the upscale nodes' own type.
-    assert list(inputs) == ["images", "models", "threshold", "frame_rate"]
+    assert list(inputs) == ["video", "models", "threshold"]
+    assert inputs["video"].io_type == "VIDEO" and not inputs["video"].optional
+    assert "frame_rate" not in inputs
     assert inputs["models"].io_type == "SEEDVR2X_MODELS" and not inputs["models"].optional
     assert "shot detector" in inputs["models"].tooltip
     assert inputs["threshold"].default == shotcuts.THRESHOLD == 0.3
     assert inputs["threshold"].io_type == "FLOAT" and inputs["threshold"].round is False
     assert "one shot" not in inputs["threshold"].tooltip
-    # The frame rate an optional socket and no widget, as Models' folder: a FLOAT from a link,
-    # Get Video Components' fps.
-    rate = inputs["frame_rate"]
-    assert rate.io_type == "FLOAT" and rate.optional and rate.force_input and rate.default is None
-    assert rate.display_name == "frame rate" and "Get Video Components" in rate.tooltip
     found = nodes.Cuts.INPUT_TYPES()
-    assert list(found["required"]) == ["images", "models", "threshold"]
-    assert list(found["optional"]) == ["frame_rate"]
-    assert found["optional"]["frame_rate"][1]["forceInput"] is True
+    assert list(found["required"]) == ["video", "models", "threshold"]
+    assert "optional" not in found or not found["optional"]
     assert "seedvr2x Models" in schema.description and "one shot" not in schema.description
 
 
@@ -657,12 +647,22 @@ def test_a_detectors_file_gone_from_the_folder_since_models_ran_is_refused_never
     monkeypatch.setattr(pull, "check_pin", lambda *args, **kwargs: None)
     handle = models.Handle(plans.DEFAULT_DIT, str(folder))
     asked = no_cache(monkeypatch)
-    execute(nodes.Cuts, "7", images=clip_images(12), models=handle, threshold=shotcuts.THRESHOLD)
+    execute(
+        nodes.Cuts,
+        "7",
+        video=frames_video(clip_images(12)),
+        models=handle,
+        threshold=shotcuts.THRESHOLD,
+    )
     (folder / pull.DETECTOR).unlink()
     caplog.set_level(logging.DEBUG, logger="seedvr2x_comfyui")
     with pytest.raises(words.Refused, match="is not in the model folder wired to seedvr2x Models"):
         execute(
-            nodes.Cuts, "7", images=clip_images(12), models=handle, threshold=shotcuts.THRESHOLD
+            nodes.Cuts,
+            "7",
+            video=frames_video(clip_images(12)),
+            models=handle,
+            threshold=shotcuts.THRESHOLD,
         )
     assert asked == []
     said = unprefixed(caplog)
@@ -687,3 +687,105 @@ def test_comfyuis_cancel_is_the_check_of_the_detectors_waits_its_close_among_the
     run_cuts(clip_images(12), model_dir=str(weights_dir))
     assert checks == [management.throw_exception_if_processing_interrupted]
     assert getattr(waiting._named, "check", None) is None  # pyright: ignore[reportPrivateUsage]
+
+
+# ---- A VIDEO backed by a file, read by streaming ------------------------------------------------
+
+
+def written_clip(path: Path, count: int = 110, rate: int = 25) -> Path:
+    """A small FFV1 file (yuv420p, 64x48) of `count` frames with a scene change at its middle: a
+    moving gradient, then a moving checkerboard, in colour."""
+    av = pytest.importorskip("av")
+    rng = np.random.default_rng(11)
+    with av.open(str(path), "w") as container:
+        stream = container.add_stream("ffv1", rate=rate)
+        stream.width, stream.height, stream.pix_fmt = 64, 48, "yuv420p"
+        columns = np.arange(64)[None, :, None]
+        rows = np.arange(48)[:, None, None]
+        for index in range(count):
+            if index < count // 2:
+                picture = (columns * 3 + rows + index * 2 + [0, 40, 80]) % 256
+            else:
+                picture = ((columns // 8 + rows // 8 + index) % 2) * 200 + [10, 30, 20]
+            noise = rng.integers(0, 6, (48, 64, 3))
+            array = np.clip(picture + noise, 0, 255).astype(np.uint8)
+            frame = av.VideoFrame.from_ndarray(array, format="rgb24").reformat(format="yuv420p")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return path
+
+
+def whole_frames(video: Any) -> torch.Tensor:
+    """The frames of a VIDEO's file as the node's own reading gives them (video.Decoded over
+    video.probe), all at once."""
+    from comfyui import video as video_module
+
+    source = video.get_stream_source()
+    trim = video_module.Trim(*(float(each) for each in video.get_active_trim_window()))
+    found = video_module.probe(source, trim, None)
+    with video_module.Decoded(source, found, torch.device("cpu")) as decoded:
+        return torch.as_tensor(decoded.next_frames(found.frames))
+
+
+def test_a_video_read_from_its_file_gives_the_probabilities_of_its_frames_held_whole(
+    monkeypatch: pytest.MonkeyPatch, weights_dir: Path, tmp_path: Path
+) -> None:
+    from comfy_api.latest import InputImpl
+    from comfyui import video as video_module
+
+    video = InputImpl.VideoFromFile(str(written_clip(tmp_path / "clip.mkv")))
+    frames = whole_frames(video)
+    assert frames.shape == (110, 48, 64, 3)
+
+    reads: list[int] = []
+    real = video_module.Decoded.next_frames
+
+    def recorded(self: Any, count: int) -> Any:
+        reads.append(count)
+        return real(self, count)
+
+    monkeypatch.setattr(video_module.Decoded, "next_frames", recorded)
+    streamed: list[npt.NDArray[np.float32]] = []
+    real_detected = shotcuts.detected
+
+    def seen(probabilities: npt.NDArray[np.float32], threshold: float) -> Any:
+        streamed.append(np.array(probabilities))
+        return real_detected(probabilities, threshold)
+
+    monkeypatch.setattr(shotcuts, "detected", seen)
+    found, _ = run_cuts_value(video, model_dir=str(weights_dir))
+    assert len(streamed) == 1 and streamed[0].shape == (110,)
+    # Only a few frames at a time are read: never the clip whole.
+    assert reads and sum(reads) == 110
+    assert max(reads) <= shot_detector.SHRINK_CHUNK < 110
+    with shot_detector.Detector(weights_dir / pull.DETECTOR, torch.device("cpu")) as detector:
+        whole = shot_detector.probabilities(detector, frames)
+    assert np.array_equal(streamed[0], whole)
+    assert found.shots[0].start == 0 and found.shots[-1].end == 110
+    # The times are the file's own rate: 25 fps.
+    assert found.text == "no cut: the clip is one shot" or "(frame " in found.text
+
+
+def test_a_trimmed_video_is_scanned_for_the_frames_of_its_window_alone(
+    monkeypatch: pytest.MonkeyPatch, weights_dir: Path, tmp_path: Path
+) -> None:
+    from comfy_api.latest import InputImpl
+
+    path = written_clip(tmp_path / "clip.mkv")
+    video = InputImpl.VideoFromFile(str(path)).as_trimmed(start_time=0.4, duration=2.0)
+    counted = whole_frames(video).shape[0]
+    assert 0 < counted < 110
+    seen: list[int] = []
+    real = shotcuts.detected
+
+    def detected(probabilities: npt.NDArray[np.float32], threshold: float) -> Any:
+        seen.append(len(probabilities))
+        return real(probabilities, threshold)
+
+    monkeypatch.setattr(shotcuts, "detected", detected)
+    found, said = run_cuts_value(video, model_dir=str(weights_dir))
+    assert seen == [counted]
+    assert found.shots[-1].end == counted
+    assert said.startswith(f"{counted} frames, ")

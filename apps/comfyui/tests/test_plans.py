@@ -11,8 +11,8 @@ from typing import Any
 import pytest
 import torch
 from comfy_api.latest import io
-from comfyui import models, nodes, plans, words
-from standins import StandIn, execute, nodes_console, plan_of, upscale_image
+from comfyui import models, nodes, plans, stream, words
+from standins import StandIn, execute, frames_video, nodes_console, plan_of, upscale_image
 
 from seedvr2x import peaks, pull, weights
 from seedvr2x.memory import Reading
@@ -101,7 +101,7 @@ def test_the_handle_and_the_reports_inputs_name_no_folder_of_the_users(tmp_path:
     # A node refused with a folder wired: its inputs, as the report formats them, hold no path.
     folder = tmp_path / "someone's models"
     inputs: dict[str, Any] = {
-        "images": torch.zeros(2, 8, 8, 3),
+        "video": frames_video(torch.zeros(2, 8, 8, 3)),
         "models": models.Handle(dit, str(folder), "auto"),
         "threshold": 2.0,
     }
@@ -186,7 +186,7 @@ VALUE_NODES = {
 }
 
 
-def test_the_pictures_come_first_then_the_models_then_the_widgets_then_the_plans_numbers() -> None:
+def test_the_pictures_and_the_video_come_first_then_the_models_then_the_plans_numbers() -> None:
     video = schema_inputs(nodes.UpscaleVideo)
     image = schema_inputs(nodes.UpscaleImage)
     # What does not apply to a node is not on it: a picture is one latent and has no window.
@@ -207,7 +207,7 @@ def test_the_pictures_come_first_then_the_models_then_the_widgets_then_the_plans
     # the plan's numbers.
     assert "quality" in video and "quality" not in image
     assert list(video) == [
-        "images",
+        "video",
         "models",
         "resolution",
         "quality",
@@ -218,15 +218,16 @@ def test_the_pictures_come_first_then_the_models_then_the_widgets_then_the_plans
     ]
     assert video["cuts"].io_type == "SEEDVR2X_CUTS" and video["cuts"].optional
     assert video["cuts"].tooltip == (
-        "Recommended: the shots from seedvr2x Cuts. Unwired, the clip is upscaled as one shot,"
-        " and a clip with cuts would have frames mixed across them."
+        "Recommended: the shots from seedvr2x Cuts. Unwired, the video is upscaled as one shot,"
+        " and a video with cuts would have frames mixed across them."
     )
     description = nodes.UpscaleVideo.GET_SCHEMA().description
-    assert "unwired, the clip is upscaled as one shot" in description
+    assert "unwired, the video is upscaled as one shot" in description
     assert "takes the clip as one shot" not in description
     for node in (nodes.UpscaleImage, nodes.UpscaleVideo):
         spec = schema_inputs(node)
-        assert spec["images"].io_type == "IMAGE" and spec["models"].io_type == "SEEDVR2X_MODELS"
+        first, kind = ("images", "IMAGE") if node is nodes.UpscaleImage else ("video", "VIDEO")
+        assert spec[first].io_type == kind and spec["models"].io_type == "SEEDVR2X_MODELS"
         for name in ("resolution", "seed"):
             assert spec[name].io_type == "INT", name
         for name, kind in TYPES.items():
@@ -351,9 +352,10 @@ def test_every_input_and_output_has_a_label_and_a_tooltip() -> None:
     for node in (nodes.UpscaleImage, nodes.UpscaleVideo):
         schema = node.GET_SCHEMA()
         names = [each.display_name for each in schema.inputs]
-        assert names[:2] == ["images", "models"]
+        first = "images" if node is nodes.UpscaleImage else "video"
+        assert names[:2] == [first, "models"]
         # The plan is said in ComfyUI's console: no text output.
-        assert [(each.id, each.display_name) for each in schema.outputs] == [("images", "images")]
+        assert [(each.id, each.display_name) for each in schema.outputs] == [(first, first)]
 
 
 # What a ComfyUI user reads has none of the library's own terms (the user's Desktop test,
@@ -407,10 +409,11 @@ def test_the_colour_correction_a_boolean_split_or_none() -> None:
     assert plans.Settings.of(color_correction=False).color_correction == "none"
 
 
-def test_no_text_of_the_nodes_says_film_and_upscale_video_names_the_command_lines_stream() -> None:
+def test_no_text_of_the_nodes_says_film_and_upscale_video_says_it_reads_from_the_file() -> None:
     """The nodes are for pictures and clips that fit in RAM (the user, 2026-11-08): no "film" in
     any label, tooltip or description, nor in the nodes' README; Upscale Video's description says
-    what the command line does for a clip that doesn't fit, it streams it."""
+    that a video loaded from a file is read from it shot by shot and that the command line resumes
+    after a stop."""
     for node in nodes.NODES:
         schema = node.GET_SCHEMA()
         said = [schema.description]
@@ -421,8 +424,10 @@ def test_no_text_of_the_nodes_says_film_and_upscale_video_names_the_command_line
     readme = (Path(nodes.__file__).parent / "README.md").read_text(encoding="utf-8")
     assert "film" not in readme.lower()
     description = nodes.UpscaleVideo.GET_SCHEMA().description or ""
-    assert "streams the clip from its source file" in description
-    assert "a clip of any length fits" in description
+    assert "read from it shot by shot, never whole" in description
+    assert "written as it comes to a lossless file in ComfyUI's temp folder" in description
+    assert "seedvr2x's command line resumes after a stop" in description
+    assert "streams the clip" not in description
 
 
 def test_quality_is_a_combo_of_the_levels_on_upscale_video_alone_in_a_users_words() -> None:
@@ -549,7 +554,7 @@ def test_the_value_nodes_outputs_reach_the_plan_as_set(machine: StandIn, tmp_pat
         execute(
             nodes.UpscaleVideo,
             "1",
-            images=torch.zeros(33, 24, 40, 3),
+            video=frames_video(torch.zeros(33, 24, 40, 3)),
             cuts=(Shot(0, 33),),
             models=handle(tmp_path),
             resolution=48,
@@ -618,9 +623,9 @@ def picture_plan(settings: plans.Settings):  # type: ignore[no-untyped-def]
 
 
 def clip_plan(settings: plans.Settings, frames: int = 100):  # type: ignore[no-untyped-def]
-    planned = nodes.clip_planner(settings, FULL_HD, [Shot(0, frames)])(
-        BIG, 64 * GIB, weights.DIT_7B, False
-    )
+    planned = nodes.clip_planner(
+        settings, FULL_HD, [Shot(0, frames)], stream.held_bytes(FULL_HD, FULL_HD)
+    )(BIG, 64 * GIB, weights.DIT_7B, False)
     return planned.plan
 
 
@@ -700,7 +705,11 @@ def test_the_registered_nodes() -> None:
     assert schema_inputs(nodes.UpscaleImage)["resolution"].default == 1080
     assert [(each.id, each.io_type) for each in upscale.outputs] == [("images", "IMAGE")]
     video = nodes.UpscaleVideo.GET_SCHEMA()
-    assert [(each.id, each.io_type) for each in video.outputs] == [("images", "IMAGE")]
+    assert [(each.id, each.io_type) for each in video.outputs] == [("video", "VIDEO")]
+    assert [(each.id, each.io_type) for each in video.inputs][:1] == [("video", "VIDEO")]
+    assert [(each.id, each.io_type) for each in nodes.Cuts.GET_SCHEMA().inputs][:1] == [
+        ("video", "VIDEO")
+    ]
     assert [(each.id, each.io_type) for each in nodes.Models.GET_SCHEMA().outputs] == [
         ("models", "SEEDVR2X_MODELS")
     ]
@@ -883,11 +892,21 @@ def test_the_text_counts_the_ram_and_says_what_the_computer_has() -> None:
         unread.host, KEPT, 0, ["x"]
     )  # pyright: ignore[reportPrivateUsage]
     clip = next(each for each in clip_text(plans.Settings()).splitlines() if each.startswith("RAM"))
-    # The comparison has the output and the run's own work; the input, ComfyUI's, is said and
-    # left out of it (its memory is out of the RAM available already).
-    assert "for the clip's output, kept whole," in clip and "2.32 GiB for the clip's" in clip
-    assert "the input's frames, 2.32 GiB, are not in that" in clip
-    assert "ComfyUI has them in memory already, so they are out of the RAM available" in clip
+    # A video read from its file: the frames on their way and the run's own work, whatever the
+    # video's length; the frames are never held whole.
+    assert "whatever the video's length: 0.00 GiB for the frames on their way" in clip
+    assert "2.46 GiB for seedvr2x's own work" in clip or "for seedvr2x's own work" in clip
+    assert "the video is read from its file shot by shot and written to a file as it comes" in clip
+    assert "the video's frames" not in clip
+    # Frames ComfyUI holds (Create Video's): their memory is out of the RAM available already.
+    held = next(
+        each
+        for each in clip_text(plans.Settings(), streamed=GIB, from_file=False).splitlines()
+        if each.startswith("RAM")
+    )
+    assert "1.00 GiB for the frames on their way" in held
+    assert "the video's frames, 2.32 GiB, are not in that" in held
+    assert "ComfyUI has them in memory already, so they are out of the RAM available" in held
     assert "the computer has 48.00 GiB available" in clip
     off = plans.Keeping("off", False, 8 * GIB, 12 * GIB, "x")
     assert "the model is not kept" in picture_text(plans.Settings(), off)

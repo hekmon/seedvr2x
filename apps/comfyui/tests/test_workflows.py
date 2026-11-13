@@ -13,9 +13,10 @@ bundle, 2026-11-05): the sockets alone under `inputs` (the unlinked widget slots
 links' target slots numbered in that list), the widgets' values in their order. Its load rebuilds
 the inputs from the node's definition and takes each saved entry's link by name.
 
-The stock nodes' sockets and widgets are the table below, read from ComfyUI v0.44.0's schemas
-(LoadImage, SaveImage, LoadVideo, GetVideoComponents, CreateVideo, SaveVideo) and
-loaded in it by hand on 2026-11-05: the tests hold the files to what they were written against."""
+The stock nodes' sockets and widgets are the table below: LoadVideo and SaveVideo (the clip's)
+read from ComfyUI 0.45.3's schemas (comfy_extras/nodes_video.py), LoadImage and SaveImage (the
+picture's) as read from v0.44.0's and loaded in it by hand on 2026-11-05, not read again: the
+tests hold the files to what they were written against."""
 
 import json
 from pathlib import Path
@@ -33,29 +34,13 @@ NAMES = ("picture", "clip")
 type Node = dict[str, Any]
 
 # What each stock node takes on a socket (the inputs a workflow lists, in the order the frontend
-# saves them: a widget fed by a link comes after the sockets), what it gives, and how many widget
-# values it saves. SaveVideo's four are the prefix, the format, the format's codec and the
-# hidden codec; CreateVideo's five are fps, bit depth, colour space, chroma subsampling, codec.
+# saves them), what it gives, and how many widget values it saves. LoadVideo's two are the file
+# and the upload button's; SaveVideo's four are the prefix, the format, the format's codec and the
+# hidden codec.
 STOCK: dict[str, dict[str, Any]] = {
     "LoadImage": {"inputs": [], "outputs": [("IMAGE", "IMAGE"), ("MASK", "MASK")], "widgets": 2},
     "SaveImage": {"inputs": [("images", "IMAGE")], "outputs": [], "widgets": 1},
     "LoadVideo": {"inputs": [], "outputs": [("VIDEO", "VIDEO")], "widgets": 2},
-    "GetVideoComponents": {
-        "inputs": [("video", "VIDEO")],
-        "outputs": [
-            ("images", "IMAGE"),
-            ("audio", "AUDIO"),
-            ("fps", "FLOAT"),
-            ("bit_depth", "COMBO"),
-            ("color_space", "COMBO"),
-        ],
-        "widgets": 0,
-    },
-    "CreateVideo": {
-        "inputs": [("images", "IMAGE"), ("audio", "AUDIO"), ("fps", "FLOAT")],
-        "outputs": [("VIDEO", "VIDEO")],
-        "widgets": 5,
-    },
     "SaveVideo": {
         "inputs": [("video", "VIDEO")],
         "outputs": [("video", "VIDEO")],
@@ -247,12 +232,10 @@ def test_every_link_joins_an_output_to_an_input_of_its_type(name: str) -> None:
         for output in node["outputs"]:
             assert set(output["links"] or []) <= listed
     # A seedvr2x node's required socket is wired (the nodes take no default for a handle or the
-    # pictures), and every optional one left unwired: the plan chooses. The two exceptions are the
+    # pictures), and every optional one left unwired: the plan chooses. The one exception is the
     # clip workflow's `cuts` socket of Upscale Video: optional (unwired, the clip is one shot) but
-    # recommended by its tooltip, so the example wires seedvr2x Cuts into it; and Cuts'
-    # `frame_rate`, optional (unwired, the cut list gives each cut's frame alone) and wired where
-    # the example has the clip's rate, Get Video Components' fps.
-    wired = {("seedvr2xUpscaleVideo", "cuts"), ("seedvr2xCuts", "frame_rate")}
+    # recommended by its tooltip, so the example wires seedvr2x Cuts into it.
+    wired = {("seedvr2xUpscaleVideo", "cuts")}
     for node in workflow["nodes"]:
         if node["type"] in SCHEMAS:
             unwired = [each for each in optional(node["type"]) if (node["type"], each) not in wired]
@@ -310,49 +293,40 @@ def test_the_picture_workflow_is_a_picture_in_and_out() -> None:
     assert len(workflow["nodes"]) == 4
 
 
-def test_the_clip_workflow_takes_the_frame_rate_and_audio_of_the_video_it_loads() -> None:
+def test_the_clip_workflow_is_a_video_in_and_out_with_no_frames_between() -> None:
+    """Load Video's VIDEO goes to Upscale Video and to Cuts, and Upscale Video's VIDEO to Save
+    Video: no Get Video Components and no Create Video, no image on a link (the nodes take and give
+    a VIDEO, read from its file shot by shot)."""
     workflow = load("clip")
     (upscale,) = of_type(workflow, "seedvr2xUpscaleVideo")
-    (components,) = of_type(workflow, "GetVideoComponents")
-    (create,) = of_type(workflow, "CreateVideo")
+    (load_video,) = of_type(workflow, "LoadVideo")
     (save,) = of_type(workflow, "SaveVideo")
-    assert source(workflow, components, "video")["type"] == "LoadVideo"
-    assert source(workflow, upscale, "images") is components
-    assert source(workflow, create, "images") is upscale
-    assert source(workflow, save, "video") is create
-    # The frame rate is the loaded video's own, not CreateVideo's widget.
-    assert source(workflow, create, "fps") is components
-    fps = next(each for each in workflow["links"] if each[3] == create["id"] and each[5] == "FLOAT")
-    assert components["outputs"][fps[2]]["name"] == "fps"
-    audio = source(workflow, create, "audio")
-    assert audio is components
-    # Frames come from the first output, the frame rate from the third.
-    frames_link = next(
-        each for each in workflow["links"] if each[3] == upscale["id"] and each[5] == "IMAGE"
-    )
-    assert components["outputs"][frames_link[2]]["name"] == "images"
+    assert source(workflow, upscale, "video") is load_video
+    assert source(workflow, save, "video") is upscale
+    assert not of_type(workflow, "GetVideoComponents") and not of_type(workflow, "CreateVideo")
+    assert not [link for link in workflow["links"] if link[5] in ("IMAGE", "FLOAT", "AUDIO")]
+    assert len(workflow["nodes"]) == 5
+    # Save Video copies the lossless file into a Matroska file as it is (format mkv, codec auto:
+    # ComfyUI 0.45.3's remux), where format auto would encode it to H.264.
+    assert save["widgets_values"] == ["video/seedvr2x", "mkv", "auto", "auto"]
 
 
-def test_the_clip_workflow_finds_the_cuts_of_the_frames_it_upscales() -> None:
-    """Load Video, Cuts, Models, Upscale Video: the same frames go to Cuts and to the upscale, the
+def test_the_clip_workflow_finds_the_cuts_of_the_video_it_upscales() -> None:
+    """Load Video, Cuts, Models, Upscale Video: the same VIDEO goes to Cuts and to the upscale, the
     cut list is wired to the upscale's optional cuts input (the example takes the recommended
-    way), Cuts takes the same Models node as the upscale (it gives the detector's file) and the
-    video's frame rate (the cut list's times), and Cuts is at its defaults (the detector at the
-    command line's threshold)."""
+    way), Cuts takes the same Models node as the upscale (it gives the detector's file) and has no
+    frame rate input (its times are at the video's own rate), and Cuts is at its defaults (the
+    detector at the command line's threshold)."""
     workflow = load("clip")
     (upscale,) = of_type(workflow, "seedvr2xUpscaleVideo")
     (cuts,) = of_type(workflow, "seedvr2xCuts")
-    (components,) = of_type(workflow, "GetVideoComponents")
-    assert source(workflow, cuts, "images") is components
+    (load_video,) = of_type(workflow, "LoadVideo")
+    assert source(workflow, cuts, "video") is load_video
     (models,) = of_type(workflow, "seedvr2xModels")
     assert source(workflow, cuts, "models") is models
     assert source(workflow, upscale, "models") is models
     assert source(workflow, upscale, "cuts") is cuts
-    assert source(workflow, upscale, "images") is components
+    assert source(workflow, upscale, "video") is load_video
     assert cuts["order"] < upscale["order"]
-    # The cut list's times at the loaded video's own frame rate: Get Video Components' fps, the
-    # same output CreateVideo takes.
-    assert source(workflow, cuts, "frame_rate") is components
-    rate = next(each for each in workflow["links"] if each[3] == cuts["id"] and each[5] == "FLOAT")
-    assert components["outputs"][rate[2]]["name"] == "fps"
+    assert [each["name"] for each in cuts["inputs"]] == ["video", "models"]
     assert not of_type(load("picture"), "seedvr2xCuts")

@@ -400,7 +400,12 @@ def to_rgb(planes: Sequence["torch.Tensor"], read: Reading) -> "torch.Tensor":
             rgb = (r, g, b)
         for channel, values in enumerate(rgb):
             out[index, ..., channel] = torch.round(values.clamp(0, 1) * 65535)
-    out /= 65535
+    # Divided by a tensor on the frames' device, not by a number: CUDA's true division by a CPU
+    # scalar multiplies by its reciprocal (PyTorch's BinaryDivTrueKernel.cu, read, not run on a
+    # card), which leaves 512 of the 65,536 codes an ulp off code / 65535 in float32 (impl-video-2's
+    # review, measured on the CPU), so that frames made on the card and their 16-bit codes read
+    # back (the nodes' stream.Copy) would differ.
+    out /= torch.full((), 65535.0, dtype=torch.float32, device=device)
     return out
 
 

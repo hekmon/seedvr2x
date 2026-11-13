@@ -93,14 +93,15 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
   __init__.py nodes.py   V3 registration (`comfy_entrypoint`, a ComfyExtension; `io.ComfyNode`,
                          `io.Schema`); the nodes (Models, Cuts, Upscale Image, Upscale Video, and
                          the value nodes Tile, Blocks Swapped and Window Length: Upscale Video
+                         takes a VIDEO and gives a VIDEO of its own file (stream.py), and
                          takes the Cuts node's cut list, an optional input of its own type (the
-                         first of its optional sockets; unwired, the clip is one shot), and
+                         first of its optional sockets; unwired, the video is one shot), and
                          a quality widget: the model's runs over each shot; the settings are the
                          upscale nodes' widgets, the plan's numbers their optional sockets of
-                         seedvr2x's own types, no Tuning node; the Cuts node takes the Models
-                         node's output, which also provides the shot detector's file, and has
-                         no mode and no folder, its frame rate an optional FLOAT input with no
-                         widget, for the cut list's times; the Models node's model folder an
+                         seedvr2x's own types, no Tuning node; the Cuts node takes the VIDEO and
+                         the Models node's output, which also provides the shot detector's file,
+                         and has no mode, no folder and no frame rate input, the cut list timed
+                         at the VIDEO's own rate; the Models node's model folder an
                          optional STRING input with no widget, `force_input`)
                          and ComfyUI's calls (the bar and the status of two lines it gets from
                          progress.py, Cancel, the plan said in the console, plan only, a
@@ -134,15 +135,29 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          installed by `__init__.py` before anything else is imported; a text
                          of several lines said a line a record (`say`); the library's checks of
                          the model files (`QUIET`: pull, weights) at DEBUG there
-  master.py              the lossless file Upscale Video will write, no node writing it yet:
-                         FFV1 in Matroska, 16-bit 4:4:4 YCbCr tagged BT.709 limited, the
-                         library's planes (`yuv.master_planes`), written through PyAV (ComfyUI's,
-                         17.0.0 and later) a shot at a time into one file open for the run
+  master.py              the lossless file Upscale Video writes: FFV1 in Matroska, 16-bit
+                         4:4:4 YCbCr tagged BT.709 limited, the library's planes
+                         (`yuv.master_planes`), written through PyAV (ComfyUI's, 17.0.0 and
+                         later) into one file open for the run, seedvr2x's record its video
+                         stream's tags, the source's audio and subtitles copied packet for
+                         packet as the frames' times reach them (`Others`; `other_streams`
+                         tries each into Matroska first, refusing in the nodes' words)
+  video.py stream.py     a VIDEO's frames and Upscale Video's streamed pass: a file read forward
+                         through PyAV (`probe`, `Decoded`: the trim window, the rotation and Crop
+                         Video's crop as ComfyUI 0.45.3 decodes them, the planes through
+                         `yuv.to_rgb`, the rate of a Matroska NTSC reading taken back to N x
+                         1000/1001); a shot through the library's bricks in the command line's
+                         order (`upscale_shot`), what it keeps in files in a run directory of
+                         ComfyUI's temp folder (`Workspace`: the scratch beyond the plan's
+                         allowance, the shot's input copy, the windows, the earlier runs'
+                         frames), each frame's planes to a writer thread (`Writer`, a queue of
+                         `QUEUED`), the frames on their way counted for the plan (`held_bytes`)
   workflows/ README.md   the two example workflows (picture.json, clip.json: ComfyUI's UI format,
                          Models wired in), and the nodes' README, for users
   ruff.toml pyrightconfig.json pytest.ini     the checks' settings, the CLI's
   tests/                 the nodes', with standins.py, conftest.py and comfy_stand_in/ (ComfyUI's
-                         few modules, comfy, comfy_api.latest and server, written for the tests)
+                         few modules, comfy, comfy_api.latest, folder_paths and server, written
+                         for the tests)
 research/ models/ upstream/
 ```
 
@@ -996,6 +1011,27 @@ marker. The image server, Linux's alone by its lock, has no such line.
   luma and 57,344 of chroma for RGB's 65,535 (0.29% of the samples two off, 2026-11-13); the
   CLI's `tests/test_yuv_cli.py` reads such a file as a source, through zscale, the same.
   The floors' environment runs `test_master.py` with PyAV 17.0.0.
+- Upscale Video on a VIDEO (`apps/comfyui/video.py`, `stream.py`, `nodes.py`; DESIGN.md, the
+  nodes' VIDEO path, built on 2026-11-13 by impl-video-2), on the CPU with the stand-in models,
+  skipped without PyAV: the nodes' `tests/test_stream.py` writes source files with PyAV (FFV1 and
+  x264, with a FLAC track) and holds the planes of the node's file bit for bit to
+  `yuv.master_planes` of the library's pass (`clip.upscale`, shot by shot, the shot's seed) on the
+  frames the node reads (`video.probe`, `Decoded`), for 1, 2 and 3 shots at each quality, tiled
+  corrected and not, from a path and from bytes in memory; the audio's packets copied byte for
+  byte at their times; a trimmed VIDEO's frames those of ComfyUI's window and its audio the
+  packets overlapping it, whole; Crop Video's crop as ComfyUI resolves it (`crop_rect`), and a
+  VIDEO whose crop can't be read refused; seedvr2x's record as the stream's tags (app
+  `seedvr2x-comfyui`, the SHA-256 the stand-in's load proves); the VIDEO given keeping the
+  source's rate where Matroska reads 60000/1001 and 120000/1001 back otherwise; each pixel format
+  through `yuv.to_rgb` (nv12 repacked); a plan only writing nothing; a Cancel and a writer that
+  fails leaving no file in the temp folder and no writer thread; and the resident memory of a
+  clip ten times as long the same within a shot's frames (sampled from `/proc/self/statm`).
+  `tests/test_nodes.py` holds frames given as Create Video gives them (VideoFromComponents) the
+  same way, through the same pass; `tests/test_cuts_node.py` the detector's probabilities of a
+  file streamed a few frames at a time equal bit for bit to `detector.probabilities` on its
+  frames whole. The stand-in VIDEO classes are `tests/comfy_stand_in/comfy_api/latest/
+  _input_impl.py` (0.45.3's behaviour, described), and ComfyUI's temp folder the test's own
+  (`folder_paths`, conftest's `comfy_temp`).
 - The shot detector in the first pass (`media/scan.py`) is held by `tests/test_detection.py`, a
   recording stand-in in its place: its frames are the official extraction command's byte for
   byte, on 18 pixel formats whatever the official command's scaler threads (1, 4, or ffmpeg's
@@ -1651,7 +1687,9 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `detector.probabilities`' `progress` per batch with the same probabilities.
 - The ComfyUI nodes (DESIGN.md, Repository and apps), on the CPU in the CLI's environment, from
   `apps/comfyui/`: `tests/comfy_stand_in/` writes ComfyUI's few modules from the reading of
-  v0.44.0, no ComfyUI code (`comfy.model_management`: `current_loaded_models` of weak
+  v0.44.0, no ComfyUI code (ComfyUI is GPL-3.0, so what the nodes follow of its decode, Crop
+  Video's rectangle and the rotation, and the stand-ins are written from a description of its
+  behaviour, never from its code; `comfy.model_management`: `current_loaded_models` of weak
   references, `load_models_gpu`, `free_memory` in ComfyUI's order and partial, `unload_all_models`,
   Cancel as a flag that raises a `BaseException`, torch's cache that a partial unload fills and
   `soft_empty_cache` empties; `comfy.model_patcher`; `comfy.utils`' ProgressBar, recording;

@@ -264,7 +264,9 @@ def test_a_folder_without_the_detector_makes_no_warning_and_never_asks_the_cache
     assert f"Sharp 7B int8, {shown}" in lines and f"VAE, {shown}" in lines
     assert not any(line.startswith("shot detector, ") for line in lines)
     assert not ProgressBar.created
-    assert sorted(path.name for path in tmp_path.iterdir()) == sorted([INT8, VAE])
+    # (comfy-temp is ComfyUI's temp folder, which conftest.py makes in the test's directory)
+    left = [path.name for path in tmp_path.iterdir() if path.name != "comfy-temp"]
+    assert sorted(left) == sorted([INT8, VAE])
     assert node_texts("4") == ["Sharp 7B int8 · kept in RAM"]
 
 

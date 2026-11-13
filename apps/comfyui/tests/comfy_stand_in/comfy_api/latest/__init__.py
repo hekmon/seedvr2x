@@ -1,10 +1,25 @@
 """The stand-in for ComfyUI v0.44.0's comfy_api.latest, the V3 schema namespace: `io` (the types,
-Schema, ComfyNode, NodeOutput, Hidden) and ComfyExtension, the two names a node file imports.
+Schema, ComfyNode, NodeOutput, Hidden), ComfyExtension, and 0.45.3's InputImpl and Types for the
+VIDEO objects (_input_impl.py), the names a node file imports.
 Written from the reading of that version, in the tests' own words: no ComfyUI code."""
 
 from abc import ABC, abstractmethod
 
+from . import _input_impl
 from . import _io as io
+
+
+class InputImpl:
+    """comfy_api.latest's InputImpl namespace: the VIDEO objects' classes."""
+
+    VideoFromFile = _input_impl.VideoFromFile
+    VideoFromComponents = _input_impl.VideoFromComponents
+
+
+class Types:
+    """comfy_api.latest's Types namespace."""
+
+    VideoComponents = _input_impl.VideoComponents
 
 
 class ComfyExtension(ABC):
@@ -18,4 +33,4 @@ class ComfyExtension(ABC):
     async def get_node_list(self) -> list[type[io.ComfyNode]]: ...
 
 
-__all__ = ["ComfyExtension", "io"]
+__all__ = ["ComfyExtension", "InputImpl", "Types", "io"]

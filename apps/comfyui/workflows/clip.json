@@ -2,7 +2,7 @@
   "id": "3abe2710-6955-509b-a2f1-8cc1e4c90e86",
   "revision": 0,
   "last_node_id": 9,
-  "last_link_id": 13,
+  "last_link_id": 6,
   "nodes": [
     {
       "id": 1,
@@ -32,7 +32,7 @@
           "type": "SEEDVR2X_MODELS",
           "links": [
             1,
-            12
+            4
           ]
         }
       ],
@@ -64,6 +64,7 @@
           "name": "VIDEO",
           "type": "VIDEO",
           "links": [
+            2,
             3
           ]
         }
@@ -77,15 +78,15 @@
       ]
     },
     {
-      "id": 4,
-      "type": "GetVideoComponents",
+      "id": 9,
+      "type": "seedvr2xCuts",
       "pos": [
         830,
         80
       ],
       "size": [
-        250,
-        126
+        280,
+        200
       ],
       "flags": {},
       "order": 2,
@@ -95,53 +96,34 @@
           "name": "video",
           "type": "VIDEO",
           "link": 3
+        },
+        {
+          "name": "models",
+          "type": "SEEDVR2X_MODELS",
+          "link": 4
         }
       ],
       "outputs": [
         {
-          "name": "images",
-          "type": "IMAGE",
+          "name": "cuts",
+          "type": "SEEDVR2X_CUTS",
           "links": [
-            4,
-            10
+            5
           ]
-        },
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "links": [
-            7
-          ]
-        },
-        {
-          "name": "fps",
-          "type": "FLOAT",
-          "links": [
-            6,
-            13
-          ]
-        },
-        {
-          "name": "bit_depth",
-          "type": "COMBO",
-          "links": null
-        },
-        {
-          "name": "color_space",
-          "type": "COMBO",
-          "links": null
         }
       ],
       "properties": {
-        "Node name for S&R": "GetVideoComponents"
+        "Node name for S&R": "seedvr2xCuts"
       },
-      "widgets_values": []
+      "widgets_values": [
+        0.3
+      ]
     },
     {
       "id": 5,
       "type": "seedvr2xUpscaleVideo",
       "pos": [
-        1130,
+        1150,
         80
       ],
       "size": [
@@ -149,13 +131,13 @@
         420
       ],
       "flags": {},
-      "order": 4,
+      "order": 3,
       "mode": 0,
       "inputs": [
         {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 4
+          "name": "video",
+          "type": "VIDEO",
+          "link": 2
         },
         {
           "name": "models",
@@ -166,7 +148,7 @@
           "name": "cuts",
           "type": "SEEDVR2X_CUTS",
           "shape": 7,
-          "link": 11
+          "link": 5
         },
         {
           "name": "window",
@@ -195,10 +177,10 @@
       ],
       "outputs": [
         {
-          "name": "images",
-          "type": "IMAGE",
+          "name": "video",
+          "type": "VIDEO",
           "links": [
-            5
+            6
           ]
         }
       ],
@@ -215,112 +197,10 @@
       ]
     },
     {
-      "id": 9,
-      "type": "seedvr2xCuts",
-      "pos": [
-        830,
-        260
-      ],
-      "size": [
-        280,
-        200
-      ],
-      "flags": {},
-      "order": 3,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 10
-        },
-        {
-          "name": "models",
-          "type": "SEEDVR2X_MODELS",
-          "link": 12
-        },
-        {
-          "name": "frame_rate",
-          "type": "FLOAT",
-          "shape": 7,
-          "link": 13
-        }
-      ],
-      "outputs": [
-        {
-          "name": "cuts",
-          "type": "SEEDVR2X_CUTS",
-          "links": [
-            11
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "seedvr2xCuts"
-      },
-      "widgets_values": [
-        0.3
-      ]
-    },
-    {
-      "id": 6,
-      "type": "CreateVideo",
-      "pos": [
-        1500,
-        80
-      ],
-      "size": [
-        270,
-        220
-      ],
-      "flags": {},
-      "order": 5,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 5
-        },
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "link": 7
-        },
-        {
-          "name": "fps",
-          "type": "FLOAT",
-          "widget": {
-            "name": "fps"
-          },
-          "link": 6
-        }
-      ],
-      "outputs": [
-        {
-          "name": "VIDEO",
-          "type": "VIDEO",
-          "links": [
-            9
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CreateVideo"
-      },
-      "widgets_values": [
-        30,
-        "auto",
-        "sRGB",
-        "auto",
-        "none"
-      ]
-    },
-    {
       "id": 7,
       "type": "SaveVideo",
       "pos": [
-        1810,
+        1520,
         80
       ],
       "size": [
@@ -328,13 +208,13 @@
         400
       ],
       "flags": {},
-      "order": 6,
+      "order": 4,
       "mode": 0,
       "inputs": [
         {
           "name": "video",
           "type": "VIDEO",
-          "link": 9
+          "link": 6
         }
       ],
       "outputs": [
@@ -349,7 +229,7 @@
       },
       "widgets_values": [
         "video/seedvr2x",
-        "auto",
+        "mkv",
         "auto",
         "auto"
       ]
@@ -365,71 +245,23 @@
       "SEEDVR2X_MODELS"
     ],
     [
+      2,
+      3,
+      0,
+      5,
+      0,
+      "VIDEO"
+    ],
+    [
       3,
       3,
       0,
-      4,
+      9,
       0,
       "VIDEO"
     ],
     [
       4,
-      4,
-      0,
-      5,
-      0,
-      "IMAGE"
-    ],
-    [
-      5,
-      5,
-      0,
-      6,
-      0,
-      "IMAGE"
-    ],
-    [
-      6,
-      4,
-      2,
-      6,
-      2,
-      "FLOAT"
-    ],
-    [
-      7,
-      4,
-      1,
-      6,
-      1,
-      "AUDIO"
-    ],
-    [
-      9,
-      6,
-      0,
-      7,
-      0,
-      "VIDEO"
-    ],
-    [
-      10,
-      4,
-      0,
-      9,
-      0,
-      "IMAGE"
-    ],
-    [
-      11,
-      9,
-      0,
-      5,
-      2,
-      "SEEDVR2X_CUTS"
-    ],
-    [
-      12,
       1,
       0,
       9,
@@ -437,12 +269,20 @@
       "SEEDVR2X_MODELS"
     ],
     [
-      13,
-      4,
-      2,
+      5,
       9,
+      0,
+      5,
       2,
-      "FLOAT"
+      "SEEDVR2X_CUTS"
+    ],
+    [
+      6,
+      5,
+      0,
+      7,
+      0,
+      "VIDEO"
     ]
   ],
   "groups": [

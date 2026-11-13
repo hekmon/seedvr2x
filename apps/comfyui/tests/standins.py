@@ -5,14 +5,18 @@ are tests/comfy_stand_in."""
 
 import inspect
 import logging
+import os
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import comfy.model_management as management
+import numpy as np
+import numpy.typing as npt
 import pytest
 import torch
 from comfy.model_patcher import ModelPatcher
@@ -20,7 +24,7 @@ from comfy_api.latest import io
 from comfyui import console, models, plans, progress
 from test_still import pipeline_models, stand_in_dit
 
-from seedvr2x import memory, model, peaks, pull, waiting, weights
+from seedvr2x import memory, model, peaks, pull, waiting, weights, yuv
 from seedvr2x.memory import Reading
 from seedvr2x.passes import ModelPlan
 from seedvr2x.pull import ModelFiles
@@ -32,6 +36,9 @@ GIB = peaks.GIB
 PICTURE = (24, 40)
 RESOLUTION = 48
 NAME = "w.safetensors"
+# The SHA-256 the stand-in machine's load proves for the DiT's and the VAE's files.
+DIT_SHA256 = "d" * 64
+VAE_SHA256 = "e" * 64
 # The bytes of a piece the stand-in machine's load reads, a file being two.
 READ_PIECE = 1_000_000
 
@@ -124,6 +131,11 @@ class StandIn:
             for each in (files.vae, files.dit):
                 progress(each.name, READ_PIECE, 2 * READ_PIECE)
                 progress(each.name, 2 * READ_PIECE, 2 * READ_PIECE)
+        # The load proves each file's SHA-256 as the library's does (pull.Hashes.proved): the
+        # stand-in's own, the files being none.
+        for each, sha256 in ((files.dit, DIT_SHA256), (files.vae, VAE_SHA256)):
+            if not files.hashes.known(each.path):
+                files.hashes.proved(each.path, sha256, os.stat_result((0,) * 10))
         loaded = standin_models(self.vae_models, self.events, held=plan == passes_held())
         self.made.append(loaded)
         return loaded
@@ -389,10 +401,42 @@ def upscale_image(
     return out[0], plan_of(said)
 
 
+def frames_video(images: torch.Tensor, rate: Fraction = Fraction(24)) -> Any:
+    """A VIDEO of frames ComfyUI holds, as Create Video gives it (VideoFromComponents)."""
+    from comfy_api.latest import InputImpl, Types
+
+    return InputImpl.VideoFromComponents(Types.VideoComponents(images, rate))
+
+
+def planes_of(video: Any) -> npt.NDArray[np.uint16]:
+    """The planes of the file a VIDEO of Upscale Video's is backed by, (T, 3, H, W) uint16, Y, Cb
+    and Cr, read back through PyAV."""
+    import av
+
+    found: list[npt.NDArray[np.uint16]] = []
+    container: Any
+    with av.open(video.get_stream_source(), "r") as container:
+        for frame in container.decode(container.streams.video[0]):
+            planes = [
+                np.frombuffer(plane, dtype="<u2").reshape(plane.height, plane.line_size // 2)[
+                    :, : plane.width
+                ]
+                for plane in frame.planes
+            ]
+            found.append(np.stack(planes))
+    return np.stack(found)
+
+
+def master_of(rgb: npt.NDArray[np.float32]) -> npt.NDArray[np.uint16]:
+    """The planes the node's file holds of RGB frames (T, H, W, 3) float32: yuv.master_planes on the
+    CPU, the device the tests run on."""
+    return yuv.master_planes(torch.as_tensor(np.ascontiguousarray(rgb))).numpy()
+
+
 def upscale_video(
     handle: models.Handle,
     settings: plans.Settings,
-    images: torch.Tensor,
+    images: "torch.Tensor | Any",
     resolution: int,
     unique_id: str | None = "1",
     *,
@@ -400,17 +444,19 @@ def upscale_video(
     cuts: "tuple[Shot, ...] | plans.CutList | None" = None,
     quality: str = "standard",
 ) -> tuple[Any, str]:
-    """seedvr2x Upscale Video run as ComfyUI runs it: (the frames, the plan's text as the console
-    had it). `cuts`: the
-    cut list seedvr2x Cuts gives, unwired by default (one shot of the whole clip); `quality`: the
+    """seedvr2x Upscale Video run as ComfyUI runs it: (the planes of the file it gives, as
+    planes_of reads them, or the blocker of a plan only; the plan's text as the console had it).
+    `images`: frames, given as Create Video gives them (frames_video), or a VIDEO. `cuts`: the cut
+    list seedvr2x Cuts gives, unwired by default (one shot of the whole clip); `quality`: the
     widget's value (ComfyUI gives every widget's, the default standard)."""
     from comfyui import nodes
 
+    video = frames_video(images) if isinstance(images, torch.Tensor) else images
     with nodes_console() as said:
         out = execute(
             nodes.UpscaleVideo,
             unique_id,
-            images=images,
+            video=video,
             models=handle,
             resolution=resolution,
             plan_only=plan_only,
@@ -419,7 +465,8 @@ def upscale_video(
             **({} if cuts is None else {"cuts": cuts}),
             **inputs(settings, video=True),
         )
-    return out[0], plan_of(said)
+    given = out[0]
+    return (given if plan_only else planes_of(given)), plan_of(said)
 
 
 def validate(node: type[io.ComfyNode], **constants: Any) -> bool | str:
