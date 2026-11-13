@@ -378,12 +378,16 @@ def _correction_inputs() -> list[Any]:
             "seed",
             default=plans.SEED,
             min=0,
-            max=plans.SEED_MAX,
+            # ComfyUI's own seed widgets' range (KSampler, nodes.py), so that a generation's seed
+            # typed here or shared through a primitive node is taken; plans.Settings.of folds it.
+            max=0xFFFFFFFFFFFFFFFF,
             control_after_generate=io.ControlAfterGenerate.fixed,
             display_name=plans.LABELS["seed"],
             tooltip="The seed of the model's noise: the same input, settings and seed give the"
             " same image on the same computer. Fixed after each run by default, so that running"
-            " again gives the same result.",
+            " again gives the same result. Any whole number is taken, a generation's seed"
+            f" included: a seed outside seedvr2x's range, 0 to {plans.SEED_MAX:,}, is taken modulo"
+            f" {plans.SEEDS:,}, and the plan in ComfyUI's console says the seed used.",
         ),
     ]
 
@@ -749,13 +753,16 @@ def _cut_list(cuts: object, frames_: int) -> tuple[Shot, ...]:
     return found
 
 
-def _check_seed(seed: int, shots: tuple[Shot, ...]) -> None:
-    """Refuse a seed some shot would seed past numz's range, before anything loads: the seed
-    widget's largest value (plans.SEED_MAX) is the one of a shot at frame 0, and a later shot adds
-    its first frame (job.check_seed's rule on the command line, which this node can't import)."""
+def _check_seed(settings: plans.Settings, shots: tuple[Shot, ...]) -> None:
+    """Refuse a seed some shot would seed past numz's range, before anything loads: the largest
+    seed used (plans.SEED_MAX) is the one of a shot at frame 0, and a later shot adds its first
+    frame (job.check_seed's rule on the command line, which this node can't import). The seed is
+    the one used, a seed past the range folded into it (plans.Settings.of), the one given named."""
     last = shots[-1].start
-    if seed + last > plans.SEED_MAX:
-        raise words.seed_past_the_cuts(seed, last, plans.SEED_MAX - last)
+    if settings.seed + last > plans.SEED_MAX:
+        raise words.seed_past_the_cuts(
+            settings.seed, last, plans.SEED_MAX - last, given=settings.given_seed
+        )
 
 
 class UpscaleVideo(io.ComfyNode):
@@ -862,7 +869,7 @@ class UpscaleVideo(io.ComfyNode):
                 shot_list = (Shot(0, count),)
             else:
                 shot_list = _cut_list(cuts, count)
-            _check_seed(seed, shot_list)
+            _check_seed(settings, shot_list)
             target = _target(width, height, resolution, picture=False)
             out_height, out_width = frames.output_size(target)
 

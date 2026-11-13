@@ -385,7 +385,13 @@ def test_no_label_tooltip_or_description_uses_the_librarys_terms() -> None:
 
 def test_the_seed_is_comfys_with_its_control_fixed_at_the_command_lines_seed() -> None:
     seed = schema_inputs(nodes.UpscaleImage)["seed"]
-    assert (seed.default, seed.min, seed.max) == (42, 0, 2**32 - 1 - 1_000_000)
+    # ComfyUI's own seed widgets' range (KSampler): a generation's seed is taken, then folded.
+    assert (seed.default, seed.min, seed.max) == (42, 0, 0xFFFFFFFFFFFFFFFF)
+    assert seed.tooltip.endswith(
+        " Any whole number is taken, a generation's seed included: a seed outside seedvr2x's"
+        " range, 0 to 4,293,967,295, is taken modulo 4,293,967,296, and the plan in ComfyUI's"
+        " console says the seed used."
+    )
     # A string starts the frontend's control widget at that mode, where True starts at randomize.
     assert seed.control_after_generate == io.ControlAfterGenerate.fixed == "fixed"
     assert seed.as_dict()["control_after_generate"] == "fixed"
@@ -504,8 +510,9 @@ def test_the_inputs_values_are_the_settings_as_pins() -> None:
         ({"encode_tile": 1024.0}, "encode tile 1024.0"),
         ({"swap_blocks": True}, "blocks swapped True"),
         ({"color_correction": "split"}, "colour correction 'split': must be on or off"),
-        ({"seed": -1}, "seed -1"),
-        ({"seed": 2**32}, "seed 4294967296"),
+        ({"seed": 1.5}, "seed 1.5"),
+        ({"seed": True}, "seed True"),
+        ({"seed": "7"}, "seed '7'"),
     ],
 )
 def test_a_value_no_input_takes_is_refused_naming_it(bad: dict[str, Any], said: str) -> None:
@@ -902,3 +909,33 @@ def test_nodes_py_is_the_one_module_that_uses_comfy_api() -> None:
         text = each.read_text(encoding="utf-8")
         uses = "from comfy_api" in text or "import comfy_api" in text
         assert uses == (each.name == "nodes.py"), each.name
+
+
+def test_seed_problem_refuses_no_whole_number_and_nothing_else() -> None:
+    for bad in (True, 1.0, 1.5, "7"):
+        assert plans.seed_problem(bad) is not None, bad
+    for good in (0, plans.SEED_MAX, plans.SEED_MAX + 1, -1, -214223524269425, 2**64 - 1, 2**70):
+        assert plans.seed_problem(good) is None, good
+
+
+def test_a_seed_past_the_range_is_folded_modulo_the_count_of_seeds() -> None:
+    assert plans.SEEDS == plans.SEED_MAX + 1 == 4_293_967_296
+    for given in (plans.SEED_MAX + 1, -1, -214223524269425, 2**64 - 1, 2**70):
+        settings = plans.Settings.of(seed=given)
+        assert settings.seed == given % plans.SEEDS and 0 <= settings.seed <= plans.SEED_MAX
+        assert settings.given_seed == given
+    assert plans.Settings.of(seed=plans.SEED_MAX + 1).seed == 0
+    assert plans.Settings.of(seed=-1).seed == plans.SEED_MAX
+    for kept in (0, 42, plans.SEED_MAX):
+        settings = plans.Settings.of(seed=kept)
+        assert (settings.seed, settings.given_seed) == (kept, None)
+    assert plans.Settings().given_seed is None
+
+
+def test_the_plans_seed_line_says_the_seed_used_and_the_one_given_where_folded() -> None:
+    given = -214223524269425
+    used = given % plans.SEEDS
+    folded = picture_text(plans.Settings.of(seed=given)).splitlines()
+    assert f"seed: {used} ({given} given, taken modulo 4,293,967,296)" in folded, folded
+    kept = picture_text(plans.Settings.of(seed=42)).splitlines()
+    assert "seed: 42" in kept and not any("given" in each for each in kept)

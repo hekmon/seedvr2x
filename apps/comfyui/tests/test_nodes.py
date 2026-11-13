@@ -229,6 +229,15 @@ def test_a_seed_some_shot_would_seed_past_the_range_is_refused_before_anything_l
     assert "the last starts at frame 9" in str(r.value)
     assert "can be 4,293,967,286 at most" in str(r.value) and "--" not in str(r.value)
     assert machine.loads == []
+    # A seed past the range is folded first, and the message names both.
+    given = plans.SEED_MAX + 1 + plans.SEED_MAX
+    with pytest.raises(words.Refused) as folded:
+        run_shots(machine, tmp_path, frames, cuts, seed=given)
+    assert (
+        f"seed {plans.SEED_MAX:,} ({given:,} given, taken modulo 4,293,967,296) is too high"
+        in str(folded.value)
+    )
+    assert machine.loads == []
     # The highest seed that works is taken, and so is any seed with one shot.
     run_shots(machine, tmp_path, frames, cuts, seed=plans.SEED_MAX - 9, window=5)
     run_shots(machine, tmp_path, frames, (Shot(0, 21),), seed=plans.SEED_MAX, window=5)
@@ -745,3 +754,31 @@ def test_the_nodes_load_with_one_line_naming_the_command_line_and_no_run_says_it
         run_shots(machine, tmp_path, pictures(5), (Shot(0, 5),))
         upscale_image(handle(tmp_path), plans.Settings(), pictures(1), RESOLUTION, "1")
     assert not [m for m in caplog.messages if "command line" in m]
+
+
+FOLDED = (-214223524269425, 2**64 - 1)
+
+
+@pytest.mark.parametrize("given", FOLDED)
+def test_a_folded_seed_gives_the_picture_of_the_seed_used(
+    machine: StandIn, tmp_path, given: int
+) -> None:
+    batch = pictures(2)
+    out, plan = upscale_image(handle(tmp_path), plans.Settings(seed=given), batch, RESOLUTION, "1")
+    used = given % plans.SEEDS
+    same, _ = upscale_image(handle(tmp_path), plans.Settings(seed=used), batch, RESOLUTION, "1")
+    assert out.numpy().tobytes() == same.numpy().tobytes()
+    assert f"seed: {used} ({given} given, taken modulo 4,293,967,296)" in plan
+
+
+@pytest.mark.parametrize("given", FOLDED)
+def test_a_folded_seed_gives_the_clip_of_the_seed_used(
+    machine: StandIn, tmp_path, given: int
+) -> None:
+    frames = pictures(9)
+    cuts = (Shot(0, 4), Shot(4, 9))
+    used = given % plans.SEEDS
+    out, plan = run_shots(machine, tmp_path, frames, cuts, seed=given, window=5)
+    same, _ = run_shots(machine, tmp_path, frames, cuts, seed=used, window=5)
+    assert out.numpy().tobytes() == same.numpy().tobytes()
+    assert f"seed: {used} ({given} given, taken modulo 4,293,967,296)" in plan

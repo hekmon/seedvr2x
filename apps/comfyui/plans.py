@@ -133,6 +133,13 @@ CORRECTIONS = ("split", "none")
 # passes.ENCODE_SEED_OFFSET). A clip's later shots add their first frame (nodes._check_seed).
 SEED = 42
 SEED_MAX = 2**32 - 1 - 1_000_000
+# The count of seeds the nodes take. A seed is shared with a generation node: ComfyUI's own seed
+# widgets run from 0 to 0xffffffffffffffff (KSampler in ComfyUI's nodes.py), and a link carries any
+# integer, which ComfyUI never checks against a widget's range (it checks a widget's own value
+# alone, execution.py's validate_inputs). The nodes therefore fold any whole number into
+# 0 to SEED_MAX, modulo SEEDS; the command line keeps refusing a seed past its range
+# (job.check_seed).
+SEEDS = SEED_MAX + 1
 # The command line's default resolution (job.DEFAULT_RESOLUTION), and the bounds of the widget: a
 # short side of 18 pixels is the least a picture's padding can be made on once the output's sides
 # are cropped to even ones (frames.check_picture_target: 17 gives 16 rows), 16,384
@@ -257,10 +264,7 @@ def _pin_problem(name: str, value: object) -> str | None:
 def seed_problem(value: object) -> str | None:
     if (problem := _whole("seed", value)) is not None:
         return problem
-    assert isinstance(value, int)
-    if 0 <= value <= SEED_MAX:
-        return None
-    return f"seed {value}: must be from 0 to {SEED_MAX:,}"
+    return None
 
 
 def problems(
@@ -297,7 +301,8 @@ class Settings:
     encode_tile: int | None = None  # 0: untiled
     decode_tile: int | None = None  # 0: untiled
     color_correction: str = "split"
-    seed: int = SEED
+    seed: int = SEED  # the seed used, 0 to SEED_MAX
+    given_seed: int | None = None  # the integer given, where it differed from the one used
 
     @classmethod
     def of(
@@ -311,8 +316,9 @@ class Settings:
         seed: int = SEED,
     ) -> "Settings":
         """The settings of the node's inputs: a pin in the library's units, None where its socket
-        is unconnected; the colour correction's on or off. BadSetting, worded for the node, for a
-        value an input does not take."""
+        is unconnected; the colour correction's on or off; the seed folded into 0 to SEED_MAX,
+        modulo SEEDS, where it is past them (given_seed the integer given). BadSetting, worded for
+        the node, for a value an input does not take."""
         found = problems(
             window=window,
             swap_blocks=swap_blocks,
@@ -330,7 +336,8 @@ class Settings:
             encode_tile,
             decode_tile,
             CORRECTIONS[0] if color_correction else CORRECTIONS[1],
-            seed,
+            seed % SEEDS,
+            None if 0 <= seed <= SEED_MAX else seed,
         )
 
     @property
@@ -515,12 +522,15 @@ def _frames(length: int) -> str:
 
 
 def _common(dit: str, swapped: int, settings: Settings) -> list[str]:
+    seed = f"seed: {settings.seed}"
+    if settings.given_seed is not None:
+        seed += f" ({settings.given_seed} given, taken modulo {SEEDS:,})"
     return [
         f"model: {DIT_LABELS.get(dit, dit)}",
         _swap(settings.swap_blocks is not None, swapped),
         f"{LABELS['color_correction']}: {'on' if settings.split else 'off'}"
         f" ({settings.color_correction})",
-        f"seed: {settings.seed}",
+        seed,
     ]
 
 

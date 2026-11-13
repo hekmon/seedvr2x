@@ -1587,7 +1587,13 @@ marker. The image server, Linux's alone by its lock, has no such line.
   shot by shot, the bar over all the shots), a cut list for other frames refused, a clip the host
   can't hold refused before a model loads with the command line's stream its first way out, a
   seed some shot would seed past 2**32 (the seed plus the last shot's first frame and the
-  encode's offset) refused before a model loads, a picture at resolution 17 refused and a clip
+  encode's offset) refused before a model loads, the seed used named and the one given where it
+  was folded (the nodes take any whole number, a generation's 64-bit seed or a negative one a
+  link gives, which ComfyUI never checks against a widget's range: folded into 0 to `SEED_MAX`
+  modulo `plans.SEEDS` by `Settings.of`, `given_seed` the integer given; the widget runs from 0
+  to 0xffffffffffffffff as ComfyUI's own seeds do; the plan's seed line says both; a folded run
+  equal bit for bit to the run of the seed used, a picture and a clip; the command line keeps its
+  refusal), a picture at resolution 17 refused and a clip
   at 17 planned, four channels with an opaque alpha a view of the same memory and not a copy,
   the input said in the plan's RAM line and out of the comparison, and the INFO line naming the
   command line (it streams the clip, so a clip of any length fits, and resumes) said once at import

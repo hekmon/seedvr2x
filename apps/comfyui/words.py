@@ -655,15 +655,16 @@ def cuts_wrong(covered: int, frames: int) -> Refused:
     )
 
 
-def seed_past_the_cuts(seed: int, start: int, highest: int) -> Refused:
+def seed_past_the_cuts(seed: int, start: int, highest: int, given: int | None = None) -> Refused:
     """A seed that some shot of the cut list seeds past numz's range: each shot is seeded with the
     seed plus its first frame, its encode with passes.ENCODE_SEED_OFFSET more, and NumPy's
     generator takes seeds under 2**32 only. `start` is the last shot's first frame, `highest` the
-    largest seed that works with this cut list."""
+    largest seed that works with this cut list. `given`: the integer the seed was folded from."""
+    folded = "" if given is None else f" ({given:,} given, taken modulo {plans.SEEDS:,})"
     return Refused(
-        f"seed {seed:,} is too high for this cut list: each shot is seeded with the seed plus its"
-        f" first frame, the last starts at frame {start:,}, and the seed can be {highest:,} at"
-        " most: lower the seed"
+        f"seed {seed:,}{folded} is too high for this cut list: each shot is seeded with the seed"
+        f" plus its first frame, the last starts at frame {start:,}, and the seed can be"
+        f" {highest:,} at most: lower the seed"
     )
 
 

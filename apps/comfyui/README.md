@@ -51,7 +51,7 @@ each at its default:
 | resolution | `1080` | The output's short side, in pixels. |
 | quality (Upscale Video only) | `standard` | How many times the model runs over each shot: `standard` once, `enhanced` twice, `maximum` four times, each run starting a frame or two further into the shot, each frame kept from the run that rebuilds it best. At `standard` one frame in four comes out closer to the original than the three before it, and looks sharper: edges that pulse ([below](#edges-that-pulse-at-standard)); `maximum` takes every frame from a run where it is rebuilt closest to the original. Sharper lines and less flicker where there is motion, little change on a still shot; 2 or 4 times as long as `standard`, and no more memory. A picture is one frame, so Upscale Image has no quality. |
 | colour correction | on (`split`) | On, `split`, keeps the input's overall colours and brightness with the model's fine detail; off, `none`, leaves the model's own colours, which can drift. |
-| seed | `42` | ComfyUI's seed with its control after generate, `fixed`. |
+| seed | `42` | ComfyUI's seed with its control after generate, `fixed`. Any whole number is taken: outside 0 to 4,293,967,295, it is taken modulo 4,293,967,296, and the plan in the console says the seed used. |
 | plan only | off | Make the plan, say it in the console, and stop: the model's weights are not read into memory (seedvr2x Models finds the files; the upscale node reads them when it runs, after its plan), ComfyUI's loaded models stay, and the nodes after the images output do not run. |
 
 ### Edges that pulse at `standard`
