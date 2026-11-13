@@ -956,6 +956,12 @@ marker. The image server, Linux's alone by its lock, has no such line.
   chroma sitings, its guesses for an untagged stream and its refusals are the library's
   (`yuv.reading`, refusing as `SourceRefused` with a kind of `yuv.KINDS`), which
   `media/conversion.py` takes, its own words kept for `--input-matrix` and `--deband`.
+  A source whose sides its chroma subsampling doesn't divide (zimg refuses them) is refused
+  at the start by the same rule (`yuv.check_size`, which `to_rgb` applies; `media/source.py`'s
+  `_sides_refusal` in `declare`), naming its size, format and subsampling and giving the lossless
+  crop (`rate.crop_remake`): the library's `tests/test_yuv.py` holds the rule, the CLI's
+  `tests/test_sides.py` the words, the remake run and read back, and that nothing is planned or
+  loaded first.
   `core/tests/test_yuv.py` holds the table, the rules and the conversion on closed forms (limited
   and full white and black exact at every depth, 8-bit RGB as v * 257, the siting's geometry
   worked out by hand, a grey's channels within one code of each other, a 16-bit grey's G one code

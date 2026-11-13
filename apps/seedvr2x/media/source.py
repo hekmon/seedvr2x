@@ -5,6 +5,7 @@ it then trusts when nothing changed (DESIGN.md, Pause and resume)."""
 
 import logging
 import math
+import re
 import threading
 from dataclasses import dataclass, replace
 from fractions import Fraction
@@ -21,7 +22,9 @@ from media.probe import DoviRecord, VideoStream, probe
 from media.rate import Timeline
 from media.reader import Reader
 from media.scan import TOLERANCE_US, Detects, Idet, Scan, name_error, scan, timing_error
+from seedvr2x.errors import SourceRefused
 from seedvr2x.files import sha256
+from seedvr2x.yuv import block_words, check_size
 
 logger = logging.getLogger("cli.media.source")
 
@@ -313,6 +316,9 @@ def declare(
             raise MediaError(refusal)
         stream = resolved(probed)
         conversion = conversion_for(stream, matrix, deband)
+        sides = _sides_refusal(path, stream)
+        if sides:
+            raise MediaError(sides)
     except MediaError as error:
         raise MediaError(f"{path}: {error}") from None
     waived = contradicted(probed).get("color_space")
@@ -1137,6 +1143,40 @@ def _fixes(
         f"or give --frame-rate {rate.fraction(found)},"
         " which takes its frames at that rate, each checked to lie within half a frame of its"
         " timeline: the same frames on the same timeline, without the intermediate file"
+    )
+
+
+def _sides_refusal(path: Path, stream: VideoStream) -> str:
+    """Why a stream whose sides its chroma subsampling doesn't divide is refused, or "": zimg
+    refuses such frames ("image dimensions must be divisible by subsampling factor": an odd side
+    at 4:2:0, a width not a multiple of 4 at 4:1:1), and a run failed on the reader's "ffmpeg's
+    frames end before frame 0", which names no cause (DESIGN.md, Input, decided on 2026-11-13).
+    The rule is the library's (yuv.check_size); the words name the size, the format and the
+    subsampling, then the lossless remake that crops the frames to the subsampling's multiple."""
+    try:
+        check_size(stream.pix_fmt, stream.width, stream.height)
+    except SourceRefused:
+        pass
+    else:
+        return ""
+    rows, columns = PIXEL_FORMATS[stream.pix_fmt].subsampling
+    match = re.match(r"yuvj?(\d)(\d)(\d)", stream.pix_fmt)
+    chroma = ":".join(match.groups()) if match else stream.pix_fmt
+    width = stream.width - stream.width % columns
+    height = stream.height - stream.height % rows
+    command = rate.crop_remake(width, height, *_covers(path))
+    lost = [
+        f"the last {noun}" if count == 1 else f"the last {count} {noun}s"
+        for count, noun in ((stream.width - width, "column"), (stream.height - height, "row"))
+        if count
+    ]
+    dropped = " and ".join(lost)
+    return (
+        f"frames of {stream.width}x{stream.height} in {stream.pix_fmt}: their sides are not"
+        f" multiples of its chroma subsampling, {chroma}, {block_words(stream.pix_fmt)}, which"
+        " the conversion (zimg) refuses; crop them to"
+        f" {width}x{height}, dropping {dropped}, an FFV1 master with its other streams copied"
+        f" ({REMAKE_COST}), with {rate.alone(command)}"
     )
 
 

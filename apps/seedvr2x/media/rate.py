@@ -524,6 +524,27 @@ def remake(
     if microseconds:
         words += ["-filter:v:0", f"settb=AVTB,setpts=PTS{microseconds:+d}"]
         words += ["-enc_time_base:v:0", "demux"]
+    return _with_covers(words, covers, attachments)
+
+
+def crop_remake(
+    width: int, height: int, covers: Sequence[Stream] = (), attachments: int = 0
+) -> str:
+    """The ffmpeg command cropping a source to `width` x `height` from its top left corner (a
+    source whose sides its chroma subsampling does not divide, DESIGN.md, Input, zimg): its first
+    video stream an FFV1 master as remake's, its frames and timestamps as they are
+    (-fps_mode:v:0 passthrough), its other streams copied, its cover pictures as remake has
+    them."""
+    words = ["ffmpeg", "-i", "SOURCE", "-map", "0", "-map", "-0:d"]
+    words += [word for cover in covers for word in ("-map", f"-0:{cover.index}")]
+    words += ["-c", "copy", *FFV1, "-fps_mode:v:0", "passthrough"]
+    words += ["-filter:v:0", f"crop={width}:{height}:0:0"]
+    return _with_covers(words, covers, attachments)
+
+
+def _with_covers(words: list[str], covers: Sequence[Stream], attachments: int) -> str:
+    """The remake's command (remake, crop_remake) from its `words` up to its output, and its cover
+    pictures' two commands when the source has some (see remake)."""
     if not covers:
         return " ".join([*words, "remade.mkv"])
     files = [_cover_file(number, cover) for number, cover in enumerate(covers, 1)]

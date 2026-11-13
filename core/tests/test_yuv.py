@@ -260,18 +260,18 @@ def _size_refusal() -> SourceRefused:
 
 
 @pytest.mark.parametrize(
-    ("planar", "size"),
+    ("planar", "size", "block"),
     [
-        ("yuv420p", (65, 16)),
-        ("yuv420p", (64, 17)),
-        ("yuv422p10le", (63, 16)),
-        ("yuv411p", (66, 16)),
-        ("yuv410p", (64, 18)),
-        ("yuv440p", (64, 15)),
+        ("yuv420p", (65, 16), "2 columns by 2 rows"),
+        ("yuv420p", (64, 17), "2 columns by 2 rows"),
+        ("yuv422p10le", (63, 16), "2 columns by 1 row"),
+        ("yuv411p", (66, 16), "4 columns by 1 row"),
+        ("yuv410p", (64, 18), "4 columns by 4 rows"),
+        ("yuv440p", (64, 15), "1 column by 2 rows"),
     ],
 )
 def test_frames_whose_sides_the_subsampling_doesnt_divide_are_refused(
-    planar: str, size: tuple[int, int]
+    planar: str, size: tuple[int, int], block: str
 ) -> None:
     # zscale refuses them ("image dimensions must be divisible by subsampling factor"), so the
     # command line reads no such source; the shapes given are those of the planes cut down.
@@ -286,7 +286,7 @@ def test_frames_whose_sides_the_subsampling_doesnt_divide_are_refused(
     assert caught.value.kind == "size"
     assert str(caught.value) == (
         f"frames of {width}x{height} in {planar}: their sides are not multiples of its chroma"
-        f" subsampling, {columns} columns by {rows} rows, which the conversion refuses"
+        f" subsampling, {block}, which the conversion refuses"
     )
 
 
@@ -598,3 +598,49 @@ def test_importing_yuv_imports_no_torch() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "False"
+
+
+BLOCKS = {
+    "yuv420p": "2 columns by 2 rows",
+    "yuv422p10le": "2 columns by 1 row",
+    "yuv411p": "4 columns by 1 row",
+    "yuv410p": "4 columns by 4 rows",
+    "yuv440p": "1 column by 2 rows",
+}
+
+
+@pytest.mark.parametrize("planar", list(BLOCKS))
+def test_block_words_count_one_in_the_singular(planar: str) -> None:
+    assert yuv.block_words(planar) == BLOCKS[planar]
+
+
+@pytest.mark.parametrize(
+    ("planar", "size", "refused"),
+    [
+        ("yuv420p", (64, 16), False),
+        ("yuv420p", (65, 16), True),
+        ("yuv420p", (64, 17), True),
+        ("yuv422p10le", (64, 17), False),
+        ("yuv422p10le", (63, 16), True),
+        ("yuv411p", (68, 17), False),
+        ("yuv411p", (66, 16), True),
+        ("yuv410p", (64, 18), True),
+        ("yuv440p", (64, 15), True),
+        ("yuv444p", (65, 17), False),
+        ("gbrp", (65, 17), False),
+    ],
+)
+def test_check_size_is_the_rule_to_rgb_applies(
+    planar: str, size: tuple[int, int], refused: bool
+) -> None:
+    width, height = size
+    if not refused:
+        yuv.check_size(planar, width, height)
+        return
+    with pytest.raises(SourceRefused) as caught:
+        yuv.check_size(planar, width, height)
+    assert caught.value.kind == "size"
+    assert str(caught.value) == (
+        f"frames of {width}x{height} in {planar}: their sides are not multiples of its chroma"
+        f" subsampling, {BLOCKS[planar]}, which the conversion refuses"
+    )

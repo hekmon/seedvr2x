@@ -316,6 +316,32 @@ def _upsampled(plane: "torch.Tensor", taps: Taps, dim: int) -> "torch.Tensor":
     return low + (plane.index_select(dim, above) - low) * weight.view(shape)
 
 
+def block_words(planar: str) -> str:
+    """The chroma block of `planar` in words, a count of 1 in the singular: "2 columns by 2 rows"
+    (4:2:0), "2 columns by 1 row" (4:2:2), "4 columns by 1 row" (4:1:1)."""
+    rows, columns = PIXEL_FORMATS[planar].subsampling
+
+    def count(number: int, noun: str) -> str:
+        return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
+
+    return f"{count(columns, 'column')} by {count(rows, 'row')}"
+
+
+def check_size(planar: str, width: int, height: int) -> None:
+    """Refuse frames of `width` x `height` in the planar format `planar` whose sides are not
+    multiples of its chroma subsampling, which zscale refuses ("image dimensions must be divisible
+    by subsampling factor"): an odd side at 4:2:0, a width not a multiple of 4 at 4:1:1.
+
+    Raises SourceRefused ("size")."""
+    rows, columns = PIXEL_FORMATS[planar].subsampling
+    if height % rows or width % columns:
+        raise _refused(
+            "size",
+            f"frames of {width}x{height} in {planar}: their sides are not multiples of its"
+            f" chroma subsampling, {block_words(planar)}, which the conversion refuses",
+        )
+
+
 def to_rgb(planes: Sequence["torch.Tensor"], read: Reading) -> "torch.Tensor":
     """A stream's frames as the command line's reader gives them: (T, H, W, 3) float32 RGB in
     [0, 1], each sample a 16-bit code over 65535, on the planes' device.
@@ -336,12 +362,7 @@ def to_rgb(planes: Sequence["torch.Tensor"], read: Reading) -> "torch.Tensor":
     frames, height, width = first.shape
     pixel_format = read.format
     rows, columns = pixel_format.subsampling
-    if height % rows or width % columns:
-        raise _refused(
-            "size",
-            f"frames of {width}x{height} in {read.planar}: their sides are not multiples of its"
-            f" chroma subsampling, {columns} columns by {rows} rows, which the conversion refuses",
-        )
+    check_size(read.planar, width, height)
     small = (frames, height // rows, width // columns)
     if tuple(second.shape) != small or tuple(third.shape) != small:
         raise ValueError(
