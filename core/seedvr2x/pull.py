@@ -969,10 +969,18 @@ def _download(
     one's and the next ones', as _check_space checked it. `progress` is told its bytes (Download),
     through the progress bar huggingface_hub is given in place of its own (_Bars)."""
     from huggingface_hub import constants, file_download
+
+    # EntryNotFoundError, not 1.x's RemoteEntryNotFoundError, which 0.34 to 0.36 lack (the line
+    # ComfyUI's transformers 4.x takes, below 1.0): there the Hub's own "entry not found" is
+    # EntryNotFoundError itself, an HfHubHTTPError, and LocalEntryNotFoundError its subclass
+    # (huggingface_hub 0.36.2, errors.py:259, 277); from 1.0 both are its subclasses (1.33.0 and
+    # 2.4.0, errors.py:422, 440, 467). LocalEntryNotFoundError caught first, what reaches it is the
+    # Hub's 404 on each line: hf_hub_download raises no other (1.33.0 and 2.4.0 raise the base
+    # elsewhere alone: hf_api.py, hf_file_system.py, _commit_api.py:898).
     from huggingface_hub.errors import (
+        EntryNotFoundError,
         HfHubHTTPError,
         LocalEntryNotFoundError,
-        RemoteEntryNotFoundError,
         RepositoryNotFoundError,
         RevisionNotFoundError,
     )
@@ -990,14 +998,19 @@ def _download(
     # those of hf-xet 1.6.0, which downloads Xet files (xet_pkg/src/error.rs:293-318), every one
     # caught by name: no bare Exception. Each message is built from locals bound in its clause
     # (Python unbinds the clause's name at its end, and a message is worded later, by an app).
+    # Before 1.0 the library's requests are made by requests, whose errors are OSErrors
+    # (requests 2.34.2: exceptions.py:20), caught as such below; the Hub's answers come as
+    # HfHubHTTPError, a requests HTTPError (huggingface_hub 0.36.2: errors.py:40), which
+    # hf_raise_for_status makes of each (utils/_http.py:349-467).
     bar: dict[str, Any] = {}
     if progress is not None:
         # Read by name: the library's overloads are partly unknown to strict typing.
         if _takes_bars(vars(file_download)["hf_hub_download"]):
             bar["tqdm_class"] = _bars(name, pin.size, progress)
         else:
-            # huggingface_hub before 1.0 (0.36.2 is in ComfyUI's Windows environment) has no
-            # tqdm_class, the one thing it offers to follow a download by: the pin asks for 1.33.
+            # huggingface_hub before 1.1 has no tqdm_class, the one thing it offers to follow a
+            # download by: 0.34 to 0.36, the line ComfyUI's transformers 4.x takes, and 1.0
+            # (hf_hub_download's signature read in 0.34.0, 0.36.2, 1.0.0 and 1.1.0).
             logger.warning(
                 "%s: this huggingface_hub (%s) gives no way to follow a download: its progress"
                 " is not shown",
@@ -1042,7 +1055,7 @@ def _download(
                 f" ({cause}): run again once it can be, {elsewhere(say)}"
             ),
         ) from None
-    except RemoteEntryNotFoundError:
+    except EntryNotFoundError:
         raise _unreachable(
             name,
             "not-found",
@@ -1279,11 +1292,20 @@ def _refused(error: BaseException) -> bool:
     current: BaseException | None = error
     while current is not None:
         if isinstance(current, DisabledRepoError) or (
-            isinstance(current, HfHubHTTPError) and current.response.status_code in (401, 403)
+            isinstance(current, HfHubHTTPError) and _status(current) in (401, 403)
         ):
             return True
         current = current.__cause__
     return False
+
+
+def _status(error: BaseException) -> int | None:
+    """The HTTP status of the Hub's answer an HfHubHTTPError carries, None where it carries none:
+    before 1.0 its response may be None (huggingface_hub 0.36.2, errors.py:70), and is for the
+    LocalEntryNotFoundError the library raises of its message alone (errors.py:296-297;
+    file_download.py:1653, 1665), an HfHubHTTPError on that line (errors.py:259, 277)."""
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    return status if isinstance(status, int) else None
 
 
 def _not_the_hub(error: BaseException) -> bool:
@@ -1306,11 +1328,16 @@ def _xet_refused(error: OSError) -> bool:
     (XetObjectNotFoundError, XetAuthenticationError: hf-xet 1.6.0, xet_pkg/src/error.rs:270-274,
     303-304), which no rerun changes. hf_xet is looked up among the modules imported, never
     imported here: its import writes a log file under HF_HOME (xet_pkg/src/lib.rs:82-94), and an
-    error of its own means it is imported already."""
+    error of its own means it is imported already. Each class is taken where the module has it:
+    hf-xet 1.1.3, the least huggingface_hub 0.34 to 0.36 take, has neither (its module read on
+    2026-11-13)."""
     xet = sys.modules.get("hf_xet")
-    return xet is not None and isinstance(
-        error, (xet.XetObjectNotFoundError, xet.XetAuthenticationError)
+    refusals = tuple(
+        cast(type[BaseException], getattr(xet, name))
+        for name in ("XetObjectNotFoundError", "XetAuthenticationError")
+        if hasattr(xet, name)
     )
+    return isinstance(error, refusals)
 
 
 def _unreadable(where: Path, error: OSError) -> ModelUnreadable:

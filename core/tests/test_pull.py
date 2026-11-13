@@ -31,6 +31,7 @@ The tests that run the command line over the pull are test_pull_cli.py's (apps/s
 helpers both use (Hub, pins, ...) are this file's, which that one imports."""
 
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -43,7 +44,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import httpx
 import pytest
 from huggingface_hub import constants, file_download
 from huggingface_hub.errors import (
@@ -791,10 +791,29 @@ def test_detector_named_in_another_role_refused(hub: Hub) -> None:
     assert hub.calls == hub.lookups == []
 
 
+def http_library() -> Any:
+    """The HTTP library the installed huggingface_hub makes its requests with: requests before
+    1.0, httpx on 1.x, httpx2 on 2.x, the one whose HTTPError its errors.py imports (line 6 in
+    0.36.2, 1.33.0 and 2.4.0)."""
+    from huggingface_hub import errors
+
+    return importlib.import_module(vars(errors)["HTTPError"].__module__.split(".")[0])
+
+
+def network_error(message: str) -> Exception:
+    """The network's own error, as the installed huggingface_hub's HTTP library raises it when a
+    host can't be reached: requests' ConnectionError, an OSError (requests 2.34.2:
+    exceptions.py:70), or httpx's and httpx2's ConnectError."""
+    library = http_library()
+    if library.__name__ == "requests":
+        return library.ConnectionError(message)
+    return library.ConnectError(message)
+
+
 def unreachable() -> LocalEntryNotFoundError:
     """The library's error when the Hub can't be reached, the network's own as its cause."""
     error = LocalEntryNotFoundError("An error happened while trying to locate the file on the Hub")
-    error.__cause__ = httpx.ConnectError("[Errno -3] Temporary failure in name resolution")
+    error.__cause__ = network_error("[Errno -3] Temporary failure in name resolution")
     return error
 
 

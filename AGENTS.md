@@ -729,7 +729,17 @@ marker. The image server, Linux's alone by its lock, has no such line.
   unmoved by the move of the choice to the library.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
-  `test_pull_cli.py` holds what the command line does over it.
+  `test_pull_cli.py` holds what the command line does over it. `tests/test_pull_lines.py` holds a
+  download's failures on each line of huggingface_hub the library takes, each refused by its kind
+  and in its words: 0.34 to 0.36, below 1.0, the line ComfyUI's transformers 4.x takes (no
+  `RemoteEntryNotFoundError`: the Hub's 404 is `EntryNotFoundError` itself, an `HfHubHTTPError`,
+  and its `LocalEntryNotFoundError` subclass carries no response; the network's errors are
+  requests', OSErrors), and 1.x, whose classes 2.x keeps (2.x's httpx2 held apart); the installed
+  line by its real classes, the other by a stand-in the real ones hold where that line is
+  installed (the CLI's environment runs 1.33.0, the floors' 0.34.0: below), and an hf_xet without
+  its two refusal classes (hf-xet 1.1.3, the least 0.34 to 0.36 take) refused as a failed
+  download. Until 2026-11-13 a download on 0.34 to 0.36 failed at its import of
+  `RemoteEntryNotFoundError`, whatever happened.
 - One read per load (DESIGN.md, Weights, decided on 2026-11-03): `tests/test_blockswap.py` holds
   `blockswap.read` hashing every byte of the file once, in its order (the header, the tensors
   skipped, bytes after the data), its SHA-256 hashlib's of the whole file and its tensors those
@@ -1510,7 +1520,8 @@ marker. The image server, Linux's alone by its lock, has no such line.
   chunks and a resume's negative step, a Xet download's two bars with the keywords the reporter
   gives them and no `update_transfer`, the most either counted told in order to the file's size,
   0 told for every file before the first begins, none passed to the library without a callback,
-  and a huggingface_hub without `tqdm_class` (0.36.2) downloading as before with a warning;
+  and a huggingface_hub without `tqdm_class` (before 1.1: 0.34 to 0.36, and 1.0) downloading as
+  before with a warning;
   `detector.probabilities`' `progress` per batch with the same probabilities.
 - The ComfyUI nodes (DESIGN.md, Repository and apps), on the CPU in the CLI's environment, from
   `apps/comfyui/`: `tests/comfy_stand_in/` writes ComfyUI's few modules from the reading of

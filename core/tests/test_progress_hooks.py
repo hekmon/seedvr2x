@@ -416,7 +416,8 @@ def test_a_huggingface_hub_without_progress_bars_downloads_as_before_and_says_so
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # huggingface_hub 0.36.2 (ComfyUI's Windows environment): no tqdm_class, no **options.
+    # huggingface_hub before 1.1 (0.34 to 0.36, the line ComfyUI's transformers 4.x takes, and
+    # 1.0): no tqdm_class, no **options.
     hub, name, _ = small
 
     def old(repo_id: str, filename: str, *, revision: str, cache_dir: Any, token: Any) -> str:
