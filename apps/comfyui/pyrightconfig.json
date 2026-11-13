@@ -2,7 +2,7 @@
   "include": ["*.py", "tests"],
   "exclude": [".venv", "**/__pycache__"],
   "strict": ["*.py"],
-  "pythonVersion": "3.13",
+  "pythonVersion": "3.12",
   "venvPath": "../seedvr2x",
   "venv": ".venv",
   "extraPaths": ["..", "../../core", "../../core/tests", "tests/comfy_stand_in"]

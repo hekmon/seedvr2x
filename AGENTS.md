@@ -286,6 +286,17 @@ beside it; the `__init__.py` is seedvr2x's.
   1's regression, below): torch and torchvision (CUDA 13.0 builds, from PyTorch's index),
   diffusers, rotary-embedding-torch and the rest. A bump can move the output's bits: it remakes
   the references, with the measured reason said in its commit (DESIGN.md).
+- Two environments. The CLI's, the one shipped, on Python 3.13 with the lock's exact versions:
+  every check and every suite runs there. The floors', on Python 3.12 with each of the library's
+  ranges at its floor (`core/pyproject.toml`: a Comfy Desktop's versions of 2026-11-12 where it
+  has the package, huggingface_hub at the 0.34.0 its transformers 4.57.3 takes, below 1.0, and
+  diffusers at the 0.39.0 that takes it), made apart and never in the repository: the library's
+  and the nodes' suites run there, the ranges being what the library promises another program's
+  environment, ComfyUI's first (DESIGN.md, Repository and apps). Its making is in
+  [Tests](#tests). A floor moves to a version the floors' suites pass with, and the CLI's pins
+  and lock stay the shipped ones, its references made with them; a change of the library's
+  ranges rewrites the requirements the two locks record of `core/` (`uv lock` in
+  `apps/seedvr2x/` and `apps/imgserver/`), every locked version as it was.
 - Linux x86_64 first (DESIGN.md: Linux first), and Windows on x86-64 beside it in the CLI's
   lock (its pyproject's `environments`): torch and torchvision from the same index, the CUDA
   packages and Triton Linux's alone as torch's own requirements mark them, every Linux pin the
@@ -385,6 +396,11 @@ beside it; the `__init__.py` is seedvr2x's.
   picture and no video run should do; its image decoders bundle libpng and need no FFmpeg. It
   is never in a job's environment record (a video run never imports it), and it turns a picture
   by its eXIf chunk with no switch to leave it, so the chunk is taken out of the bytes it decodes.
+  The nodes' install leaves it out (`apps/comfyui/README.md`, Install): the nodes read no file,
+  and each TorchCodec wheel is built for one release of torch, which that install can't choose
+  for every ComfyUI; pip check's one line of it there is expected. Its floor, 0.16.0, is the
+  release whose CPU build decodes under the floors' torch, 2.13.0+cpu (`tests/test_picture.py`
+  whole there, 2026-11-13); PyPI's 0.16.0 is CUDA's build, which asks for `libc10_cuda.so`.
 - ffmpeg and ffprobe on PATH, 7.1 or later (for setparams' chroma_location), with zscale
   (libzimg), idet and ffv1: seedvr2x checks the build at startup and refuses to run without
   them, or without any other filter, encoder, decoder or muxer it uses (`media/ffmpeg.py`;
@@ -469,6 +485,39 @@ marker. The image server, Linux's alone by its lock, has no such line.
   is fixed in its patch and only its files run again, never a second suite; a patch re-cut on a
   moved main runs the files its conflicts touched. Tests that need ffmpeg skip without a build
   seedvr2x accepts (see [Environment](#environment)).
+- **The floors' environment** ([Environment](#environment)): Python 3.12 and each of the
+  library's ranges at its floor, made from `core/pyproject.toml` itself by uv's lowest resolution
+  of its direct requirements, in one resolution with the CPU builds of torch, torchvision and
+  torchcodec from PyTorch's index pinned at their floors (the lowest resolution alone takes PyPI's
+  builds of the same versions, CUDA's: PyPI's torchcodec 0.16.0 asks for libc10_cuda.so, which the
+  CPU torch lacks; and a torch installed first brings the latest numpy and Pillow, which uv then
+  keeps), in a directory of its own, `$FLOORS`, never in the repository (about 2 GB; uv's cache,
+  `UV_CACHE_DIR`, on a disk with room), from the repository's root:
+
+  ```
+  uv python install 3.12
+  uv venv --seed --python 3.12 "$FLOORS"
+  uv pip install --python "$FLOORS" --resolution lowest-direct \
+      --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple \
+      --index-strategy unsafe-best-match -r core/pyproject.toml \
+      torch==2.13.0+cpu torchvision==0.28.0+cpu torchcodec==0.16.0+cpu \
+      pytest==9.1.1 gguf==0.19.0 ruff==0.16.10
+  uv pip install --python "$FLOORS" --no-deps -e core
+  ```
+
+  (the three pins move with their floors; the tools' pins are the CLI's lock's, ruff for
+  `tests/test_vendor.py`, whose `tools/vendor.py check` runs it by the interpreter), then the library's suite from `core/` and the nodes'
+  from `apps/comfyui/`, each `"$FLOORS"/bin/python -m pytest -p no:cacheprovider
+  --basetemp=<a directory on Linux's disk>` with `OMP_NUM_THREADS` as in the CLI's environment. A
+  baton that moves a range, or the library's or the nodes' code a range covers, runs them once at
+  its end, beside the one full suite. Its torch being a CPU build where every other environment's
+  is CUDA's, two of the library's tests met names a CPU build lacks: `tests/test_memory.py`'s
+  reading of torch's own allocator variables skips there (no CUDA allocator to ask), and
+  `tests/test_detector_close.py` sets its stand-in for cuBLAS's workspace clearing whether the
+  build has it or not. On 2026-11-13 (impl-nodes-8, Python 3.12.11, the environment on D:'s drvfs):
+  the nodes' 453 passed in 2.9 minutes, the library's 2,307 passed and 65 skipped in 19.5 minutes,
+  those two files' 7 cases then fixed and run again there (6 passed, 1 skipped); no failure came
+  of Python 3.12 or of a floor.
 - The CLI's tests under pytest-xdist (a dev dependency of `apps/seedvr2x` alone, pinned; the image
   server's lock doesn't list it): each worker is a process of its own with its own basetemp
   (`popen-gwN`), the tests run on its main thread, and the workers share the controller's process

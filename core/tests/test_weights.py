@@ -1064,10 +1064,11 @@ def test_a_link_the_system_cant_follow_is_unreadable_never_a_traceback(
     plain.write_bytes(b"")
     real = Path.is_file
 
-    def inaccessible(self: Path, *, follow_symlinks: bool = True) -> bool:
+    # Its options passed on as given: is_file takes follow_symlinks from Python 3.13 alone.
+    def inaccessible(self: Path, **options: Any) -> bool:
         if self.name.startswith("seedvr2x_"):
             raise OSError(22, "The system cannot access the file", str(self))
-        return real(self, follow_symlinks=follow_symlinks)
+        return real(self, **options)
 
     monkeypatch.setattr(Path, "is_file", inaccessible)
     assert refused(link, "dit") == (

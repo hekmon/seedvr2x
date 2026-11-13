@@ -1202,6 +1202,10 @@ def test_the_allocator_is_read_as_torch_reads_it() -> None:
         assert allocator(setting) == (True, False), setting
 
 
+@pytest.mark.skipif(
+    not hasattr(torch._C, "_cuda_getAllocatorBackend"),
+    reason="torch's CPU build (the floors' environment) has no CUDA allocator to ask",
+)
 def test_torch_takes_the_first_variable_set_even_empty() -> None:
     # What startup's handling of an empty setting rests on (seedvr2x/memory.py), asked of torch
     # itself: an empty setting names no allocator, torch's own then; and the first variable set

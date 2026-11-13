@@ -2,7 +2,7 @@
 # (they run in ComfyUI's environment), so the settings sit beside them. Run from here in the CLI's
 # environment: uv run --project ../seedvr2x ruff check
 line-length = 100
-target-version = "py313"
+target-version = "py312"
 
 [lint]
 select = ["E", "F", "W", "I", "B", "UP", "RUF"]

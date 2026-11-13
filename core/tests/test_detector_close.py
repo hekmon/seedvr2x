@@ -65,7 +65,11 @@ def card(monkeypatch: pytest.MonkeyPatch) -> Card:
     monkeypatch.setattr(torch.cuda, "max_memory_allocated", found.says("peak", 2**30))
     monkeypatch.setattr(torch.cuda, "memory_reserved", found.says("reserved", 2**20))
     monkeypatch.setattr(torch.cuda, "empty_cache", found.says("empty_cache"))
-    monkeypatch.setattr(torch._C, "_cuda_clearCublasWorkspaces", found.says("cublas"))
+    # Absent from torch's CPU builds (the floors' torch, 2.13.0+cpu: AGENTS.md, Tests), where the
+    # library never calls it, a detector on the CPU having no card: set whether it is there or not.
+    monkeypatch.setattr(
+        torch._C, "_cuda_clearCublasWorkspaces", found.says("cublas"), raising=False
+    )
     monkeypatch.setattr(waiting, "sleep", lambda seconds: None)
     monkeypatch.setattr(detector, "_left", [])
     return found

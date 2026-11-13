@@ -234,20 +234,57 @@ The node shows how far it has got, in what ComfyUI gives a node:
 ## Install
 
 Nothing is published, so install by hand. Link or copy this folder, `apps/comfyui`, into ComfyUI's
-`custom_nodes` folder, under any name. Then, in ComfyUI's own Python environment:
+`custom_nodes` folder, under any name. Then, with ComfyUI's own Python (in Comfy Desktop's
+terminal; with the portable's `python_embeded\python.exe` in place of `python`), install the
+library without its dependencies, then, at the versions its tests pass with, those of its
+packages ComfyUI's environment lacks (`python -m pip show omegaconf rotary-embedding-torch`
+names any it has: leave that one out):
 
 ```
-pip install --no-deps /path/to/seedvr2x/core
-pip install "diffusers>=0.42" omegaconf rotary-embedding-torch
+python -m pip install --no-deps /path/to/seedvr2x/core
+python -m pip install "omegaconf==2.3.1" "rotary-embedding-torch==0.9.1"
 ```
 
-- **Python 3.13** is what the library requires today ([core/pyproject.toml](../../core/pyproject.toml)
-  holds its dependencies, with their ranges). torch is ComfyUI's own; so are the numpy, Pillow,
-  safetensors, torchvision, einops and huggingface_hub it already has. The library is installed with
-  `--no-deps` so that pip leaves them alone.
-- **diffusers 0.42 or later**: 0.40 pins huggingface_hub below 2, which ComfyUI's environment may
-  have passed. The library's tests pass with the Pillow 13 and huggingface_hub 2 that ComfyUI's
-  installs hold; diffusers past the command line's 0.40 is not yet compared with it bit for bit.
+and diffusers, only where ComfyUI's environment has none (`python -m pip show diffusers` finds
+nothing), the release that takes the huggingface_hub it has (`python -m pip show huggingface_hub`):
+below 2.0, as ComfyUI's transformers 4.x keeps it (below 1.0),
+
+```
+python -m pip install "diffusers==0.39.0"
+```
+
+and from 2.0, `python -m pip install "diffusers>=0.42,<1"`.
+
+- **ComfyUI's packages stay as they are**: torch, torchvision, transformers, huggingface_hub,
+  numpy, Pillow and einops are ComfyUI's. The library takes each from the version its tests pass
+  with (the ranges are in [core/pyproject.toml](../../core/pyproject.toml)): Python 3.12, torch
+  2.13, torchvision 0.28, numpy 2.2.6, Pillow 12.0, einops 0.8.0, huggingface_hub 0.34 (the
+  library's download runs on 0.34 to below 3), diffusers 0.39.0, safetensors 0.8.0. `--no-deps`
+  keeps pip from upgrading any of them for the library, and the commands above find them
+  already satisfied. One exception: diffusers needs safetensors 0.8 or later, which pip installs
+  where ComfyUI's is older (ComfyUI itself takes any from 0.4.2).
+- **Why diffusers is pinned so**: a later diffusers takes a later huggingface_hub (0.40 takes 1.23
+  or later, 0.41 1.32, 0.42 and 0.43 1.32 to below 3), and to install it pip upgrades
+  huggingface_hub past what transformers 4.x takes, which then fails to import. This page's
+  `pip install "diffusers>=0.42"` did that in a Comfy Desktop (transformers 4.57.3) on 2026-11-12:
+  it brought huggingface_hub 2.4. diffusers 0.39.0 takes huggingface_hub from 0.34 to below 2.
+  To see first what pip would change, add `--dry-run`: it must name none of ComfyUI's own
+  packages (torch, torchvision, transformers, huggingface_hub, numpy, Pillow, einops). The
+  command line's references, which its GPU tests compare outputs with bit for bit, are made with
+  diffusers 0.40.0; another diffusers is not compared with them.
+- **Below these versions**: a ComfyUI whose huggingface_hub is older than 0.34, its diffusers
+  older than 0.39 or its torch older than 2.13 (Comfy Desktop offers torch from 2.9.1) is below
+  what the library takes: `pip check` names those floors there, the nodes are not tested on it,
+  and the install above would move ComfyUI's own packages (a huggingface_hub older than 0.34
+  upgraded for diffusers 0.39.0, past transformers 4.x's range).
+- **TorchCodec is left out**: the library decodes a 16-bit colour PNG file with it, and the nodes
+  read no file (ComfyUI decodes the pictures). Each TorchCodec wheel is built for one release of
+  torch, which this install can't choose for every ComfyUI.
+- **To check**: `python -m pip check`. It says one line of seedvr2x's, which stays:
+  `seedvr2x-core 0.1.0.dev0 requires torchcodec, which is not installed.` Any other line naming
+  seedvr2x-core, diffusers, huggingface_hub or transformers is one to act on. Then
+  `python -c "import seedvr2x.pull, diffusers, transformers"` prints nothing where all three
+  import.
 - The two example workflows, `workflows/picture.json` and `workflows/clip.json`, load by dragging
   them into ComfyUI. Each has seedvr2x Models connected, every widget at its default and every
   optional input unconnected, but for the clip's `cuts`: it has seedvr2x Cuts between Load Video
@@ -270,9 +307,12 @@ README](../seedvr2x/README.md#model-files)).
   ("Sharp 7B int8, 8.3 GB, in Hugging Face's cache: ...").
 - **Downloaded when missing.** seedvr2x Models downloads what the cache lacks of the model file,
   the VAE and the shot detector's file when it runs, with its bar and its line, and again only if
-  its inputs change or the cache loses a file. With `HF_HUB_OFFLINE` set nothing is downloaded and
-  the node says so. The shot detector's file holds no other node up: where it can't be downloaded,
-  the console says so and seedvr2x Models goes on, and seedvr2x Cuts tries again when it runs.
+  its inputs change or the cache loses a file. A huggingface_hub before 1.1, as ComfyUI's
+  transformers 4.x keeps it, gives no way to follow a download: the bar then stays at 0 while the
+  files download, and the console says so for each file. With `HF_HUB_OFFLINE` set
+  nothing is downloaded and the node says so. The shot detector's file holds no other node up:
+  where it can't be downloaded, the console says so and seedvr2x Models goes on, and seedvr2x
+  Cuts tries again when it runs.
 - **Moving the cache.** Set `HF_HOME` before ComfyUI starts, to a folder on a disk with room for
   the files. For ComfyUI Desktop on Windows, in the user environment variables (Settings, System,
   About, Advanced system settings, Environment Variables; or `setx HF_HOME D:\hf` in a terminal),
