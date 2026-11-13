@@ -506,18 +506,18 @@ marker. The image server, Linux's alone by its lock, has no such line.
   ```
 
   (the three pins move with their floors; the tools' pins are the CLI's lock's, ruff for
-  `tests/test_vendor.py`, whose `tools/vendor.py check` runs it by the interpreter), then the library's suite from `core/` and the nodes'
-  from `apps/comfyui/`, each `"$FLOORS"/bin/python -m pytest -p no:cacheprovider
-  --basetemp=<a directory on Linux's disk>` with `OMP_NUM_THREADS` as in the CLI's environment. A
-  baton that moves a range, or the library's or the nodes' code a range covers, runs them once at
-  its end, beside the one full suite. Its torch being a CPU build where every other environment's
-  is CUDA's, two of the library's tests met names a CPU build lacks: `tests/test_memory.py`'s
-  reading of torch's own allocator variables skips there (no CUDA allocator to ask), and
-  `tests/test_detector_close.py` sets its stand-in for cuBLAS's workspace clearing whether the
-  build has it or not. On 2026-11-13 (impl-nodes-8, Python 3.12.11, the environment on D:'s drvfs):
-  the nodes' 453 passed in 2.9 minutes, the library's 2,307 passed and 65 skipped in 19.5 minutes,
-  those two files' 7 cases then fixed and run again there (6 passed, 1 skipped); no failure came
-  of Python 3.12 or of a floor.
+  `tests/test_vendor.py`, whose `tools/vendor.py check` runs it by the interpreter), then the
+  library's suite from `core/` and the nodes' from `apps/comfyui/`, each `"$FLOORS"/bin/python -m
+  pytest -p no:cacheprovider --basetemp=<a directory on Linux's disk>` with `OMP_NUM_THREADS` as in
+  the CLI's environment. A baton that moves a range, or the library's or the nodes' code a range
+  covers, runs them once at its end, beside the one full suite. Its torch being a CPU build where
+  every other environment's is CUDA's, two of the library's tests met names a CPU build lacks:
+  `tests/test_memory.py`'s reading of torch's own allocator variables skips there (no CUDA allocator
+  to ask), and `tests/test_detector_close.py` sets its stand-in for cuBLAS's workspace clearing
+  whether the build has it or not. On 2026-11-13 (impl-nodes-8, Python 3.12.11, the environment on
+  D:'s drvfs): the nodes' 453 passed in 2.9 minutes, the library's 2,307 passed and 65 skipped in
+  19.5 minutes, those two files' 7 cases then fixed and run again there (6 passed, 1 skipped); no
+  failure came of Python 3.12 or of a floor.
 - The CLI's tests under pytest-xdist (a dev dependency of `apps/seedvr2x` alone, pinned; the image
   server's lock doesn't list it): each worker is a process of its own with its own basetemp
   (`popen-gwN`), the tests run on its main thread, and the workers share the controller's process
@@ -1231,13 +1231,13 @@ marker. The image server, Linux's alone by its lock, has no such line.
   impl-box-4, on 2026-11-13: the 96 GB card's pool refused a 167-latent window's 31.65 GiB piece
   that the segments gave, and its pieces of 20 to 32 GiB at every pin from 10 to 36 blocks
   swapped; the cards emulated from 8 to 48 GB ran every step at or under its plan under the
-  segments; the plan matrix unmoved; cudaMallocAsync stays Windows itself's, `memory._default` the one place that
-  says so, for the start and a resume's early reading alike, and `tests/test_split.py`'s driver
-  sets the platform's default); a driver behind WSL2's device found to refuse names the allocator
-  in its line too; the image server sets the segments itself, as before, and the nodes take
-  ComfyUI's allocator as it is, a card ComfyUI alone uses planned as before. `watched` stays a
-  held run's (decided on 2026-11-13: an unheld run recovers from 3 to 930 refused 20-MiB
-  mappings a run, every one, no step past its plan).
+  segments; the plan matrix unmoved; cudaMallocAsync stays Windows itself's, `memory._default` the
+  one place that says so, for the start and a resume's early reading alike, and
+  `tests/test_split.py`'s driver sets the platform's default); a driver behind WSL2's device found
+  to refuse names the allocator in its line too; the image server sets the segments itself, as
+  before, and the nodes take ComfyUI's allocator as it is, a card ComfyUI alone uses planned as
+  before. `watched` stays a held run's (decided on 2026-11-13: an unheld run recovers from 3 to 930
+  refused 20-MiB mappings a run, every one, no step past its plan).
   A resume's early reading takes the share too (`memory.early`). The plan's held card line, the
   CLI's and a picture's (`still_plan.said`), ends `the card shared: ...` (`held_why`), the CLI's
   refusal of GPU memory says `shared: ...` and keeps the driver's figures (the card's there), and

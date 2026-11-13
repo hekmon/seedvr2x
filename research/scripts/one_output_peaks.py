@@ -16,8 +16,9 @@ latent; 21 frames of the source from --first, the tiles sharing 64 px; the two m
 allocator (PYTORCH_CUDA_ALLOC_CONF), set before torch is imported: the pool on purpose, as
 tile_peaks.py's recorded peaks were measured under it (seedvr2x's CLI default is now torch's own
 allocator with expandable segments, cudaMallocAsync on Windows itself only: seedvr2x/memory.py,
-_default). See tile_peaks.py's docstring for the squares (a T x T tile and a T x 192 one, fed on frames of T rows by T + 128 columns) and
-the tiles cut off at the picture's edge (1080p padded to 1104 x 1920, 720p to 752 x 1280).
+_default). See tile_peaks.py's docstring for the squares (a T x T tile and a T x 192 one, fed on
+frames of T rows by T + 128 columns) and the tiles cut off at the picture's edge (1080p padded to
+1104 x 1920, 720p to 752 x 1280).
 
 Beyond tile_peaks.py, `run` takes:
   --steps STEP,...   only those steps, in that order. STEP is square-T, cutoff-1080p-T,
