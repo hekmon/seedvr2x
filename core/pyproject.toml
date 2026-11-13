@@ -9,15 +9,17 @@ license-files = ["LICENSE", "NOTICE", "seedvr2x/transnetv2/LICENSE"]
 requires-python = ">=3.12"
 # Ranges, so that the library runs in another program's environment (DESIGN.md, Repository and
 # apps), ComfyUI's first: each floor the version the library's and the nodes' suites pass with in
-# the floors' environment (AGENTS.md, Tests), on Python 3.12, a Comfy Desktop's versions where it
-# has the package (2026-11-12: torch 2.13.0, torchvision 0.28.0, numpy 2.2.6, Pillow 12.0.0,
-# einops 0.8.0), huggingface-hub at the 0.34.0 its transformers 4.57.3 takes (below 1.0),
-# diffusers at the 0.39.0 that takes it (0.40 takes 1.23 or later), safetensors at the 0.8.0
-# diffusers 0.39.0 takes, torchcodec at its release for torch 2.13, and the others at the CLI's
-# pins; each cap below the next major version, but Pillow's below 14 and huggingface-hub's below
-# 3, widened for ComfyUI's environment (pillow 13.0.0, huggingface-hub 2.3.0): the library's tests
-# that touch them passed with pillow 13.0.0 and huggingface-hub 2.3.0 and 2.4.0 on 2026-11-05. The
-# CLI pins the versions it ships, its references made with them (apps/seedvr2x/pyproject.toml).
+# the floors' environment (AGENTS.md, Tests), on Python 3.12: torch 2.12.1 and torchvision 0.27.1,
+# the ComfyUI instance made for seedvr2x's tests (2026-11-13), a Comfy Desktop's versions where it
+# has the other packages (2026-11-12: numpy 2.2.6, Pillow 12.0.0, einops 0.8.0), huggingface-hub
+# at the 0.34.0 its transformers 4.57.3 takes (below 1.0), diffusers at the 0.39.0 that takes it
+# (0.40 takes 1.23 or later), safetensors at the 0.8.0 diffusers 0.39.0 takes, torchcodec at
+# 0.16.0, the first release with the image decoder the library imports (0.12.0, made for torch
+# 2.12, to 0.15.0 have none), its CPU build decoding under torch 2.12.1, and the others at the
+# CLI's pins; each cap below the next major version, but Pillow's below 14 and huggingface-hub's
+# below 3, widened for ComfyUI's environment (pillow 13.0.0, huggingface-hub 2.3.0): the library's
+# tests that touch them passed with pillow 13.0.0 and huggingface-hub 2.3.0 and 2.4.0 on 2026-11-05.
+# The CLI pins the versions it ships, its references made with them (apps/seedvr2x/pyproject.toml).
 # huggingface-hub pulls seedvr2x's own model files (DESIGN.md, Weights), its download held on each
 # line, 0.x, 1.x and 2.x (tests/test_pull_lines.py); pillow reads a still picture (DESIGN.md,
 # Still images); torchcodec decodes a 16-bit colour PNG, which Pillow cuts to 8 bits,
@@ -32,9 +34,9 @@ dependencies = [
     "pillow>=12.0.0,<14",
     "rotary-embedding-torch>=0.9.1,<1",
     "safetensors>=0.8.0,<1",
-    "torch>=2.13.0,<3",
+    "torch>=2.12.1,<3",
     "torchcodec>=0.16.0,<1",
-    "torchvision>=0.28.0,<1",
+    "torchvision>=0.27.1,<1",
 ]
 
 [build-system]

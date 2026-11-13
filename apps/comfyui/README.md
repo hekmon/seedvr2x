@@ -258,7 +258,7 @@ and from 2.0, `python -m pip install "diffusers>=0.42,<1"`.
 - **ComfyUI's packages stay as they are**: torch, torchvision, transformers, huggingface_hub,
   numpy, Pillow and einops are ComfyUI's. The library takes each from the version its tests pass
   with (the ranges are in [core/pyproject.toml](../../core/pyproject.toml)): Python 3.12, torch
-  2.13, torchvision 0.28, numpy 2.2.6, Pillow 12.0, einops 0.8.0, huggingface_hub 0.34 (the
+  2.12.1, torchvision 0.27.1, numpy 2.2.6, Pillow 12.0, einops 0.8.0, huggingface_hub 0.34 (the
   library's download runs on 0.34 to below 3), diffusers 0.39.0, safetensors 0.8.0. `--no-deps`
   keeps pip from upgrading any of them for the library, and the commands above find them
   already satisfied. One exception: diffusers needs safetensors 0.8 or later, which pip installs
@@ -273,7 +273,7 @@ and from 2.0, `python -m pip install "diffusers>=0.42,<1"`.
   command line's references, which its GPU tests compare outputs with bit for bit, are made with
   diffusers 0.40.0; another diffusers is not compared with them.
 - **Below these versions**: a ComfyUI whose huggingface_hub is older than 0.34, its diffusers
-  older than 0.39 or its torch older than 2.13 (Comfy Desktop offers torch from 2.9.1) is below
+  older than 0.39 or its torch older than 2.12.1 (Comfy Desktop offers torch from 2.9.1) is below
   what the library takes: `pip check` names those floors there, the nodes are not tested on it,
   and the install above would move ComfyUI's own packages (a huggingface_hub older than 0.34
   upgraded for diffusers 0.39.0, past transformers 4.x's range).

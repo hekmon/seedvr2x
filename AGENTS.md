@@ -298,8 +298,9 @@ beside it; the `__init__.py` is seedvr2x's.
   the references, with the measured reason said in its commit (DESIGN.md).
 - Two environments. The CLI's, the one shipped, on Python 3.13 with the lock's exact versions:
   every check and every suite runs there. The floors', on Python 3.12 with each of the library's
-  ranges at its floor (`core/pyproject.toml`: a Comfy Desktop's versions of 2026-11-12 where it
-  has the package, huggingface_hub at the 0.34.0 its transformers 4.57.3 takes, below 1.0, and
+  ranges at its floor (`core/pyproject.toml`: torch and torchvision the ComfyUI instance's made
+  for seedvr2x's tests, a Comfy Desktop's versions of 2026-11-12 where it has the others,
+  huggingface_hub at the 0.34.0 its transformers 4.57.3 takes, below 1.0, and
   diffusers at the 0.39.0 that takes it), made apart and never in the repository: the library's
   and the nodes' suites run there, the ranges being what the library promises another program's
   environment, ComfyUI's first (DESIGN.md, Repository and apps). Its making is in
@@ -415,8 +416,10 @@ beside it; the `__init__.py` is seedvr2x's.
   The nodes' install leaves it out (`apps/comfyui/README.md`, Install): the nodes read no file,
   and each TorchCodec wheel is built for one release of torch, which that install can't choose
   for every ComfyUI; pip check's one line of it there is expected. Its floor, 0.16.0, is the
-  release whose CPU build decodes under the floors' torch, 2.13.0+cpu (`tests/test_picture.py`
-  whole there, 2026-11-13); PyPI's 0.16.0 is CUDA's build, which asks for `libc10_cuda.so`.
+  first release with the image decoder the library imports (`torchcodec.decoders.decode_image`:
+  0.12.0, made for torch 2.12, to 0.15.0 have none), its CPU build decoding under the floors'
+  torch, 2.12.1+cpu, as under 2.13.0+cpu (`tests/test_picture.py` whole there, 2026-11-13);
+  PyPI's 0.16.0 is CUDA's build, which asks for `libc10_cuda.so`.
 - ffmpeg and ffprobe on PATH, 7.1 or later (for setparams' chroma_location), with zscale
   (libzimg), idet and ffv1: seedvr2x checks the build at startup and refuses to run without
   them, or without any other filter, encoder, decoder or muxer it uses (`media/ffmpeg.py`;
@@ -516,7 +519,7 @@ marker. The image server, Linux's alone by its lock, has no such line.
   uv pip install --python "$FLOORS" --resolution lowest-direct \
       --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple \
       --index-strategy unsafe-best-match -r core/pyproject.toml \
-      torch==2.13.0+cpu torchvision==0.28.0+cpu torchcodec==0.16.0+cpu \
+      torch==2.12.1+cpu torchvision==0.27.1+cpu torchcodec==0.16.0+cpu \
       pytest==9.1.1 gguf==0.19.0 ruff==0.16.10 av==17.0.0
   uv pip install --python "$FLOORS" --no-deps -e core
   ```
@@ -533,7 +536,12 @@ marker. The image server, Linux's alone by its lock, has no such line.
   workspace clearing whether the build has it or not. On 2026-11-13 (impl-nodes-8, Python 3.12.11,
   the environment on D:'s drvfs): the nodes' 453 passed in 2.9 minutes, the library's 2,307 passed
   and 65 skipped in 19.5 minutes, those two files' 7 cases then fixed and run again there (6 passed,
-  1 skipped); no failure came of Python 3.12 or of a floor.
+  1 skipped); no failure came of Python 3.12 or of a floor. Again with torch 2.12.1+cpu and
+  torchvision 0.27.1+cpu (impl-video-1, the same day): the library's 2,438 passed and 66 skipped
+  (`tests/test_memory.py`'s reading of the allocator among them) in 22.6 minutes, the nodes' 467
+  passed and one failed in 2.4, a test of their words lacking the library's new refusal class
+  (`tests/test_words.py`), fixed and its file run again there (52 passed); no failure came of a
+  floor.
 - The CLI's tests under pytest-xdist (a dev dependency of `apps/seedvr2x` alone, pinned; the image
   server's lock doesn't list it): each worker is a process of its own with its own basetemp
   (`popen-gwN`), the tests run on its main thread, and the workers share the controller's process
