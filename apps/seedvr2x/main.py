@@ -5162,7 +5162,7 @@ def _replan(record: "Manifest", prior: _Prior, shape: list[str]) -> None:
 
 # The option a setting's difference names beside its key, where the key alone would not say
 # which option to give or leave out: --deband's is written only when on (_settings), its line
-# `settings.deband: null -> "deband=blur=0"`.
+# `settings.deband: null -> "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0"`.
 SETTING_OPTIONS = {"deband": "--deband"}
 
 

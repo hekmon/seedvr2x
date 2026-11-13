@@ -46,8 +46,8 @@ DECODES = (
 
 # --deband's chains (Conversion.deband), their zscale bringing a limited and a full range to 16
 # bits before the filter, run on a gradient frame (_gradient), not the noise of _frame: deband
-# changed 0.32% of the output samples of the noise frame in a limited range and 2.3% in a full
-# one, and 77% and 88% of the gradient's (ffmpeg 9.0.2, 256x64 yuv420p, the chain with deband
+# changed 0.13% of the output samples of the noise frame in a limited range and 2.2% in a full
+# one, and 67% and 80% of the gradient's (ffmpeg 9.0.2, 256x64 yuv420p, the chain with deband
 # against the same without it, 2026-11-11), so a change in the filter moves this digest.
 DEBANDS = (
     Conversion("yuv420p", "709", "limited", "left", deband=True),
@@ -170,8 +170,8 @@ def _frame(pix_fmt: str) -> bytes:
 def _gradient(pix_fmt: str) -> bytes:
     """A yuv420p or yuvj420p frame, WIDTH x HEIGHT, of smooth ramps across, the kind of frame
     banding lives on: luma from 40 to 200 over the width, the chroma planes 100 to 140 and 140 to
-    100. Deterministic, 24 KiB. Deband changed 77% (limited) and 88% (full) of the samples
-    ffmpeg made of it, against 0.32% and 2.3% of _frame's noise (DEBANDS)."""
+    100. Deterministic, 24 KiB. Deband changed 67% (limited) and 80% (full) of the samples
+    ffmpeg made of it, against 0.13% and 2.2% of _frame's noise (DEBANDS)."""
     if pix_fmt not in ("yuv420p", "yuvj420p"):
         raise ValueError(f"no gradient frame in {pix_fmt}")
 

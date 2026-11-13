@@ -30,6 +30,9 @@ PICTURE = Record(
 )  # fmt: skip
 MOVIE = dataclasses.replace(PICTURE, video=Video(20, "maximum", True, True, cut_threshold="0.3"))
 
+# The CLI's DEBAND (record only carries the string).
+DEBAND = "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0"
+
 # What PICTURE's packet holds under seedvr2x's namespace, written out here, in order.
 FIELDS = [
     ("source_size", "4032x3024"),
@@ -150,11 +153,11 @@ def test_the_tags_hold_the_same_fields_prefixed() -> None:
 def test_a_video_read_through_a_deband_says_its_filter_and_one_read_plain_nothing() -> None:
     # --deband's filter as the frames were read through it, last, in the packet and the tags;
     # a video read without it writes no such field, the record of before it (MOVIE's above).
-    video = Video(20, "maximum", True, True, cut_threshold="0.3", deband="deband=blur=0")
+    video = Video(20, "maximum", True, True, cut_threshold="0.3", deband=DEBAND)
     debanded = dataclasses.replace(MOVIE, video=video)
     _, _, fields = read_xmp(debanded.xmp())
-    assert fields[-2:] == [("cut_threshold", "0.3"), ("deband", "deband=blur=0")]
-    assert debanded.tags() == [*MOVIE.tags(), ("seedvr2x_deband", "deband=blur=0")]
+    assert fields[-2:] == [("cut_threshold", "0.3"), ("deband", DEBAND)]
+    assert debanded.tags() == [*MOVIE.tags(), ("seedvr2x_deband", DEBAND)]
     assert not [name for name, _ in MOVIE.tags() if "deband" in name]
     assert not [name for name, _ in MOVIE.fields() if "deband" in name]
 

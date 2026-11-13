@@ -82,8 +82,9 @@ class Video:
     manifest), and its cuts: cut_threshold, the threshold they were detected at as the job's
     settings write it ("0.3"), or cuts_sha256, the SHA-256 of the list --cuts named
     (cuts_sha256()), one of the two; and deband, the filter the frames were read through
-    (--deband: "deband=blur=0", the CLI's DEBAND), None for frames read as they are, the field
-    then not written, as in every record before it."""
+    (--deband: "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0",
+    the CLI's DEBAND), None for frames read as they are, the field then not written, as in every
+    record before it."""
 
     window: int
     quality: str

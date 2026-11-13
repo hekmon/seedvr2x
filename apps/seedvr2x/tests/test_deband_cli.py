@@ -37,8 +37,8 @@ pytestmark = needs_ffmpeg
 
 # The plan's line of --deband (planner._deband_said), whole.
 LINE = (
-    "deband: on, ffmpeg's deband=blur=0 on every frame the job reads, at 16 bits before their"
-    " conversion to RGB (--deband); the shot detection reads the source as it is"
+    f"deband: on, ffmpeg's {DEBAND} on every frame the job reads, at 16 bits before"
+    " their conversion to RGB (--deband); the shot detection reads the source as it is"
 )
 
 # test_deband.py's banded clip at the stand-in's size, as many frames as test_cli_run.py's JOB
@@ -104,16 +104,22 @@ def test_the_setting_the_record_and_the_plan_say_it_only_when_on(
     assert upscale(tmp_path, banded, "out", *options, "--deband") == 0
     assert LINE in caplog.text
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
-    assert content["settings"]["deband"] == "deband=blur=0"
+    assert (
+        content["settings"]["deband"] == "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0"
+    )
     expected = recorded_tags(content, "64x48", "128x96")
-    assert expected["SEEDVR2X_DEBAND"] == "deband=blur=0"
+    assert (
+        expected["SEEDVR2X_DEBAND"] == "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0"
+    )
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
         tags = stream_tags_of(tmp_path / "out" / name)
         assert {key: tags.get(key) for key in expected} == expected, name
     assert upscale(tmp_path, banded, "x.mkv", *options, "--deband") == 0
     beside = json.loads((tmp_path / "x.mkv.manifest.json").read_text())
     tags = stream_tags_of(tmp_path / "x.mkv")
-    assert tags.get("SEEDVR2X_DEBAND") == "deband=blur=0"
+    assert (
+        tags.get("SEEDVR2X_DEBAND") == "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0"
+    )
     assert {key: tags.get(key) for key in recorded_tags(beside, "64x48", "128x96")} == (
         recorded_tags(beside, "64x48", "128x96")
     )
@@ -132,8 +138,16 @@ def test_the_setting_the_record_and_the_plan_say_it_only_when_on(
 @pytest.mark.parametrize(
     ("before", "after", "line"),
     [
-        ((), ("--deband",), 'settings.deband: null -> "deband=blur=0" (--deband)'),
-        (("--deband",), (), 'settings.deband: "deband=blur=0" -> null (--deband)'),
+        (
+            (),
+            ("--deband",),
+            f'settings.deband: null -> "{DEBAND}" (--deband)',
+        ),
+        (
+            ("--deband",),
+            (),
+            f'settings.deband: "{DEBAND}" -> null (--deband)',
+        ),
     ],
 )
 def test_a_resume_with_the_other_value_is_another_job_naming_the_option(

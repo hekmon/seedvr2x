@@ -171,7 +171,9 @@ says where the line falls).
 A source whose smooth gradients come in fine steps, most often dark shaded animation and
 near-black haze, can come out with those steps drawn as contour lines across the sky or the
 shadows: the steps of an 8-bit source, invisible there, are what the model sharpens.
-`--deband` smooths them first, with ffmpeg's deband at 16 bits on every frame the job reads;
+`--deband` smooths them first, with ffmpeg's deband (thresholds 0.012, no blur) at 16 bits on
+every frame the job reads; advised for animation with banded gradients, not for live action,
+whose dark scenes lose detail to it;
 the shots are still found on the source as it is ([the manual](MANUAL.md#banded-sources---deband)).
 Elsewhere it may take faint lines or fine gradients for banding, so it is never on by default.
 It is a setting of the job, which a resume repeats; a picture refuses it.

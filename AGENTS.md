@@ -830,8 +830,9 @@ marker. The image server, Linux's alone by its lock, has no such line.
 - `--deband` (DESIGN.md, Input, "Banded sources"; `media/conversion.py`'s `DEBAND`, `DEEP` and
   `Conversion.deband`): the reads' chain brings the frames to their 16-bit format by zscale (a
   limited range shifted, a full range scaled, exactly: swscale's full-range expansion is not),
-  runs `deband=blur=0` there and converts to RGB from that format; a conversion without it is
-  the chain of before, byte for byte. `tests/test_deband.py` holds the filter strings with and
+  runs `deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0` there (thresholds 0.012 on
+  all four, decided on 2026-11-11) and converts to RGB from that format; a conversion without it
+  is the chain of before, byte for byte. `tests/test_deband.py` holds the filter strings with and
   without it against main's literals, every planar format's 16-bit twin (yuv411p, yuv410p and
   yuv440p, which have none, refused naming `--deband`), the 16 bits exact (a full range's chroma
   centred, v * 257 - 128), a read with it equal
@@ -851,8 +852,8 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `tests/test_still_cli.py` a picture's refusal; `core/tests/test_record.py` the field. deband
   is among `ffmpeg.FILTERS`, so a build without it is refused. Its two chains, a limited and a
   full range, are a digest of their own (`media/fingerprint.py`'s `deband_fingerprint`, run on a
-  gradient frame that deband changes 77% and 88% of the samples of, where the noise frame the
-  conversions run on changed 0.32% and 2.3%), run and recorded by a job with `--deband` alone,
+  gradient frame that deband changes 67% and 80% of the samples of, where the noise frame the
+  conversions run on changed 0.13% and 2.2%), run and recorded by a job with `--deband` alone,
   under `environment.deband_conversions`, and counted in a resume's comparison and in an
   accepted change's record only between two jobs that both took it (`resume.DEBAND_KEY`,
   `debands`, as inductor's packages count between two compiled jobs): a change in ffmpeg's

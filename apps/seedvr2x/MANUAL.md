@@ -658,14 +658,20 @@ source leaves the steps as wide flat plateaus with hard borders, the grain that 
 taken off by its encoder.
 
 `--deband` smooths the steps before the model sees them: ffmpeg's own `deband` without its blur
-(`deband=blur=0`), on every frame the job reads, brought to 16 bits first so that the values it
-puts between two codes are kept, then converted to RGB as any read is. On that sky it brought
-the terraces under a plain bicubic upscale's, where ffmpeg's `gradfun` left lines by the edges;
-without its blur it left less speckle along the clouds' borders than with it, and kept most of
-the mountain's texture below. The model's input keeps that smoothing through its own casts and
-resize, whole in the dark tones where the banding was found: 99 to 101% of it on the study's
-scenes.
+and with its four thresholds at 0.012
+(`deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0`), on every frame the job reads,
+brought to 16 bits first so that the values it puts between two codes are kept, then converted
+to RGB as any read is. On that sky it brought the terraces under a plain bicubic upscale's, where
+ffmpeg's `gradfun` left lines by the edges; without its blur it left less speckle along the
+clouds' borders than with it, and kept most of the mountain's texture below. The thresholds are
+0.012, under ffmpeg's default of 0.02: on animation the eye could not choose between the two,
+and 0.012 moved 1.4 to 3.5% of the luma samples by more than an 8-bit code where 0.02 moved 3.8
+to 8.2%, keeping the fine shadows of a painted short. The model's input keeps that smoothing
+through its own casts and resize, whole in the dark tones where the banding was found: 99 to
+101% of it on the study's scenes.
 
+- **Advised for:** animation with banded gradients. Not for live action: its dark scenes lose
+  detail to it.
 - **Where it helps:** eight sources were scanned as the study's 540p re-encodes of them, the
   downscale and the encode making most of the bands, as they would in a low-resolution source:
   the banding found was in dark shaded animation and near-black haze with smooth gradients, and

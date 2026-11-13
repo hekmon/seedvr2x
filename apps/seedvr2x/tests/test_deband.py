@@ -48,7 +48,7 @@ PLAIN_RGB = (
 DEBANDED = (
     "format=yuv420p,zscale=threads=1:min=709:m=709:rin=limited:r=limited:cin=left:c=left"
     ":pin=unspecified:p=unspecified:tin=unspecified:t=unspecified:d=none:f=bilinear"
-    ",format=yuv420p16le,deband=blur=0,"
+    ",format=yuv420p16le,deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0,"
     "format=yuv420p16le,zscale=threads=1:min=709:rin=limited:cin=left:pin=unspecified"
     ":p=unspecified:tin=unspecified:t=unspecified:m=gbr:r=full:d=none:f=bilinear,format=gbrp16le"
 )
@@ -90,7 +90,7 @@ def test_without_deband_the_chain_is_the_one_of_before() -> None:
 
 
 def test_with_deband_the_frames_are_debanded_at_16_bits_before_rgb() -> None:
-    assert DEBAND == "deband=blur=0"
+    assert DEBAND == "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0"
     debanded = Conversion("yuv420p", "709", "limited", "left", deband=True)
     assert debanded.filters() == DEBANDED
     command = read_command(Path("in.mkv"), debanded, None, None, "pipe:3")

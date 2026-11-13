@@ -69,16 +69,21 @@ CHROMA_LOCATIONS = frozenset({"left", "center", "topleft", "top", "bottomleft", 
 # full-reference run was fed sources read with bilinear.
 KERNEL = "f=bilinear"
 
-# --deband's filter, ffmpeg's own, its other parameters at their defaults (DESIGN.md, Input,
-# "Banded sources"): on the user's dark animation's sky, at 16 bits, it brought the terraces
-# under the plain bicubic's, where gradfun left lines by the edges and a stronger deband turned a
-# dark mountain to speckle (impl-win-4, 2026-11-09); without its blur each of the four random
+# --deband's filter, ffmpeg's own, its thresholds 0.012 on all four planes and its other
+# parameters at their defaults (DESIGN.md, Input, "Banded sources"): on the user's dark
+# animation's sky, at 16 bits, it brought the terraces under the plain bicubic's, where gradfun
+# left lines by the edges and a stronger deband turned a dark mountain to speckle (impl-win-4,
+# 2026-11-09); without its blur each of the four random
 # references must be within the threshold, which by the edges changed 50% of the pixels against
 # the default's 69% and left 44% less speckle, the open sky within 4% of the default's, and the
 # user's eyes saw less noise by the clouds' edges (2026-11-10). It keeps nothing from one frame
 # to the next: a read by the reader's seek gave the frames of a longer read on five H.264
-# sources and an all-intra one, its threads its own or one (impl-box-1, impl-win-5).
-DEBAND = "deband=blur=0"
+# sources and an all-intra one, its threads its own or one (impl-box-1, impl-win-5). The
+# thresholds are 0.012, the default's 0.02 lowered (decided on 2026-11-11, the eyes' verdict on
+# animation): the eye could not choose between the two on it, 0.012 moving 1.4 to 3.5% of the
+# luma samples by more than an 8-bit code where 0.02 moved 3.8 to 8.2%, and the painted short
+# keeping its fine shadows.
+DEBAND = "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0"
 
 # The 16-bit format of each planar format --deband reads, of the same chroma subsampling, which
 # deband takes as it is: its in-between values kept, where the source's own format after it

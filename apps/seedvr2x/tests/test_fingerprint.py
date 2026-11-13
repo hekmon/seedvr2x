@@ -72,7 +72,7 @@ def test_the_deband_digest_moves_with_the_deband_chain_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plain, banded = fingerprint(), deband_fingerprint()
-    monkeypatch.setattr(conversion, "DEBAND", "deband=blur=0:1thr=0.2:2thr=0.2:3thr=0.2")
+    monkeypatch.setattr(conversion, "DEBAND", f"{conversion.DEBAND}:1thr=0.2:2thr=0.2:3thr=0.2")
     assert fingerprint() == plain
     assert deband_fingerprint() != banded
 
@@ -123,8 +123,8 @@ def _run(chain: Conversion, frame: bytes) -> "np.ndarray":
 def test_the_gradient_frame_is_one_deband_changes(
     pix_fmt: str, matrix: str, color_range: str, location: str
 ) -> None:
-    # Measured 2026-11-11 (ffmpeg 9.0.2): 77% of the samples of the limited range's chain
-    # and 88% of the full range's, against 0.32% and 2.3% on the noise frame. The floor is well
+    # Measured 2026-11-12 at 0.012 (ffmpeg 9.0.2): 67% of the samples of the limited range's chain
+    # and 80% of the full range's, against 0.13% and 2.2% on the noise frame. The floor is well
     # under the measure and far over the noise's.
     gradient = digests._gradient(pix_fmt)  # pyright: ignore[reportPrivateUsage]
     assert len(gradient) == digests.WIDTH * digests.HEIGHT * 3 // 2
