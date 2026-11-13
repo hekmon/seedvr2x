@@ -344,7 +344,8 @@ def decode_fp16(runner, ctx, latents, p3):
 
 
 def cmd_decode(a):
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")  # the CLI's default
+    # numz's inference_cli.py default, not seedvr2x's.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
     root = os.path.abspath(os.environ.get("SEEDVR2_DIR", os.getcwd()))
     if root not in sys.path:
         sys.path.insert(0, root)

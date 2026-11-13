@@ -37,8 +37,8 @@ Environment:
   VRAM_CAP_OTHER_GIB   default 0.3
   VRAM_CAP_MODE        ballast | fraction (default ballast)
 
-The CLI sets PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync unless it is already set; this
-wrapper imports torch first, so it applies the same default itself.
+numz's CLI (inference_cli.py) sets PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync unless it is
+already set; this wrapper imports torch first, so it applies the same default itself.
 
 Usage (cwd = the SeedVR2 checkout, its venv's python):
   VRAM_CAP_GIB=12 python vram_cap.py inference_cli.py <CLI args>
@@ -57,7 +57,8 @@ def log(msg):
 
 
 def setup():
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")  # the CLI's default
+    # numz's inference_cli.py default, not seedvr2x's.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
     n = float(os.environ["VRAM_CAP_GIB"])
     hidden = float(os.environ.get("VRAM_CAP_HIDDEN_GIB", "0.35"))
     other = float(os.environ.get("VRAM_CAP_OTHER_GIB", "0.3"))

@@ -20,6 +20,10 @@ import os
 import sys
 import time
 
+# The pool is what this probe reads (its trims, refusals and observer), so it takes it by default;
+# seedvr2x's CLI default is now torch's own allocator with expandable segments, and
+# cudaMallocAsync on Windows itself only (seedvr2x/memory.py, _default; DESIGN.md, Allocator,
+# "The pool where the driver refuses").
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
 
 import torch

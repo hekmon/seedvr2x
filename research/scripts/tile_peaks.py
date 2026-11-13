@@ -49,7 +49,9 @@ here has not run on a GPU: its measuring code is that driver's, moved. The passe
 the same in the seedvr2x this file came with (runtime/model.py's VAE passes, tilegrid.py's grid,
 tiling.py's two passes, shot_pass.py's encoder inputs, frames.py's padding). The allocator is
 cudaMallocAsync unless the environment names one (PYTORCH_CUDA_ALLOC_CONF), set before torch is
-imported: the one those peaks were measured under, and seedvr2x's own on a driver that refuses.
+imported: the pool, on purpose, the one those peaks were measured under (a rerun must reproduce
+them). seedvr2x's CLI default is now torch's own allocator with expandable segments, cudaMallocAsync
+on Windows itself only (seedvr2x/memory.py, _default).
 
 Brought up to the library on 2026-11-05: the shot's pass moved there on 2026-11-04, so that the
 encoder's inputs come from seedvr2x/shot_pass.py (encoder_inputs, unchanged by the move). The
@@ -110,7 +112,8 @@ def fits(side: int, pixels: int) -> tuple[float, float]:
 
 
 def run(args: argparse.Namespace) -> int:
-    # Before torch is imported; the environment's own setting stands.
+    # Before torch is imported; the environment's own setting stands. The pool, on purpose: the
+    # recorded peaks are its (see the docstring), not the CLI's current default.
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
 
     import numpy as np

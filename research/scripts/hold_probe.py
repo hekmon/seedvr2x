@@ -7,8 +7,12 @@ One process, one way of holding, a sequence of steps; every step's line is print
 at once, since a step may kill the process (a sticky CUDA error aborts it in a destructor).
 
 The ways (options, combined freely):
-  --allocator async|native   PYTORCH_CUDA_ALLOC_CONF's backend (async: cudaMallocAsync, the
-                             command line's default), set before torch is imported
+  --allocator async|native   PYTORCH_CUDA_ALLOC_CONF's backend, set before torch is imported
+                             (async: cudaMallocAsync; native: torch's own); none given, the
+                             command line's default (seedvr2x/memory.py, _default, since
+                             2026-11-12): native with expandable_segments:True, cudaMallocAsync
+                             on Windows itself. The runs hold.md and small-cards.md record name
+                             theirs (native, the segments among them)
   --gc FRACTION              native only: garbage_collection_threshold
   --split MIB                native only: max_split_size_mb, the size from which the allocator
                              no longer splits a block it has cached for a smaller request
@@ -139,11 +143,22 @@ import time
 SEEDS = (42, 43)
 
 
+def default_allocator(args: argparse.Namespace) -> None:
+    """No --allocator: the command line's own default (seedvr2x/memory.py, _default, since
+    2026-11-12), cudaMallocAsync on Windows itself, whose torch has no expandable segments, and
+    torch's own allocator with them elsewhere, a --conf given added after them."""
+    if args.allocator is not None:
+        return
+    args.allocator = "async" if sys.platform == "win32" else "native"
+    if args.allocator == "native" and "expandable_segments" not in (args.conf or ""):
+        args.conf = ",".join(each for each in ("expandable_segments:True", args.conf) if each)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dit", required=True)
     parser.add_argument("--vae", required=True)
-    parser.add_argument("--allocator", choices=("async", "native"), default="async")
+    parser.add_argument("--allocator", choices=("async", "native"))
     parser.add_argument("--gc", type=float)
     parser.add_argument("--split", type=int)
     parser.add_argument("--conf")
@@ -167,6 +182,7 @@ def main() -> int:
     parser.add_argument("--write-reference")
     parser.add_argument("--out")
     args = parser.parse_args()
+    default_allocator(args)
     conf = "backend:cudaMallocAsync" if args.allocator == "async" else "backend:native"
     if args.gc is not None:
         conf += f",garbage_collection_threshold:{args.gc}"

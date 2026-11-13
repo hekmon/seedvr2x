@@ -90,11 +90,16 @@ def allocator_conf(rest: list[str]) -> str:
     import argparse
 
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--allocator", choices=("async", "native"), default="async")
+    parser.add_argument("--allocator", choices=("async", "native"))
     parser.add_argument("--gc", type=float)
     parser.add_argument("--split", type=int)
     parser.add_argument("--conf")
     known, _ = parser.parse_known_args(rest)
+    # No --allocator: the command line's default, as hold_probe.py's default_allocator takes it.
+    if known.allocator is None:
+        known.allocator = "async" if sys.platform == "win32" else "native"
+        if known.allocator == "native" and "expandable_segments" not in (known.conf or ""):
+            known.conf = ",".join(e for e in ("expandable_segments:True", known.conf) if e)
     conf = "backend:cudaMallocAsync" if known.allocator == "async" else "backend:native"
     if known.gc is not None:
         conf += f",garbage_collection_threshold:{known.gc}"

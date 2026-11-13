@@ -13,8 +13,10 @@ statistics reset first, the DiT's and the VAE's weights on the card before it an
 tiling.encode_tiled, its latent returned in system memory, then tiling.decode_tiled of that
 latent; 21 frames of the source from --first, the tiles sharing 64 px; the two models loaded whole
 (seedvr2x/model.py, load_models, no plan); cudaMallocAsync unless the environment names an
-allocator (PYTORCH_CUDA_ALLOC_CONF), set before torch is imported. See tile_peaks.py's docstring
-for the squares (a T x T tile and a T x 192 one, fed on frames of T rows by T + 128 columns) and
+allocator (PYTORCH_CUDA_ALLOC_CONF), set before torch is imported: the pool on purpose, as
+tile_peaks.py's recorded peaks were measured under it (seedvr2x's CLI default is now torch's own
+allocator with expandable segments, cudaMallocAsync on Windows itself only: seedvr2x/memory.py,
+_default). See tile_peaks.py's docstring for the squares (a T x T tile and a T x 192 one, fed on frames of T rows by T + 128 columns) and
 the tiles cut off at the picture's edge (1080p padded to 1104 x 1920, 720p to 752 x 1280).
 
 Beyond tile_peaks.py, `run` takes:
@@ -172,7 +174,8 @@ def step_name(kind: str, res: str | None, side: int | None) -> str:
 
 
 def run(args: argparse.Namespace) -> int:
-    # Before torch is imported; the environment's own setting stands.
+    # Before torch is imported; the environment's own setting stands. The pool, on purpose
+    # (docstring).
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
 
     import numpy as np

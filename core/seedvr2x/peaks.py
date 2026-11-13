@@ -412,8 +412,10 @@ TILE_STEP = 64
 # allocator, and takes no margin on top (shot_plan._Job.margin; DESIGN.md,
 # Allocator, 2026-10-12). The planner's, here so that the library's plan for one picture
 # (still_plan.py) takes the same. Measured under cudaMallocAsync, taken unchanged under torch's
-# own allocator with expandable segments, the default there since 2026-11-12 (memory.startup):
-# PROVISIONAL until measured under them.
+# own allocator with expandable segments, the default there since 2026-11-12 (memory.startup),
+# and held under them on the 96 GB card (impl-box-4, 2026-11-13; DESIGN.md, Allocator, decided
+# that day): the cards emulated from 8 to 48 GB at 1080p and 4K ran every step at or under its
+# plan with no out of memory, and so did 8 runs held beside a desktop.
 MARGIN = round(0.6 * GIB)
 
 # The room every VAE pass, encode or decode, tiled or not, must leave under the budget besides
@@ -434,7 +436,10 @@ MARGIN = round(0.6 * GIB)
 # memory_limit_conv's concatenation, which the one-output convolution spares most of them
 # (MEASURED). Measured under cudaMallocAsync, taken unchanged under torch's own allocator with
 # expandable segments where the driver refuses, the default there since 2026-11-12
-# (memory.startup): PROVISIONAL until measured under them.
+# (memory.startup), and held under them on the 96 GB card (impl-box-4, 2026-11-13; DESIGN.md,
+# Allocator, decided that day): every step of the cards emulated from 8 to 48 GB at or under
+# its plan, no out of memory, the regression's frames those of the references made under the
+# pool.
 VAE_ROOM = round(1.25 * GIB)
 
 # The VAE passes' room at the plan's last rung (shot_plan.plan, "the floor"): the reserve floor of

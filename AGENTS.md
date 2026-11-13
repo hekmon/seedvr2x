@@ -1222,14 +1222,17 @@ marker. The image server, Linux's alone by its lock, has no such line.
   the checks), the hold's warning then the share's line (`shared_line`), the finding at debug; a
   card nothing else uses: a refusing driver's plans, no limit and no check, one INFO line
   (`ALONE`) naming the allocator, torch's own with expandable segments by default there too, in
-  cudaMallocAsync's place (PROVISIONAL, DESIGN.md, Allocator, decided on 2026-11-12: the 96 GB
-  card's pool refused a 167-latent window's 31.65 GiB piece that the segments gave; the plan
-  matrix unmoved; cudaMallocAsync stays Windows itself's, `memory._default` the one place that
+  cudaMallocAsync's place (DESIGN.md, Allocator, decided on 2026-11-12 and, measured by
+  impl-box-4, on 2026-11-13: the 96 GB card's pool refused a 167-latent window's 31.65 GiB piece
+  that the segments gave, and its pieces of 20 to 32 GiB at every pin from 10 to 36 blocks
+  swapped; the cards emulated from 8 to 48 GB ran every step at or under its plan under the
+  segments; the plan matrix unmoved; cudaMallocAsync stays Windows itself's, `memory._default` the one place that
   says so, for the start and a resume's early reading alike, and `tests/test_split.py`'s driver
   sets the platform's default); a driver behind WSL2's device found to refuse names the allocator
   in its line too; the image server sets the segments itself, as before, and the nodes take
   ComfyUI's allocator as it is, a card ComfyUI alone uses planned as before. `watched` stays a
-  held run's: whether an unheld run under the segments is watched is design's question.
+  held run's (decided on 2026-11-13: an unheld run recovers from 3 to 930 refused 20-MiB
+  mappings a run, every one, no step past its plan).
   A resume's early reading takes the share too (`memory.early`). The plan's held card line, the
   CLI's and a picture's (`still_plan.said`), ends `the card shared: ...` (`held_why`), the CLI's
   refusal of GPU memory says `shared: ...` and keeps the driver's figures (the card's there), and

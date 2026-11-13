@@ -44,7 +44,7 @@ SIZE = 720 | 1080 | 1440 | 2160 (16:9 output) or WxH, padded up to multiples of 
 (1080 -> 1920x1088). Model (vram.md, 7B fp16, flash_attn_2): peak = 16.05 GiB + 128.5 KiB x
 tokens (VAE resident; 0.47 GiB less with --no-vae), time = 0.231 ms x tokens (a fast session).
 
-Environment: SEEDVR2_DIR (the numz checkout, default: cwd). The allocator default of the CLI
+Environment: SEEDVR2_DIR (the numz checkout, default: cwd). The allocator default of numz's CLI
 (PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync) is applied before torch is imported.
 
 Usage (cwd = the SeedVR2 checkout, its venv's python; GPU commands under the shared GPU lock):

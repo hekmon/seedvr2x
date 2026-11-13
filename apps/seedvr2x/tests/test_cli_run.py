@@ -1754,8 +1754,8 @@ def test_a_card_no_other_program_uses_under_linux_s_driver_is_not_held(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The same job on a card nothing else uses (library_fixtures' share): torch's own allocator
-    # with its segments (PROVISIONAL, DESIGN.md, Allocator, decided on 2026-11-12), no limit, the
-    # plan of a driver that refuses, the start saying so.
+    # with its segments (DESIGN.md, Allocator, decided on 2026-11-13), no limit, the plan of a
+    # driver that refuses, the start saying so.
     caplog.set_level(logging.INFO)
     monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
     limits = shared_card(monkeypatch, FREE)

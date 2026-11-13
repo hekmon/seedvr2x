@@ -105,8 +105,10 @@ only (and --history's).
 --allocator CONF: torch's allocator for every run of the study, its units' and its rungs', as
 seedvr2x is given it, the PYTORCH_CUDA_ALLOC_CONF of the run's process (backend:native,
 expandable_segments:True, torch's own allocator with expandable segments; 2026-10-18); without
-it the environment's, else seedvr2x's own default (cudaMallocAsync where the driver refuses what
-the card can't hold). Each rung records the setting it ran under, and the queue says it."""
+it the environment's, else seedvr2x's own default (torch's own allocator with expandable
+segments, cudaMallocAsync on Windows itself, since 2026-11-12: seedvr2x/memory.py, _default;
+before it, cudaMallocAsync where the driver refuses what the card can't hold). Each rung records
+the setting it ran under, and the queue says it."""
 
 import argparse
 import calendar

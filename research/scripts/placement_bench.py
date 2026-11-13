@@ -38,8 +38,9 @@ known by the SHA-256 of its bytes; forward i of a step takes seed 42 + i.
 SIZE = 720 | 1080 | 2160 (16:9 output) or WxH, padded as seedvr2x pads it (seedvr2x/frames.py,
 padded_size: 1920x1080 to 1920x1104, a latent of 138 x 240, 8,280 tokens).
 
-The CLI's allocator default (PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync, main.py) is applied
-before torch is imported.
+The CLI's allocator default (seedvr2x/memory.py, _default: torch's own allocator with expandable
+segments, cudaMallocAsync on Windows itself) is applied before torch is imported, unless
+PYTORCH_CUDA_ALLOC_CONF is set; the record's `allocator` field says which.
 
 Usage (seedvr2x's venv python; under the GPU's lock):
   python placement_bench.py matrix --dit DIT.safetensors --vae VAE.safetensors \
@@ -58,7 +59,15 @@ import sys
 import threading
 import time
 
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")  # the CLI's default
+# The CLI's default since 2026-11-12 (seedvr2x/memory.py, _default): cudaMallocAsync on Windows
+# itself, torch's own allocator with expandable segments elsewhere (literals: torch must not be
+# imported yet).
+os.environ.setdefault(
+    "PYTORCH_CUDA_ALLOC_CONF",
+    "backend:cudaMallocAsync"
+    if sys.platform == "win32"
+    else "backend:native,expandable_segments:True",
+)
 
 GIB = 1024**3
 # The DiT's peak (7B fp16) by DESIGN.md's fit, for the guard only: 15.87 GiB with every weight on

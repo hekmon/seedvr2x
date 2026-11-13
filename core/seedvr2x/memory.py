@@ -20,7 +20,7 @@ that refuses, and nothing is held. Given, it is one that spills, as is, unasked,
 reports more free to the process than the whole card has; and seedvr2x holds itself to the
 card's memory by its own means:
 - torch's own allocator (startup), its segments expandable, the default but on Windows itself,
-  held or not since 2026-11-12 (PROVISIONAL where the driver refuses: startup)
+  held or not since 2026-11-12, where the driver refuses too since 2026-11-13 (startup)
   (EXPANDABLE): it counts every byte it has from the driver, its cache included, where
   cudaMallocAsync's pool keeps memory torch's limit doesn't see (2.0 to 2.6 GiB of it at 11
   latents at 1080p); and with expandable segments a step short of room under that limit
@@ -300,7 +300,7 @@ ASYNC, NATIVE = "backend:cudaMallocAsync", "backend:native"
 #   80.9; torch holding 22.1 GiB at the most at its checks where 25.2, the card never under
 #   4.27 GiB free where 0.96.
 # PROVISIONAL (implementation, 2026-10-13): one card, one driver, one version of torch. Taken on
-# a driver that refuses too since 2026-11-12, PROVISIONAL again there (startup).
+# a driver that refuses too since 2026-11-12, decided there on 2026-11-13 (startup).
 EXPANDABLE = f"{NATIVE},expandable_segments:True"
 # The three ways a held run's allocator is told apart by the plan's reserve (peaks.reserve):
 # torch's own with expandable segments (the default but on Windows itself), torch's own without
@@ -788,8 +788,8 @@ def startup() -> str:
     2026-11-12); held as under WSL2, torch's own allocator with
     expandable segments by default, torch limited, each step's reserve by that allocator and
     every unit checked. A card nothing else uses keeps the plans of a driver that refuses, no
-    limit and no check, under EXPANDABLE too (PROVISIONAL, below), said at INFO with the
-    allocator. The share is said in a warning after what seedvr2x does, the whole
+    limit and no check, under EXPANDABLE too (decided on 2026-11-13, below), said at INFO with
+    the allocator. The share is said in a warning after what seedvr2x does, the whole
     finding at debug.
 
     On Windows itself the driver is taken for one that lends, unasked (design's ruling for the
@@ -854,15 +854,19 @@ def startup() -> str:
     given = next((os.environ[name] for name in VARIABLES if name in os.environ), None)
     # On Windows torch has no expandable segments (_allocator): cudaMallocAsync, whose pool each
     # step's reserve counts (peaks.reserve), rather than torch's own allocator without them.
-    # Elsewhere torch's own with the segments, held or not (_default). PROVISIONAL (DESIGN.md,
-    # Allocator, decided on 2026-11-12, to be measured on the 96 GB card before it stands): where
-    # the driver refuses too, cudaMallocAsync before it, which on the 96 GB card (Linux's driver,
-    # headless, impl-box-3, 2026-11-11 and 12) refused a 167-latent window's calibration its
-    # 31.65 GiB piece (the MLP's intermediate for 1.38 M tokens) after trimming its pool 31 times,
-    # a plan 0.07 GiB under its budget; under the segments the same plan's calibration ran, torch
-    # recovering from 137 refused 20-MiB mappings. The plans don't move: a run not held plans as a
-    # driver that refuses does (Reading: PLAIN, no reserve beyond the planner's margin, no limit,
-    # no check).
+    # Elsewhere torch's own with the segments, held or not (_default), where the driver refuses
+    # too (DESIGN.md, Allocator, "The pool where the driver refuses", decided on 2026-11-13):
+    # cudaMallocAsync before it, which on the 96 GB card (Linux's driver, headless) refused a
+    # 167-latent window's calibration its 31.65 GiB piece (the MLP's intermediate for 1.38 M
+    # tokens) after trimming its pool 31 times, a plan 0.07 GiB under its budget (impl-box-3,
+    # 2026-11-11 and 12), and that window at every pin from 10 to 36 blocks swapped, up to
+    # 10.57 GiB under the budget, its pieces of 20 to 32 GiB refused once it had filled the card
+    # (impl-box-4, 2026-11-13). The segments ran it on the defaults' plan, 0.50 GiB reserved over
+    # its allocated peak; the cards emulated from 8 to 48 GB ran every step at or under its plan,
+    # with no out of memory, the DiT's windows 8.6 to 21% faster where blocks swap, and the
+    # regression's cases passed against references made under the pool. The plans don't move: a
+    # run not held plans as a driver that refuses does (Reading: PLAIN, no reserve beyond the
+    # planner's margin, no limit, no check).
     chosen = _default()
     if given is None and chosen == ASYNC and _torch_loaded():
         # torch parsed the allocator's backend as it was loaded, and its CUDA refuses another at
@@ -965,7 +969,7 @@ def _default() -> str:
     """The allocator's setting a run takes where the environment gives none (startup, early):
     cudaMallocAsync on Windows itself, whose torch has no expandable segments, its pool counted
     beside each step (peaks.reserve); torch's own with them everywhere else (EXPANDABLE), held or
-    not, PROVISIONAL where the driver refuses (startup)."""
+    not, where the driver refuses too since 2026-11-13 (startup)."""
     return ASYNC if windows() else EXPANDABLE
 
 
@@ -1034,9 +1038,10 @@ def watched(device: Any, unit: str, output: str) -> Generator[None]:
     one that doesn't says nothing either way. Nothing elsewhere: a driver that refuses isn't
     held, and under cudaMallocAsync, or an allocator of the environment's, torch counts no
     refused allocation (DESIGN.md, Memory planner). An unheld run under torch's own allocator,
-    the default where the driver refuses since 2026-11-12, counts them but isn't watched: that
-    is design's to decide. Nothing said of a unit that raises: its
-    error is the run's."""
+    the default where the driver refuses, counts them but isn't watched (DESIGN.md, Allocator,
+    decided on 2026-11-13): such a run on the 96 GB card recovered from 3 to 930 refused 20-MiB
+    mappings a run, every one, no step past its plan (impl-box-4), so that a warning there would
+    say nothing of its frames. Nothing said of a unit that raises: its error is the run's."""
     if not (_spills and _native):
         yield
         return

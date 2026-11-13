@@ -39,7 +39,8 @@ import time
 from pathlib import Path
 
 GIB = 1024 ** 3
-CLI_DEFAULT_ALLOC_CONF = "backend:cudaMallocAsync"  # inference_cli.py setdefault()s it
+# numz's inference_cli.py setdefault()s it: numz's CLI default, not seedvr2x's.
+CLI_DEFAULT_ALLOC_CONF = "backend:cudaMallocAsync"
 PHASE_NAMES = {1: "VAE encode", 2: "DiT", 3: "VAE decode", 4: "Post-processing"}
 
 

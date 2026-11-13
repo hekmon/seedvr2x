@@ -33,7 +33,8 @@ def _tensors(m):
 
 
 def install():
-    # the allocator backend is fixed when torch is imported: apply the CLI's default first
+    # the allocator backend is fixed when torch is imported: apply numz's inference_cli.py
+    # default first
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
     import torch
     orig = torch.nn.Module.to

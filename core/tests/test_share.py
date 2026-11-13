@@ -313,7 +313,7 @@ def test_a_card_no_other_program_uses_takes_the_segments_unheld_and_says_so(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, named: None
 ) -> None:
     # torch's own allocator with expandable segments where the driver refuses too, in
-    # cudaMallocAsync's place (PROVISIONAL: DESIGN.md, Allocator, decided on 2026-11-12), the run
+    # cudaMallocAsync's place (DESIGN.md, Allocator, decided on 2026-11-13), the run
     # neither limited nor checked, the start's line naming the allocator.
     caplog.set_level(logging.DEBUG, logger=memory.logger.name)
     assert start(monkeypatch, Listing()) == HELD

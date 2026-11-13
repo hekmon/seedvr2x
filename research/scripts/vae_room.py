@@ -878,7 +878,10 @@ def launch(args: argparse.Namespace) -> int:
         shutil.copytree(args.seed_dir, out)
         say(f"{args.seed_dir} copied to {out}: the run resumes it")
 
-    # As vram_cap.py and seedvr2x's own start have it, before torch is imported.
+    # Before torch is imported. The pool, on purpose: this study reads its trims and its reserved
+    # bytes, and its recorded results are the pool's. seedvr2x's CLI default is now torch's own
+    # allocator with expandable segments, cudaMallocAsync on Windows itself only
+    # (seedvr2x/memory.py, _default); the environment's own setting stands.
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     if args.card != "bare":

@@ -73,8 +73,8 @@ Subcommands:
            backend eager and fullgraph on a small VAE with no graph break
 
 The allocator is chosen as seedvr2x's CLI chooses it, before torch is imported
-(seedvr2x/memory.py, startup: cudaMallocAsync, or expandable segments where the driver spills, as
-WSL2's does), unless PYTORCH_CUDA_ALLOC_CONF is set. ffmpeg and ffprobe on PATH for --clip. The
+(seedvr2x/memory.py, startup: torch's own allocator with expandable segments, cudaMallocAsync on
+Windows itself), unless PYTORCH_CUDA_ALLOC_CONF is set. ffmpeg and ffprobe on PATH for --clip. The
 GPU is one job's at a time: run under the shared GPU lock.
 
 Usage (seedvr2x's venv's python):
@@ -107,14 +107,20 @@ from pathlib import Path
 def _choose_allocator():
     """The allocator seedvr2x's CLI would choose, set before torch is imported: its own startup
     (it asks the driver whether it refuses what the card can't hold), unless the environment has
-    a setting; cudaMallocAsync, the CLI's default, where seedvr2x can't be imported yet."""
+    a setting; where seedvr2x can't be imported yet, the CLI's default as memory._default has
+    it (cudaMallocAsync on Windows itself, torch's own allocator with expandable segments
+    elsewhere)."""
     try:
         from seedvr2x import memory
 
         memory.startup()
     except Exception as error:  # noqa: BLE001 - the harness runs anywhere the venv does
-        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
-        print(f"[compile_vae] memory.startup() unavailable ({error!r}): cudaMallocAsync",
+        fallback = (
+            "backend:cudaMallocAsync" if sys.platform == "win32"
+            else "backend:native,expandable_segments:True"
+        )
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", fallback)
+        print(f"[compile_vae] memory.startup() unavailable ({error!r}): {fallback}",
               file=sys.stderr)
 
 

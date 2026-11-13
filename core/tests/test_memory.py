@@ -632,7 +632,7 @@ def test_a_linux_driver_is_asked_nothing(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # No WSL2 device: the driver refuses, as Linux's does: not asked, and DESIGN.md's allocator,
-    # torch's own with expandable segments there too (PROVISIONAL, decided on 2026-11-12), the
+    # torch's own with expandable segments there too (decided on 2026-11-13), the
     # run neither limited nor checked, its plan a refusing driver's.
     caplog.set_level(logging.INFO)
     asked: list[str] = []
@@ -741,7 +741,7 @@ def test_a_driver_that_refuses_behind_wsl_changes_nothing(
     assert [record.levelname for record in caplog.records] == ["INFO"]
     assert caplog.messages[0].startswith("the GPU's driver refuses what the card can't hold")
     # The allocator named, as a lone Linux card's line names it: torch's own with its segments
-    # where the driver refuses too (PROVISIONAL, decided on 2026-11-12).
+    # where the driver refuses too (decided on 2026-11-13).
     assert caplog.messages[0].endswith("; torch's own allocator with expandable segments")
 
 
@@ -1277,8 +1277,8 @@ def test_an_empty_setting_is_no_setting(
     # limit and the card's room.
     with pytest.raises(torch.OutOfMemoryError, match="torch's pool holds" if warned else None):
         memory.check("cuda:0")
-    # On a driver that refuses: the default there (torch's own with its segments, PROVISIONAL
-    # since 2026-11-12), or the user's own, and nothing said.
+    # On a driver that refuses: the default there (torch's own with its segments since
+    # 2026-11-12, decided on 2026-11-13), or the user's own, and nothing said.
     for name in memory.VARIABLES:
         monkeypatch.delenv(name, raising=False)
     for name, value in variables.items():
