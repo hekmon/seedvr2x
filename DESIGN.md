@@ -526,13 +526,36 @@ seedvr2x/                the repository
       held to the command line's frames; the source's other streams copied packet for packet,
       as the command line's assembly copies them (Output); seedvr2x Cuts reading a VIDEO the
       same way. A VIDEO with no file of its own (Create Video's, a concatenation) is taken
-      whole, as frames are today, under the same RAM plan. To settle at the pass's start: Crop
-      Video's crop (ComfyUI keeps it private), a trimmed VIDEO's audio (a copy cuts at its
-      packets), a temp folder that grows by a file a run, and whether Upscale Video keeps an
-      input of frames beside the VIDEO.
-    - No node saves: the nodes give ComfyUI's image, float32, which ComfyUI's savers or others
-      write; a 16-bit PNG with seedvr2x's record is the CLI's. Writing no file, the nodes
-      carry no record ([The record in each output](#the-record-in-each-output)).
+      whole, as frames are today, under the same RAM plan. Upscale Video takes and gives a
+      VIDEO alone, with no input or output of frames (the user, the same day): a generation's
+      frames enter through Create Video and leave through Get Video Components. Its file
+      carries seedvr2x's record, as every output does (The record in each output). To settle
+      at the pass's start: Crop Video's crop (ComfyUI keeps it private), a trimmed VIDEO's
+      audio (a copy cuts at its packets), a temp folder that grows by a file a run, and the
+      rate the VIDEO passes on (libavformat reads a Matroska file's 60000/1001 as 19001/317:
+      Input, the frame rate). Built on 2026-11-13 (impl-video-1), the first half:
+      - the conversion a brick of the library (`seedvr2x/yuv.py`): the command line's table of
+        formats, matrices and sitings, its guesses and its refusals moved there, the command
+        line taking them with its own words; `to_rgb` converting as zimg does, in float32, a
+        frame at a time, held to the command line's frames through zscale on 115 cases of
+        every format, depth, range, matrix and siting it reads: no sample more than one 16-bit
+        code off, 0.14% one off; a frame whose sides its subsampling doesn't divide refused,
+        as zimg refuses it (Input);
+      - the file's planes a brick of the library (`yuv.master_planes`), the file written
+        through PyAV a shot at a time into one open file (`apps/comfyui/master.py`), no node
+        writing it yet and no record in it yet: its planes read back bit for bit by PyAV 17
+        and 19 and by ffmpeg, its tags read back as written, its RGB within two 16-bit codes
+        of the RGB given (0.29% of the samples two off), the format's own: 16-bit limited YCbCr
+        spans 56,064 codes of luma and 57,344 of chroma for RGB's 65,535;
+      - PyAV a dev dependency of the command line's environment (19.0.2) and in the floors'
+        (17.0.0, ComfyUI 0.45.3's own floor), never the library's or the shipped environment's:
+        imported into the command line's test process, it hung the command line's first pass
+        under pytest (the cause not isolated), so those tests decode with it in a process of
+        their own.
+    - No node saves: Upscale Image gives ComfyUI's image, float32, which ComfyUI's savers or
+      others write, and Upscale Video its VIDEO, which Save Video copies or re-encodes; a 16-bit
+      PNG with seedvr2x's record is the CLI's. Writing no file, Upscale Image carries no record;
+      Upscale Video's file carries it ([The record in each output](#the-record-in-each-output)).
   - **Refusals by kind** (the user, 2026-11-05): the library raises a refusal as an exception
     class of its kind carrying its facts (the phase, what it needs, what the card has, the
     smaller files that would fit), and each app words it and its way out: the CLI with its
@@ -671,12 +694,16 @@ seedvr2x/                the repository
     huggingface_hub 1.x alone and failed under 0.36; and a seed from the user's generation
     workflow, past seedvr2x's range, was refused. Built on 2026-11-13 (impl-nodes-8):
     - the library on Python 3.12 and later (3.14 untested), each range's floor a version its
-      suites pass with: torch 2.13.0, torchvision 0.28.0, numpy 2.2.6, Pillow 12.0.0 and einops
-      0.8.0 (Comfy Desktop's), huggingface_hub 0.34.0 (transformers 4.57's own floor),
-      diffusers 0.39.0 (the newest that takes huggingface_hub below 1.0), safetensors 0.8.0
-      (diffusers 0.39.0's own floor), TorchCodec 0.16.0 (torch 2.13's), omegaconf 2.3.1 and
-      rotary-embedding-torch 0.9.1 (the command line's pins); the caps as before. The command
-      line's environment, the one shipped, stays as it was: Python 3.13 and its lock;
+      suites pass with: torch 2.12.1 and torchvision 0.27.1 (the user's ComfyUI made for
+      seedvr2x's tests; Comfy Desktop's 2.13.0 and 0.28.0 until impl-video-1 lowered them the
+      same day), numpy 2.2.6, Pillow 12.0.0 and einops 0.8.0 (Comfy Desktop's),
+      huggingface_hub 0.34.0 (transformers 4.57's own floor), diffusers 0.39.0 (the newest
+      that takes huggingface_hub below 1.0), safetensors 0.8.0 (diffusers 0.39.0's own floor),
+      TorchCodec 0.16.0 (the first release with the image decoder the library imports: 0.12.0,
+      made for torch 2.12, to 0.15.0 have none; its CPU build decodes under torch 2.12.1),
+      omegaconf 2.3.1 and rotary-embedding-torch 0.9.1 (the command line's pins); the caps as
+      before. The command line's environment, the one shipped, stays as it was: Python 3.13
+      and its lock;
     - two test environments: the command line's, where every suite runs, and the floors' (its
       command in AGENTS.md, Tests), where the library's and the nodes' suites run at the end of
       a baton that moves a range;
@@ -693,9 +720,7 @@ seedvr2x/                the repository
       whose folded seed still takes a later shot's seed past the range is refused, naming
       both seeds (a fold that hung on the cut list would move every shot's noise with the
       cuts); the command line still refuses a seed past the range;
-    - left: torch's and torchvision's floors lowered to 2.12.1 and 0.27.1, the versions of the
-      user's ComfyUI made for seedvr2x's tests, once the floors' suites pass there (the nodes'
-      next baton); the nodes' versions against the references on the GPU
+    - left: the nodes' versions against the references on the GPU
       ([To measure](#to-measure), the nodes' versions).
 - **The front README:** short, there to catch a visitor long enough to send them on to the
   app's README (the user, 2026-11-02). A line saying what seedvr2x does; a picture of the best
@@ -1585,6 +1610,13 @@ Decoding goes through an ffmpeg pipe:
     follows, which keeps 11 significant bits.
   - zscale must be fed planar RGB: given packed RGB, ffmpeg puts swscale in front of it, which
     then does the expansion.
+  - zimg refuses a frame whose sides its chroma subsampling doesn't divide (an odd width or
+    height at 4:2:0, a width not a multiple of 4 at 4:1:1), and a run then failed with the
+    reader's "ffmpeg's frames end before frame 0", which names no cause (impl-video-1's
+    review, 2026-11-13). Decided that day: such a source is refused at the start, naming its
+    size and its subsampling, with the lossless remake that crops it to the subsampling's
+    multiple; the library's conversion refuses it already (`yuv.to_rgb`, built that day), the
+    command line's refusal to build.
 - colour tags read per property from the stream and from the first decoded frame: ffmpeg
   gives the stream the container's primaries, transfer and matrix as a group as soon as the
   container declares one of them, and its range or chroma location each when declared
@@ -2974,7 +3006,8 @@ holds nothing personal.
   not Matroska's), and the record is still written. A job re-planned on a resume
   (`--accept-env-change`) says so (`replanned`), its values the manifest's for the job, each
   unit's own in the manifest. A PNG directory's frames carry none: the directory's manifest
-  holds the record.
+  holds the record. Upscale Video's file in ComfyUI carries the same tags, its app
+  `seedvr2x-comfyui` (decided on 2026-11-13, the nodes' next pass writing a file; to build).
   The source's video tags stay dropped, its language and title aside (`media/assembly.py`,
   `VIDEO_TAGS`): they describe an encode that seedvr2x's redraw replaces (the user). sptenc,
   the masters' usual next step, keeps its input's stream tags by ffmpeg's default copy unless
@@ -5819,7 +5852,7 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   Other window layouts were modelled on the 12 cut lists: none pays more than the balanced
   windows, and none has fewer lengths.
 - **The nodes' versions on the GPU** (see [Repository and apps](#repository-and-apps), the
-  nodes' install). The library at its floors (diffusers 0.39.0 and torch 2.13.0 today), as
+  nodes' install). The library at its floors (diffusers 0.39.0 and torch 2.12.1 today), as
   ComfyUI's environments run it, against the references, made in the command line's
   environment (diffusers 0.40.0, torch 2.14.1): the same bits, or how close. Only the CPU
   suites ran there (impl-nodes-8, 2026-11-13). Before v0.2.0's publication, which lists the
