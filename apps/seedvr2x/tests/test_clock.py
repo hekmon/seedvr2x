@@ -407,7 +407,8 @@ def test_the_spent_time_is_said_in_the_walls_seconds(
     paced(0.9)
     monkeypatch.setattr(run, "time", SimpleNamespace(monotonic=lambda: 110.0))
     monkeypatch.setattr(run.torch.cuda, "max_memory_allocated", lambda device: 2 * 1024**3)
-    assert run._spent(SimpleNamespace(device="cpu"), 0.0) == (  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+    monkeypatch.setattr(run.torch.cuda, "max_memory_reserved", lambda device: 3 * 1024**3)
+    assert run._spent(SimpleNamespace(device="cpu"), 0.0, "shot 1/1's decode") == (  # pyright: ignore[reportPrivateUsage,reportArgumentType]
         "99.0 s, VRAM peak 2.00 GiB"
     )
 

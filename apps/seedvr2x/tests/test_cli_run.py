@@ -263,6 +263,7 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     patch(torch.backends.cudnn, "version", lambda: None)
     patch(torch.cuda, "reset_peak_memory_stats", lambda device: None)
     patch(torch.cuda, "max_memory_allocated", lambda device: 0)
+    patch(torch.cuda, "max_memory_reserved", lambda device: 0)
     # The planner's budget: the free memory's reading as the command line takes it
     # (cli._free_memory), its first tensor and its warm-up on the stand-in's device, the driver's
     # figures the stand-in's; the system memory available a figure of its own, not this
@@ -901,6 +902,54 @@ def test_the_system_memory_the_plan_counts_on_is_logged_at_debug(
     monkeypatch.setattr(cli, "_host_available", lambda: None)
     assert upscale(tmp_path, source_path, "none.mkv", *JOB[:4]) == 0
     assert "the system memory available was not read: the plan counts on none" in caplog.text
+
+
+def test_each_step_s_vram_peaks_are_logged_in_bytes_at_debug(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Beside each unit's line, its VRAM peak in GiB to two decimals, the step's allocated and
+    # reserved peaks in bytes at debug (run._spent), for every encode, DiT window and decode, so
+    # that a measure against the plan needs no rounding (impl-wsl2-1's 960-px decodes read 3 to
+    # 14 MiB over their plan at two decimals).
+    source_path = job(tmp_path, monkeypatch)
+    allocated, reserved = 3 * GIB + 12_345, 4 * GIB + 678
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device: allocated)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda device: reserved)
+    levels(caplog, logging.DEBUG)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    peaks = [record for record in caplog.records if "bytes allocated" in record.getMessage()]
+    assert {record.levelname for record in peaks} == {"DEBUG"}
+    said = [record.getMessage() for record in peaks]
+    assert said == [
+        f"{unit}: VRAM peak {allocated} bytes allocated, {reserved} reserved"
+        for unit in (
+            "shot 1/3's encode",
+            "shot 1/3: window 1/1",
+            "shot 2/3's encode",
+            "shot 2/3: window 1/1",
+            "shot 1/3's decode",
+            "shot 2/3's decode",
+            "shot 3/3's encode",
+            "shot 3/3: window 1/2",
+            "shot 3/3: window 2/2",
+            "shot 3/3's decode",
+        )
+    ]
+    # Each beside its unit's line, which keeps its GiB.
+    units = [
+        message
+        for message in caplog.messages
+        if "VRAM peak 3.00 GiB" in message or "bytes allocated" in message
+    ]
+    assert len(units) == 2 * len(said)
+    assert all("bytes allocated" in units[2 * at] for at in range(len(said)))
+    caplog.clear()
+    levels(caplog, logging.INFO)
+    assert upscale(tmp_path, source_path, "again", *JOB) == 0
+    assert "bytes allocated" not in caplog.text
 
 
 def large_source(path: Path, size: str, *filters: str) -> Path:

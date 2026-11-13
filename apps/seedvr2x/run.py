@@ -370,7 +370,7 @@ def _sample(
         # In system memory, as its encode gives it: the one the units keep or wrote, which the
         # windows are sampled from, as a resumed run samples them from the one read back.
         latent = units.save_latent(index, latent)
-        spent = _spent(models, started)
+        spent = _spent(models, started, f"{name}'s encode")
         left = _made(
             *(progress, key, "encode", shot.frames, started, f"{name}'s encode", counted),
         )
@@ -399,7 +399,7 @@ def _sample(
         finite(output, unit)
         units.save_window(index, number, output)
         start, end = layout[number]
-        spent = _spent(models, started)
+        spent = _spent(models, started, f"{name}: window {number + 1}/{len(layout)}")
         # The run's first window this process makes draws the run's noise (sample_windows).
         drawn = layout[-1][1] * per_latent if number == done else None
         left = _made(
@@ -505,7 +505,7 @@ def _decode(
         units.copy_path(index).unlink(missing_ok=True)
         units.checksums_path(index).unlink(missing_ok=True)
         raise
-    spent = _spent(models, started)
+    spent = _spent(models, started, f"{name}'s decode")
     left = _made(
         *(progress, key, "decode", run.frames, started, f"{name}'s decode"),
         entering=entering,
@@ -849,11 +849,16 @@ def _started(models: Models) -> float:
     return time.monotonic()
 
 
-def _spent(models: Models, started: float) -> str:
+def _spent(models: Models, started: float, unit: str) -> str:
     """The time since started, said in the wall clock's seconds (clock.wall), and the VRAM peak
-    since, as the logs give them."""
-    peak = torch.cuda.max_memory_allocated(models.device) / GIB
-    return f"{spent(time.monotonic() - started):.1f} s, VRAM peak {peak:.2f} GiB"
+    since, as the unit's line gives them; the step's peaks in bytes said at debug first, `unit`
+    naming it: torch's allocated peak and its reserved one, so that a measure of a step against
+    its plan needs no rounding (two decimals of GiB left impl-wsl2-1's 960-px decodes read 3 to
+    14 MiB over their plan, the night of 2026-11-11 to 12)."""
+    allocated = torch.cuda.max_memory_allocated(models.device)
+    reserved = torch.cuda.max_memory_reserved(models.device)
+    logger.debug("%s: VRAM peak %d bytes allocated, %d reserved", unit, allocated, reserved)
+    return f"{spent(time.monotonic() - started):.1f} s, VRAM peak {allocated / GIB:.2f} GiB"
 
 
 def _resident() -> int:
