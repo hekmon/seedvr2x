@@ -662,18 +662,41 @@ seedvr2x/                the repository
     small steps; cached on disk by a fingerprint (seedvr2x's version, torch and its CUDA, the
     driver, the GPU, the allocator), run again when any of them changes; where it fails, the
     loader refuses, saying why. The versions tested are listed before v0.2.0's publication.
-    The library requires Python 3.13 today (the Desktop app runs 3.12), and its caps on Pillow
-    (below 13) and huggingface_hub (below 2), under the Windows portable's 13.0.0 and 2.3.0,
-    widen once its tests pass with them. Met in the user's own ComfyUI on 2026-11-12 (Comfy
-    Desktop: Python 3.12, torch 2.13, transformers 4.57): the library refused Python 3.12; the
-    install's diffusers (0.42 or later) brought huggingface_hub 2.4, which transformers 4.x
-    refuses (it takes below 1.0); the library's ranges are the command line's pins, not
-    minimums; its download imports an error class of huggingface_hub 1.x alone and failed under
-    0.36; and a seed from the user's generation workflow, past seedvr2x's range, was refused.
-    Decided for the nodes' next pass: the library on Python 3.12 too, its suites run there; its
-    ranges the minimums it is tested with; the install keeping ComfyUI's own huggingface_hub
-    and diffusers; the download working on the huggingface_hub ComfyUI's transformers takes; a
-    seed past the range folded into it, the tooltip saying how.
+    The library's caps on Pillow and huggingface_hub, below 14 and 3, were widened on
+    2026-11-05 for the Windows portable's 13.0.0 and 2.3.0, its tests passing with them. Met in
+    the user's own ComfyUI on 2026-11-12 (Comfy Desktop: Python 3.12, torch 2.13, transformers
+    4.57): the library refused Python 3.12; the install's diffusers (0.42 or later) brought
+    huggingface_hub 2.4, which transformers 4.x refuses (it takes below 1.0); the library's
+    ranges were the command line's pins, not minimums; its download imported an error class of
+    huggingface_hub 1.x alone and failed under 0.36; and a seed from the user's generation
+    workflow, past seedvr2x's range, was refused. Built on 2026-11-13 (impl-nodes-8):
+    - the library on Python 3.12 and later (3.14 untested), each range's floor a version its
+      suites pass with: torch 2.13.0, torchvision 0.28.0, numpy 2.2.6, Pillow 12.0.0 and einops
+      0.8.0 (Comfy Desktop's), huggingface_hub 0.34.0 (transformers 4.57's own floor),
+      diffusers 0.39.0 (the newest that takes huggingface_hub below 1.0), safetensors 0.8.0
+      (diffusers 0.39.0's own floor), TorchCodec 0.16.0 (torch 2.13's), omegaconf 2.3.1 and
+      rotary-embedding-torch 0.9.1 (the command line's pins); the caps as before. The command
+      line's environment, the one shipped, stays as it was: Python 3.13 and its lock;
+    - two test environments: the command line's, where every suite runs, and the floors' (its
+      command in AGENTS.md, Tests), where the library's and the nodes' suites run at the end of
+      a baton that moves a range;
+    - the download on huggingface_hub from 0.34 and on 1.x and 2.x, each line's errors held by
+      tests; its bar from huggingface_hub 1.1 on, before it a warning and the bar at 0;
+    - the install: the library without its dependencies, then those ComfyUI's environment
+      lacks, at the versions tested; ComfyUI's torch, torchvision, transformers,
+      huggingface_hub, numpy, Pillow and einops never moved; diffusers only where there is
+      none, 0.39.0 under a huggingface_hub below 2 and 0.42 or later from 2; TorchCodec left
+      out, the nodes reading no file (pip check's one line about it expected; the command line
+      and the image server keep it);
+    - a seed of any whole number (a generation's 64-bit seed, a negative one by a link) folded
+      modulo 4,293,967,296, the plan's line giving the seed used beside the one given; a clip
+      whose folded seed still takes a later shot's seed past the range is refused, naming
+      both seeds (a fold that hung on the cut list would move every shot's noise with the
+      cuts); the command line still refuses a seed past the range;
+    - left: torch's and torchvision's floors lowered to 2.12.1 and 0.27.1, the versions of the
+      user's ComfyUI made for seedvr2x's tests, once the floors' suites pass there (the nodes'
+      next baton); the nodes' versions against the references on the GPU
+      ([To measure](#to-measure), the nodes' versions).
 - **The front README:** short, there to catch a visitor long enough to send them on to the
   app's README (the user, 2026-11-02). A line saying what seedvr2x does; a picture of the best
   it makes, an input beside seedvr2x's output at `--quality maximum`, the caption saying so;
@@ -4559,9 +4582,10 @@ run in one line, before the models load as after.
     out of memory under the segments in any of those runs, nor in the 8 held ones beside a
     desktop (To measure, the cards v0.1.0 is tested on), the planner's margin and the VAE's
     room, measured under the pool, holding in every one. Decided on 2026-11-13, no longer
-    provisional: the code's marks of it to go. An unheld run there recovers from 3 to 930
-    refused 20-MiB mappings a run, every one, no step past its plan: the warning a held run
-    gives for the allocator's retries stays a held run's.
+    provisional, the code's marks of it gone the same day (impl-nodes-8). An unheld run there
+    recovers from 3 to 930 refused 20-MiB mappings a run, every one, no step past its plan:
+    the warning a held run gives for the allocator's retries stays a held run's, its
+    docstring saying why.
   - A display active no longer makes a card shared (decided on 2026-11-12): the 96 GB card,
     no program on it and no display server running, reads one through NVML (its text console,
     inferred), with no process listed and 10 MiB used, so that every run there would be held
@@ -5794,6 +5818,12 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
     2026-11-13, a compiled 1080p job its check.
   Other window layouts were modelled on the 12 cut lists: none pays more than the balanced
   windows, and none has fewer lengths.
+- **The nodes' versions on the GPU** (see [Repository and apps](#repository-and-apps), the
+  nodes' install). The library at its floors (diffusers 0.39.0 and torch 2.13.0 today), as
+  ComfyUI's environments run it, against the references, made in the command line's
+  environment (diffusers 0.40.0, torch 2.14.1): the same bits, or how close. Only the CPU
+  suites ran there (impl-nodes-8, 2026-11-13). Before v0.2.0's publication, which lists the
+  versions tested.
 - **A detail scale, not in v1.** The user proposed a "detail recreation" scale for the
   over-rendering at 4K. With the sharp 7B the eyes' main complaint, invented skin texture, is
   gone, and what remains goes both ways with the content: the 7B's sharper thin cel lines, the
