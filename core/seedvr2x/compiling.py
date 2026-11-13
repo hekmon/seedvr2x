@@ -338,10 +338,22 @@ def warm(models: Models, shapes: Shapes) -> None:
     job's slice lengths").
 
     The passes are the run's own, through its own functions (model.encode_sliced,
-    model.decode_sliced), fed zeros: the encode with a tile's crop as the tiled encode hands it
-    (tiling._crops), a contiguous (3, t, rows, columns) tensor on the device in the VAE's dtype,
-    t following model.encode_slices; the decode with the crop of a latent of the whole padded
-    frame, as the tiled decode takes it (tiling._decoded). A shot of `n` latents in
+    model.decode_sliced), fed zeros in the layout the run gives each: the tiled encode with a
+    tile's crop as it hands it (tiling._crops), a contiguous (3, t, rows, columns) tensor on the
+    device in the VAE's dtype; the untiled encode (the shape of the whole padded frame, which a
+    grid of one tile takes for untiled too) with the view model.input_transform gives it, a
+    (3, t, rows, columns) permute of (t, 3, rows, columns) memory, the channel stride rows *
+    columns and not t * rows * columns, same dtype and device, t following model.encode_slices
+    (_untiled_input). The compiler's guards tell the two apart by the stride: on 2026-11-12
+    (impl-box-3) a 1080p job with an untiled encode warmed on contiguous zeros recompiled the
+    encoder 3 times in the calibration, one for each kind of slice, 'sample' stride mismatch at
+    index 0, expected 31,795,200, actual 6,359,040; the same job with the encoder's input made
+    contiguous compiled none, its frames the same bits (DESIGN.md, Memory planner, decided that
+    day: the warm-up in the run's layout, no copy in the run, which would take 64 MB a slice at
+    1080p). The zeros are made directly in the transform's output shape, never from smaller
+    frames through its resize: they take what the run's input takes (one slice at the padded
+    size) and no more. The decode is fed the crop of a latent of the whole padded frame, as the
+    tiled decode takes it (tiling._decoded). A shot of `n` latents in
     `shapes.latents` is one of 4 * (n - 1) + 1 frames, its slices those of model.encode_slices
     and model.latent_slices.
 
@@ -365,18 +377,21 @@ def warm(models: Models, shapes: Shapes) -> None:
     Not whole shots' worth of work: a slice is 4 or 5 frames of a tile.
 
     PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says "a warm call per shape", not with what):
-    zeros, in the memory the run's inputs have as far as the code shows (a tile's crop copied to
-    the device is contiguous; the decoder's latent dense, as above). The DiT's layout is read
-    from the stride of the run that missed it, not from the model's code; whether they match the
-    run's own inputs for the compiler's guards is for a GPU run to show: no unit of the run may
-    compile (report_late, after each part of a unit)."""
+    zeros, in the memory the run's inputs have (a tile's crop copied to the device is contiguous;
+    the untiled encode's input the transform's permuted view, above; the decoder's latent dense,
+    as above). The DiT's layout and the untiled encode's are read from the stride of the run that
+    missed them, not from the model's code; whether they match the run's own inputs for the
+    compiler's guards is for a GPU run to show: no unit of the run may compile (report_late,
+    after each part of a unit)."""
     padded_rows, padded_columns = shapes.padded
     latent_rows, latent_columns = padded_rows // SCALE, padded_columns // SCALE
     for latents in shapes.latents:
         frames = 4 * (latents - 1) + 1
         for rows, columns in shapes.encode:
+            untiled = (rows, columns) == shapes.padded
+            make = _untiled_input if untiled else _crop
             crops = (
-                torch.zeros((3, size, rows, columns), dtype=COMPUTE_DTYPE, device=models.device)
+                make(size, rows, columns, models.device)
                 for size in model.encode_slices(models, frames)
             )
             for moments in model.encode_sliced(models, crops, frames):
@@ -389,6 +404,21 @@ def warm(models: Models, shapes: Shapes) -> None:
             for decoded in model.decode_sliced(models, latent, top, left):
                 del decoded
             model.synchronize(models.device)
+
+
+def _crop(size: int, rows: int, columns: int, device: torch.device) -> torch.Tensor:
+    """Zeros for a slice of a tiled encode: a tile's crop as tiling._crops hands it, a copy on the
+    device, contiguous (3, size, rows, columns)."""
+    return torch.zeros((3, size, rows, columns), dtype=COMPUTE_DTYPE, device=device)
+
+
+def _untiled_input(size: int, rows: int, columns: int, device: torch.device) -> torch.Tensor:
+    """Zeros for a slice of an untiled encode: what model.input_transform ends with, a
+    (3, size, rows, columns) view of (size, 3, rows, columns) memory (its last step is
+    permute(1, 0, 2, 3)), as shot_pass.encoder_inputs hands it to the encoder."""
+    return torch.zeros((size, 3, rows, columns), dtype=COMPUTE_DTYPE, device=device).permute(
+        1, 0, 2, 3
+    )
 
 
 def _latent(latents: int, rows: int, columns: int) -> torch.Tensor:

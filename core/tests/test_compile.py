@@ -23,9 +23,11 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from seedvr2x import compiling, peaks
+from seedvr2x import compiling, model, peaks, tiling
+from seedvr2x.frames import padded_length, padded_size
 from seedvr2x.model import COMPUTE_DTYPE, Models
 from seedvr2x.passes import Shapes, Tiles
+from seedvr2x.tilegrid import SCALE, Tile
 from seedvr2x.vendor.models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
 from seedvr2x.vendor.models.video_vae_v3.modules.types import MemoryState
 
@@ -312,9 +314,12 @@ class FakeVAE(torch.nn.Module):
         # The decoder's inputs with the layout the compiler's guards tell apart: whether the
         # channels are the innermost dimension in memory (the DiT's layout), else channel-major.
         self.decoded: list[tuple[tuple[int, ...], str, bool]] = []
+        # The encoder's inputs as the compiler's guards see them: shape, strides, dtype, device.
+        self.encoded: list[tuple[tuple[int, ...], tuple[int, ...], torch.dtype, str]] = []
 
     def _encode(self, x: torch.Tensor, memory_state: MemoryState) -> torch.Tensor:
         self.calls.append(("encode", tuple(x.shape), memory_state.name))
+        self.encoded.append((tuple(x.shape), x.stride(), x.dtype, x.device.type))
         return torch.zeros(1, 32, 1, 1, 1, dtype=x.dtype)
 
     def _decode(
@@ -382,6 +387,72 @@ def test_the_warm_up_latent_is_dense_channels_last() -> None:
     assert dense.shape == channel_major.shape == (3, 4, 4, 16)
     assert dense.is_contiguous() and not channel_major.is_contiguous()
     assert dense.stride(3) == 1 and channel_major.stride(3) > 1
+
+
+def the_runs_encoder_inputs(
+    target: tuple[int, int], padded: tuple[int, int], count: int, tiled: bool
+) -> list[tuple[tuple[int, ...], tuple[int, ...], torch.dtype, str]]:
+    """What the encoder receives in the run for a shot of `count` frames: the frames of each slice
+    through model.input_transform (shot_pass.encoder_inputs, the untiled encode's input), or the
+    tile's crops of them (tiling._crops) when `tiled`.
+
+    The frames are handed to the transform as (t, 3, H, W) contiguous memory, as the resize leaves
+    them on CUDA (impl-box-3, 2026-11-12: the encoder's input stride at index 0 was 3 * H * W, the
+    permute of (t, 3, H, W) memory); on the CPU the resize keeps the channels-last memory of
+    shot_pass's own view of the source, a layout of the CPU alone, so the test starts the
+    transform from the layout CUDA ends with, the transform's own steps all run."""
+    fake = FakeVAE()
+    models = fake_models(fake)
+    height, width = target
+    transform = model.input_transform(target)
+    sizes = model.encode_slices(models, padded_length(count))
+    inputs = [
+        transform(torch.zeros((size, 3, height // 2, width // 2), dtype=COMPUTE_DTYPE))
+        for size in sizes
+    ]
+    assert all(tuple(x.shape[2:]) == padded for x in inputs)
+    if tiled:
+        tile = Tile(0, padded[0] // SCALE // 2, 0, padded[1] // SCALE // 2)
+        crops = tiling._crops(models, torch.cat(inputs, dim=1), tile, sizes)  # pyright: ignore[reportPrivateUsage]
+        # On the CPU `.to(device)` copies nothing, so the crop is still a view of the store; to a
+        # CUDA device torch copies a non-dense view into dense memory (preserve_format), which
+        # `.contiguous()` does here.
+        inputs = [crop.contiguous() for crop in crops]
+    for _ in model.encode_sliced(models, inputs, padded_length(count)):
+        pass
+    return fake.encoded
+
+
+@pytest.mark.parametrize("latents", [1, 2, 3])
+def test_the_untiled_encode_is_warmed_in_the_layout_the_run_gives_it(latents: int) -> None:
+    # impl-box-3, 2026-11-12: the untiled encode gets model.input_transform's permuted view
+    # (stride of the channel rows * columns, not t * rows * columns); zeros that are contiguous
+    # made the encoder's guards fail once for each kind of slice, in the calibration.
+    target = (24, 48)
+    padded = padded_size(target)
+    count = 4 * (latents - 1) + 1
+    run = the_runs_encoder_inputs(target, padded, count, tiled=False)
+    fake = FakeVAE()
+    compiling.warm(fake_models(fake), Shapes(padded, (padded,), ((64, 64),), (latents,)))
+    assert fake.encoded == run
+    # The encoder's 5-D input (1, 3, t, H, W): stride 3 * H * W at index 0, as measured on 1080p
+    # (6,359,040 = 3 * 1104 * 1920), not the contiguous 3 * t * H * W (31,795,200 at t = 5).
+    assert all(strides[0] == 3 * padded[0] * padded[1] for _, strides, _, _ in run)
+    # (a slice of 1 frame is the same memory either way)
+    assert latents == 1 or any(
+        strides[0] != 3 * shape[2] * padded[0] * padded[1] for shape, strides, _, _ in run
+    )
+
+
+def test_a_tiled_encode_is_warmed_with_the_contiguous_crops_the_run_gives_it() -> None:
+    target = (24, 48)
+    padded = padded_size(target)
+    run = the_runs_encoder_inputs(target, padded, 5, tiled=True)
+    rows, columns = padded[0] // 2, padded[1] // 2
+    fake = FakeVAE()
+    compiling.warm(fake_models(fake), Shapes(padded, ((rows, columns),), ((64, 64),), (2,)))
+    assert fake.encoded == run
+    assert all(strides[0] == 3 * shape[2] * rows * columns for shape, strides, _, _ in run)
 
 
 @pytest.fixture
