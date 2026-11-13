@@ -1337,7 +1337,8 @@ def test_a_driver_that_refuses_holds_nothing(
     )
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
-    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:cudaMallocAsync" and not limits
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native,expandable_segments:True"
+    assert not limits
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     assert content["plan"]["memory"]["free"] == FREE
 
@@ -1703,8 +1704,9 @@ def test_a_card_another_program_uses_under_linux_s_driver_is_held(
 def test_a_card_no_other_program_uses_under_linux_s_driver_is_not_held(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The same job on a card nothing else uses (library_fixtures' share): cudaMallocAsync, no
-    # limit, the plan of a driver that refuses, the start saying so.
+    # The same job on a card nothing else uses (library_fixtures' share): torch's own allocator
+    # with its segments (PROVISIONAL, DESIGN.md, Allocator, decided on 2026-11-12), no limit, the
+    # plan of a driver that refuses, the start saying so.
     caplog.set_level(logging.INFO)
     monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
     limits = shared_card(monkeypatch, FREE)
@@ -1713,11 +1715,11 @@ def test_a_card_no_other_program_uses_under_linux_s_driver_is_not_held(
     monkeypatch.setattr(memory, "share", lambda index=0: memory.Share())
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
-    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:cudaMallocAsync"
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native,expandable_segments:True"
     assert limits == [] and steps.calls == UNINTERRUPTED
     assert (
         "no other program on the GPU at the start (none listed by NVML): not held, its driver"
-        " refusing what the card can't hold"
+        " refusing what the card can't hold; torch's own allocator with expandable segments"
     ) in caplog.messages
     assert "the driver refusing memory the card doesn't have" in caplog.text
 

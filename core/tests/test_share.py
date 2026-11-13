@@ -32,7 +32,7 @@ SHARED_BY_A_SERVER = (
 )
 ALONE = (
     "no other program on the GPU at the start (none listed by NVML): not held, its driver refusing"
-    " what the card can't hold"
+    " what the card can't hold; torch's own allocator with expandable segments"
 )
 
 
@@ -309,16 +309,50 @@ def test_nvml_unread_at_the_start_holds_the_run_saying_why(
     ) in caplog.messages[-1]
 
 
-def test_a_card_no_other_program_uses_keeps_cudamallocasync_and_says_so(
+def test_a_card_no_other_program_uses_takes_the_segments_unheld_and_says_so(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, named: None
 ) -> None:
+    # torch's own allocator with expandable segments where the driver refuses too, in
+    # cudaMallocAsync's place (PROVISIONAL: DESIGN.md, Allocator, decided on 2026-11-12), the run
+    # neither limited nor checked, the start's line naming the allocator.
     caplog.set_level(logging.DEBUG, logger=memory.logger.name)
-    assert start(monkeypatch, Listing()) == "backend:cudaMallocAsync"
+    assert start(monkeypatch, Listing()) == HELD
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == HELD
     assert not memory.spills() and memory.shared() is None
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.INFO, ALONE)]
-    # The plan of a driver that refuses, as before: nothing held, nothing read of the card.
+    # The plan of a driver that refuses, as before: nothing held, nothing read of the card, no
+    # reserve beyond the planner's margin (PLAIN on a reading not held).
     assert memory.reading(30 * GIB) == memory.Reading(30 * GIB, None, 30 * GIB, False)
     assert memory.hold("cuda:0") is None
+    memory.check("cuda:0")  # nothing held: nothing checked
+
+
+@pytest.mark.parametrize(
+    ("setting", "words"),
+    [
+        ("backend:cudaMallocAsync", "torch on cudaMallocAsync"),
+        ("backend:native", "torch's own allocator without expandable segments"),
+        ("expandable_segments:True", "torch's own allocator with expandable segments"),
+    ],
+)
+def test_the_user_s_allocator_stands_on_a_card_no_other_program_uses(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    named: None,
+    setting: str,
+    words: str,
+) -> None:
+    # The environment's setting is torch's, as on a shared card; the start's one line names the
+    # allocator it gives, and nothing more is said: the run isn't held, its plan a refusing
+    # driver's whatever the allocator.
+    caplog.set_level(logging.DEBUG, logger=memory.logger.name)
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", setting)
+    start(monkeypatch, Listing())
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == setting
+    assert caplog.messages == [
+        ALONE.replace("torch's own allocator with expandable segments", words)
+    ]
+    assert memory.reading(30 * GIB) == memory.Reading(30 * GIB, None, 30 * GIB, False)
 
 
 @pytest.mark.parametrize(
@@ -392,10 +426,11 @@ def test_a_platform_other_than_linux_asks_nothing_and_is_not_held(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The share is Linux's driver's question: elsewhere (macOS, a port to come) nothing is asked
-    # and nothing held, as before.
+    # and nothing held, as before; the default allocator is Windows itself's alone to differ
+    # (memory._default; macOS has no CUDA to read it).
     monkeypatch.setattr(memory, "share", lambda index=0: pytest.fail("the share is asked"))
     monkeypatch.setattr(memory.sys, "platform", "darwin")
-    assert memory.startup() == "backend:cudaMallocAsync"
+    assert memory.startup() == HELD
     assert not memory.spills() and memory.shared() is None
     assert not memory.early(20 * GIB).held
 

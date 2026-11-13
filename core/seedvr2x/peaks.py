@@ -411,7 +411,9 @@ TILE_STEP = 64
 # have, counts on memory.RESERVE less already, which measures the same need under torch's own
 # allocator, and takes no margin on top (shot_plan._Job.margin; DESIGN.md,
 # Allocator, 2026-10-12). The planner's, here so that the library's plan for one picture
-# (still_plan.py) takes the same.
+# (still_plan.py) takes the same. Measured under cudaMallocAsync, taken unchanged under torch's
+# own allocator with expandable segments, the default there since 2026-11-12 (memory.startup):
+# PROVISIONAL until measured under them.
 MARGIN = round(0.6 * GIB)
 
 # The room every VAE pass, encode or decode, tiled or not, must leave under the budget besides
@@ -430,7 +432,9 @@ MARGIN = round(0.6 * GIB)
 # workspaces are their own. An encode is held 0.4 GiB more besides (ENCODE_EXTRA). Before, 1.5
 # (2026-10-11), a guard while its cause wasn't known: the large passes refused at
 # memory_limit_conv's concatenation, which the one-output convolution spares most of them
-# (MEASURED).
+# (MEASURED). Measured under cudaMallocAsync, taken unchanged under torch's own allocator with
+# expandable segments where the driver refuses, the default there since 2026-11-12
+# (memory.startup): PROVISIONAL until measured under them.
 VAE_ROOM = round(1.25 * GIB)
 
 # The VAE passes' room at the plan's last rung (shot_plan.plan, "the floor"): the reserve floor of

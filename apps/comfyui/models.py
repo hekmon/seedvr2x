@@ -304,7 +304,7 @@ class _CommandLineWords(logging.Filter):
 def _startup() -> None:
     """memory.startup, in a process whose allocator is already chosen. It reads the allocator's
     setting from the environment, and sets its own default there when there is none (backend:native
-    with expandable segments where the driver lends system memory): in ComfyUI's process torch
+    with expandable segments but on Windows itself, memory._default): in ComfyUI's process torch
     runs what ComfyUI chose, so an environment with no setting is given the backend torch reports,
     for startup to read, and left as it was after (DESIGN.md, Repository and apps: "ComfyUI's
     process is not seedvr2x's"). The warnings it gives about that allocator and the limit on

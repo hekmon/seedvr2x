@@ -158,8 +158,9 @@ def _logging(verbose: bool) -> None:
 
 def _torch_lines(verbose: bool) -> None:
     """torch's own C++ lines, c10's log, out of the default output (DESIGN.md, Architecture, What
-    it prints, decided on 2026-10-23; built on 2026-10-29): where the driver refuses,
-    cudaMallocAsync prints "[W1023 00:04:28.18… CUDAMallocAsyncAllocator.cpp:377] [cudaMallocAsync]
+    it prints, decided on 2026-10-23; built on 2026-10-29): where it is the allocator (Windows
+    itself's default, and Linux's before 2026-11-12, or a user's setting), cudaMallocAsync prints
+    "[W1023 00:04:28.18… CUDAMallocAsyncAllocator.cpp:377] [cudaMallocAsync]
     recovered from an allocation failure by trimming the pool and retrying" each time it trims,
     108 times in a 2-hour job, no Python warning carrying them. c10 reads TORCH_CPP_LOG_LEVEL once,
     as torch is imported (libc10: INFO, WARNING, ERROR or FATAL, or 0 to 3): ERROR keeps a
@@ -2192,7 +2193,8 @@ def _refused(error: BaseException) -> str:
     programs' memory out, and stands under the card's near a full card: seedvr2x/memory.py), but
     for a run held for another program on the card under Linux's driver (memory.shared), whose
     driver's figure is the card's.
-    There too, cudaMallocAsync's message, DESIGN.md's allocator on such a driver, is read
+    There too, cudaMallocAsync's message, the allocator there before 2026-11-12 and a user's
+    setting's still, is read
     beyond its first line, which says no figure: what was asked, what torch had allocated, and
     the same two figures, from its own lines (torch 2.14.1's words under each allocator, its
     limit refusing a request of 4 GiB: tests/test_cli_run.py); on a run held to its card, what

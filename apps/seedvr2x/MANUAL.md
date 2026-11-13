@@ -1151,11 +1151,15 @@ place of 16.5, the dynamic GGUF 4.8 ([README](README.md#model-files)).
 nvidia-smi can show the card nearly full while the job needs much less. PyTorch's allocator
 keeps the memory it has freed reserved for itself, and trims it only when an allocation would
 fail. The figures to read are the peaks seedvr2x logs for each unit, and those the plan
-predicts. On Linux the allocator is `cudaMallocAsync`, which trims its pool on a full card where
-PyTorch's native one fragments and fails; [under WSL2](#under-wsl2), and on a card
-[another program uses](#a-card-another-program-uses-on-linux), it is PyTorch's own, with
-expandable segments. seedvr2x sets it through `PYTORCH_CUDA_ALLOC_CONF` unless you have set
-that variable or `PYTORCH_ALLOC_CONF` (an empty one counts as unset).
+predicts. On Linux the allocator is PyTorch's own, with expandable segments: on a full card a
+step short of room slows down and runs where PyTorch's plain allocator fragments and fails, and
+on a 96 GB card `cudaMallocAsync` refused a long window's 31.65 GiB piece that the segments gave
+(a choice to be measured further). [Under WSL2](#under-wsl2) and on a card
+[another program uses](#a-card-another-program-uses-on-linux) seedvr2x also limits PyTorch to
+the card; on a card nothing else uses it doesn't. [On Windows itself](#on-windows-itself), whose
+PyTorch has no expandable segments, the allocator is `cudaMallocAsync`. seedvr2x
+sets it through `PYTORCH_CUDA_ALLOC_CONF` unless you have set that variable or
+`PYTORCH_ALLOC_CONF` (an empty one counts as unset).
 
 ### What else holds the card
 
@@ -1363,7 +1367,7 @@ being the smallest.
 ## A card another program uses, on Linux
 
 On Linux the driver refuses memory the card doesn't have, and a job alone on its card takes
-`cudaMallocAsync` and the whole of the plan above. But PyTorch keeps the memory a job has had,
+the whole of the plan above, PyTorch unlimited. But PyTorch keeps the memory a job has had,
 so a desktop or another program on the same card has only the plan's 0.6 GiB margin to grow
 into: on a 96 GB card emulating 16 to 48 GB, a desktop growing by 0.6 GiB stopped every 4K job
 out of memory, and saw its own requests refused during 1080p ones. So at its start seedvr2x asks
@@ -1378,8 +1382,8 @@ with a reserve of its own, and each unit checking the card first. It says which 
 ```
 
 and the plan's card line ends with `the card shared:` and the same words. A card nothing else
-uses says `no other program on the GPU at the start` and runs as before. Where NVML can't tell,
-the card is taken for shared, and the line says why. Your own `PYTORCH_CUDA_ALLOC_CONF` stands
+uses says `no other program on the GPU at the start`, with the allocator, and runs as before.
+Where NVML can't tell, the card is taken for shared, and the line says why. Your own `PYTORCH_CUDA_ALLOC_CONF` stands
 either way. To run a card unheld, no other program may hold a context on it when the job
 starts; a display attached to the card with nothing running on it, a text console, is no other
 program.
@@ -2213,7 +2217,8 @@ disk rate and masters' size, the driver's own memory figures, the system memory 
 on, and a refusal's full figures. It also shows two kinds of lines that aren't seedvr2x's, kept
 out of the default output: the model's sampler's progress bar, one per window (`EulerSampler:
 100%|██████████| 1/1 [00:07<00:00,  7.68s/it]`), and PyTorch's own lines from its C++ code, such
-as its allocator's on Linux each time it trims its pool to make room (`[W1023 03:24:11.423298250
+as `cudaMallocAsync`'s, where it is the allocator (Windows itself, or your own setting), each
+time it trims its pool to make room (`[W1023 03:24:11.423298250
 CUDAMallocAsyncAllocator.cpp:377] [cudaMallocAsync] recovered from an allocation failure by
 trimming the pool and retrying.`), every few seconds in a long window packed to the budget. Both
 are harmless. A `TORCH_CPP_LOG_LEVEL` of your own decides PyTorch's lines; a download's progress
@@ -2585,5 +2590,5 @@ A picture keeps none of these: its output is the one file `-o` names.
 | `HF_HUB_DISABLE_TELEMETRY` | Set to `1` by seedvr2x unless you have set it. |
 | `TORCH_CPP_LOG_LEVEL` | PyTorch's lines from its C++ code: set to `ERROR` by seedvr2x unless `--verbose` is given, so that they stay out of the default output; a value of your own is kept ([the lines](#the-lines)). |
 | `TORCHINDUCTOR_CACHE_DIR` | PyTorch's compile cache: under `--compile`, replaced by the job's own `compile-cache/` ([compiling the VAE](#compiling-the-vae---compile)). |
-| `PYTORCH_CUDA_ALLOC_CONF`, `PYTORCH_ALLOC_CONF` | PyTorch's allocator. Unless you set one, seedvr2x sets the first: `backend:cudaMallocAsync`, or `backend:native,expandable_segments:True` [under WSL2](#under-wsl2) and on a card [another program uses](#a-card-another-program-uses-on-linux) ([GPU memory](#what-nvidia-smi-shows)). |
+| `PYTORCH_CUDA_ALLOC_CONF`, `PYTORCH_ALLOC_CONF` | PyTorch's allocator. Unless you set one, seedvr2x sets the first: `backend:native,expandable_segments:True` on Linux, WSL2 included, `backend:cudaMallocAsync` on Windows itself ([GPU memory](#what-nvidia-smi-shows)). |
 | `CUDA_VISIBLE_DEVICES` | CUDA's own: which card the job sees. |

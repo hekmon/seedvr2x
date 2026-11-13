@@ -435,7 +435,7 @@ def upscaled(
 def shared_card(log: str) -> None:
     """A run held for another program on its card under Linux's driver (memory.SHARED; DESIGN.md,
     Allocator, decided on 2026-11-11) fails the case: the references under Linux's driver were made
-    on a card nothing else used, cudaMallocAsync's plans, and a held run plans otherwise. The
+    on a card nothing else used, a refusing driver's plans, and a held run plans otherwise. The
     other program may be this pytest process, whose in-process GPU tests (test_clip_cli.py,
     test_still_cli.py, test_shot_cli.py) leave it a CUDA context on the card: run this file in a
     pytest process of its own, nothing else on the card."""

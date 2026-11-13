@@ -631,18 +631,20 @@ def startup(monkeypatch: pytest.MonkeyPatch, card: Card | None, nvml: Nvml | Non
 def test_a_linux_driver_is_asked_nothing(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # No WSL2 device: the driver refuses, as Linux's does: not asked, and DESIGN.md's allocator.
+    # No WSL2 device: the driver refuses, as Linux's does: not asked, and DESIGN.md's allocator,
+    # torch's own with expandable segments there too (PROVISIONAL, decided on 2026-11-12), the
+    # run neither limited nor checked, its plan a refusing driver's.
     caplog.set_level(logging.INFO)
     asked: list[str] = []
     monkeypatch.setattr(memory, "probe", lambda: asked.append("probe"))
-    assert startup(monkeypatch, None) == "backend:cudaMallocAsync"
-    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:cudaMallocAsync"
+    assert startup(monkeypatch, None) == "backend:native,expandable_segments:True"
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native,expandable_segments:True"
     assert not asked and not memory.spills()
     # Its card no other program uses (library_fixtures.no_driver_asked's share), said so: a shared
     # one is held (tests/test_share.py).
     assert caplog.messages == [
         "no other program on the GPU at the start (none listed by NVML): not held, its driver"
-        " refusing what the card can't hold"
+        " refusing what the card can't hold; torch's own allocator with expandable segments"
     ]
     caplog.clear()
     # The whole free memory is the plan's, and the card's own figure is read nowhere: neither
@@ -699,6 +701,11 @@ def test_windows_without_a_setting_runs_cudamallocasync_and_says_nothing_of_the_
     assert caplog.messages[1] == LENDS_LINE_WINDOWS
     assert not [m for m in caplog.messages if "environment's" in m or "expandable" in m]
     assert memory.reading(30 * GIB).allocator == memory.POOL
+    # A resume's early reading, before startup and with no setting, plans for the same default
+    # (memory._default): the pool's reserves, not torch's own without the segments (PLAIN, the
+    # flat reserve), as it did before 2026-11-13.
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF")
+    assert memory.early(20 * GIB).allocator == memory.POOL
 
 
 def test_windows_has_no_expandable_segments(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -723,7 +730,7 @@ def test_a_driver_that_refuses_behind_wsl_changes_nothing(
     monkeypatch.setattr(memory, "paravirtual", lambda: True)
     card = Card(30 * GIB, spills=False)
     loaded = libraries(monkeypatch, card, nvml)
-    assert memory.startup() == "backend:cudaMallocAsync"
+    assert memory.startup() == "backend:native,expandable_segments:True"
     assert "cuMemAlloc" in card.calls and nvml.calls.count("nvmlInit") == 1
     assert loaded == [memory.CUDA, memory.NVML, memory.CUDA]
     assert not memory.spills() and memory.usable(30 * GIB) == 30 * GIB
@@ -733,6 +740,9 @@ def test_a_driver_that_refuses_behind_wsl_changes_nothing(
     assert len(loaded) == 3 and nvml.calls.count("nvmlInit") == 1
     assert [record.levelname for record in caplog.records] == ["INFO"]
     assert caplog.messages[0].startswith("the GPU's driver refuses what the card can't hold")
+    # The allocator named, as a lone Linux card's line names it: torch's own with its segments
+    # where the driver refuses too (PROVISIONAL, decided on 2026-11-12).
+    assert caplog.messages[0].endswith("; torch's own allocator with expandable segments")
 
 
 def test_a_driver_that_leaves_other_programs_out_is_not_asked(
@@ -1263,16 +1273,20 @@ def test_an_empty_setting_is_no_setting(
     # limit and the card's room.
     with pytest.raises(torch.OutOfMemoryError, match="torch's pool holds" if warned else None):
         memory.check("cuda:0")
-    # On a driver that refuses: the default there, or the user's own, and nothing said.
+    # On a driver that refuses: the default there (torch's own with its segments, PROVISIONAL
+    # since 2026-11-12), or the user's own, and nothing said.
     for name in memory.VARIABLES:
         monkeypatch.delenv(name, raising=False)
     for name, value in variables.items():
         monkeypatch.setenv(name, value)
     caplog.clear()
-    assert startup(monkeypatch, Card(30 * GIB, spills=False)) == "backend:cudaMallocAsync"
+    assert (
+        startup(monkeypatch, Card(30 * GIB, spills=False))
+        == "backend:native,expandable_segments:True"
+    )
     assert len(set(left.values())) == 1 and len(caplog.messages) == 0
     there = {name: os.environ[name] for name in memory.VARIABLES if name in os.environ}
-    assert there == dict.fromkeys(left, "backend:cudaMallocAsync")
+    assert there == left
 
 
 @pytest.mark.parametrize(
@@ -1355,7 +1369,10 @@ def test_the_environment_s_allocator_stands(
         memory.check("cuda:0")
     # On a driver that refuses the setting stands as well, and nothing is said of it.
     caplog.clear()
-    assert startup(monkeypatch, Card(30 * GIB, spills=False)) == "backend:cudaMallocAsync"
+    assert (
+        startup(monkeypatch, Card(30 * GIB, spills=False))
+        == "backend:native,expandable_segments:True"
+    )
     assert os.environ[variable] == given
     assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
 
@@ -2901,43 +2918,39 @@ def test_a_kept_reservation_is_not_given_back_as_weights_leave(
     )
 
 
-@pytest.mark.parametrize("on_windows", [False, True], ids=["linux", "windows"])
 def test_torch_loaded_first_keeps_the_allocator_it_loaded_with(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, on_windows: bool
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # A 16-bit PNG's decoder (TorchCodec) imports torch before startup: torch then refuses a
     # backend other than the one it parsed as it loaded, at its CUDA's first use ("Allocator
     # backend parsed at runtime != allocator backend parsed at load time, cudaMallocAsync !=
-    # native", natively on Windows, 2026-11-09). Its own allocator stays the run's, said.
+    # native", natively on Windows, 2026-11-09). Its own allocator stays the run's, said: on
+    # Windows itself, the one platform whose default is cudaMallocAsync (memory._default).
     monkeypatch.setattr(memory, "_torch_loaded", lambda: True)
-    monkeypatch.setattr(memory, "windows", lambda: on_windows)
+    monkeypatch.setattr(memory, "windows", lambda: True)
     caplog.set_level(logging.INFO, logger="seedvr2x.memory")
     memory.startup()
-    if on_windows:
-        assert not any(name in os.environ for name in memory.VARIABLES)
-        assert (memory._native, memory._segments) == (True, False)  # pyright: ignore[reportPrivateUsage]
-    else:
-        assert os.environ[memory.VARIABLES[0]] == memory.EXPANDABLE
-        assert (memory._native, memory._segments) == (True, True)  # pyright: ignore[reportPrivateUsage]
+    assert not any(name in os.environ for name in memory.VARIABLES)
+    assert (memory._native, memory._segments) == (True, False)  # pyright: ignore[reportPrivateUsage]
     said = [r.getMessage() for r in caplog.records if "loaded before seedvr2x" in r.getMessage()]
     assert said == [
-        "torch was loaded before seedvr2x chose its allocator (a 16-bit PNG's decoder loads it):"
-        " torch's own allocator, which it loaded with, is the run's, "
-        + (
-            "without expandable segments, which Windows' torch has none of"
-            if on_windows
-            else "its segments expandable"
-        )
+        "torch was loaded before seedvr2x chose its allocator (a 16-bit PNG's decoder loads"
+        " it): torch's own allocator, which it loaded with, is the run's, without expandable"
+        " segments, which Windows' torch has none of"
     ]
 
 
+@pytest.mark.parametrize("wsl2", [True, False], ids=["wsl2", "linux"])
 def test_torch_loaded_first_changes_nothing_where_torch_s_own_allocator_is_chosen_anyway(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, wsl2: bool
 ) -> None:
-    # Under WSL2 the choice is torch's own allocator with its segments, which a setting made
-    # after the import still takes: unchanged.
+    # Under WSL2, and under Linux's driver since 2026-11-12, the choice is torch's own allocator
+    # with its segments, which a setting made after the import still takes: unchanged, nothing
+    # said of torch loaded first.
+    caplog.set_level(logging.INFO, logger="seedvr2x.memory")
     monkeypatch.setattr(memory, "_torch_loaded", lambda: True)
-    monkeypatch.setattr(memory, "paravirtual", lambda: True)
+    monkeypatch.setattr(memory, "paravirtual", lambda: wsl2)
     monkeypatch.setattr(memory, "probe", lambda: None)
     memory.startup()
     assert os.environ[memory.VARIABLES[0]] == memory.EXPANDABLE
+    assert not [m for m in caplog.messages if "loaded before seedvr2x" in m]

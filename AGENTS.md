@@ -352,7 +352,7 @@ beside it; the `__init__.py` is seedvr2x's.
   - torch loaded before `memory.startup` (TorchCodec, for a 16-bit PNG) keeps the allocator it
     loaded with: torch refuses another backend at its CUDA's first use (an internal assert,
     `cudaMallocAsync != native`, met natively on 2026-11-09), so where `cudaMallocAsync` would
-    be chosen, torch's own allocator is said and taken instead, with its segments off Windows
+    be chosen (Windows itself, since 2026-11-12), torch's own allocator is said and taken instead
     (`memory._torch_loaded`, which `library_fixtures.no_driver_asked` answers no to;
     `tests/test_memory.py`); the regression's plan comparison takes the platform's allocator
     (`readings`);
@@ -1160,7 +1160,16 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `memory.startup` holds the run as a lending driver's (torch's own allocator with expandable
   segments by default, the limit, each step's reserve,
   the checks), the hold's warning then the share's line (`shared_line`), the finding at debug; a
-  card nothing else uses: cudaMallocAsync and a refusing driver's plans, one INFO line (`ALONE`).
+  card nothing else uses: a refusing driver's plans, no limit and no check, one INFO line
+  (`ALONE`) naming the allocator, torch's own with expandable segments by default there too, in
+  cudaMallocAsync's place (PROVISIONAL, DESIGN.md, Allocator, decided on 2026-11-12: the 96 GB
+  card's pool refused a 167-latent window's 31.65 GiB piece that the segments gave; the plan
+  matrix unmoved; cudaMallocAsync stays Windows itself's, `memory._default` the one place that
+  says so, for the start and a resume's early reading alike, and `tests/test_split.py`'s driver
+  sets the platform's default); a driver behind WSL2's device found to refuse names the allocator
+  in its line too; the image server sets the segments itself, as before, and the nodes take
+  ComfyUI's allocator as it is, a card ComfyUI alone uses planned as before. `watched` stays a
+  held run's: whether an unheld run under the segments is watched is design's question.
   A resume's early reading takes the share too (`memory.early`). The plan's held card line, the
   CLI's and a picture's (`still_plan.said`), ends `the card shared: ...` (`held_why`), the CLI's
   refusal of GPU memory says `shared: ...` and keeps the driver's figures (the card's there), and
@@ -1179,9 +1188,11 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `core/tests/test_share.py` holds the reading on NVML stood in (a process, compute or graphics,
   both, this process left out, a list grown, a list that keeps growing or fails, a display active
   with no program listed no share and never asked, every way NVML is unread, once and again, no
-  CUDA context made), the start (held, its
-  lines whole, the reading, the user's allocator standing, NVML unread with 0.5 GiB left, not
-  shared, another platform asking nothing), the early reading, WSL2 and Windows asking nothing;
+  CUDA context made), the start (held, its lines whole, the reading, the user's allocator
+  standing, NVML unread with 0.5 GiB left, not shared: the segments unheld and the line naming
+  the allocator, the user's own standing there too; another platform asking nothing), the early
+  reading, WSL2 and Windows asking nothing; `tests/test_memory.py` Windows' early reading planned
+  for the pool;
   `test_still_plan.py` a picture's line; the CLI's `tests/test_cli_run.py` a job on a shared card
   and on one alone, and the refusal's words; `tests/test_planner.py` the card line;
   `tests/test_regression_unpinned.py` the regression's guard; the nodes' `tests/test_machine.py`

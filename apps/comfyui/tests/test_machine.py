@@ -322,7 +322,7 @@ def test_the_librarys_command_line_warnings_are_not_shown_in_comfyuis_process(
         memory.logger.warning("%s", memory.shared_line(memory.Share(unread="nvmlInit: 999")))
         memory.logger.info(
             "no other program on the GPU at the start (none listed by NVML): not held, its driver"
-            " refusing what the card can't hold"
+            " refusing what the card can't hold; torch on cudaMallocAsync"
         )
         memory.logger.warning("another warning of the library's")
         return ""

@@ -16,10 +16,11 @@ be trusted: once it gave other bits, once tensors of wrong sizes and an "unknown
 
 So seedvr2x asks the driver, once a run, where the run first takes the GPU and before torch is
 imported (startup): probe requests a little more memory than is free. Refused, the driver is one
-that refuses, and nothing changes. Given, it is one that spills, as is, unasked, one that
+that refuses, and nothing is held. Given, it is one that spills, as is, unasked, one that
 reports more free to the process than the whole card has; and seedvr2x holds itself to the
 card's memory by its own means:
-- torch's own allocator in cudaMallocAsync's place (startup), its segments expandable
+- torch's own allocator (startup), its segments expandable, the default but on Windows itself,
+  held or not since 2026-11-12 (PROVISIONAL where the driver refuses: startup)
   (EXPANDABLE): it counts every byte it has from the driver, its cache included, where
   cudaMallocAsync's pool keeps memory torch's limit doesn't see (2.0 to 2.6 GiB of it at 11
   latents at 1080p); and with expandable segments a step short of room under that limit
@@ -261,10 +262,11 @@ RESERVE = round(4.5 * GIB)
 # longer fits): 0.83, the larger, an early warning a little early under WSL2 rather than one
 # missed on Linux. The warning it feeds says it is an early reading (main._early_memory).
 CONTEXT = round(0.83 * GIB)
-# The allocator's setting by the driver: DESIGN.md's default (Allocator), and torch's own
-# allocator where the driver spills.
+# The allocator's settings: cudaMallocAsync, Windows itself's default (DESIGN.md, Allocator), and
+# torch's own allocator, everywhere else's (startup).
 ASYNC, NATIVE = "backend:cudaMallocAsync", "backend:native"
-# torch's own allocator as a held run takes it by default: its segments expandable
+# torch's own allocator as a run takes it by default, but on Windows itself: its segments
+# expandable
 # (PYTORCH_CUDA_ALLOC_CONF's expandable_segments: each of the allocator's pools one range of
 # addresses, grown and given back by mapping, where its segments are otherwise allocations of
 # the driver's that it gives back only whole). Without them a step short of room is refused,
@@ -297,11 +299,11 @@ ASYNC, NATIVE = "backend:cudaMallocAsync", "backend:native"
 # - a job of 66 frames at 1080p, planned alike under both: the same frames; 83.5 s where
 #   80.9; torch holding 22.1 GiB at the most at its checks where 25.2, the card never under
 #   4.27 GiB free where 0.96.
-# PROVISIONAL (implementation, 2026-10-13): one card, one driver, one version of torch; not
-# measured on a driver that refuses, where the default stays cudaMallocAsync (ASYNC).
+# PROVISIONAL (implementation, 2026-10-13): one card, one driver, one version of torch. Taken on
+# a driver that refuses too since 2026-11-12, PROVISIONAL again there (startup).
 EXPANDABLE = f"{NATIVE},expandable_segments:True"
 # The three ways a held run's allocator is told apart by the plan's reserve (peaks.reserve):
-# torch's own with expandable segments (the default on a driver that lends), torch's own without
+# torch's own with expandable segments (the default but on Windows itself), torch's own without
 # them (a user's setting: the flat RESERVE off the counted figure, as before 2026-11-06), and
 # cudaMallocAsync (ComfyUI's default there, or a user's setting). A driver that refuses is held
 # to nothing and plans as PLAIN does: the planner's margin and the VAE's room, no flat reserve
@@ -491,7 +493,9 @@ class Reading:
     - allocator: on a held run, the allocator the plan is made for, SEGMENTS (torch's own with
       expandable segments, the default), PLAIN (torch's own without them) or POOL
       (cudaMallocAsync): what peaks.reserve tells each step's reserve by, and whether RESERVE is
-      off `counted`; PLAIN on a driver that refuses. A step short of room slows down and runs
+      off `counted`; PLAIN on a run not held, the plan's model of a driver that refuses whatever
+      allocator torch runs (the planner's margin and the VAE's room, no reserve beyond them). A
+      step short of room slows down and runs
       under the segments where it is otherwise refused (EXPANDABLE);
     - nvml: on an early reading only (early), what the whole card has free by NVML before this
       process has a CUDA context on it, in bytes; `reported` and `card` are then that figure less
@@ -639,8 +643,8 @@ def early(card: int, used: int | None = None) -> Reading:
     allocator is not chosen yet (startup) and the driver not asked: behind WSL2's device the run
     and on Windows itself the run is taken for held, as startup takes them, the free memory the
     driver reports to the process counted as the card's (the smaller of the two figures, as
-    reading takes it), torch's own allocator with expandable segments unless the environment's
-    setting says otherwise (_allocator, as startup reads it); elsewhere the driver refuses and
+    reading takes it), the platform's default allocator unless the environment's setting says
+    otherwise (_default and _allocator, as startup reads them); elsewhere the driver refuses and
     its figure is the card's, the run held all the same where another program uses the card
     (share, read here as startup reads it, the share in `shared`). Nothing is remembered and
     nothing is logged: the module's state is startup's, and a run's own reading comes later
@@ -652,7 +656,7 @@ def early(card: int, used: int | None = None) -> Reading:
     if not lends and (found is None or not found.shared):
         return Reading(free, None, free, False, nvml=card, nvml_used=used)
     given = next((os.environ[name] for name in VARIABLES if os.environ.get(name)), None)
-    native, segments = _allocator(EXPANDABLE if given is None else given)
+    native, segments = _allocator(_default() if given is None else given)
     made = Reading(
         *(free, free, 0, True, HELD_BACK, _chosen(native, segments)),
         nvml=card,
@@ -766,10 +770,11 @@ def _torch_loaded() -> bool:
 def startup() -> str:
     """Ask the driver whether it refuses, once a run, before torch is imported, and set the
     allocator the run takes by default (VARIABLES, which the user's own setting overrides):
-    EXPANDABLE where the driver spills, ASYNC elsewhere; returned. Called where a run first takes
-    the GPU (main._run, its model files checked), so that a run refused before it, for its
-    source, its settings or its model files, asks nothing: the request disturbs the card (probe).
-    Nor does a job recorded with every segment made, which takes no GPU: it isn't called for one.
+    EXPANDABLE on Linux, WSL2's device included, held or not, ASYNC on Windows itself; returned.
+    Called where a run first takes the GPU (main._run, its model files checked), so that a run
+    refused before it, for its source, its settings or its model files, asks nothing: the request
+    disturbs the card (probe). Nor does a job recorded with every segment made, which takes no
+    GPU: it isn't called for one.
 
     The driver is asked only where it can spill, behind WSL2's device: a Linux driver refuses,
     and isn't disturbed. What was found is said in the log, a warning where it spills. No
@@ -782,8 +787,9 @@ def startup() -> str:
     compute or graphics, or NVML unable to say, a display active on it no share (decided on
     2026-11-12); held as under WSL2, torch's own allocator with
     expandable segments by default, torch limited, each step's reserve by that allocator and
-    every unit checked. A card nothing else uses keeps ASYNC and the plans of a driver that
-    refuses, said at INFO. The share is said in a warning after what seedvr2x does, the whole
+    every unit checked. A card nothing else uses keeps the plans of a driver that refuses, no
+    limit and no check, under EXPANDABLE too (PROVISIONAL, below), said at INFO with the
+    allocator. The share is said in a warning after what seedvr2x does, the whole
     finding at debug.
 
     On Windows itself the driver is taken for one that lends, unasked (design's ruling for the
@@ -804,6 +810,9 @@ def startup() -> str:
     _spills, _limit, _left, _footing, _planned = False, None, HELD_BACK, None, None
     _shared = None
     _plan_s_limit, _base, _reserve, _kept = None, None, RESERVE, None
+    # A card no other program uses under Linux's driver, and a driver behind WSL2's device found
+    # to refuse (Driver.said), each said once the allocator is chosen.
+    alone, refusing = False, None
     # Why the run is held, said after what seedvr2x does about it (below): each warning a line,
     # the whole finding at debug after it.
     why: list[tuple[str, str | None]] = []
@@ -820,7 +829,7 @@ def startup() -> str:
                 # resumes included).
                 why.append((lends_line(), found.said()))
             else:
-                logger.info("%s", found.said())
+                refusing = found.said()
     elif windows():
         _spills = True
         why.append((lends_line(), None))
@@ -833,10 +842,7 @@ def startup() -> str:
             _spills, _shared = True, found.said()
             why.append((shared_line(found), _share_finding(found)))
         else:
-            logger.info(
-                "%s (none listed by NVML): not held, its driver refusing what the card can't hold",
-                ALONE,
-            )
+            alone = True
     # An empty setting is no setting, and goes from the environment. torch takes the first of
     # the two variables that is set, empty or not: left there, an empty PYTORCH_CUDA_ALLOC_CONF
     # would hide a PYTORCH_ALLOC_CONF that names an allocator, and itself names none, which is
@@ -848,26 +854,42 @@ def startup() -> str:
     given = next((os.environ[name] for name in VARIABLES if name in os.environ), None)
     # On Windows torch has no expandable segments (_allocator): cudaMallocAsync, whose pool each
     # step's reserve counts (peaks.reserve), rather than torch's own allocator without them.
-    chosen = EXPANDABLE if _spills and not windows() else ASYNC
+    # Elsewhere torch's own with the segments, held or not (_default). PROVISIONAL (DESIGN.md,
+    # Allocator, decided on 2026-11-12, to be measured on the 96 GB card before it stands): where
+    # the driver refuses too, cudaMallocAsync before it, which on the 96 GB card (Linux's driver,
+    # headless, impl-box-3, 2026-11-11 and 12) refused a 167-latent window's calibration its
+    # 31.65 GiB piece (the MLP's intermediate for 1.38 M tokens) after trimming its pool 31 times,
+    # a plan 0.07 GiB under its budget; under the segments the same plan's calibration ran, torch
+    # recovering from 137 refused 20-MiB mappings. The plans don't move: a run not held plans as a
+    # driver that refuses does (Reading: PLAIN, no reserve beyond the planner's margin, no limit,
+    # no check).
+    chosen = _default()
     if given is None and chosen == ASYNC and _torch_loaded():
         # torch parsed the allocator's backend as it was loaded, and its CUDA refuses another at
         # its first use: "Allocator backend parsed at runtime != allocator backend parsed at load
         # time, cudaMallocAsync != native" (an INTERNAL ASSERT, torch 2.14.1 natively on Windows,
         # a 16-bit PNG's run, whose decoder, TorchCodec, imports torch before this: impl-win-3,
-        # 2026-11-09). Its own allocator, which it loaded with, is the run's then, its segments
-        # expandable where torch has them (a setting torch reads at its first use), said.
-        chosen = "" if windows() else EXPANDABLE
+        # 2026-11-09). Its own allocator, which it loaded with, is the run's then, said. Only on
+        # Windows itself, whose default is cudaMallocAsync (_default): elsewhere torch's own is
+        # the default anyway.
+        chosen = ""
         logger.info(
             "torch was loaded before seedvr2x chose its allocator (a 16-bit PNG's decoder loads"
-            " it): torch's own allocator, which it loaded with, is the run's, %s",
-            "without expandable segments, which Windows' torch has none of"
-            if windows()
-            else "its segments expandable",
+            " it): torch's own allocator, which it loaded with, is the run's, without expandable"
+            " segments, which Windows' torch has none of"
         )
     if given is None and chosen:
         os.environ[VARIABLES[0]] = chosen
     # torch's own allocator is its default too, when the environment's setting names none.
     _native, _segments = _allocator(chosen if given is None else given)
+    if refusing is not None:
+        logger.info("%s; %s", refusing, _allocator_named(_native, _segments))
+    if alone:
+        logger.info(
+            "%s (none listed by NVML): not held, its driver refusing what the card can't hold; %s",
+            ALONE,
+            _allocator_named(_native, _segments),
+        )
     if _spills:
         # The environment's allocator stands, and is said next where it isn't the default.
         named = (
@@ -939,6 +961,22 @@ def startup() -> str:
     return chosen
 
 
+def _default() -> str:
+    """The allocator's setting a run takes where the environment gives none (startup, early):
+    cudaMallocAsync on Windows itself, whose torch has no expandable segments, its pool counted
+    beside each step (peaks.reserve); torch's own with them everywhere else (EXPANDABLE), held or
+    not, PROVISIONAL where the driver refuses (startup)."""
+    return ASYNC if windows() else EXPANDABLE
+
+
+def _allocator_named(native: bool, segments: bool) -> str:
+    """The allocator torch runs, in the start's words: its own with or without expandable
+    segments, or cudaMallocAsync."""
+    if not native:
+        return "torch on cudaMallocAsync"
+    return f"torch's own allocator {'with' if segments else 'without'} expandable segments"
+
+
 def _allocator(setting: str) -> tuple[bool, bool]:
     """How torch reads an allocator's setting (VARIABLES) as it is loaded: whether it takes its
     own allocator, and whether that allocator's segments are expandable. Its tokens are what
@@ -995,7 +1033,9 @@ def watched(device: Any, unit: str, output: str) -> Generator[None]:
     grows says the unit ran short of room, its output maybe not that of a run with more room;
     one that doesn't says nothing either way. Nothing elsewhere: a driver that refuses isn't
     held, and under cudaMallocAsync, or an allocator of the environment's, torch counts no
-    refused allocation (DESIGN.md, Memory planner). Nothing said of a unit that raises: its
+    refused allocation (DESIGN.md, Memory planner). An unheld run under torch's own allocator,
+    the default where the driver refuses since 2026-11-12, counts them but isn't watched: that
+    is design's to decide. Nothing said of a unit that raises: its
     error is the run's."""
     if not (_spills and _native):
         yield

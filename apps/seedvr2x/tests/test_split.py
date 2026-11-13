@@ -103,8 +103,14 @@ import json, os, sys
 from contextlib import contextmanager
 from pathlib import Path
 
-# As a run sets it (seedvr2x/memory.py's startup).
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
+# As a run sets it (seedvr2x/memory.py's startup): torch's own allocator with expandable segments,
+# cudaMallocAsync on Windows itself.
+os.environ.setdefault(
+    "PYTORCH_CUDA_ALLOC_CONF",
+    "backend:cudaMallocAsync"
+    if sys.platform == "win32"
+    else "backend:native,expandable_segments:True",
+)
 tests, scratch, report, count, height, width, *argv = sys.argv[1:]
 count, height, width = int(count), int(height), int(width)
 sys.path.insert(0, tests)
