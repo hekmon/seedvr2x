@@ -1,65 +1,20 @@
 """How a source's frames become 16-bit RGB: zscale's parameters, every one explicit, each the
-tags' value or a guess (DESIGN.md, Input)."""
+tags' value or a guess (DESIGN.md, Input). The formats, matrices and chroma locations read, the
+guesses for an untagged stream and the refusals are the library's (seedvr2x/yuv.py), which the
+nodes convert by in torch where zscale is not to be had; the words of the refusals that name an
+option are the command line's."""
 
 from dataclasses import dataclass, replace
 
 from media.ffmpeg import MediaError, zscale
 from media.probe import VideoStream
-
-
-@dataclass(frozen=True)
-class PixelFormat:
-    """A decoded pixel format seedvr2x reads."""
-
-    planar: str  # the format zscale is fed: the source's own, or its planar twin
-    family: str  # "yuv"; "jpeg", YUV with full range by definition; "rgb"
-    subsampled: bool  # chroma subsampled, so its location matters
-
-
-def _pixel_formats() -> dict[str, PixelFormat]:
-    formats: dict[str, PixelFormat] = {}
-    # Planar formats zscale takes as they are: ffmpeg inserts no conversion before it (checked
-    # for each, tests/test_decode.py).
-    for depth in ("", "9le", "10le", "12le", "14le", "16le"):
-        for chroma in ("420", "422", "444"):
-            formats[f"yuv{chroma}p{depth}"] = PixelFormat(
-                f"yuv{chroma}p{depth}", "yuv", chroma != "444"
-            )
-        formats[f"gbrp{depth}"] = PixelFormat(f"gbrp{depth}", "rgb", False)
-    for name in ("yuv411p", "yuv410p", "yuv440p"):
-        formats[name] = PixelFormat(name, "yuv", True)
-    for chroma in ("420", "422", "444"):
-        formats[f"yuvj{chroma}p"] = PixelFormat(f"yuvj{chroma}p", "jpeg", chroma != "444")
-    # Packed and semi-planar formats, fed as their planar twin, of the same depth and subsampling:
-    # zscale takes no packed format, and the swscale step ffmpeg inserts before it then only
-    # repacks, which is exact (checked for each, tests/test_decode.py). A packed format left to
-    # ffmpeg's negotiation gets a conversion of swscale's choosing instead: 8-bit RGB expanded
-    # to 16 bits by swscale, 255 → 65283 (DESIGN.md, Input).
-    twins = {
-        **dict.fromkeys(("nv12", "nv21"), "yuv420p"),
-        "nv16": "yuv422p",
-        **dict.fromkeys(("nv24", "nv42"), "yuv444p"),
-        **{f"p0{d}le": f"yuv420p{d}le" for d in ("10", "12", "16")},
-        **{f"p2{d}le": f"yuv422p{d}le" for d in ("10", "12", "16")},
-        **{f"p4{d}le": f"yuv444p{d}le" for d in ("10", "12", "16")},
-        **dict.fromkeys(("yuyv422", "uyvy422", "yvyu422"), "yuv422p"),
-        **dict.fromkeys(("rgb24", "bgr24", "rgb0", "bgr0", "0rgb", "0bgr"), "gbrp"),
-        **dict.fromkeys(("rgb48le", "bgr48le", "rgb48be", "bgr48be"), "gbrp16le"),
-    }
-    for name, planar in twins.items():
-        formats[name] = formats[planar]
-    return formats
-
-
-PIXEL_FORMATS = _pixel_formats()
-
-# The matrices read, ffprobe's names to zscale's. The constant-luminance ones and ICtCp need the
-# transfer function, which is never converted; FCC, SMPTE 240M and YCgCo are rare and would go
-# untested (DESIGN.md, Not in the first version).
-MATRICES = {"bt709": "709", "bt470bg": "470bg", "smpte170m": "170m", "bt2020nc": "2020_ncl"}
-
-# The chroma locations, ffprobe's names, which are zscale's too.
-CHROMA_LOCATIONS = frozenset({"left", "center", "topleft", "top", "bottomleft", "bottom"})
+from seedvr2x.errors import SourceRefused
+from seedvr2x.yuv import CHROMA_LOCATIONS as CHROMA_LOCATIONS
+from seedvr2x.yuv import MATRICES as MATRICES
+from seedvr2x.yuv import PIXEL_FORMATS as PIXEL_FORMATS
+from seedvr2x.yuv import PixelFormat as PixelFormat
+from seedvr2x.yuv import guess_matrix as guess_matrix
+from seedvr2x.yuv import reading, unsupported
 
 # Chroma upsampled with bilinear, zscale's own kernel, given explicitly (DESIGN.md, Input, decided
 # on 2026-10-20): against it, Catmull-Rom (bicubic b = 0, c = 0.5) gave outputs whose chroma is
@@ -161,12 +116,6 @@ class Conversion:
         return f"YUV {self.matrix_tag}, {self.color_range} range, chroma {self.chroma_location}"
 
 
-def guess_matrix(width: int, height: int) -> str:
-    """The matrix of an untagged YUV stream: BT.709 from a width of 1280 or a height above 576,
-    else BT.601, mpv's rule for untagged video (DESIGN.md, Input)."""
-    return "bt709" if width >= 1280 or height > 576 else "smpte170m"
-
-
 def conversion_for(
     stream: VideoStream, matrix: str | None = None, deband: bool = False
 ) -> Conversion:
@@ -178,7 +127,7 @@ def conversion_for(
     tagged limited range; with `deband`, a format of a chroma subsampling no 16-bit format has."""
     pixel_format = PIXEL_FORMATS.get(stream.pix_fmt)
     if pixel_format is None:
-        raise MediaError(_unsupported(stream.pix_fmt))
+        raise MediaError(unsupported(stream.pix_fmt))
     if deband and pixel_format.planar not in DEEP:
         # yuv411p, yuv410p and yuv440p: ffmpeg has no 16-bit format of their subsampling, and
         # deband takes them at 8 bits alone, where its in-between values would be cut back.
@@ -194,59 +143,25 @@ def conversion_for(
 def _conversion_for(
     stream: VideoStream, matrix: str | None, pixel_format: PixelFormat
 ) -> Conversion:
-    if pixel_format.family == "rgb":
-        if matrix is not None:
-            raise MediaError(f"--input-matrix {matrix}: the source is RGB, it has no matrix")
-        if stream.color_range == "tv":
-            raise MediaError(
-                "RGB tagged limited range: rare, most likely a mis-tag, and either reading could"
-                " be wrong"
-            )
-        return Conversion(pixel_format.planar, "gbr", "full", "left")
-    guessed: list[str] = []
-    matrix_guessed = False
-    if matrix is None:
-        matrix = stream.color_space
-        if not matrix:
-            matrix = guess_matrix(stream.width, stream.height)
-            guessed.append(f"matrix {matrix} (from {stream.width}x{stream.height})")
-            matrix_guessed = True
-    if matrix not in MATRICES:
-        raise MediaError(f"matrix {matrix} is not supported (only {', '.join(MATRICES)})")
-    if pixel_format.family == "jpeg":
-        if stream.color_range == "tv":
-            raise MediaError(f"{stream.pix_fmt}, full range by definition, tagged limited range")
-        color_range = "full"
-    elif stream.color_range:
-        color_range = "full" if stream.color_range == "pc" else "limited"
-    else:
-        color_range = "limited"
-        guessed.append("limited range")
-    chroma_location = stream.chroma_location
-    if chroma_location not in CHROMA_LOCATIONS:
-        # Untagged: the H.264, HEVC and MPEG-2 default. ffmpeg declares the JPEG family's centre
-        # siting itself (MJPEG, tests/test_decode.py).
-        chroma_location = "left"
-        if pixel_format.subsampled:
-            guessed.append("chroma sited left")
-    return Conversion(
-        pixel_format.planar,
-        MATRICES[matrix],
-        color_range,
-        chroma_location,
-        tuple(guessed),
-        matrix_guessed,
-    )
-
-
-def _unsupported(pix_fmt: str) -> str:
-    if pix_fmt == "pal8":
-        return "palette pixel format pal8: not the YUV or RGB the conversions are tested for"
-    if pix_fmt.startswith(("gray", "ya", "mono")):
-        return f"grey pixel format {pix_fmt}: not the YUV or RGB the conversions are tested for"
-    if any(part in pix_fmt for part in ("yuva", "gbrap", "rgba", "bgra", "argb", "abgr", "ayuv")):
-        return (
-            f"pixel format {pix_fmt} has an alpha channel: dropping it would change the picture"
-            " wherever it isn't opaque"
+    if pixel_format.family == "rgb" and matrix is not None:
+        raise MediaError(f"--input-matrix {matrix}: the source is RGB, it has no matrix")
+    try:
+        read = reading(
+            stream.pix_fmt,
+            stream.width,
+            stream.height,
+            stream.color_space,
+            stream.color_range,
+            stream.chroma_location,
+            matrix,
         )
-    return f"pixel format {pix_fmt} is not supported"
+    except SourceRefused as error:
+        raise MediaError(str(error)) from error
+    return Conversion(
+        read.planar,
+        read.matrix,
+        read.color_range,
+        read.chroma_location,
+        read.guessed,
+        read.matrix_guessed,
+    )

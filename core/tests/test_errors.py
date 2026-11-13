@@ -32,6 +32,7 @@ from seedvr2x.errors import (
     PlanRefused,
     Refusal,
     Setting,
+    SourceRefused,
     TargetTooSmall,
     aside,
     plain,
@@ -256,3 +257,10 @@ def test_the_picture_s_refusals_carry_their_facts_and_the_resolution_its_setting
     assert small.value.kind == "too-small" and small.value.way == "resolution 16"
     assert str(small.value).startswith("resolution 16: ") and "--" not in str(small.value)
     assert cli_words(small.value).startswith("--resolution 16: ")
+
+
+def test_a_source_refusal_is_a_refusal_with_its_kind_and_reason() -> None:
+    error = SourceRefused("pixel format foo is not supported", kind="pixel-format", reason="why")
+    assert isinstance(error, Refusal) and isinstance(error, ValueError)
+    assert str(error) == "pixel format foo is not supported"
+    assert (error.kind, error.reason, error.way) == ("pixel-format", "why", "")

@@ -13,7 +13,7 @@ import torch
 from comfyui import models, nodes, plans, words
 from standins import GIB, execute
 
-from seedvr2x import clip, frames, peaks, pull, still_plan, weights
+from seedvr2x import clip, frames, peaks, pull, still_plan, weights, yuv
 from seedvr2x.errors import (
     CompileRefused,
     HostMemoryError,
@@ -149,6 +149,11 @@ def refusals() -> dict[str, Refusal]:
         frames.check_target((10, 16), 10)
     except TargetTooSmall as small:
         too_small = small
+    source = Refusal("")
+    try:
+        yuv.reading("yuva420p", 64, 16)
+    except Refusal as refused:
+        source = refused
     compile_ = CompileRefused(
         lambda say: (
             f"{say(Setting('compile'))} compiles only the shapes measured\n"
@@ -174,6 +179,7 @@ def refusals() -> dict[str, Refusal]:
         "compile": compile_,
         "probe": probe,
         "too small": too_small,
+        "source": source,
         **models_refused(),
         "host copies": HostMemoryError(
             "the weights that leave the GPU need 15.81 GiB of host memory, pinned, and the host has"

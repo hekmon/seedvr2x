@@ -526,6 +526,12 @@ class PictureRefused(Refusal):
         self.frames = frames
 
 
+class SourceRefused(Refusal):
+    """A video source's frames seedvr2x refuses to read (kind in yuv.KINDS: its pixel format, its
+    matrix, a range its family contradicts), the reason a complete clause naming no option of the
+    command line, which words its own (media/conversion.py)."""
+
+
 class TargetTooSmall(Refusal):
     """The frames resized to the target are too small for the padding (kind "too-small"): the
     resolution asked, the size of the frames it gives and the least the padding takes; the

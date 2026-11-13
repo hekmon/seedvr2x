@@ -29,6 +29,11 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
                          shot's pass, encode, windows and decode, on models already loaded
     picture.py png.py webp.py still.py still_plan.py     a still picture: read, written as PNG
                          or lossless WebP, upscaled on models already loaded, its plan for a bound
+    yuv.py               a video's frames between their planes and RGB: the pixel formats,
+                         matrices and chroma sitings the CLI reads, its guesses for an untagged
+                         stream and its refusals (plain Python at import: the CLI's
+                         media/conversion.py takes them), and a source's planes to RGB in torch
+                         as the CLI's zscale converts them
     clip.py              a clip's frames in memory, a call a shot (its seed by the shot's first
                          frame, the clip's one output array written into), upscaled on models
                          already loaded, its plan for the clip's shots (shot_plan's, the output
@@ -933,6 +938,30 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `tests/test_deband_cli.py` the comparison and the resume of each kind of job. No line
   suggests `--deband`: CAMBI found the strongly banded scenes and missed the clip the option was
   made for (impl-box-1), so no detection is built.
+- A source's planes to RGB in torch (`seedvr2x/yuv.py`; DESIGN.md, Repository and apps, the
+  nodes' VIDEO path), where zscale is not to be had: the CLI's table of pixel formats, matrices and
+  chroma sitings, its guesses for an untagged stream and its refusals are the library's
+  (`yuv.reading`, refusing as `SourceRefused` with a kind of `yuv.KINDS`), which
+  `media/conversion.py` takes, its own words kept for `--input-matrix` and `--deband`.
+  `core/tests/test_yuv.py` holds the table, the rules and the conversion on closed forms (limited
+  and full white and black exact at every depth, 8-bit RGB as v * 257, the siting's geometry
+  worked out by hand, a grey's channels within one code of each other, a 16-bit grey's G one code
+  off its R and B on 52 to 112 of 65,536 codes by the matrix) and importing no torch; the CLI's
+  `tests/test_yuv_cli.py` holds `to_rgb` to the CLI's own frames, its reader through zscale, on
+  files made there for every planar format in each range, every siting of every subsampling,
+  every matrix, the matrix guessed by the size, streams wholly untagged and the JPEG family:
+  the library's reading made from the tags the CLI's probe finds, field for field the CLI's
+  conversion, and every sample within one 16-bit code (115 cases on 2026-11-13: none more than
+  one off, 0.14% of the samples one off, 0.28% at most in a case); frames whose sides the chroma
+  subsampling doesn't divide, which zscale refuses, refused by `to_rgb` (`size`); the planes are
+  those ffmpeg decodes from the file (FFV1 in
+  Matroska, NUT where nothing may be tagged, x264 and x265 for a 4:2:0 siting at the bottom,
+  which Matroska can't say, MJPEG for the JPEG family), a siting at the bottom of the other
+  subsamplings through the CLI's decode of the raw planes; real codecs' planes decoded by PyAV
+  equal to ffmpeg's, PyAV run in a process of its own: imported into the CLI's test process, it
+  hung the CLI's first pass in every run of that file under pytest (a thread never started, a
+  forked ffprobe never reached exec; 6 of 6, and 6 of 6 passed without it; the cause not
+  isolated), so no CLI test imports it; the refusals in the CLI's words.
 - The shot detector in the first pass (`media/scan.py`) is held by `tests/test_detection.py`, a
   recording stand-in in its place: its frames are the official extraction command's byte for
   byte, on 18 pixel formats whatever the official command's scaler threads (1, 4, or ffmpeg's
