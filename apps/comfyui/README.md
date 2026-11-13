@@ -382,10 +382,11 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   fails where a step is short). The nodes say which applies once, in the console, where the
   driver lends system memory. The nodes set no limit on torch's memory: ComfyUI's process is
   shared with its other nodes, and a limit set there cannot be taken back.
-- **A card another program uses, on Linux** (a display active on it, or a program other than
-  ComfyUI listed on it): Linux's driver lends nothing, but that program has only the room the plan
-  leaves to grow into, so the plan leaves the same room as on a driver that lends, and the console
-  says so, with what it found. A card ComfyUI alone uses is planned as before.
+- **A card another program uses, on Linux** (a program other than ComfyUI listed on it, a
+  desktop's display server among them): Linux's driver lends nothing, but that program has only
+  the room the plan leaves to grow into, so the plan leaves the same room as on a driver that
+  lends, and the console says so, with what it found. A card ComfyUI alone uses is planned as
+  before.
 - **A card too small** is refused before any model loads, with the way out in the nodes' own
   words: a smaller file in seedvr2x Models, a tile or the blocks swapped connected to the upscale
   node.

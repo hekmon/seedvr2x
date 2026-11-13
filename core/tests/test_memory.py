@@ -641,8 +641,8 @@ def test_a_linux_driver_is_asked_nothing(
     # Its card no other program uses (library_fixtures.no_driver_asked's share), said so: a shared
     # one is held (tests/test_share.py).
     assert caplog.messages == [
-        "no other program on the GPU at the start (no display active on it, none listed by"
-        " NVML): not held, its driver refusing what the card can't hold"
+        "no other program on the GPU at the start (none listed by NVML): not held, its driver"
+        " refusing what the card can't hold"
     ]
     caplog.clear()
     # The whole free memory is the plan's, and the card's own figure is read nowhere: neither

@@ -1645,13 +1645,11 @@ def test_gpu_memory_refused_at_the_load_stops_the_run(
 
 def shared_card(monkeypatch: pytest.MonkeyPatch, card: int) -> list[float]:
     """A card under Linux's driver (no WSL2 device) that a desktop shares, as NVML would say it
-    (memory.share stood in: a display active on it and its server listed), the whole card
+    (memory.share stood in: its display server listed), the whole card
     having `card` bytes free by NVML; returns the limits torch is given, as fractions."""
     from seedvr2x import memory
 
-    monkeypatch.setattr(
-        memory, "share", lambda index=0: memory.Share(display=True, processes=((101, "Xorg"),))
-    )
+    monkeypatch.setattr(memory, "share", lambda index=0: memory.Share(processes=((101, "Xorg"),)))
     monkeypatch.setattr(memory, "probe", lambda *a: pytest.fail("Linux's driver is asked"))
     monkeypatch.setattr(memory, "_read", lambda index: card)
     limits: list[float] = []
@@ -1664,7 +1662,7 @@ def shared_card(monkeypatch: pytest.MonkeyPatch, card: int) -> list[float]:
     return limits
 
 
-SHARED_SAID = "a display active on it and another program on it (Xorg)"
+SHARED_SAID = "another program on it (Xorg)"
 
 
 def test_a_card_another_program_uses_under_linux_s_driver_is_held(
@@ -1718,8 +1716,8 @@ def test_a_card_no_other_program_uses_under_linux_s_driver_is_not_held(
     assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:cudaMallocAsync"
     assert limits == [] and steps.calls == UNINTERRUPTED
     assert (
-        "no other program on the GPU at the start (no display active on it, none listed by"
-        " NVML): not held, its driver refusing what the card can't hold"
+        "no other program on the GPU at the start (none listed by NVML): not held, its driver"
+        " refusing what the card can't hold"
     ) in caplog.messages
     assert "the driver refusing memory the card doesn't have" in caplog.text
 

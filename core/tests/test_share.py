@@ -1,7 +1,8 @@
 """A card another program uses under Linux's driver, held as under WSL2 (seedvr2x/memory.py:
-share, startup, early; DESIGN.md, Allocator, decided on 2026-11-11): NVML's answers stood in (a
-display active on the card, processes listed on it, compute or graphics, both, none, NVML unread),
-and what the start, the plan's reading and a resume's early reading make of them. The stand-ins
+share, startup, early; DESIGN.md, Allocator, decided on 2026-11-11): NVML's answers stood in
+(processes listed on the card, compute or graphics, both, none, NVML unread; a display active on
+it, which is no share since 2026-11-12 and never asked), and what the start, the plan's reading and
+a resume's early reading make of them. The stand-ins
 for CUDA's and NVML's libraries are tests/test_memory.py's."""
 
 import ctypes
@@ -25,19 +26,19 @@ HOLDS_LINE = (
     "seedvr2x holds itself to the card's own memory: torch limited to the memory free"
     " less 0.5 GiB, and each step planned with a reserve by its own peak"
 )
-SHARED_BY_A_DISPLAY = (
-    "the GPU is shared: a display active on it; held so that the rest of the card keeps room to"
-    " grow into"
+SHARED_BY_A_SERVER = (
+    "the GPU is shared: another program on it (Xorg); held so that the rest of the card keeps room"
+    " to grow into"
 )
 ALONE = (
-    "no other program on the GPU at the start (no display active on it, none listed by NVML): not"
-    " held, its driver refusing what the card can't hold"
+    "no other program on the GPU at the start (none listed by NVML): not held, its driver refusing"
+    " what the card can't hold"
 )
 
 
 class Listing(Nvml):
-    """NVML with the card's display and its processes: `display`, whether one is active (or
-    `display_status`, the status that call answers with); `compute` and `graphics`, the
+    """NVML with the card's display and its processes: `display`, whether one is active, which
+    seedvr2x never asks (nvmlDeviceGetDisplayActive fails the test); `compute` and `graphics`, the
     processes' identifiers each list names; `grow`, identifiers added to the compute list once
     its count has been asked, as a process starting between NVML's two calls; `without`, a
     function this NVML lacks (an older library)."""
@@ -47,13 +48,12 @@ class Listing(Nvml):
         display: bool = False,
         compute: tuple[int, ...] = (),
         graphics: tuple[int, ...] = (),
-        display_status: int = SUCCESS,
         grow: tuple[int, ...] = (),
         without: str | None = None,
         failing: str | None = None,
     ) -> None:
         super().__init__({NAMED: 20 * GIB}, failing)
-        self.display, self.display_status = display, display_status
+        self.display = display
         self.lists = {"compute": list(compute), "graphics": list(graphics)}
         self.grow, self.without = list(grow), without
         self.filled: list[tuple[str, int]] = []
@@ -64,12 +64,7 @@ class Listing(Nvml):
         return object.__getattribute__(self, name)
 
     def nvmlDeviceGetDisplayActive(self, handle: ctypes.c_void_p, active: Any) -> int:
-        failed = self.call("nvmlDeviceGetDisplayActive")
-        if failed or self.display_status != SUCCESS:
-            return failed or self.display_status
-        assert self.open == 1 and handle.value == 1
-        active._obj.value = int(self.display)
-        return SUCCESS
+        pytest.fail("whether a display is active is asked")
 
     def nvmlDeviceGetComputeRunningProcesses_v3(self, handle: Any, count: Any, infos: Any) -> int:
         return self._listed("compute", count, infos)
@@ -124,10 +119,19 @@ def test_a_card_no_other_program_uses(monkeypatch: pytest.MonkeyPatch, named: No
     assert card.calls == ["cuInit", "cuDeviceGet", "cuDeviceGetUuid"]
 
 
-def test_shared_by_a_display(monkeypatch: pytest.MonkeyPatch, named: None) -> None:
-    found = read(monkeypatch, Listing(display=True))
-    assert found.shared and found.display and not found.processes
-    assert found.said() == "a display active on it"
+def test_a_display_active_with_no_program_listed_is_no_share(
+    monkeypatch: pytest.MonkeyPatch, named: None
+) -> None:
+    # The 96 GB card with no program on it and no display server running read a display active
+    # (its text console, inferred: DESIGN.md, Allocator, decided on 2026-11-12): not asked, the
+    # card no other program's (Listing's nvmlDeviceGetDisplayActive fails a test that asks).
+    nvml = Listing(display=True)
+    found = read(monkeypatch, nvml)
+    assert found == memory.Share() and not found.shared
+    assert found.said() == "no other program on it"
+    # A desktop is seen by its display server's graphics context.
+    found = read(monkeypatch, Listing(display=True, graphics=(101,)))
+    assert found.shared and found.said() == "another program on it (Xorg)"
 
 
 def test_shared_by_a_process_compute_or_graphics(
@@ -149,9 +153,7 @@ def test_shared_by_both_each_process_once_this_one_left_out(
     nvml = Listing(display=True, compute=(103, own, 900), graphics=(101, 102, 103))
     found = read(monkeypatch, nvml)
     assert [pid for pid, _ in found.processes] == [101, 102, 103, 900]
-    assert found.said() == (
-        "a display active on it and 4 other programs on it (Xorg, gnome-shell, firefox, 1 more)"
-    )
+    assert found.said() == "4 other programs on it (Xorg, gnome-shell, firefox, 1 more)"
     found = read(monkeypatch, Listing(compute=(own, 900)))
     assert found.said() == "another program on it (process 900)"
     assert not read(monkeypatch, Listing(compute=(own,), graphics=(own,))).shared
@@ -194,20 +196,12 @@ def test_a_list_that_keeps_growing_or_fails_is_unread(
     assert found.unread == "nvmlDeviceGetGraphicsRunningProcesses_v3: 15" and found.shared
 
 
-def test_a_card_that_drives_no_display_has_none_active(
-    monkeypatch: pytest.MonkeyPatch, named: None
-) -> None:
-    # NVML_ERROR_NOT_SUPPORTED: a card without a display engine.
-    found = read(monkeypatch, Listing(display_status=memory.NOT_SUPPORTED))
-    assert found == memory.Share()
-
-
 @pytest.mark.parametrize(
     ("nvml", "reason"),
     [
         (None, "cannot open shared object file"),
         (Listing(failing="nvmlInit"), "nvmlInit: 999"),
-        (Listing(failing="nvmlDeviceGetDisplayActive"), "nvmlDeviceGetDisplayActive: 999"),
+        (Listing(failing="nvmlDeviceGetHandleByUUID"), "nvmlDeviceGetHandleByUUID, GPU-"),
         (
             Listing(failing="graphics processes"),
             "nvmlDeviceGetGraphicsRunningProcesses_v3: 999",
@@ -230,10 +224,10 @@ def test_nvml_unread_is_taken_for_shared(
 
 
 def test_nvml_failing_once_is_asked_again(monkeypatch: pytest.MonkeyPatch, named: None) -> None:
-    nvml = Listing(display=True, failing="nvmlDeviceGetDisplayActive")
+    nvml = Listing(graphics=(101,), failing="graphics processes")
     nvml.times = 1
     found = read(monkeypatch, nvml)
-    assert found == memory.Share(display=True)
+    assert found == memory.Share(processes=((101, "Xorg"),))
 
 
 def start(monkeypatch: pytest.MonkeyPatch, nvml: Any) -> str:
@@ -247,11 +241,11 @@ def start(monkeypatch: pytest.MonkeyPatch, nvml: Any) -> str:
 @pytest.mark.parametrize(
     ("nvml", "said"),
     [
-        (Listing(display=True), "a display active on it"),
+        (Listing(graphics=(101,)), "another program on it (Xorg)"),
         (Listing(compute=(104,)), "another program on it (python3)"),
         (
             Listing(display=True, graphics=(101, 102)),
-            "a display active on it and 2 other programs on it (Xorg, gnome-shell)",
+            "2 other programs on it (Xorg, gnome-shell)",
         ),
     ],
 )
@@ -274,7 +268,7 @@ def test_a_shared_card_is_held_as_under_wsl2(
     ]
     finding = caplog.records[-1]
     assert finding.levelno == logging.DEBUG and finding.getMessage().startswith(
-        "the GPU's share by NVML: display active "
+        "the GPU's share by NVML: processes other than this one"
     )
     # The plan's reading: held, by the card's figure (NVML's 20 GiB, the smaller), less 0.5 GiB,
     # torch's own allocator with its segments, the share carried for the card line and out of
@@ -285,12 +279,12 @@ def test_a_shared_card_is_held_as_under_wsl2(
     assert found.shared == said and "shared" not in repr(found)
 
 
-def test_the_display_s_line_whole(
+def test_the_display_server_s_line_whole(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, named: None
 ) -> None:
     caplog.set_level(logging.INFO, logger=memory.logger.name)
-    start(monkeypatch, Listing(display=True))
-    assert caplog.messages == [HOLDS_LINE, SHARED_BY_A_DISPLAY]
+    start(monkeypatch, Listing(display=True, graphics=(101,)))
+    assert caplog.messages == [HOLDS_LINE, SHARED_BY_A_SERVER]
 
 
 def test_nvml_unread_at_the_start_holds_the_run_saying_why(
@@ -347,7 +341,7 @@ def test_the_user_s_allocator_stands_on_a_shared_card(
     # made for that allocator, and a setting that holds less said.
     caplog.set_level(logging.INFO, logger=memory.logger.name)
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", setting)
-    start(monkeypatch, Listing(display=True))
+    start(monkeypatch, Listing(graphics=(101,)))
     assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == setting
     assert memory.spills() and memory.reading(30 * GIB).allocator == allocator
     environment = [m for m in caplog.messages if m.startswith("the allocator is the environment")]
@@ -362,12 +356,12 @@ def test_a_resume_s_early_reading_takes_the_share(
     # Before torch and before startup, NVML alone: a shared card's reading is held, as the run's
     # will be; one no other program uses is a refusing driver's, as before.
     monkeypatch.setattr(memory, "share", SHARE)
-    libraries(monkeypatch, Card(30 * GIB, spills=False), Listing(display=True))
+    libraries(monkeypatch, Card(30 * GIB, spills=False), Listing(graphics=(101,)))
     found = memory.early(20 * GIB, used=3 * GIB)
-    assert found.held and found.shared == "a display active on it"
+    assert found.held and found.shared == "another program on it (Xorg)"
     assert found.nvml == 20 * GIB and found.reported == 20 * GIB - memory.CONTEXT
     assert found.counted == found.reported - memory.HELD_BACK
-    libraries(monkeypatch, Card(30 * GIB, spills=False), Listing())
+    libraries(monkeypatch, Card(30 * GIB, spills=False), Listing(display=True))
     found = memory.early(20 * GIB, used=3 * GIB)
     assert not found.held and found.shared is None
     assert found == memory.Reading(
@@ -407,7 +401,7 @@ def test_a_platform_other_than_linux_asks_nothing_and_is_not_held(
 
 
 def test_a_new_start_forgets_the_share(monkeypatch: pytest.MonkeyPatch, named: None) -> None:
-    start(monkeypatch, Listing(display=True))
+    start(monkeypatch, Listing(graphics=(101,)))
     assert memory.shared() is not None
     start(monkeypatch, Listing())
     assert memory.shared() is None and not memory.spills()

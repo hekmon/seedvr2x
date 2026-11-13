@@ -1149,13 +1149,16 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `memory.Share`, `memory.shared`, `memory.SHARED`, `memory.ALONE`, `memory.held_why`,
   `Reading.shared`; DESIGN.md, Allocator, decided on 2026-11-11, from impl-box-2's desktop on the
   96 GB card): at the start, before torch, on Linux alone (`sys.platform`; WSL2's device and
-  Windows go by the lending driver as before), NVML says whether a display is active on the card
-  or a process other than this one is listed on it (compute or graphics, both lists asked for
-  their count first and again where they grew, each process named by `/proc/PID/comm` where it can
-  be read); NVML unread, asked twice, is taken for shared and said ("maybe, NVML unread",
-  `memory.UNREAD`), the run then held 0.5 GiB under the driver's figure, the card's own there, and
-  not WSL2's 3 (`_held_back`). A shared card: `memory.startup` holds the run as a lending driver's
-  (torch's own allocator with expandable segments by default, the limit, each step's reserve,
+  Windows go by the lending driver as before), NVML says whether a process other than this one is
+  listed on the card (compute or graphics, both lists asked for their count first and again where
+  they grew, each process named by `/proc/PID/comm` where it can be read); a display active on it
+  is no share and is not asked (decided on 2026-11-12: the 96 GB card, nothing on it and no
+  display server running, read one, its text console inferred), a desktop seen by its display
+  server's graphics context (unmeasured on Linux's driver); NVML unread, asked twice, is taken for
+  shared and said ("maybe, NVML unread", `memory.UNREAD`), the run then held 0.5 GiB under the
+  driver's figure, the card's own there, and not WSL2's 3 (`_held_back`). A shared card:
+  `memory.startup` holds the run as a lending driver's (torch's own allocator with expandable
+  segments by default, the limit, each step's reserve,
   the checks), the hold's warning then the share's line (`shared_line`), the finding at debug; a
   card nothing else uses: cudaMallocAsync and a refusing driver's plans, one INFO line (`ALONE`).
   A resume's early reading takes the share too (`memory.early`). The plan's held card line, the
@@ -1165,17 +1168,18 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `_COMMAND_LINE_WORDS`). The same `memory.startup` decides for the image server and the nodes: on
   a Linux desktop their plans are now held plans too, the server's torch limited as the CLI's,
   the nodes' plan alone held (they set no limit in ComfyUI's process). A process of another PID
-  namespace (a container's) is likely not listed at all (unmeasured): a container sees another
-  program by a display alone. `Reading.shared` is out of the repr, so the plan matrix's text
+  namespace (a container's) is likely not listed at all (unmeasured): a container sees no other
+  program at all. `Reading.shared` is out of the repr, so the plan matrix's text
   doesn't move. `library_fixtures.no_driver_asked` stands in a card no other program uses
   (`memory.Share()`), the CPU tests' NVML being none, which would read as shared. A GPU test run
   makes the card shared for the commands it starts once its own process has a CUDA context
   (`pytest -m gpu` runs in-process GPU tests before `test_regression.py`), and the references
   under Linux's driver are a card nothing else used: `test_regression.py`'s runs fail a held run
   (`shared_card`), so it runs in a pytest process of its own on Linux, nothing else on the card.
-  `core/tests/test_share.py` holds the reading on NVML stood in (a display, a process, both, this
-  process left out, a list grown, a list that keeps growing or fails, a card that drives no
-  display, every way NVML is unread, once and again, no CUDA context made), the start (held, its
+  `core/tests/test_share.py` holds the reading on NVML stood in (a process, compute or graphics,
+  both, this process left out, a list grown, a list that keeps growing or fails, a display active
+  with no program listed no share and never asked, every way NVML is unread, once and again, no
+  CUDA context made), the start (held, its
   lines whole, the reading, the user's allocator standing, NVML unread with 0.5 GiB left, not
   shared, another platform asking nothing), the early reading, WSL2 and Windows asking nothing;
   `test_still_plan.py` a picture's line; the CLI's `tests/test_cli_run.py` a job on a shared card

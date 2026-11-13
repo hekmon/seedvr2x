@@ -1367,21 +1367,22 @@ On Linux the driver refuses memory the card doesn't have, and a job alone on its
 so a desktop or another program on the same card has only the plan's 0.6 GiB margin to grow
 into: on a 96 GB card emulating 16 to 48 GB, a desktop growing by 0.6 GiB stopped every 4K job
 out of memory, and saw its own requests refused during 1080p ones. So at its start seedvr2x asks
-the driver (NVML) whether a display is active on the card or another program is on it, and if
-so holds itself to the card as [under WSL2](#under-wsl2): PyTorch's own allocator with
+the driver (NVML) whether another program is on the card, a desktop's display server among them,
+and if so holds itself to the card as [under WSL2](#under-wsl2): PyTorch's own allocator with
 expandable segments, PyTorch limited to the card's free memory less 0.5 GiB, each step planned
 with a reserve of its own, and each unit checking the card first. It says which at its start:
 
 ```
 03:35:41 WARNING seedvr2x holds itself to the card's own memory: torch limited to the memory free less 0.5 GiB, and each step planned with a reserve by its own peak
-03:35:41 WARNING the GPU is shared: a display active on it and 2 other programs on it (Xorg, gnome-shell); held so that the rest of the card keeps room to grow into
+03:35:41 WARNING the GPU is shared: 2 other programs on it (Xorg, gnome-shell); held so that the rest of the card keeps room to grow into
 ```
 
 and the plan's card line ends with `the card shared:` and the same words. A card nothing else
 uses says `no other program on the GPU at the start` and runs as before. Where NVML can't tell,
 the card is taken for shared, and the line says why. Your own `PYTORCH_CUDA_ALLOC_CONF` stands
-either way. To run a card unheld, no display may be active on it (NVML can count one with no
-monitor attached) and no other program may hold a context on it when the job starts.
+either way. To run a card unheld, no other program may hold a context on it when the job
+starts; a display attached to the card with nothing running on it, a text console, is no other
+program.
 
 ## Under WSL2
 
