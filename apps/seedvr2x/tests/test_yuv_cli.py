@@ -13,8 +13,9 @@ The files: FFV1 in Matroska holding the planes as they are; NUT where a stream m
 FFV1 stores as YUV of full range. A siting at the bottom of 4:2:2, 4:1:1, 4:1:0 and 4:4:0, which
 no codec here carries (H.264's and HEVC's siting is 4:2:0's), is held through the command line's
 decode of the raw planes, its conversion made by conversion_for from a stream so tagged. Then the
-planes of real codecs as PyAV decodes them (the nodes' way). Skipped without an ffmpeg seedvr2x
-accepts; PyAV's cases without PyAV, saying so.
+planes of real codecs as PyAV decodes them (the nodes' way), and the master's planes
+(`master_planes`) read back by the command line. Skipped without an ffmpeg seedvr2x accepts; PyAV's
+cases without PyAV, saying so.
 
 Measured on 2026-11-13 (ffmpeg n9.0.2's zscale; torch 2.14.1 on the CPU): over the grid's 115
 cases, no sample more than one code off, 0.14% of the samples one off, 0.28% at most in a case."""
@@ -462,6 +463,30 @@ def test_real_codecs_decoded_by_pyav(
     for mine, theirs in zip(by_pyav, by_ffmpeg, strict=True):
         assert np.array_equal(mine, theirs)  # PyAV's decode is the command line's ffmpeg's
     compared(f"{encoder} {planar} by PyAV", the_library_s(by_pyav, read), frames)
+
+
+def test_the_master_read_back_by_the_command_line(tmp_path: Path) -> None:
+    # The master's planes of 16-bit RGB, stored as FFV1 tagged BT.709 limited: the command line
+    # reads them as it reads any source, within one code of the library's own reading of them
+    # (MASTER), and within two of the RGB written, the master's limited range spanning fewer
+    # codes than RGB's (yuv.master_planes).
+    rng = np.random.default_rng(19)
+    codes = rng.integers(0, 65536, (FRAMES, HEIGHT, WIDTH, 3))
+    rgb = torch.from_numpy(codes.astype(np.float32)) / 65535
+    master = yuv.master_planes(rgb).numpy()
+    planes = (master[:, 0], master[:, 1], master[:, 2])
+    tags = {"color_space": "bt709", "color_range": "tv"}
+    path = written(tmp_path / "master.mkv", planes, "yuv444p16le", tags, ["-c:v", "ffv1"])
+    held(path, yuv.MASTER)
+    source = examine(path)
+    with source.decoder() as reader:
+        frames = reader.read(source.frames).astype(np.int64)
+    difference = np.abs(frames - codes)
+    print(
+        f"the master read back: {np.mean(difference == 0):.2%} equal,"
+        f" {np.mean(difference == 1):.2%} one code off, {np.mean(difference == 2):.2%} two"
+    )
+    assert difference.max() <= 2
 
 
 def test_the_grid_s_figures() -> None:

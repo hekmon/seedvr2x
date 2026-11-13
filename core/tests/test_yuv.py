@@ -1,8 +1,9 @@
 """seedvr2x/yuv.py, the library's alone, from closed forms written here and no ffmpeg: the table of
 pixel formats (depth, subsampling, the packed formats' planar twins), `reading` (tags kept, the
 guesses of an untagged stream, the refusals by kind and in their words), `to_rgb` (limited and full
-range, RGB, the chroma sitings worked out by hand, dtypes, frames, clamping, the sizes refused).
-Its comparison with zscale is the CLI's (tests/test_yuv_cli.py)."""
+range, RGB, the chroma sitings worked out by hand, dtypes, frames, clamping) and `master_planes`
+(the BT.709 limited codes, the round trip through MASTER). Its comparison with zscale is the CLI's
+(tests/test_yuv_cli.py)."""
 
 import subprocess
 import sys
@@ -14,7 +15,7 @@ from library_fixtures import cli_words
 
 from seedvr2x import yuv
 from seedvr2x.errors import SourceRefused
-from seedvr2x.yuv import PIXEL_FORMATS, Reading, reading, to_rgb
+from seedvr2x.yuv import MASTER, PIXEL_FORMATS, Reading, master_planes, reading, to_rgb
 
 WEIGHTS = {"bt709": (0.2126, 0.0722), "bt470bg": (0.299, 0.114), "smpte170m": (0.299, 0.114)}
 MATRIX_NAMES = {"bt709": "709", "bt470bg": "470bg", "smpte170m": "170m", "bt2020nc": "2020_ncl"}
@@ -521,6 +522,64 @@ def test_values_out_of_gamut_clamp_to_the_range() -> None:
     out = codes(to_rgb([luma, cb, cr], read))
     assert out.min() == 0 and out.max() == 65535
     assert out[0, 0, 0, 0] == 65535 and out[0, 0, 3, 0] == 0
+
+
+# master_planes()
+
+
+def master_of(rgb: list[float]) -> list[int]:
+    """BT.709 limited 16-bit codes in float64, rounded."""
+    r, g, b = rgb
+    y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return [
+        round(4096 + 56064 * y),
+        round(32768 + 57344 * (b - y) / 1.8556),
+        round(32768 + 57344 * (r - y) / 1.5748),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rgb", "planes"),
+    [([1.0, 1, 1], [60160, 32768, 32768]), ([0.0, 0, 0], [4096, 32768, 32768])]
+    + [
+        ([float(i == c) for i in range(3)], master_of([float(i == c) for i in range(3)]))
+        for c in range(3)
+    ],
+)
+def test_the_master_planes_of_white_black_and_the_primaries(
+    rgb: list[float], planes: list[int]
+) -> None:
+    out = master_planes(torch.tensor(rgb, dtype=torch.float32).view(1, 1, 1, 3))
+    assert out.dtype == torch.uint16 and out.shape == (1, 3, 1, 1)
+    assert out.flatten().tolist() == planes
+
+
+def test_input_outside_the_range_is_clamped() -> None:
+    wild = torch.tensor([[[[-3.0, 2.0, 1.5], [0.25, -0.5, 7.0]]]])
+    assert master_planes(wild).equal(master_planes(wild.clamp(0, 1)))
+
+
+def test_the_round_trip_through_master_is_within_two_codes() -> None:
+    generator = torch.Generator().manual_seed(2026)
+    rgb = torch.rand(4, 48, 64, 3, generator=generator)
+    planes = master_planes(rgb)
+    assert planes.shape == (4, 3, 48, 64) and planes.dtype == torch.uint16
+    back = codes(to_rgb([planes[:, i] for i in range(3)], MASTER))
+    error = (back - torch.round(rgb.double() * 65535).long()).abs()
+    shares = [(error == n).double().mean().item() for n in range(4)]
+    print(
+        f"round trip RGB -> master -> RGB: share equal {shares[0]:.4%}, one off"
+        f" {shares[1]:.4%}, two off {shares[2]:.4%}, more {shares[3]:.4%}"
+    )
+    assert error.max() <= 2
+    assert shares[0] > 0.2 and shares[2] < 0.02 and shares[3] == 0
+    # The other way: planes made by master_planes, through RGB and back.
+    again = master_planes(to_rgb([planes[:, i] for i in range(3)], MASTER))
+    moved = (again.long() - planes.long()).abs()
+    print(
+        f"planes -> RGB -> planes: equal {(moved == 0).double().mean().item():.4%}, largest"
+        f" move {moved.max().item()}"
+    )
 
 
 # The import

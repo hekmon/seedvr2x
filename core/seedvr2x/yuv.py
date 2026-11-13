@@ -1,7 +1,8 @@
 """A video's frames between the YCbCr or RGB planes a file stores and the pipeline's 16-bit RGB
 (DESIGN.md, Input; Repository and apps, the nodes' VIDEO path): the pixel formats, matrices and
 chroma sitings the command line reads, its guesses for an untagged stream and its refusals; a
-source's planes to RGB in torch by those rules, where zscale is not to be had.
+source's planes to RGB in torch by those rules, where zscale is not to be had; and the RGB of an
+output to the planes of the nodes' master, 16-bit 4:4:4 YCbCr, BT.709, limited range.
 
 The command line converts with zscale, every parameter explicit (its media/conversion.py, which
 takes the table and the rules from here). `to_rgb` makes the same conversion in float32 and was
@@ -256,6 +257,13 @@ def reading(
     )
 
 
+# The master the nodes write (DESIGN.md, Repository and apps, the nodes' VIDEO path): 16-bit
+# 4:4:4 YCbCr, BT.709, limited range, as a Reading of its own planes. ComfyUI's Save Video
+# re-encodes it right, where a 16-bit RGB master came out coded as BT.601 and tagged wrong
+# (impl-videostudy, 2026-11-12).
+MASTER = Reading("yuv444p16le", "709", "limited", "left")
+
+
 def _span(depth: int, limited: bool) -> tuple[float, float, float, float]:
     """(luma's black, luma's span, chroma's neutral, chroma's span) in codes of `depth` bits, as
     zimg takes a range: a limited range's 16 to 235 and 16 to 240 shifted to the depth, exactly;
@@ -372,4 +380,34 @@ def to_rgb(planes: Sequence["torch.Tensor"], read: Reading) -> "torch.Tensor":
         for channel, values in enumerate(rgb):
             out[index, ..., channel] = torch.round(values.clamp(0, 1) * 65535)
     out /= 65535
+    return out
+
+
+def master_planes(rgb: "torch.Tensor") -> "torch.Tensor":
+    """RGB frames (T, H, W, 3) float in [0, 1] as the master's planes: (T, 3, H, W) uint16, Y, Cb,
+    Cr, 16-bit 4:4:4 BT.709 limited range (MASTER), each sample rounded to nearest, on the
+    frames' device. RGB outside [0, 1] is clamped first.
+
+    The planes hold 16-bit RGB to two codes: their limited range spans 56,064 codes of luma and
+    57,344 of chroma for RGB's 65,535, so that a sample read back through MASTER (to_rgb, or the
+    command line's zscale) is within one code of the RGB written on most samples and two on a few
+    of blue's (the CLI's tests/test_yuv_cli.py and the nodes' tests/test_master.py say how many)."""
+    import torch
+
+    frames, height, width, _ = rgb.shape
+    black, span, neutral, chroma_span = _span(16, True)
+    kr, kb = WEIGHTS["709"]
+    kg = 1 - kr - kb
+    out = torch.empty((frames, 3, height, width), dtype=torch.uint16, device=rgb.device)
+    for index in range(frames):
+        frame = rgb[index].to(torch.float32).clamp(0, 1)
+        r, g, b = frame[..., 0], frame[..., 1], frame[..., 2]
+        luma = kr * r + kg * g + kb * b
+        planes = (
+            black + span * luma,
+            neutral + chroma_span * (b - luma) / (2 * (1 - kb)),
+            neutral + chroma_span * (r - luma) / (2 * (1 - kr)),
+        )
+        for plane, values in enumerate(planes):
+            out[index, plane] = torch.round(values).clamp(0, 65535).to(torch.uint16)
     return out

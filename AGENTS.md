@@ -32,8 +32,9 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
     yuv.py               a video's frames between their planes and RGB: the pixel formats,
                          matrices and chroma sitings the CLI reads, its guesses for an untagged
                          stream and its refusals (plain Python at import: the CLI's
-                         media/conversion.py takes them), and a source's planes to RGB in torch
-                         as the CLI's zscale converts them
+                         media/conversion.py takes them), a source's planes to RGB in torch as
+                         the CLI's zscale converts them, and RGB to the planes of the nodes'
+                         master, 16-bit 4:4:4 YCbCr, BT.709, limited range
     clip.py              a clip's frames in memory, a call a shot (its seed by the shot's first
                          frame, the clip's one output array written into), upscaled on models
                          already loaded, its plan for the clip's shots (shot_plan's, the output
@@ -133,6 +134,10 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          installed by `__init__.py` before anything else is imported; a text
                          of several lines said a line a record (`say`); the library's checks of
                          the model files (`QUIET`: pull, weights) at DEBUG there
+  master.py              the lossless file Upscale Video will write, no node writing it yet:
+                         FFV1 in Matroska, 16-bit 4:4:4 YCbCr tagged BT.709 limited, the
+                         library's planes (`yuv.master_planes`), written through PyAV (ComfyUI's,
+                         17.0.0 and later) a shot at a time into one file open for the run
   workflows/ README.md   the two example workflows (picture.json, clip.json: ComfyUI's UI format,
                          Models wired in), and the nodes' README, for users
   ruff.toml pyrightconfig.json pytest.ini     the checks' settings, the CLI's
@@ -962,6 +967,21 @@ marker. The image server, Linux's alone by its lock, has no such line.
   hung the CLI's first pass in every run of that file under pytest (a thread never started, a
   forked ffprobe never reached exec; 6 of 6, and 6 of 6 passed without it; the cause not
   isolated), so no CLI test imports it; the refusals in the CLI's words.
+- The nodes' master (`apps/comfyui/master.py`; DESIGN.md, the nodes' VIDEO path) and its planes
+  (`yuv.master_planes`): `core/tests/test_yuv.py` holds the planes of white, black and the
+  primaries to BT.709's limited codes and the round trip through `MASTER` within two codes;
+  the nodes' `tests/test_master.py`, skipped without PyAV (and its ffmpeg half without ffmpeg),
+  writes shots of unequal lengths into one file and reads them back by PyAV and by ffmpeg: the
+  planes bit for bit, the tags (matrix, range, and the primaries and transfer given, none where
+  none is given), every frame's time within Matroska's millisecond and the rate read back exact
+  for the usual rates (60000/1001 and 120000/1001 come back as libavformat's nearest fractions
+  of terms up to 30,000, 19001/317 and 29011/242, ffmpeg's own Matroska files the same), each
+  frame's host copy behind the library's poll (`model.synchronize`), a frame of another size
+  refused and a file left by an exception closed. The RGB read back through the master's reading
+  is within two codes of the RGB written, not one: 16-bit limited YCbCr spans 56,064 codes of
+  luma and 57,344 of chroma for RGB's 65,535 (0.29% of the samples two off, 2026-11-13); the
+  CLI's `tests/test_yuv_cli.py` reads such a file as a source, through zscale, the same.
+  The floors' environment runs `test_master.py` with PyAV 17.0.0.
 - The shot detector in the first pass (`media/scan.py`) is held by `tests/test_detection.py`, a
   recording stand-in in its place: its frames are the official extraction command's byte for
   byte, on 18 pixel formats whatever the official command's scaler threads (1, 4, or ffmpeg's
