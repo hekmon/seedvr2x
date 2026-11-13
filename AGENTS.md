@@ -382,6 +382,12 @@ beside it; the `__init__.py` is seedvr2x's.
 - `gguf` (llama.cpp's own gguf-py, 0.19.0) is a dev dependency of `apps/seedvr2x` alone, pinned
   there: the tests' reference for the GGUF reader and the dequantisation, never the library's or
   the shipped environment's; the tests that use it skip without it.
+- `av` (PyAV, 19.0.2, the version of the ComfyUI instance made for seedvr2x's tests) is a
+  dev dependency of `apps/seedvr2x` alone, pinned there, as `gguf` is: ComfyUI ships it, and the
+  nodes' video path takes it (DESIGN.md, Repository and apps, the nodes); never the library's,
+  which imports it nowhere, nor the shipped environment's. The tests that use it skip without it,
+  saying so. The floors' environment has it at the floor ComfyUI 0.45.3's requirements.txt sets,
+  17.0.0.
 - huggingface_hub is declared, at the version the lock held already through diffusers: it pulls
   seedvr2x's own model files from its repo at the pinned revision, into Hugging Face's cache
   (`seedvr2x/pull.py`). seedvr2x imports it to look in the cache on every run without
@@ -501,23 +507,23 @@ marker. The image server, Linux's alone by its lock, has no such line.
       --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple \
       --index-strategy unsafe-best-match -r core/pyproject.toml \
       torch==2.13.0+cpu torchvision==0.28.0+cpu torchcodec==0.16.0+cpu \
-      pytest==9.1.1 gguf==0.19.0 ruff==0.16.10
+      pytest==9.1.1 gguf==0.19.0 ruff==0.16.10 av==17.0.0
   uv pip install --python "$FLOORS" --no-deps -e core
   ```
 
   (the three pins move with their floors; the tools' pins are the CLI's lock's, ruff for
-  `tests/test_vendor.py`, whose `tools/vendor.py check` runs it by the interpreter), then the
-  library's suite from `core/` and the nodes' from `apps/comfyui/`, each `"$FLOORS"/bin/python -m
-  pytest -p no:cacheprovider --basetemp=<a directory on Linux's disk>` with `OMP_NUM_THREADS` as in
-  the CLI's environment. A baton that moves a range, or the library's or the nodes' code a range
-  covers, runs them once at its end, beside the one full suite. Its torch being a CPU build where
-  every other environment's is CUDA's, two of the library's tests met names a CPU build lacks:
-  `tests/test_memory.py`'s reading of torch's own allocator variables skips there (no CUDA allocator
-  to ask), and `tests/test_detector_close.py` sets its stand-in for cuBLAS's workspace clearing
-  whether the build has it or not. On 2026-11-13 (impl-nodes-8, Python 3.12.11, the environment on
-  D:'s drvfs): the nodes' 453 passed in 2.9 minutes, the library's 2,307 passed and 65 skipped in
-  19.5 minutes, those two files' 7 cases then fixed and run again there (6 passed, 1 skipped); no
-  failure came of Python 3.12 or of a floor.
+  `tests/test_vendor.py`, whose `tools/vendor.py check` runs it by the interpreter, and av at
+  ComfyUI's floor), then the library's suite from `core/` and the nodes' from `apps/comfyui/`, each
+  `"$FLOORS"/bin/python -m pytest -p no:cacheprovider --basetemp=<a directory on Linux's disk>`
+  with `OMP_NUM_THREADS` as in the CLI's environment. A baton that moves a range, or the library's
+  or the nodes' code a range covers, runs them once at its end, beside the one full suite. Its torch
+  being a CPU build where every other environment's is CUDA's, two of the library's tests met names
+  a CPU build lacks: `tests/test_memory.py`'s reading of torch's own allocator variables skips there
+  (no CUDA allocator to ask), and `tests/test_detector_close.py` sets its stand-in for cuBLAS's
+  workspace clearing whether the build has it or not. On 2026-11-13 (impl-nodes-8, Python 3.12.11,
+  the environment on D:'s drvfs): the nodes' 453 passed in 2.9 minutes, the library's 2,307 passed
+  and 65 skipped in 19.5 minutes, those two files' 7 cases then fixed and run again there (6 passed,
+  1 skipped); no failure came of Python 3.12 or of a floor.
 - The CLI's tests under pytest-xdist (a dev dependency of `apps/seedvr2x` alone, pinned; the image
   server's lock doesn't list it): each worker is a process of its own with its own basetemp
   (`popen-gwN`), the tests run on its main thread, and the workers share the controller's process
