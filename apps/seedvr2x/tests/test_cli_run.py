@@ -1696,8 +1696,18 @@ def test_gpu_memory_refused_at_the_load_stops_the_run(
 def shared_card(monkeypatch: pytest.MonkeyPatch, card: int) -> list[float]:
     """A card under Linux's driver (no WSL2 device) that a desktop shares, as NVML would say it
     (memory.share stood in: its display server listed), the whole card
-    having `card` bytes free by NVML; returns the limits torch is given, as fractions."""
+    having `card` bytes free by NVML; returns the limits torch is given, as fractions. Natively
+    on Windows memory reads Linux's platform (test_memory's _Platform), the share being asked
+    under Linux's driver alone (memory.startup), so that these cases hold there too."""
     from seedvr2x import memory
+
+    if sys.platform == "win32":
+        # Imported here: test_memory, the library's, is on pytest's path alone (the CLI's
+        # pyproject, pythonpath), and the drivers of test_stop.py and test_assembled.py import
+        # this module in processes of their own, which have the CLI's tests alone.
+        from test_memory import _Platform  # pyright: ignore[reportPrivateUsage]
+
+        monkeypatch.setattr(memory, "sys", _Platform("linux"))
 
     monkeypatch.setattr(memory, "share", lambda index=0: memory.Share(processes=((101, "Xorg"),)))
     monkeypatch.setattr(memory, "probe", lambda *a: pytest.fail("Linux's driver is asked"))

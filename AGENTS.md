@@ -570,7 +570,12 @@ marker. The image server, Linux's alone by its lock, has no such line.
   process is TerminateProcess, so a test signals itself with `signal.raise_signal`; a scratch file
   is removed only once unmapped (`tests/test_scratch.py`'s `gone`); the venv's `python.exe` is a
   launcher whose child is the interpreter. Run natively with `-n 4` for the CLI, its basetemp on a
-  local disk.
+  local disk. A card another program uses is asked under Linux's driver alone (`memory.startup`),
+  so its cases read Linux's platform natively on Windows, as `tests/test_memory.py`'s do (its
+  `_Platform` in memory's `sys`, never the process's): `tests/test_share.py` by its autouse
+  `linux_unless_faked`, taken from it by name, and the CLI's shared and unshared runs of
+  `tests/test_cli_run.py` by `shared_card` (impl-batch-1's review, 2026-11-13: both failed natively
+  before, read and not yet run there).
 - **Where a test file sits.** `tests/test_x.py` is in the directory of the package it tests:
   `core/tests/` for the library's, `apps/seedvr2x/tests/` for the CLI's. File names are unique
   across the two, a helper being imported by name. A file that held both halves is two: the

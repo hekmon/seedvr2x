@@ -11,7 +11,12 @@ import os
 from typing import Any
 
 import pytest
-from test_memory import NAMED, Card, Nvml, libraries
+
+# linux_unless_faked, test_memory's autouse fixture, taken by name so that it serves these tests
+# too: natively on Windows memory would take Windows' own path (the share is asked under Linux's
+# driver alone, memory.startup), where every case here is Linux's but those that fake another
+# platform (memory.sys.platform).
+from test_memory import NAMED, Card, Nvml, libraries, linux_unless_faked  # noqa: F401
 
 from seedvr2x import memory
 from seedvr2x.memory import GIB, SUCCESS
