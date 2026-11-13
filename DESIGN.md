@@ -501,6 +501,35 @@ seedvr2x/                the repository
       2026-11-05: the repository that brings the nodes brings it); never at each run. The
       nodes' README opens with it: a clip must fit in RAM; the nodes are a convenience for
       pictures and clips that fit, the command line seedvr2x's full tool.
+    - A path through ComfyUI's VIDEO, studied on 2026-11-12 on the user's question
+      (impl-videostudy: ComfyUI 0.45.3 read, PyAV 19.0.2 measured). Load Video gives a file's
+      path and decodes nothing until a node asks for the frames, which then come whole; Save
+      Video, given a VIDEO backed by a file, copies its streams with no decode into the file's
+      own container, or re-encodes it a frame at a time, by default to an 8 or 10-bit H.264
+      MP4: a node that returns a VIDEO of its own file holds no clip whole. PyAV writes FFV1 a
+      batch at a time into one open file, 16-bit 4:4:4 YCbCr or RGB, a 16-bit RGB file read
+      back bit for bit. Save Video's MP4 codes a 16-bit RGB master as BT.601 and leaves it
+      untagged or mislabelled, where a 16-bit 4:4:4 YCbCr master tagged BT.709 limited comes
+      out right. The source's audio packets, copied into that file as they are, decode to the
+      source's own samples bit for bit, Matroska rounding their times to the millisecond (the
+      study's count of 448 samples short was its test tone's, never wholly encoded). PyAV's
+      FFmpeg has no zscale, and ComfyUI's own decode reads an untagged source as BT.601
+      whatever its size, its limited white at 0.996. A 10 s clip from 1080p to 4K would hold
+      about 2 GiB of frames, against 44.4 GiB today, with the tiled pass's scratch, the colour
+      reference and the runs' frames in files as the command line keeps them; its master would
+      take about 7.3 GiB of ComfyUI's temp folder, which ComfyUI empties only as it starts and
+      ends. Decided on 2026-11-13, for the nodes' next pass: Upscale Video takes a VIDEO and
+      gives a VIDEO backed by a lossless file of its own (FFV1, 16-bit 4:4:4 YCbCr tagged
+      BT.709 limited, in Matroska, in ComfyUI's temp folder), written shot by shot; the source
+      read shot by shot from its file and converted by the command line's rules (its matrix
+      guess, the exact range, the bilinear chroma), in torch where zscale is not to be had,
+      held to the command line's frames; the source's other streams copied packet for packet,
+      as the command line's assembly copies them (Output); seedvr2x Cuts reading a VIDEO the
+      same way. A VIDEO with no file of its own (Create Video's, a concatenation) is taken
+      whole, as frames are today, under the same RAM plan. To settle at the pass's start: Crop
+      Video's crop (ComfyUI keeps it private), a trimmed VIDEO's audio (a copy cuts at its
+      packets), a temp folder that grows by a file a run, and whether Upscale Video keeps an
+      input of frames beside the VIDEO.
     - No node saves: the nodes give ComfyUI's image, float32, which ComfyUI's savers or others
       write; a 16-bit PNG with seedvr2x's record is the CLI's. Writing no file, the nodes
       carry no record ([The record in each output](#the-record-in-each-output)).
@@ -635,7 +664,16 @@ seedvr2x/                the repository
     loader refuses, saying why. The versions tested are listed before v0.2.0's publication.
     The library requires Python 3.13 today (the Desktop app runs 3.12), and its caps on Pillow
     (below 13) and huggingface_hub (below 2), under the Windows portable's 13.0.0 and 2.3.0,
-    widen once its tests pass with them.
+    widen once its tests pass with them. Met in the user's own ComfyUI on 2026-11-12 (Comfy
+    Desktop: Python 3.12, torch 2.13, transformers 4.57): the library refused Python 3.12; the
+    install's diffusers (0.42 or later) brought huggingface_hub 2.4, which transformers 4.x
+    refuses (it takes below 1.0); the library's ranges are the command line's pins, not
+    minimums; its download imports an error class of huggingface_hub 1.x alone and failed under
+    0.36; and a seed from the user's generation workflow, past seedvr2x's range, was refused.
+    Decided for the nodes' next pass: the library on Python 3.12 too, its suites run there; its
+    ranges the minimums it is tested with; the install keeping ComfyUI's own huggingface_hub
+    and diffusers; the download working on the huggingface_hub ComfyUI's transformers takes; a
+    seed past the range folded into it, the tooltip saying how.
 - **The front README:** short, there to catch a visitor long enough to send them on to the
   app's README (the user, 2026-11-02). A line saying what seedvr2x does; a picture of the best
   it makes, an input beside seedvr2x's output at `--quality maximum`, the caption saying so;
@@ -789,7 +827,8 @@ for `--verbose`, which keeps the old format whole. Python's own warnings go thro
 lines, one line each ("23:05:12 WARNING UserWarning: … (file.py:12)"; built on 2026-10-22);
 a download's progress bar keeps its own. torch's own C++ lines, c10's log, which no Python
 warning carries, are kept out of the lines but under `--verbose` (decided on 2026-10-23, built
-on 2026-10-30): where the driver refuses, `cudaMallocAsync`, the default there, prints "[W1023
+on 2026-10-30): where `cudaMallocAsync` runs (the default where the driver refuses until
+2026-11-13, Windows itself's since, or a user's setting), it prints "[W1023
 00:04:28.18… CUDAMallocAsyncAllocator.cpp:377] [cudaMallocAsync] recovered from an allocation
 failure by trimming the pool and retrying" each time it trims (see [Allocator](#allocator)),
 108 times in a 2-hour job on the 96 GB card, about every 8 s in its longest windows, one glued
@@ -797,7 +836,9 @@ to the sampler's progress bar. A whole run's default output is read line by line
 memory tight, on both drivers: nothing but seedvr2x's lines and a download's bar (read so on
 the RTX 5090 under WSL2 on 2026-10-30, beside a program holding 13 GiB, and on Linux's driver
 with the 96 GB card on 2026-11-11, a 1080p job whose card line says the driver refuses memory
-the card doesn't have, with no word of a lending driver: impl-box-1). The plan's lines teach
+the card doesn't have, with no word of a lending driver: impl-box-1). Each step's GPU peaks,
+allocated and reserved, are said in bytes at debug before the unit's line (built on
+2026-11-13: a measurement needs no rounding). The plan's lines teach
 as they go (see
 [Memory planner](#memory-planner)).
 
@@ -2005,7 +2046,8 @@ Decided by the user on 2026-11-09, on impl-win-4's renders of the user's dark an
   0.012 on all four thresholds, `blur=0`, the documents advising it for animation with banded
   gradients and against it for live action. The painted short, whose fine shadows 0.02 took
   (seen side by side), keeps them at 0.012, a little more precise (the user, 2026-11-12: its
-  three renders made on one card, the input alone differing). To build.
+  three renders made on one card, the input alone differing). Built on 2026-11-13
+  (impl-batch-1), the documents advising it so.
 - **Then the CLI:** ffmpeg's own `deband` in the reader's chain at 16 bits, before the RGB
   conversion, and that conversion built from the 16-bit format: its chain begins with the
   source's own planar format (`yuv420p` on this clip), which after `deband` would cut its
@@ -2026,7 +2068,8 @@ Decided by the user on 2026-11-09, on impl-win-4's renders of the user's dark an
   is an environment change for every job: narrowed to the jobs that take it, as inductor's
   modules count only between two compiled jobs (decided on 2026-11-11, built on 2026-11-12:
   the two chains a digest of their own, on a gradient frame, 77 and 88% of whose samples the
-  filter moves in a limited and a full range, against 0.32 and 2.3% of the noise frame's;
+  filter moves in a limited and a full range, against 0.32 and 2.3% of the noise frame's (67
+  and 80%, against 0.13 and 2.2%, at 0.012);
   run and recorded by a `--deband` job alone, `deband` still required of every build). The
   nodes
   and pictures after: their frames never pass through ffmpeg, so a deband in torch, written
@@ -3696,7 +3739,8 @@ first pass, whose shots are its input, and before the models load:
       contiguous compiled none, its 192 frames the same bits. Decided that day: the warm-up
       makes its zeros in the layout the run gives each pass, the untiled encode's through the
       run's own transform, which costs the run nothing (a copy in the run would take 64 MB a
-      slice at 1080p). To build, then a compiled 1080p job to check it.
+      slice at 1080p). Built on 2026-11-13 (impl-batch-1: a test holds the run's encoder
+      inputs, shapes and strides, to the warm-up's); a compiled 1080p job is the check left.
     - The DiT isn't compiled in v0.1.0: 2–3% of a long 1080p job on a 32 GB card (the DiT is
       a fifth of its units; compiled block by block over seedvr2x's own swap, a window takes
       0.77–0.80 of plain's time), a loss on a short one (each new window length compiles
@@ -4078,12 +4122,13 @@ it, 2 to 10% at one latent and nothing measurable at 6.
 
 ### Allocator
 Torch's own allocator with expandable segments is the allocator where the driver gives memory
-the card doesn't have and on a card another program uses (below), and, PROVISIONAL since
-2026-11-12, where the driver refuses a full card too: `cudaMallocAsync`, there before (it
-trims its pool; `native` fragments and fails), could not give a window's 31.65 GiB piece that
-the segments gave (below, a driver that refuses). On Windows itself, whose torch has no
-expandable segments, the allocator stays `cudaMallocAsync`, its pool counted beside each
-step (Windows itself, below). Set by seedvr2x
+the card doesn't have, on a card another program uses (below) and, since 2026-11-13, where
+the driver refuses a full card too: `cudaMallocAsync`, there before (it trims its pool;
+`native` fragments and fails), could not give a long window's pieces of 20 to 32 GiB at any
+room the 96 GB card left it, where the segments gave them, the same bits and as fast or
+faster (below, a driver that refuses). On Windows itself, whose torch has no expandable
+segments, the allocator stays `cudaMallocAsync`, its pool counted beside each step (Windows
+itself, below). Set by seedvr2x
 before torch is imported, documented, overridable: a user's `PYTORCH_CUDA_ALLOC_CONF` or
 `PYTORCH_ALLOC_CONF` stands, an empty one being no setting. The GPU's memory refused stops a
 run in one line, before the models load as after.
@@ -4476,7 +4521,8 @@ run in one line, before the models load as after.
     plan's card line say which and why; a card nothing else uses says so in one line and
     keeps its plans byte for byte. The image server and the nodes take it through the same
     start, the nodes planning held with no limit set. In a container NVML likely lists no
-    other container's processes (unmeasured): there a share is seen by its display alone.
+    other container's processes (unmeasured): there a share was seen by its display alone,
+    until a display stopped counting (2026-11-12, below).
     The regression's references were made on a card nothing else used, so its cases fail a
     held run: `pytest -m gpu` runs that file in a process of its own on Linux. Then the desktop
     to run again, the emulation's own ballast left out of the share (research's
@@ -4496,14 +4542,33 @@ run in one line, before the models load as after.
     `cudaMallocAsync` stays Windows itself's. To build, then to measure on the 96 GB card
     before it stands: that window in a run, the cards emulated headless at 1080p and 4K under
     the segments, their speed against the pool's on the same plans (the pool by the user's
-    setting), and the room the pool would need at that window.
+    setting), and the room the pool would need at that window. Built on 2026-11-13
+    (impl-batch-1: one rule for the default, `cudaMallocAsync` on Windows itself and the
+    segments everywhere else, held or not; the plan matrix unmoved) and measured that night on
+    the 96 GB card (impl-box-4). The pool refused that window at every pin from 10 to 36 blocks
+    swapped, up to 10.57 GiB under the budget, its pieces of 20 to 32 GiB refused once it had
+    filled the card, whatever the room; it ran 104 latents with nothing swapped and not 142.
+    The segments ran it on the defaults' plan, 0.50 GiB reserved over its allocated peak, and a
+    cut of 1,771 frames holding it in a run. The regression's cases passed under the segments
+    against references made under the pool, and one plan gave the same frames both ways.
+    Headless, the cards emulated from 8 to 48 GB ran every step at or under its plan, their
+    plans the pool's but for the card's 0.09 GiB more free (the allocator's own reading), which
+    keeps one more DiT block in the encode at 12 and 8 GB and moves the smaller files' line at
+    four sizes; the DiT's windows 8.6 to 21% faster where blocks swap, the jobs 1.1 to 4.7%,
+    the two even where nothing swaps (the pool 0.3% slower on the whole card at one plan). No
+    out of memory under the segments in any of those runs, nor in the 8 held ones beside a
+    desktop (To measure, the cards v0.1.0 is tested on), the planner's margin and the VAE's
+    room, measured under the pool, holding in every one. Decided on 2026-11-13, no longer
+    provisional: the code's marks of it to go. An unheld run there recovers from 3 to 930
+    refused 20-MiB mappings a run, every one, no step past its plan: the warning a held run
+    gives for the allocator's retries stays a held run's.
   - A display active no longer makes a card shared (decided on 2026-11-12): the 96 GB card,
     no program on it and no display server running, reads one through NVML (its text console,
     inferred), with no process listed and 10 MiB used, so that every run there would be held
     and fail the regression. Another program is seen by the processes NVML lists, compute or
     graphics (a desktop's display server holds a graphics context; a real desktop on Linux's
     driver is unmeasured here), or by NVML unread; in a container a share is then seen by
-    nothing (unmeasured). To build.
+    nothing (unmeasured). Built on 2026-11-13 (impl-batch-1): the display is no longer read.
   - The abort's mechanism is torch's, and ComfyUI's own cleaning after such an error can
     still meet it: the restart the nodes ask for is the way out. A report to PyTorch with the
     minimal reproduction is the user's to send.
@@ -5658,11 +5723,20 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   its first window once the desktop had grown; the desktop held still, 4K ran at 16, 24
   and 48 GB, 16 GB's in 9.5 min. Beside it 8 GB is refused, 6.27 GiB free against the 6.58
   its smallest plan takes, and 4K at 12 GB, 10.27 against 11.64. The hold decided for a
-  card shared on that driver (Allocator, 2026-11-11), built on 2026-11-12, is to run the
-  same slice again, the emulation's ballast left out of the share.
+  card shared on that driver (Allocator, 2026-11-11), built on 2026-11-12, ran the same slice
+  on 2026-11-13 (impl-box-4, the display left out as decided on 2026-11-12): the desktop's
+  moving share was never refused, 0 of 288 pieces in 8 runs, where impl-box-2's 1080p runs had
+  5 to 18 refusals each; 4K ran at 24, 32 and 48 GB, where it had run out of memory, and 1080p
+  from 8 to 48 GB (8 GB's with the VAE's room at 0.5 GiB, the floor's last rung), every step at
+  or under its plan, each run held again once at its first check. 4K at 16 GB beside a desktop
+  is refused at the start, 14.33 GiB needed and 13.86 of the 14.36 free counted on; headless it
+  runs, in 9.2 min under the segments: on Linux's driver, 4K beside a desktop takes a card over
+  16 GB.
   The release's defaults on a real job there (impl-box-3, 2026-11-11 and 12: the user's 720p
   descale of a 24-minute animated episode, 365 shots, to 1080p on the whole card) ran out of
-  memory in their calibration, a window of 167 latents (Allocator, 2026-11-12). Run with
+  memory in their calibration, a window of 167 latents (Allocator, 2026-11-12); under the
+  segments that window ran, a cut of 1,771 frames holding it upscaled in 22.2 min at the
+  defaults (impl-box-4). Run with
   `--window 120` (3 shots in two windows each, none swapped, both passes untiled), it took
   7 h 12 min, 1.6% over its estimate, the VAE 84% of the GPU's time, every step under its
   plan. The user's eyes on it, beside the disc's own 1080p (an upscale of the same 720p
@@ -5716,8 +5790,8 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   - the recompile limits at the larger shapes (PROVISIONAL): 671 compilations at 4K's
     2,048-px tiles, a 5-frame shot's 120 among them, under the 1,024 per code object
     (impl-box-2); the 3 graphs a compiled 1080p job meets after its warm-up, found on
-    2026-11-12 (the untiled encode's layout, Memory planner), the warm-up's fix to build and
-    check.
+    2026-11-12 (the untiled encode's layout, Memory planner), the warm-up's fix built on
+    2026-11-13, a compiled 1080p job its check.
   Other window layouts were modelled on the 12 cut lists: none pays more than the balanced
   windows, and none has fewer lengths.
 - **A detail scale, not in v1.** The user proposed a "detail recreation" scale for the
