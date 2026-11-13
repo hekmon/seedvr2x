@@ -2,20 +2,25 @@
 
 [ComfyUI](https://github.com/Comfy-Org/ComfyUI) nodes that run
 [SeedVR2](https://github.com/ByteDance-Seed/SeedVR) with seedvr2x's own model files, loaders and
-memory planner: a picture, a batch of pictures or the frames of a short clip upscaled shot by shot
-on the card you have, with the plan said in ComfyUI's console and a refusal, where one is due,
-before any model loads.
+memory planner: a picture, a batch of pictures or a video upscaled shot by shot on the card you
+have, with the plan said in ComfyUI's console and a refusal, where one is due, before any model
+loads.
 
-> **A clip must fit in RAM.** ComfyUI holds a clip whole, its frames and its output, and so do the
-> nodes: they don't stream and can't resume. The output alone, float32 RGB as ComfyUI holds
-> images, takes 24.9 MB a frame at 1080p and 99.5 MB at 4K (360 frames of 4K: 33.4 GiB), and a
-> clip the RAM can't hold is refused before any model loads. The nodes are a convenience, for
-> pictures and clips that fit; seedvr2x's full tool is [the command line](../seedvr2x/README.md),
-> beside them in `apps/seedvr2x`: it streams a clip of any length, resumes after a stop and writes
-> 16-bit lossless files.
+> **A video is read from its file, a shot at a time.** seedvr2x Upscale Video takes a `VIDEO`
+> (Load Video's, Trim Video's or Crop Video's) and gives a `VIDEO`: it reads the source from its
+> file shot by shot, never whole, and writes the result as it comes to a lossless file of its own
+> in ComfyUI's temp folder, so a video of any length runs in a few GiB of RAM (the plan says the
+> figure in the console). A `VIDEO` made of frames in ComfyUI's memory (Create Video's) is taken
+> whole, as frames. What a long run needs beyond that is [the command
+> line](../seedvr2x/README.md)'s, beside the nodes in `apps/seedvr2x`: it resumes after a stop
+> (a run stopped part way here starts over), stops at a time of day (`--until`), reads the source
+> itself (its frame rate and missing frames checked, its other streams remuxed by ffmpeg, a cover
+> picture attached), runs your command on each segment (`--segment-cmd`) and keeps lossless
+> masters.
 
-> **Not published yet.** The nodes are built and tested against ComfyUI v0.44.0 and are installed by
-> hand, as below; they are published with version 0.2.0 ([DESIGN.md](../../DESIGN.md)).
+> **Not published yet.** The nodes are built and tested against ComfyUI v0.44.0 (their video path
+> against v0.45.3) and are installed by hand, as below; they are published with version 0.2.0
+> ([DESIGN.md](../../DESIGN.md)).
 
 ## The nodes
 
@@ -31,20 +36,20 @@ before any model loads.
   It reads no weights into memory: the upscale nodes and seedvr2x Cuts read the files when they
   run.
 - **seedvr2x Cuts** finds where a clip changes scene ([Cuts and shots](#cuts-and-shots)): it takes
-  the clip's frames and the output of seedvr2x Models (which provides the shot detector's file),
-  and gives the cut list that Upscale Video takes; ComfyUI's Preview as Text node (PreviewAny)
-  wired to its output shows the list, a line a cut with its time (its optional input `frame rate`
-  wired) and its frame, and ComfyUI's console says each cut's probability and the possible cuts.
+  the `VIDEO` (the same that goes to Upscale Video) and the output of seedvr2x Models (which
+  provides the shot detector's file), and gives the cut list that Upscale Video takes; ComfyUI's
+  Preview as Text node (PreviewAny) wired to its output shows the list, a line a cut with its time
+  and its frame, and ComfyUI's console says each cut's probability and the possible cuts.
 - **seedvr2x Upscale Image** upscales each picture of a batch on its own, to the output's short
   side given by `resolution` (1080 by default).
-- **seedvr2x Upscale Video** upscales a clip's frames shot by shot, each shot in sliding windows
-  of the model, no window crossing a cut.
+- **seedvr2x Upscale Video** upscales a `VIDEO` shot by shot, each shot in sliding windows of the
+  model, no window crossing a cut, and gives the upscaled `VIDEO` ([The video](#the-video)).
 - **seedvr2x Tile**, **seedvr2x Blocks Swapped** and **seedvr2x Window Length**, in the node
   library's `seedvr2x/plan settings`, set one of the plan's numbers yourself
   ([Setting a value yourself](#setting-a-value-yourself)). The other three are in `seedvr2x`.
 
-Each upscale node takes `images` first, then `models`, and gives `images`. Its settings are widgets,
-each at its default:
+Upscale Image takes `images` first, then `models`, and gives `images`; Upscale Video takes `video`
+first, then `models`, and gives `video`. The settings are widgets, each at its default:
 
 | Widget | Default | Notes |
 | --- | --- | --- |
@@ -52,7 +57,7 @@ each at its default:
 | quality (Upscale Video only) | `standard` | How many times the model runs over each shot: `standard` once, `enhanced` twice, `maximum` four times, each run starting a frame or two further into the shot, each frame kept from the run that rebuilds it best. At `standard` one frame in four comes out closer to the original than the three before it, and looks sharper: edges that pulse ([below](#edges-that-pulse-at-standard)); `maximum` takes every frame from a run where it is rebuilt closest to the original. Sharper lines and less flicker where there is motion, little change on a still shot; 2 or 4 times as long as `standard`, and no more memory. A picture is one frame, so Upscale Image has no quality. |
 | colour correction | on (`split`) | On, `split`, keeps the input's overall colours and brightness with the model's fine detail; off, `none`, leaves the model's own colours, which can drift. |
 | seed | `42` | ComfyUI's seed with its control after generate, `fixed`. Any whole number is taken: outside 0 to 4,293,967,295, it is taken modulo 4,293,967,296, and the plan in the console says the seed used. |
-| plan only | off | Make the plan, say it in the console, and stop: the model's weights are not read into memory (seedvr2x Models finds the files; the upscale node reads them when it runs, after its plan), ComfyUI's loaded models stay, and the nodes after the images output do not run. |
+| plan only | off | Make the plan, say it in the console, and stop: the model's weights are not read into memory (seedvr2x Models finds the files; the upscale node reads them when it runs, after its plan), ComfyUI's loaded models stay, and the nodes after its output do not run. |
 
 ### Edges that pulse at `standard`
 
@@ -82,20 +87,56 @@ says it whole in ComfyUI's console; the node itself shows two short lines, where
 its time ([While it runs](#while-it-runs)). The nodes have no text output: the plan and the cuts are
 read in the console. The plan is made for the card as it would be without ComfyUI's own models.
 
+## The video
+
+seedvr2x Upscale Video takes a `VIDEO` and gives a `VIDEO`, and has no input or output of frames.
+
+- **From a file** (Load Video, and Trim Video or Crop Video after it), the video is read from its
+  file shot by shot, never whole, and its frames are converted as seedvr2x's command line converts
+  them (its guess of the colour matrix for an untagged video, its exact range, its chroma
+  siting). Trim Video's start and duration are honoured, and so is Crop Video's crop.
+- **From frames in memory** (Create Video's output), the video is taken whole, as frames, and the
+  plan counts them in the RAM it needs. To upscale a generation's frames, send them through
+  Create Video; to get frames out of the result, send it through Get Video Components.
+- **The result** is written shot by shot, as it comes, to a lossless file of its own in ComfyUI's
+  temp folder: FFV1 in Matroska, 16 bits a channel (4:4:4 YCbCr, tagged BT.709, limited range), with
+  the source's audio and subtitles copied packet for packet and seedvr2x's record in its tags (the
+  video stream's, as the command line's masters carry it, and the file's own). The `VIDEO` the node
+  gives is that file. A trimmed video's audio and subtitles are copied packet for packet, so they
+  may start and end up to a packet beyond the trim.
+- **The file stays in the temp folder**, one file a run, until ComfyUI empties that folder, which
+  it does when it starts and when it closes. At 4K it is large: lossless 16-bit frames take
+  gigabytes a minute, so keep room there for a long video. A run stopped part way starts over.
+
+Save Video, wired after Upscale Video, does one of two things with that file, by the format you
+choose:
+
+- **Format `mkv`, codec `auto`** copies the streams packet for packet into an `.mkv` in ComfyUI's
+  output folder: nothing is decoded or encoded, so the video stays lossless (16 bits a channel,
+  FFV1), with its audio and subtitles. The copy keeps the file's own tags, seedvr2x's record among
+  them, and adds ComfyUI's (the prompt and the workflow); the video stream's tags are not copied
+  (PyAV, which ComfyUI copies with, drops a stream's tags on a copy: measured with PyAV 19.0.2).
+  The clip example saves this way.
+- **Format `auto` or `mp4`** (and the other formats and codecs) encodes the video again, a frame
+  at a time, to H.264 by default (8 or 10 bits, at CRF 18 unless you choose another), which is
+  lossy and much smaller; it keeps one audio track, encoded to AAC, and no subtitles. It writes
+  the file's own tags, seedvr2x's record among them, and ComfyUI's.
+
 ## Cuts and shots
 
 The model works on a stretch of frames at once, in windows that overlap, and a window that holds a
 cut blends the two scenes. So Upscale Video takes the clip's **cut list** from seedvr2x Cuts and
 upscales each shot of it on its own: no window crosses a cut. The `cuts` input is optional but
 recommended: unwired, the clip is upscaled as one shot (the console says so), and a clip with cuts
-would have frames mixed across them. The list is a fact of the clip (the same images go to Cuts and
+would have frames mixed across them. The list is a fact of the clip (the same video goes to Cuts and
 to Upscale Video), not a setting, and the plan is made once for the clip, the longest shot's
 windows deciding it. Each shot is seeded as the command line seeds a shot: the `seed` plus the
 shot's first frame, counted from 0. The plan names the shots one by one: where each is, and its
 windows.
 
 seedvr2x Cuts runs seedvr2x's shot detector, TransNetV2 (a file of about 30 MB), on the clip's
-frames, shrunk to its small input in torch, with no ffmpeg. The file is seedvr2x Models': Models
+frames, a few at a time as they are read from its file, each shrunk to its small input in torch,
+with no ffmpeg. The file is seedvr2x Models': Models
 fetches it into Hugging Face's cache with the other files or, with a `model folder`, reads it from
 the folder alone, under the name `transnetv2.safetensors`: a folder without it is refused by Cuts
 when it runs, which says where to get the file (nothing is downloaded and the cache is not read
@@ -114,12 +155,10 @@ Cut #1 - 0:00:01.440 (frame 36)
 Cut #2 - 0:00:04.000 (frame 100)
 ```
 
-The time needs the clip's frame rate, which ComfyUI's images don't carry: wire the `fps` output of
-ComfyUI's Get Video Components to Cuts' optional input `frame rate`, as the clip example does.
-Unwired, each cut is given by its frame alone (`Cut #1 - frame 36`). A clip with no cut says
-`no cut: the clip is one shot`, wired or not. The time is the command line's form, counted from
-the clip's first frame at a constant rate and rounded up to the millisecond, so that a player's
-jump to it lands on the cut where the clip is the file from its start.
+The time is at the video's own frame rate, which the `VIDEO` carries: Cuts has no frame rate input.
+A clip with no cut says `no cut: the clip is one shot`. The time is the command line's form,
+counted from the clip's first frame at a constant rate and rounded up to the millisecond, so that
+a player's jump to it lands on the cut where the clip is the file from its start.
 
 The console lists each cut by its frame with the detector's probability, and the **possible
 cuts**: scenes it found less sure than the threshold, which are not in the list. Look at them in
@@ -288,7 +327,9 @@ and from 2.0, `python -m pip install "diffusers>=0.42,<1"`.
 - The two example workflows, `workflows/picture.json` and `workflows/clip.json`, load by dragging
   them into ComfyUI. Each has seedvr2x Models connected, every widget at its default and every
   optional input unconnected, but for the clip's `cuts`: it has seedvr2x Cuts between Load Video
-  and Upscale Video, with Models wired into Cuts as well as into Upscale Video.
+  and Upscale Video, with Models wired into Cuts as well as into Upscale Video, and Save Video
+  after it, set to `mkv` so that it copies the lossless file as it is
+  ([The video](#the-video)).
 
 ## Model files
 
@@ -345,16 +386,16 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
 
 ## Limits
 
-- **A clip is kept whole in RAM**, as ComfyUI keeps any video: 99.5 MB a 4K frame in float32,
-  the input's frames and the output's. ComfyUI has the input in memory before the node starts, so
-  the node counts the output and its own work against the RAM that is available, and says the input
-  beside them (the plan's `RAM` line); a clip that does not fit is refused before any model loads,
-  and the refusal says so. For a clip the RAM can't hold, use [the command
-  line](../seedvr2x/README.md): it streams the clip from its source file to lossless files shot by
-  shot, never holding it whole, so that a clip of any length fits, its RAM following the longest
-  shot and the models, and picks up again after a stop (the `apps/seedvr2x` folder of this
-  repository; ComfyUI's console says so once, when the nodes load).
-- **Nothing resumes.** A run that stops starts again.
+- **RAM follows the shot, not the video.** A video from a file is read and written shot by shot,
+  so its RAM follows the longest shot and the models, whatever its length; the plan's `RAM` line
+  says the figure, and a video the computer can't run that way is refused before any model loads.
+  A video of frames in memory (Create Video's) is ComfyUI's, whole, already: its frames are read
+  from there, and its output is written to the file as the rest. The file the result is written to
+  takes disk in ComfyUI's temp folder, which the plan's `disk` line says beside the room free
+  there ([The video](#the-video)).
+- **Nothing resumes.** A run that stops starts again, from the video's first frame. For a long
+  video, [the command line](../seedvr2x/README.md) picks up after a stop, and stops at a time of
+  day, reads the source itself, runs your command on each segment and keeps lossless masters.
 - **A card that stopped answering may need ComfyUI restarted.** When a second Cancel leaves the
   wait for the card, the next run asks the card, without waiting, whether it has finished its last
   work: if it has, the nodes give their models back and the run goes on; if not, the run is
@@ -367,18 +408,21 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   failed: restart ComfyUI`, ComfyUI's console and error say it with CUDA's own words, and every
   later run is refused at its start until ComfyUI is restarted. Running out of memory (torch's "out
   of memory" error) is not a failure: the card is freed as after any error.
-- **ComfyUI's image.** The output is its `IMAGE`, float32, and its savers write 8 bits or lossy
-  video. The command line writes 16-bit PNG and lossless masters, with seedvr2x's record in each
-  output; the nodes write no file and carry no record.
-- **8-bit YUV sources.** From an 8-bit YUV video (most files: H.264, H.265, VP9, AV1) the nodes
-  upscale what ComfyUI's own decode gives, 8 bits a channel, where the command line converts the
-  video to 16 bits a channel first. The two outputs differ by a fraction of a level: 0.26 of one
-  level (of 255) at most on the clip measured. From an RGB source (a lossless RGB
-  video) the nodes give the command line's frames bit for bit where both run the same torch,
-  its CUDA build (the attention kernel is PyTorch's SDPA). Across versions and platforms the frames
-  differ, as any two environments' do: ComfyUI's torch 2.12.1 under Windows against the
-  command line's 2.14.1 under WSL2, both on SDPA, gave 38.7 and 43.7 dB of PSNR on a clip's
-  two shots, each side repeating its own frames bit for bit.
+- **ComfyUI's image and savers.** Upscale Image gives ComfyUI's `IMAGE`, float32, which its savers
+  write at 8 bits, and carries no record. Upscale Video's file is lossless and carries the record,
+  which Save Video keeps in the file it saves; its default format encodes the video again, lossy
+  ([The video](#the-video)). The command line writes 16-bit PNG and lossless masters, with
+  seedvr2x's record in each output.
+- **Sources.** From a file, the nodes convert the video as the command line does, in torch where
+  the command line uses ffmpeg's zscale: no sample more than one 16-bit code from the command
+  line's frames (0.14% one off, on 115 cases of every format, range, matrix and siting it reads).
+  A video whose sides its chroma subsampling doesn't divide is refused at the start, as the
+  command line refuses it. From frames in memory (Create Video's), the nodes upscale the frames
+  ComfyUI has. Where both run the same torch, its CUDA build (the attention kernel is
+  PyTorch's SDPA), the nodes' frames from an RGB source are the command line's bit for bit. Across
+  versions and platforms the frames differ, as any two environments' do: ComfyUI's torch 2.12.1
+  under Windows against the command line's 2.14.1 under WSL2, both on SDPA, gave 38.7 and 43.7 dB
+  of PSNR on a clip's two shots, each side repeating its own frames bit for bit.
 
 ## Memory
 
