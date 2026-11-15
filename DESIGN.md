@@ -19,19 +19,23 @@ A SeedVR2 video upscaler for **long runs** (whole episodes or films) that:
 - fits the GPU it runs on without the user tuning memory options. It is developed on a 96 GB
   card, but made for consumer cards of 16–32 GB as well, where the planner, BlockSwap and
   tiling carry the run:
-  - At 1080p, with every block on the GPU, a 24 GB card holds windows of about 6 latents and a
-    32 GB one 14, so many shots would be split into windows. BlockSwap buys the room back:
-    with every block swapped, 20 and 28 latents (20 measured on an emulated 24 GB card, see
-    [Memory planner](#memory-planner)).
-  - A 16 GB card can't hold the 7B fp16's weights (15.35 GiB) at all: it swaps every block,
-    for windows of 12 latents at 1080p (measured on an emulated one), and the 7B's smaller
-    files lighten it, int8 and the dynamic GGUF from v0.1.0 (see [Weights](#weights)).
+  - At 1080p the planner gives a long shot windows of 26 latents at 16 GB, 41 at 24 and 58
+    at 32 on a Linux card nothing else uses, BlockSwap moving 34 or 35 of the DiT's 36 blocks
+    to the host for the room, and 20, 34 and 48 on a run held to the card beside a desktop
+    (the planner on 2026-11-15, docs-5; see [Memory planner](#memory-planner)).
+  - A 16 GB card can't hold the 7B fp16's weights (15.35 GiB) at all, and the 7B's smaller
+    files lighten it, int8 and the dynamic GGUF from v0.1.0 (see [Weights](#weights)). A
+    1080p job plans from 6.58 GiB of free VRAM, 6.08 beside a desktop, so that an 8 GB card
+    runs it.
   - Below 48 GB, the 1080p VAE decode only fits tiled. At 4K, every card tiles the decode,
-    the 96 GB one included, and that one's windows hold about 19 latents.
-  - 4K takes 22.4 GiB of free VRAM for the DiT's smallest window, every block swapped, and
-    is refused under it. What counts is the memory free at the start, whatever the card: a
-    16 GB card never has that much; a 24 GB one with nothing else on it has, and runs it
-    (measured on an emulated one, see [Memory planner](#memory-planner)).
+    the 96 GB one included, and that one's windows hold 44 latents.
+  - 4K takes 11.64 GiB of free VRAM for the DiT's smallest window, every block swapped, and
+    14.83 beside a desktop, and is refused under it. What counts is the memory free at the
+    start, whatever the card: a 16 GB card runs it headless, and beside a desktop 4K takes a
+    card over 16 GB, on Linux's driver and under WSL2.
+  - 1080p ran on every size from 8 to 96 GB, headless, beside a desktop and under WSL2, and 4K
+    from 16 GB headless and from 24 GB beside a desktop (see [To measure](#to-measure), The
+    cards v0.1.0 is tested on).
   - These cards also compute more slowly (an RTX 5080 has 84 SMs, the 96 GB card 188), so a
     job lasts longer there, and resume and `--until` matter most.
 - gives its best with little tuning (the user, 2026-11-09): few options, each a switch or a
@@ -102,9 +106,9 @@ never requires it.
   and tested before v0.1.0 is tagged. Phase 2, in v0.2.0 (the user, 2026-11-04), brings their
   other smaller files (fp8, Q8_0, Q4_K, NVFP4); no other model is planned (see
   [Weights](#weights))
-- An output size whose smallest window doesn't fit the VRAM free at the start, 4K under 22.4
-  GiB free for one: refused, naming the free VRAM it takes and the largest size that fits
-  (see [Memory planner](#memory-planner))
+- An output size whose smallest plan doesn't fit the VRAM free at the start, 4K under 11.64
+  GiB free for one (14.83 beside a desktop): refused, naming the free VRAM it takes and the
+  largest size that fits (see [Memory planner](#memory-planner))
 - Variable frame rate sources: refused with a clear message, as sptenc does
 - A frame rate above 1,000 fps (decided on 2026-10-12, built on 2026-10-29): every FFV1
   output is Matroska, whose millisecond can't tell two such frames apart. Written today,
@@ -1212,7 +1216,7 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
       windows are fp16's (16 GB: 37.6 s of DiT against 37.5), less where fewer blocks swap
       (the whole card: 33.8 s against 36.1 at 1080p, 98.1 against 111.0 at 4K), a swap
       costing more there;
-    - a window's memory: int8's 0.42 to 0.45 GiB under its plan, float16's 0.05 to 0.08
+    - a window's memory: int8's 0.41 to 0.46 GiB under its plan, float16's 0.05 to 0.08
       under theirs, on both cards: in windows of 7 latents and more at 1080p and of 6 at
       4K, int8's buffers take nothing beyond float16's figure. They stay counted, on the
       side of too much: a picture's window and shorter ones are unmeasured.
@@ -3946,8 +3950,7 @@ first pass, whose shots are its input, and before the models load:
       card emulated beside a desktop's still 0.54 GiB (impl-box-2): windows of 6 latents, 35
       blocks swapped, tiles of 1024 and 768 px, every step under its plan, 9.5 min; 12 GB is
       refused, 10.27 GiB free against 11.64, naming `--resolution 1984`. The CLI's README
-      and MANUAL still give the old figures: the pre-release pass of the documents mends
-      them.
+      and MANUAL give these figures since 2026-11-15 (docs-5).
     - A shot's length no longer bounds the DiT's phase (2026-10-16): with the noise drawn in
       system memory, that card plans a 4K shot of any length (2,661 latents and 10,000 tested),
       and no refusal names a cut. A long shot is bounded by the host's memory alone, its refusal
@@ -5402,7 +5405,8 @@ explanation.
     nvidia-smi on Linux
 - what a small card asks of the host and can't run: pinned RAM for the DiT's swapped blocks
   (15.19 GiB with all 36), a tiled shot's scratch, and the sizes refused for want of free
-  VRAM, counted from what is free at the start, not from the card's size (4K: 22.4 GiB)
+  VRAM, counted from what is free at the start, not from the card's size (4K: 11.64 GiB,
+  14.83 beside a desktop)
 - under WSL2: the Windows driver gives memory the card doesn't have, so seedvr2x holds itself
   to the card: why the plan counts on less than is shown free, what stops a run there and
   how it resumes, and one seedvr2x per card
@@ -5434,8 +5438,8 @@ explanation.
   - when not to use it: where an output must be made again bit for bit; and a finished
     directory job never needs it.
 - the default size, a short side of 1080, numz's default kept: a 1080p source comes out at
-  its own size, redrawn, not enlarged; a size the cards the planner aims at all run (from 8.3
-  GiB of free VRAM, the VAE's floor), where 4K's smallest window takes 22.4 GiB
+  its own size, redrawn, not enlarged; a size the cards the planner aims at all run (from 6.58
+  GiB of free VRAM, the floor's last rungs), where 4K's smallest window takes 11.64 GiB
 - stopping at a set time: `--until`, what it stops before, its exit code (75) for scripts that
   run a job night after night, and the longest unit `--plan` prints
 - integrity: the per-frame checksums kept with the output, and `seedvr2x verify` to check a
@@ -5919,9 +5923,9 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   while a 4K run brought the card within 4 to 6 GiB of full (the cause not isolated). Its
   growth in a 4K decode on the whole card took the room kept for it 0.48 GiB under the
   emulation's floor, 5.77 GiB still free, and the emulation ended the run; run again with the
-  desktop at 3.2 GiB, it passed. Measured on 2026-11-15 (impl-wsl2-2, the desktop idle at 3.1
-  to 3.8 GiB): 4K on a 16 GB card exactly is refused, 14.33 GiB needed and 14.18 counted on
-  of the 14.68 free, so that under WSL2 too 4K at the defaults takes a card over 16 GB; the
+  desktop at 3.2 GiB, it passed. Measured on 2026-11-15 (impl-wsl2-2, the desktop at 3.1 to
+  4.5 GiB): 4K on a 16 GB card exactly is refused, 14.33 GiB needed and 14.18 counted on of
+  the 14.68 free, so that under WSL2 too 4K at the defaults takes a card over 16 GB; the
   whole card with no room kept ran 4K and 1080p, the hold's margin alone between the run and
   the desktop (0.69 to 1.13 GiB free at the least), nothing held again; and in bytes, the
   960-px decodes are 5.00 MiB over their plan, every other side under (Memory planner,
