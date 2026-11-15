@@ -675,6 +675,30 @@ marker. The image server, Linux's alone by its lock, has no such line.
   holds the int8 files' headers and markers; `test_int8_cli.py` the command line over a
   synthetic int8 file: its check, the plan by int8's figures and its line, the job's record, a
   resume judged early by int8's figures.
+- An int8 DiT where the environment forces torch's TF32 in cuBLAS (`weights.tf32_forced`,
+  `check_tf32`; DESIGN.md, Weights, TF32): `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE`, read without torch as
+  torch reads it once, as its context is made (`c10::utils::check_env`: "1" alone true, no space
+  stripped, no case folded), refuses an int8 DiT as `errors.Tf32Forced` (kind "tf32", its `variable`
+  and `value` the facts) before the first pass and any model, `--plan` too, fp16 and GGUF untouched:
+  `tests/test_weights.py` the 14 values, the facts, the plain and the command line's words, the
+  twins (`weights.INT8_TWINS`); the CLI's `test_int8_cli.py` (run and `--plan`, 11 values, nothing
+  made) and `test_still_cli.py` (a picture, run and `--plan`, the card never asked); the server's
+  `test_service.py` (int8, fp16 and GGUF by 7 values, before the card is read); the nodes'
+  `test_plan_only.py` (run and plan only) and `test_words.py` (the variable unset where ComfyUI
+  starts, or the fp16 twin).
+- An int8 DiT where the process turned TF32 on itself (`weights.tf32_set`, `check_tf32_set`):
+  torch's three readings (`weights.TF32_SETTINGS`: the legacy flag, the matrix products' precision,
+  the per-backend precision, which gives the generic one where its own is unset; the legacy two
+  raise RuntimeError once the newer API set a precision), taken as each app loads an int8 DiT, torch
+  imported: the CLI's `main._load` (a video's run and its `--plan`'s calibration, a picture's run; a
+  picture's `--plan` loads nothing), the server's `Service.load`, the nodes at every run beside the
+  variable's check, kept models and plan only too; `Tf32Forced`'s facts then `setting` and `value`,
+  `variable` empty. seedvr2x sets nothing of torch's. `library_fixtures.TF32_WAYS` turns it on each
+  way (and a mix of the two APIs), `tf32_turned_on` puts every reading back as found, the legacy
+  precision first (the newer API alone leaves it at "high"): `tests/test_weights.py` the readings,
+  the refusal, fp16 and GGUF untouched, and a process started with the variable read the same; the
+  CLI's, the server's and the nodes' tests above each way, no reading moved by the run. The readings
+  on torch 2.12.1 and 2.14.1, the same (2026-11-15); 2.13 not run.
 - `tests/test_gguf_file.py` holds `seedvr2x/gguf_file.py`, the GGUF header read without torch or
   the tensors' data, to files written there by hand with struct from the format's specification
   (every size and type, every refusal, every prefix cut short) and to `gguf.GGUFReader` on the
@@ -1967,6 +1991,15 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `--accept-env-change`, the warning given before the checks, the re-plan under the flag
   (`peaks.PER_TOKEN` multiplied, so that the DiT phase refuses at the stand-in's size), the
   segments and latents kept, `--plan` looking and writing nothing.
+- The measured table's thousandths (`seedvr2x/peaks.py`'s `MEASURED`;
+  `research/docs/planner-limits.md`'s tables of 2026-10-11 and, for the passes the one-output
+  convolution takes, of 2026-10-17): `core/tests/test_peaks.py`'s `THOUSANDTHS` holds the 45 tiles'
+  encodes and decodes to the thousandth, and `test_every_decode_is_planned_at_or_over_its_measure`
+  every decode entry at or over its measure: the 960-px square's 15.675
+  (`test_a_decode_in_960_px_tiles_is_planned_at_or_over_its_measure`, whole frames in bytes on the
+  RTX 5090, 2026-11-15) and the two tiles cut off at 720p's rows, 752x832's 11.493 and 752x960's
+  12.694, each taken to the thousandth that day; the 16 encodes whose hundredth stands under their
+  measure, 4.3 MiB at the most, are held over it by `ENCODE_EXTRA`.
 - The DiT's fit on the lean attention (`seedvr2x/peaks.py`: `PER_TOKEN`, `PER_WINDOW`, the int8
   and GGUF terms, `DIT_ATTENTION`; `research/docs/small-cards.md`, The lean attention's peak):
   `core/tests/test_peaks.py` holds the prediction at or over the allocated peak of every window
