@@ -578,12 +578,13 @@ seedvr2x/                the repository
       - The RAM is the plan's, plus the frames on their way (5 read and 5 for the correction,
         the decode's slice, the writer's 2 queued and the one it encodes, a preview): 0.78 GiB
         from 1080p to 1080p, 2.41 from 1080p to 4K, 3.11 at 4K, whatever the length; on the
-        stand-ins, a clip ten times as long peaked within 2 MiB of the shorter one. In no plan:
-        the source frame's conversion on the card, about 50 MB at 1080p and 200 at 4K
-        (inferred). The disk the run takes is said in the plan beside the temp folder's free
-        room, with a warning where it looks short and never a refusal, as the command line
-        says it; the file counted at 4.8 bytes a pixel (synthetic frames' 3.95 and a fifth:
-        PROVISIONAL).
+        stand-ins, a clip ten times as long held within 2 MiB of the shorter one at each shot's
+        end, 0.10 to 0.19 MiB more in 20 runs alone (glibc's bytes in use, impl-tests-2,
+        2026-11-15). In no plan: the source frame's conversion on the card, about 50 MB at
+        1080p and 200 at 4K (inferred). The disk the run takes is said in the plan beside the
+        temp folder's free room, with a warning where it looks short and never a refusal, as
+        the command line says it; the file counted at 4.8 bytes a pixel (synthetic frames' 3.95
+        and a fifth: PROVISIONAL).
       - The file: one a run, kept in the temp folder until ComfyUI empties it, as it starts and
         as it closes (a VIDEO made from it, Trim Video's, shares its path, so nothing deletes it
         sooner); the source's audio and subtitles copied packet for packet, a trimmed VIDEO's
@@ -689,9 +690,10 @@ seedvr2x/                the repository
     code ran the 4K picture there in 10.6 and 12.1 s (two runs) and the 1080p clip in 98.0
     and 102.5 s, the clip in 74.6 and 82.5 s on 16 GB. On Linux's driver the command line
     planned and ran a 1080p job on every size from 8 to 96 GB on 2026-11-11, headless, the
-    8 GB card's in 4.0 min; beside a desktop's 0.54 GiB the 8 GB card is refused, 0.31 GiB
-    short (To measure, The cards v0.1.0 is tested on). Native Windows' share kept back is
-    v0.2.0's to measure.
+    8 GB card's in 4.0 min; beside a desktop's 0.54 GiB the 8 GB card was refused unheld,
+    0.31 GiB short (impl-box-2), and runs under the hold built on 2026-11-12, its VAE's room
+    at 0.5 GiB (impl-box-4, 2026-11-13; To measure, The cards v0.1.0 is tested on). Native
+    Windows' share kept back is v0.2.0's to measure.
   - **The shot's pass moves to the library.** The sliding windows, their blend and the plan
     that sizes them, over frames in memory, which the CLI and ComfyUI's nodes both need, are
     bricks of `core/` since 2026-11-04 (impl-shotpass), moved from the CLI: `shots.py`, a shot
@@ -1154,7 +1156,7 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
     the wheels' tags without their ABI had said otherwise). seedvr2x's own W8A8 linear
     (`torch._int_mm`, the rotation rebuilt in `models/`) adds no dependency and keeps every
     buffer known to the planner; whether comfy-kitchen's fused kernel is worth a dependency
-    for its speed is measured on the 96 GB card, both on the same activations.
+    for its speed was decided on 2026-11-03 (below): a test's reference, not a dependency.
   - Built on 2026-11-02 on the CPU (impl-int8, then impl-int8-2; three reviews):
     `seedvr2x/int8.py`, a W8A8 linear with the arithmetic of comfy-kitchen 0.2.37's CUDA
     kernel, the files' validation path (each 256 columns of the input rotated, a scale per
@@ -3955,8 +3957,9 @@ first pass, whose shots are its input, and before the models load:
       `--resolution 288`. Since the lean attention, the reserve by the step and the floor's
       last rungs (2026-11-06), a 1080p job's smallest plan takes 6.58 GiB free (a peak of
       4.73 GiB, the VAE's room of 1.25 and the margin; impl-box-2, 2026-11-11): an 8 GB
-      card runs it headless, 6.82 GiB free (impl-box-1), and is refused beside a desktop's
-      0.54 GiB.
+      card runs it headless, 6.82 GiB free (impl-box-1). Beside a desktop's 0.54 GiB it was
+      refused unheld (impl-box-2) and runs held, the hold built on 2026-11-12, its VAE's
+      room at 0.5 GiB, the floor's last rung (impl-box-4, 2026-11-13).
 - **Pins.** `--window N`, `--swap-blocks N`, `--encode-tile PX` and `--decode-tile PX` (0 for
   untiled) each fix one choice, and the planner makes the others around it. A pin is taken
   exactly or refused, never adjusted: the refusal names what fits, the longest window, the
@@ -5876,8 +5879,8 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   96 GB, its steps under plan and its times the same, but the desktop's growth was refused
   from 12 to 48 GB; 4K ran at 72 and 96 GB and failed from 16 to 48 GB, out of memory in
   its first window once the desktop had grown; the desktop held still, 4K ran at 16, 24
-  and 48 GB, 16 GB's in 9.5 min. Beside it 8 GB is refused, 6.27 GiB free against the 6.58
-  its smallest plan takes, and 4K at 12 GB, 10.27 against 11.64. The hold decided for a
+  and 48 GB, 16 GB's in 9.5 min. Beside it 8 GB was refused, 6.27 GiB free against the 6.58
+  its smallest plan took, and 4K at 12 GB, 10.27 against 11.64. The hold decided for a
   card shared on that driver (Allocator, 2026-11-11), built on 2026-11-12, ran the same slice
   on 2026-11-13 (impl-box-4, the display left out as decided on 2026-11-12): the desktop's
   moving share was never refused, 0 of 288 pieces in 8 runs, where impl-box-2's 1080p runs had
