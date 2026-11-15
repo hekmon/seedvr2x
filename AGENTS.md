@@ -80,7 +80,8 @@ apps/seedvr2x/          the seedvr2x command: distribution seedvr2x (setuptools)
   pyproject.toml uv.lock .python-version LICENSE NOTICE
   README.md MANUAL.md images/
 apps/imgserver/          the image server: distribution seedvr2x-imgserver (setuptools), flat
-  main.py                options, environment, the server's life (`seedvr2x-imgserver = "main:command"`)
+  main.py                options, environment, the server's life (`seedvr2x-imgserver =
+                         "main:command"`)
   service.py reservation.py admission.py     the start (files, plan, reservation, warm-up), a
                          picture's run under a lock per model, the queue
   web.py answers.py metrics.py     HTTP (ThreadingHTTPServer), a request's headers and the
@@ -592,6 +593,15 @@ marker. The image server, Linux's alone by its lock, has no such line.
   asked again only when its own bytes change, not files it prints from. They are asked every time in
   `tests/test_ffmpeg_check.py`, `test_fingerprint.py` and `test_ends_with_us.py` (`MEMO_OFF`), whose
   subject they are, and in any process of its own.
+- A source a test makes is the same every time: a lavfi source that draws at random is seeded
+  (`gradients` picks its line's points at random without `seed`), and an x264 or x265 source whose
+  test needs a keyframe or a frame type at a frame has it from its options (keyint and min-keyint
+  equal, `scenecut=0`), never from x264's reading of the content (`tests/test_deband.py`'s seek
+  test, whose keyframes moved with its unseeded gradients, 2026-11-15). The exception is
+  `tests/test_index.py`'s `ENCODES`, which keep the encoders' own choices on `testsrc2`, a content
+  the same every time (their open GOPs, and the frames its damage tests overwrite at packets 100
+  and 101); x264 itself isn't always the same (of 80 encodes, 16 at a time, 2 decoded to other
+  frames), so each of those files is made once in its test.
 - `pytest -m gpu` runs the tests that need CUDA, never selected by default; run it in each
   directory, without `-n`: the tests share the one card.
 - **Windows' cases.** The tests of Windows' twins are named `on_windows` and skip elsewhere, each
@@ -868,29 +878,29 @@ marker. The image server, Linux's alone by its lock, has no such line.
   skipped, bytes after the data), its SHA-256 hashlib's of the whole file and its tensors those
   read without the hash; the hash thread a piece behind the read, the staging buffer read into
   again only once its last piece is hashed (a slow hash, pieces of 5 bytes; the test fails
-  without that wait); a file cut short refused in the same words; a GGUF file's header parsed again from the bytes
-  hashed, a header read differently the second time refused as changed while it loaded; and, where
-  `SEEDVR2X_MODEL_DIR` has them, seedvr2x's VAE and TransNetV2's weights read to their pins and to
-  safetensors' own tensors. `tests/test_pull.py` the pin's check with `load` reading nothing, its
-  size first, its SHA-256 proved at the load's end or refused there in the pin's words; a SHA-256
-  known before (a record's, a whole read's) held to the pin at once and proved by the load, each
-  refused in its own words, but a pinned file's a record vouches for, in the pin's; with
-  `whole`, a SHA-256 nothing vouches for read at once once its size has passed; a file unknown before taken with the load's; `load_models` refusing a
-  file whose bytes aren't those expected at the end of its own load, before the next.
-  `tests/test_detector.py` the detector's file opened once for its bytes (and once for its
-  header's check), hashed, loaded from them and proved. The picture's run and the server's start
-  read no model file whole (`test_still_cli.py`, `apps/imgserver/tests/test_service.py`), their
-  stand-in loads proving the files as the library's does. The pins: `SHA256SUMS`, a few
-  kilobytes, downloaded into a temporary `HF_HOME` behind a link, and the sizes read from the
-  Hub's API, skipped offline (no network to huggingface.co, or `HF_HUB_OFFLINE` set). A test
-  that runs seedvr2x in a process of its own gives it its own `HF_HOME` and `HF_HUB_OFFLINE=1`,
-  but that one; hf_xet is imported in such a process only. Its runs of the CLI give an empty cut
-  list, so that the shot detector, which it replaces, neither fetches nor checks its file, but
-  where a test holds that pull. With `SEEDVR2X_TESTS_PULL=1`, it pulls the four v1 files into
-  Hugging Face's cache too, about 33 GB the first time; `test_regression.py`'s
-  `test_milestone1_from_the_cache` (GPU) then runs the default models from the cache,
-  `HF_HUB_OFFLINE=1`, and skips until the three it takes are there, saying how to fetch them
-  alone (`hf download`, 17 GB).
+  without that wait); a file cut short refused in the same words; a GGUF file's header parsed again
+  from the bytes hashed, a header read differently the second time refused as changed while it
+  loaded; and, where `SEEDVR2X_MODEL_DIR` has them, seedvr2x's VAE and TransNetV2's weights read to
+  their pins and to safetensors' own tensors. `tests/test_pull.py` the pin's check with `load`
+  reading nothing, its size first, its SHA-256 proved at the load's end or refused there in the
+  pin's words; a SHA-256 known before (a record's, a whole read's) held to the pin at once and
+  proved by the load, each refused in its own words, but a pinned file's a record vouches for, in
+  the pin's; with `whole`, a SHA-256 nothing vouches for read at once once its size has passed; a
+  file unknown before taken with the load's; `load_models` refusing a file whose bytes aren't those
+  expected at the end of its own load, before the next. `tests/test_detector.py` the detector's file
+  opened once for its bytes (and once for its header's check), hashed, loaded from them and proved.
+  The picture's run and the server's start read no model file whole (`test_still_cli.py`,
+  `apps/imgserver/tests/test_service.py`), their stand-in loads proving the files as the library's
+  does. The pins: `SHA256SUMS`, a few kilobytes, downloaded into a temporary `HF_HOME` behind a
+  link, and the sizes read from the Hub's API, skipped offline (no network to huggingface.co, or
+  `HF_HUB_OFFLINE` set). A test that runs seedvr2x in a process of its own gives it its own
+  `HF_HOME` and `HF_HUB_OFFLINE=1`, but that one; hf_xet is imported in such a process only. Its
+  runs of the CLI give an empty cut list, so that the shot detector, which it replaces, neither
+  fetches nor checks its file, but where a test holds that pull. With `SEEDVR2X_TESTS_PULL=1`, it
+  pulls the four v1 files into Hugging Face's cache too, about 33 GB the first time;
+  `test_regression.py`'s `test_milestone1_from_the_cache` (GPU) then runs the default models from
+  the cache, `HF_HUB_OFFLINE=1`, and skips until the three it takes are there, saying how to fetch
+  them alone (`hf download`, 17 GB).
 - `tests/test_regression.py` (GPU) holds every change to the runtime or the vendored code to
   milestone 1: the output must stay bit-identical to seedvr2x's own references, FFV1 master and
   float32 frames, made once on main's code in seedvr2x's defaults (its own padding, its tail
@@ -1141,8 +1151,8 @@ marker. The image server, Linux's alone by its lock, has no such line.
   hashed at its start, its pinned one (the stand-in detector's) by its load alone; a job with its
   assembly alone left reading no model file. A pinned file of its size and other bytes is refused
   at the end of its load, the first pass kept, what is kept said before the command the refusal
-  advises, which stays its last line (`tests/test_pull_cli.py`). The source is hashed at each start of such a job,
-  as before.
+  advises, which stays its last line (`tests/test_pull_cli.py`). The source is hashed at each start
+  of such a job, as before.
   A `.mkv` path's finished file keeps its own manifest beside it (`tests/test_assembled.py`): the
   same command makes nothing, another job or a changed file is refused, `--plan` writes nothing,
   and a stop after each of the end steps (file, checksums, work record, manifest beside it,
@@ -1238,15 +1248,16 @@ marker. The image server, Linux's alone by its lock, has no such line.
   writers: ffmpeg dies with its parent (PDEATHSIG), a segment command's process group is killed
   (`media/writer.end_commands`, from `main._flush`; `tests/test_segment_cmd.py`), and the
   resume's checks (the writers' partial paths, `resume.leftovers`) are those of a SIGKILL;
-  `_unmake` and `_unlock` run one at a time (`main._CLEANING`), the watcher's and main's own. `tests/test_stop.py`: DRIVER's mode
-  `held` (the step held in the interpreter's own lock acquired twice, through ctypes: no signal
-  ends it and no Python runs) with a unit of 0.01 s and `waiting.FLOOR` of 1 s: one SIGTERM ends
-  nothing, two end it with 143 and Ctrl-C three times with 130 within 30 s, the line, the job's
-  files and the resume as if uninterrupted, for an FFV1 job and a PNG one; the stall's line naming
-  the frame and followed by the stacks; mode `wait` (a wait polling in the same frame) said by
-  `waiting` alone; the `Watch` class in process, bytes written to its pipe (the classification of
-  the stops, the ACK's order, once with `main._end` in both orders, the guard, the descriptor and
-  signal handlers given back, a real signal answered by a responsive main thread never counted).
+  `_unmake` and `_unlock` run one at a time (`main._CLEANING`), the watcher's and main's own.
+  `tests/test_stop.py`: DRIVER's mode `held` (the step held in the interpreter's own lock acquired
+  twice, through ctypes: no signal ends it and no Python runs) with a unit of 0.01 s and
+  `waiting.FLOOR` of 1 s: one SIGTERM ends nothing, two end it with 143 and Ctrl-C three times with
+  130 within 30 s, the line, the job's files and the resume as if uninterrupted, for an FFV1 job and
+  a PNG one; the stall's line naming the frame and followed by the stacks; mode `wait` (a wait
+  polling in the same frame) said by `waiting` alone; the `Watch` class in process, bytes written to
+  its pipe (the classification of the stops, the ACK's order, once with `main._end` in both orders,
+  the guard, the descriptor and signal handlers given back, a real signal answered by a responsive
+  main thread never counted).
 - Every thread's stack on SIGUSR1: `command` registers `faulthandler` (all threads, to stderr,
   not chained) in the CLI and the image server; `tests/test_stop.py` sends it inside a slow step,
   the main thread in Python's sleep and in C calls (libc's `usleep`, mode `c-call`): the main
@@ -1275,30 +1286,30 @@ marker. The image server, Linux's alone by its lock, has no such line.
   without waiting; the nodes' settle runs the release it then makes, and the synchronize of
   models not kept before their `forget`, inside `waiting.releasing` and ComfyUI's Cancel as the
   check, so that a second Cancel leaves it with the mark kept; never by another wait or card, and
-  never on a card `fail` marked, whatever the events say; the queries kept until a release completes); `Models.release` sends nothing
-  back while its own card's mark holds (`core/tests/test_held.py`,
-  `apps/comfyui/tests/test_release.py`), `cuda_used` and `cuda_failed`, and its import making no
-  torch. `Models.enter` ends a change of phase with the poll for the copies it queued, so that a
-  stop reaches them, on a card neither abandoned nor failed: `test_held.py`, with `run._enter`'s
-  and the calibration's own waits then no-ops and the enter terms (`timing.ENTER`) meaning what
-  they meant. `tests/test_memory.py` NVML's activity (`memory.activity`) on its stand-in. The CLI
-  names
+  never on a card `fail` marked, whatever the events say; the queries kept until a release
+  completes); `Models.release` sends nothing back while its own card's mark holds
+  (`core/tests/test_held.py`, `apps/comfyui/tests/test_release.py`), `cuda_used` and `cuda_failed`,
+  and its import making no torch. `Models.enter` ends a change of phase with the poll for the copies
+  it queued, so that a stop reaches them, on a card neither abandoned nor failed: `test_held.py`,
+  with `run._enter`'s and the calibration's own waits then no-ops and the enter terms
+  (`timing.ENTER`) meaning what they meant. `tests/test_memory.py` NVML's activity
+  (`memory.activity`) on its stand-in. The CLI names
   each unit in `run._begin` with the calibration's estimate; the image server each step of a picture
   inside its model's lock, the warm-up's longest time of that step its estimate:
   `tests/test_service.py` the estimates and the units named, `tests/test_web.py` /health's `stalled`
   (503, a ready server only, ready again after) and the gauge of the longest wait,
   `tests/test_metrics.py` its family.
-- A card a CUDA error failed (`waiting.fail`, `waiting.failed`, `model.marking`, `model.unless_failed`;
-  the nodes on Windows, 2026-11-07: "Fatal Python error: Aborted" at a free, where under
-  cudaMallocAsync a tensor's free reports a pending error inside torch's deleter, which aborts:
-  shown alone on the RTX 5090, a device-side assert then a `del`, exit code 3; torch's own
+- A card a CUDA error failed (`waiting.fail`, `waiting.failed`, `model.marking`,
+  `model.unless_failed`; the nodes on Windows, 2026-11-07: "Fatal Python error: Aborted" at a free,
+  where under cudaMallocAsync a tensor's free reports a pending error inside torch's deleter, which
+  aborts: shown alone on the RTX 5090, a device-side assert then a `del`, exit code 3; torch's own
   allocator frees silently and the error comes at the next synchronise): a CUDA error other than
   torch's `OutOfMemoryError` (`waiting.cuda_failed`: a "CUDA error: out of memory" a kernel met is
   one) marks its card, abandoned too and never cleared. From then on nothing seedvr2x controls
   frees, closes or waits on that card: each free on an error's way out first asks the card
-  (`model.unless_failed`: the poll, where a pending error comes back and marks it), since a generator's
-  own `finally` runs as the error unwinds through its consumer, before any outer block has seen
-  it. Frees inside a forward pass before the error surfaces, ComfyUI's own clean-up and the
+  (`model.unless_failed`: the poll, where a pending error comes back and marks it), since a
+  generator's own `finally` runs as the error unwinds through its consumer, before any outer block
+  has seen it. Frees inside a forward pass before the error surfaces, ComfyUI's own clean-up and the
   interpreter's exit are not seedvr2x's. A decode's normal end polls the card before its causal
   memory is freed (`model.decode_sliced`); `synchronize` marks an error its event's record or
   query meets; `Models.release` polls before its first free; the environment probe passes such an
@@ -1317,13 +1328,13 @@ marker. The image server, Linux's alone by its lock, has no such line.
   consumer's, or in the writer, tiled or not, leaving what the decode held and marking the card,
   out of memory freeing as before; `tests/test_clip.py` the decode left open and the frames kept;
   `tests/test_env_probe.py` the probe's. `library_fixtures.no_card_failed` (autouse in the four
-  projects) clears the marks before each test. The nodes (`apps/comfyui/tests/test_card_failed.py`): the error kept with its frames
-  (`models._failures`), the models held, ComfyUI's cache not emptied, the error's first line on
-  the node (`progress.FAILED`), at ERROR in the console and in ComfyUI's error with the restart
-  (`words.card_failed`), every later run refused at its start with nothing read, a CUDA error at
-  a run's end poll holding models not kept, out of memory freeing as before; the Cuts node
-  refused on a failed card and marking one (`tests/test_cuts_node.py`). The CLI's and the
-  server's CUDA errors still end their process (`main.py`, `service.py`).
+  projects) clears the marks before each test. The nodes (`apps/comfyui/tests/test_card_failed.py`):
+  the error kept with its frames (`models._failures`), the models held, ComfyUI's cache not emptied,
+  the error's first line on the node (`progress.FAILED`), at ERROR in the console and in ComfyUI's
+  error with the restart (`words.card_failed`), every later run refused at its start with nothing
+  read, a CUDA error at a run's end poll holding models not kept, out of memory freeing as before;
+  the Cuts node refused on a failed card and marking one (`tests/test_cuts_node.py`). The CLI's and
+  the server's CUDA errors still end their process (`main.py`, `service.py`).
 - The card read on Windows itself (`seedvr2x/memory.py`: `NVML_WINDOWS`, `CUDA_WINDOWS`,
   `_libraries`, `_unread`): NVML through `nvml.dll` (System32, or NVSMI's directory) and the
   driver through `nvcuda.dll`, the probe's too; a reading NVML can't make said at INFO the first
@@ -1498,15 +1509,15 @@ marker. The image server, Linux's alone by its lock, has no such line.
   manifest (`main._job_record`), on the masters, on the finished `.mkv`, on a command's segments,
   the whole record on the finished file of a command writing MP4, which drops stream tags; a
   re-planned resume's segments `replanned`, with the new plan's values; a cut list's SHA-256 or
-  the detection's threshold; and none in a PNG job's frames. The tags change the masters' bytes and sizes, not their frames, packets or
-  checksums: what compares masters (the milestone-1 regression's `tools/compare.py`, the
-  segments' SHA-256 and sizes, each against its own file's record) compares frames, or a file
-  with its own record.
+  the detection's threshold; and none in a PNG job's frames. The tags change the masters' bytes and
+  sizes, not their frames, packets or checksums: what compares masters (the milestone-1 regression's
+  `tools/compare.py`, the segments' SHA-256 and sizes, each against its own file's record) compares
+  frames, or a file with its own record.
 - The environment probe (`seedvr2x/probe.py`, DESIGN.md, Repository and apps, "ComfyUI's process is
-  not seedvr2x's"): `tests/test_env_probe.py` holds, on the CPU, the fingerprint's parts from stand-ins
-  for torch's and NVML's readings (Linux's library, Windows' two names, macOS none), the cache
-  directory of each platform, the cache (written, vouching, run again for each part changed with
-  the other environment kept, a check added for another layout, a damaged or unreadable file
+  not seedvr2x's"): `tests/test_env_probe.py` holds, on the CPU, the fingerprint's parts from
+  stand-ins for torch's and NVML's readings (Linux's library, Windows' two names, macOS none), the
+  cache directory of each platform, the cache (written, vouching, run again for each part changed
+  with the other environment kept, a check added for another layout, a damaged or unreadable file
   ignored and written again, the write atomic, the margin's field kept), each check on the CPU
   device for the three layouts, and a kernel made wrong on purpose per check, refused with its
   facts, the refusal cached and refusing at once on the next run, a kernel that raises a failed
@@ -1518,9 +1529,10 @@ marker. The image server, Linux's alone by its lock, has no such line.
   measured: the cache has the field, null; its reading side is built (`Probed.allocator_margin`,
   carried by an app into `memory.Reading.margin`, which `peaks.reserve` counts where it is
   larger than the rule's share, under the segments and the pool; the nodes do it,
-  `apps/comfyui/models.py`), held by `test_a_cached_margin_counts_in_the_plan_where_it_is_over_the_rules_share`
-  (under, equal to and over the 0.33 share) and, through the plans, by `test_peaks.py`,
-  `test_shot_plan.py`, `test_still_plan.py` and the nodes' `test_machine.py`.
+  `apps/comfyui/models.py`), held by
+  `test_a_cached_margin_counts_in_the_plan_where_it_is_over_the_rules_share` (under, equal to and
+  over the 0.33 share) and, through the plans, by `test_peaks.py`, `test_shot_plan.py`,
+  `test_still_plan.py` and the nodes' `test_machine.py`.
 - A still picture (DESIGN.md, Still images), on the CPU, in `core/tests/`: `tests/test_picture.py`
   holds `seedvr2x/picture.py` to files it makes, bytes in: every format and mode read (PNG in
   RGB, palette, grey at 1 to 16 bits, 16-bit RGB by TorchCodec's decoder, alpha; JPEG, WebP,
@@ -1586,8 +1598,8 @@ marker. The image server, Linux's alone by its lock, has no such line.
   attention windows counted as the DiT's window functions count them, and their most within a
   bound; the floor proved, and what of the DiT a pinned VAE phase keeps lowered for it; the DiT's
   order, int8, SDPA,
-  pins, the host's trades and refusal, held readings and each phase's reserve (below); the picture's own
-  copies and resize on the GPU (`input_pixels`, a 100 MP input's 1.2 GB in float32 and 0.6 in
+  pins, the host's trades and refusal, held readings and each phase's reserve (below); the picture's
+  own copies and resize on the GPU (`input_pixels`, a 100 MP input's 1.2 GB in float32 and 0.6 in
   bfloat16, the transform's tensors counted from their sizes, unmeasured): the residents lowered
   where a moment needs it, the refusal naming the largest input that fits, a small input changing
   nothing; the CLI's bound its one picture as stored (`plan`'s `picture`: its own frame, windows
@@ -1606,11 +1618,11 @@ marker. The image server, Linux's alone by its lock, has no such line.
   frame, tiled and corrected, and under `-m gpu` on CUDA with the sharp 7B and the VAE from
   `SEEDVR2X_MODEL_DIR`, untiled at 720p, the plan's own at 1080p, and both passes tiled at 1080p
   pinned to 1728 and 1024 px, the models placed by the plan for one picture in the card's free
-  memory less 4 GiB left to the desktop (the smaller of the driver's and NVML's readings); a picture told by its content whatever its name, a video named
-  `.png` sent to the video path; every option of the parser taken or refused on a still (a new
-  one unclassified fails), each refusal; `-o`'s rules and a write that fails leaving nothing;
-  `--plan` alone saying the plan, loading and writing nothing, and hashing no model file for the
-  record; seedvr2x's record read
+  memory less 4 GiB left to the desktop (the smaller of the driver's and NVML's readings); a picture
+  told by its content whatever its name, a video named `.png` sent to the video path; every option
+  of the parser taken or refused on a still (a new one unclassified fails), each refusal; `-o`'s
+  rules and a write that fails leaving nothing; `--plan` alone saying the plan, loading and writing
+  nothing, and hashing no model file for the record; seedvr2x's record read
   back from each file, PNG and WebP, upright or turned (the app and version, the mark, the source's
   size as stored and the output's as written, the resolution asked and the sample aspect, 48 and
   49 giving the same size, the model files by name and SHA-256, hashed by their load
@@ -1665,10 +1677,10 @@ marker. The image server, Linux's alone by its lock, has no such line.
   for both passes now), a pin taking one there at the slice's figure, and a landscape 1080p
   picture pinned untiled taken where its own plan is untiled (the padded 1080p and 1440p
   frames within 4K), the refusal shown on a 4K bound; `tests/test_still_plan.py` the copies'
-  measured rule (`still_plan.RESIZE`, cuBLAS's workspace held) and what a phase takes for a reservation
-  (`still_plan.Peak`, `bound_peaks`, `picture_peaks`, a picture's passes within a `budget`). That
-  patch moved no video plan: the plan matrix's 5,480 cases were main's byte for byte (5,120
-  since the tests' numz modes retired, 2026-11-04; since 2026-11-05 in the repository, core's
+  measured rule (`still_plan.RESIZE`, cuBLAS's workspace held) and what a phase takes for a
+  reservation (`still_plan.Peak`, `bound_peaks`, `picture_peaks`, a picture's passes within a
+  `budget`). That patch moved no video plan: the plan matrix's 5,480 cases were main's byte for byte
+  (5,120 since the tests' numz modes retired, 2026-11-04; since 2026-11-05 in the repository, core's
   `tools/plan_matrix.py`'s 4,760 and the CLI's `tools/plan_lines.py`'s 360 checks of a record:
   4,760 + 360 = 5,120, the counts still). The patches of 2026-11-06 (the lean attention, the
   reserve by the step, the floor's rungs) move plans on purpose, each commit listing what the
@@ -1688,18 +1700,18 @@ marker. The image server, Linux's alone by its lock, has no such line.
   state, the limits before a body is read, the deadlines, a picture's bytes those the library
   makes of it with the same seed and tiles; `tests/test_service.py` the steps under a lock per
   model, one picture in the DiT while another is in the VAE, each with its bits alone, the
-  reservation held again when idle, the warm-up in both orientations, the start refused; `tests/test_stop.py` the stop in process and by
-  SIGTERM in a process of its own; `tests/test_reservation.py`, `test_admission.py`,
-  `test_answers.py`, `test_metrics.py` (read back by prometheus_client's parser, a dependency of
-  the tests alone), `test_main.py`, `test_names.py` and `test_lock.py` the parts alone. The
-  library's three steps (`still.encoded`, `sampled`, `decoded`) are held to `still.upscale` by
-  the CLI's `tests/test_still_cli.py`, through `upscale`, which composes them. The start's
-  search remembers the tiles' figures while it runs (`peaks.tiles_remembered`,
-  `reservation.make`): `core/tests/test_peaks.py` holds every tiled pass over 1080p's, 4K's and
-  an odd frame's padding the same inside it, the memo the search's alone (gone at its end, a
-  raise included, the outer one serving a nested search, a figure set between two searches read
-  by the second), and `tests/test_reservation.py` a start's plan, reservation and refusal the same
-  with it and without (`_make`), its floor proofs made again.
+  reservation held again when idle, the warm-up in both orientations, the start refused;
+  `tests/test_stop.py` the stop in process and by SIGTERM in a process of its own;
+  `tests/test_reservation.py`, `test_admission.py`, `test_answers.py`, `test_metrics.py` (read back
+  by prometheus_client's parser, a dependency of the tests alone), `test_main.py`, `test_names.py`
+  and `test_lock.py` the parts alone. The library's three steps (`still.encoded`, `sampled`,
+  `decoded`) are held to `still.upscale` by the CLI's `tests/test_still_cli.py`, through `upscale`,
+  which composes them. The start's search remembers the tiles' figures while it runs
+  (`peaks.tiles_remembered`, `reservation.make`): `core/tests/test_peaks.py` holds every tiled pass
+  over 1080p's, 4K's and an odd frame's padding the same inside it, the memo the search's alone
+  (gone at its end, a raise included, the outer one serving a nested search, a figure set between
+  two searches read by the second), and `tests/test_reservation.py` a start's plan, reservation and
+  refusal the same with it and without (`_make`), its floor proofs made again.
 - The library's callbacks for a caller's bar, text and Cancel (`core/tests/test_progress_hooks.py`),
   all observing only: `tiling.TileStep` told by a tiled encode and decode (0 before the first
   tile, then each; a decode tells every tile before its first slice), through `shot_pass`,
@@ -1739,9 +1751,9 @@ marker. The image server, Linux's alone by its lock, has no such line.
   read it whole by) and naming its caller, the library's checks of the model files out of a
   console at INFO and at DEBUG under a handler at DEBUG, its warnings and other loggers' INFO
   kept, and, in a process of its own started as ComfyUI starts, the nodes' import line prefixed
-  and a check of a model file not shown; `conftest.py`'s autouse `records_are_one_line` fails any test of the
-  nodes' in which a record of `seedvr2x` or `seedvr2x_comfyui` at INFO or above holds a newline
-  (the loggers held to INFO for it; a traceback, the record's exc_info, aside).
+  and a check of a model file not shown; `conftest.py`'s autouse `records_are_one_line` fails any
+  test of the nodes' in which a record of `seedvr2x` or `seedvr2x_comfyui` at INFO or above holds a
+  newline (the loggers held to INFO for it; a traceback, the record's exc_info, aside).
   `tests/test_registration.py` holds the one patcher (its model's class named `seedvr2x` for
   ComfyUI's "Requested to load seedvr2x", its sizes, strong
   references, Unload models and POST /free dropping the weights, the next run loading again,
@@ -1835,9 +1847,9 @@ marker. The image server, Linux's alone by its lock, has no such line.
   emptied and models not kept held rather than dropped after it (Unload models too), `running`
   giving the check and the unit back, and every later run refused at its start, nothing read or
   placed, in the words of a card still busy (`words.card_busy`) while the work the wait was for is
-  pending, asked without waiting (`models._settle`); the release after a run an exception ended (Cancel or an error)
-  run inside ComfyUI's interrupt as the check, the node's line `progress.FREEING` meanwhile (its
-  sentence, `FREEING_SAID`, at INFO in the console), a
+  pending, asked without waiting (`models._settle`); the release after a run an exception ended
+  (Cancel or an error) run inside ComfyUI's interrupt as the check, the node's line
+  `progress.FREEING` meanwhile (its sentence, `FREEING_SAID`, at INFO in the console), a
   second Cancel leaving it with the card marked whatever the bound, torch's cache not emptied and
   the next run refused while the work is pending, `progress.STOPPED` after it (`STOPPED_SAID` at
   WARNING, and the refused run's line the same), and the next run's
@@ -1847,15 +1859,15 @@ marker. The image server, Linux's alone by its lock, has no such line.
   error put never cleared; the query never waiting; a wait of the run itself past its bound and
   left by Cancel, whose later work on either stream (`waiting.pend`) keeps the next run refused
   until all of it is done, then the models not kept synchronized in the poll before `forget`, and
-  a Cancel during that release leaving the mark kept: `tests/test_release.py`), models not kept waiting for the device in the
-  poll first (`model.synchronize`) under the same text and second Cancel, a healthy release putting
-  the text back (none said before: cleared) and marking nothing, and one after a normal end with no
-  check and no text; `tests/test_cuts_node.py` seedvr2x Cuts (on a temporary HF_HOME, an
-  autouse fixture, `hugging_faces_cache`, offline: none reads the process's own Hugging Face
-  cache, which natively on Windows was one WSL had written, its links unreadable there) over
-  the untrained detector's weights and scripted probabilities (the cut list, and the console's
-  text of the cuts with their probabilities and the possible cuts, without a lead; the node's
-  line "scanning 64/120 frames",
+  a Cancel during that release leaving the mark kept: `tests/test_release.py`), models not kept
+  waiting for the device in the poll first (`model.synchronize`) under the same text and second
+  Cancel, a healthy release putting the text back (none said before: cleared) and marking nothing,
+  and one after a normal end with no check and no text; `tests/test_cuts_node.py` seedvr2x Cuts (on
+  a temporary HF_HOME, an autouse fixture, `hugging_faces_cache`, offline: none reads the process's
+  own Hugging Face cache, which natively on Windows was one WSL had written, its links unreadable
+  there) over the untrained detector's weights and scripted probabilities (the cut list, and the
+  console's text of the cuts with their probabilities and the possible cuts, without a lead; the
+  node's line "scanning 64/120 frames",
   "2 shots · 1 possible cut below 0.30"; no text output; no mode and no folder input, the
   models handle required and refused if it is none (naming the node), the threshold, the file the
   handle's folder's alone where a folder is given (the user, 2026-11-08: a folder is the choice of
@@ -2048,8 +2060,9 @@ marker. The image server, Linux's alone by its lock, has no such line.
   each step (`apps/comfyui/tests/test_machine.py`; ComfyUI's models gone counted by the
   allocator's rule, a refusing driver none). The CLI's budget line is per step
   (`apps/seedvr2x/tests/test_planner.py`). A plan refused under `PLAIN` says where the segments
-  would run it (`test_a_plan_refused_under_torch_s_own_allocator_says_where_the_segments_would_run_it`).
-  The pool's VAE floor (1.25 GiB) is design's open question, not a measure.
+  would run it
+  (`test_a_plan_refused_under_torch_s_own_allocator_says_where_the_segments_would_run_it`). The
+  pool's VAE floor (1.25 GiB) is design's open question, not a measure.
 - The floor's last rungs (DESIGN.md, Allocator, Small cards, "The floor, last rungs";
   `shot_plan.plan`'s `tail_frames` and `rungs`, `Plan.tail_frames` and `Plan.vae_floor`,
   `peaks.VAE_ROOM_LEAST`, `peaks.TAIL_MEASURED`, `peaks.tail_ratio`, `model.tail_frames`): a clip
