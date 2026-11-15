@@ -380,6 +380,50 @@ The other machine (the loader rewritten: an earlier cut of the same change):
 | the 36 blocks pinned | warm | the loader rewritten | 3 | 16.32 | 16.20 | 0.0 to 0.2 | 3.1 to 3.5 | 3.4 | 0, 0, 0 |
 | the 36 blocks pinned | warm | the same, large tensors in 4 pieces at once | 3 | 16.32 | 16.20 | 0.0 to 0.1 | 2.7 to 3.0 | 2.9 | 0, 0, 0 |
 
+## The environment on a Windows drive
+
+Measured on 2026-11-15, on seedvr2x at `4fd8afd`, on the RTX 5090 desktop under WSL2 (kernel 6.6,
+39 GiB given to WSL), the card hidden (`CUDA_VISIBLE_DEVICES=` empty), nothing on the GPU: the
+CLI's lock synced twice by `uv sync`, into the repository's own `apps/seedvr2x/.venv` on Linux's
+disk (ext4, inside WSL2's virtual disk), and with the tree's `core/` and `apps/seedvr2x/` copied
+(`git archive`) to a drive of Windows', reached through the 9p bridge, `uv sync --frozen` there:
+the same 71 packages, 5.7 to 5.8 GB, 32,853 files (torch 2.14.1+cu130, torchvision 0.29.1+cu130,
+diffusers 0.40.0), uv's cache on Linux's disk. The sync on the Windows drive took 1 min 49 s,
+uv copying every file where it can't hardlink across the two file systems.
+
+Then in each, from an empty working directory: `seedvr2x --help`, and the modules a video run
+imports before its first line (main's own, then torch and the run's: `seedvr2x.model`,
+`seedvr2x.detector`, `run`, `planner`, `media.ffmpeg`), one run first to warm the caches and left
+out, then five runs, each timed by the shell's clock from start to exit:
+
+| environment | `seedvr2x --help` (s) | median | the run's imports (s) | median |
+|---|---|---|---|---|
+| Linux's disk | 0.110 to 0.125 | 0.116 | 2.47 to 2.59 | 2.56 |
+| a Windows drive, 9p | 1.52 to 1.56 | 1.53 | 90.0 to 92.5 | 90.3 |
+
+The warm runs are as slow as the first, most likely because Linux's page cache keeps little of
+what is read through the bridge, as it keeps little of the weights' file above (inferred: not
+measured for the modules), so that every start reads its modules again. `python -X importtime`
+of the same imports, warm, says where the time goes, the cumulative time of each (2,956 imports
+on both):
+
+| module | Linux's disk (s) | a Windows drive (s) |
+|---|---|---|
+| `seedvr2x.model`, all it imports | 1.40 | 71.8 |
+| of it, diffusers | 0.46 | 48.6 |
+| of it, torchvision | 0.75 | 16.9 |
+| torch | 0.73 | 15.1 |
+| main, the CLI's own | 0.14 | 1.14 |
+
+So the time most likely goes in the files' count rather than their bytes (no run here varies
+one without the other): diffusers is thousands of small modules, each opened and read through
+the bridge. A start's imports cost 88 s more from a Windows drive, at every start of a job and
+of each resume, on top of the model files' read (70.5 to 77.3 s for the DiT through the bridge,
+above, against 3.4 to 3.6 s from NVMe on the other machine). The jobs run under WSL2 on
+2026-11-15, their environments and model files on a Windows drive, spent 106 to 161 s before
+their first pass, and those of 2026-11-11 about 3 min: no line of theirs falls inside that span,
+so no part of it is told apart there; this measure gives the imports' part.
+
 ## For seedvr2x
 
 - The mapped load's peak was never a need: a load that leaves 7.30 to 7.31 GiB resident fits a
@@ -396,6 +440,10 @@ The other machine (the loader rewritten: an earlier cut of the same change):
 - The load's time is the file system's: 86.2 to 92.9 s for 15.35 GiB through WSL's file bridge,
   3.0 s from NVMe. Through the bridge, reading in four pieces at once takes 40.6 to 45.4 s; a
   job's SHA-256 of the same file, before its load, reads it once more, one stream.
+- seedvr2x's environment on a Windows drive costs a start 88 s more than on Linux's disk, its
+  imports read through the bridge every time ([above](#the-environment-on-a-windows-drive)):
+  the manual says to keep the repository and its environment on Linux's disk under WSL2, beside
+  the model files and the job's directory.
 
 ## Reproduce
 
@@ -418,4 +466,12 @@ python scripts/load_peak.py cache --drop DIT.safetensors
 # The file's reads alone, four at once through a descriptor each; a directory's runs as a table:
 python scripts/load_peak.py read DIT.safetensors --threads 4 --own --times 3
 python scripts/load_peak.py rows RUNS/
+# The environment on a Windows drive (CUDA_VISIBLE_DEVICES= empty): the tree copied there and
+# synced, then each command timed five times after a first run left out, in each environment:
+git archive HEAD core apps/seedvr2x | tar -x -C "$WINDOWS_DIR"
+(cd "$WINDOWS_DIR/apps/seedvr2x" && uv sync --frozen)
+VENV/bin/seedvr2x --help
+IMPORTS='import main; import torch; import seedvr2x.model, seedvr2x.detector, run, planner'
+VENV/bin/python -c "$IMPORTS; import media.ffmpeg"
+VENV/bin/python -X importtime -c "$IMPORTS; import media.ffmpeg" 2> importtime.txt
 ```
