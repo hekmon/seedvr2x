@@ -30,8 +30,11 @@ size and, if it wants, a seed. Everything else is fixed when the server starts.
   refuses when the reservation does not fit, saying the most pictures at the size asked, and the
   largest size at that count, that would. One picture at a time may swap some of the DiT's blocks
   to system memory; more than one at a time needs the whole DiT on the card. The server has been
-  developed on a 96 GB card and checked on an RTX 5090; its plan on other sizes of card is
-  provisional until it is measured ([DESIGN.md](../../DESIGN.md#still-images), Still images).
+  developed on a 96 GB card and checked on an RTX 5090. The library's plans ran on the 96 GB card
+  held to every size from 8 to 96 GB and on the RTX 5090 under WSL2, every step at or under its
+  plan (the command line's jobs: [its manual](../seedvr2x/MANUAL.md#the-plan)); the server's own
+  start on other sizes of card is provisional until it is measured
+  ([DESIGN.md](../../DESIGN.md#still-images), Still images).
 - **Disk space:** about 17 GB for the models, downloaded once into Hugging Face's cache at the
   first start (or read from a directory you give).
 - **For the image: Docker, and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)**
@@ -184,7 +187,7 @@ the server never changes the file by itself.
 | File | Size | What it saves |
 |---|---|---|
 | `seedvr2x_ema_7b_sharp_fp16.safetensors` (the default), `seedvr2x_ema_7b_fp16.safetensors` | 16.5 GB | Nothing: the reference. |
-| `seedvr2x_ema_7b_sharp_int8_convrot.safetensors`, `seedvr2x_ema_7b_int8_convrot.safetensors` | 8.3 GB | Half the DiT's weights, multiplied in 8 bits. |
+| `seedvr2x_ema_7b_sharp_int8_convrot.safetensors`, `seedvr2x_ema_7b_int8_convrot.safetensors` | 8.3 GB | Half the DiT's weights, multiplied in 8 bits: closer to float16's output than float16 at another seed, and no faster (measured on video, [the command line's manual](../seedvr2x/MANUAL.md#the-int8-files)). |
 | `seedvr2x_ema_7b_sharp_dyn.gguf`, `seedvr2x_ema_7b_dyn.gguf` | 4.8 GB | Under a third of float16's weights, a type per block matrix among Q3_K, Q4_K and Q5_K (the dynamic GGUF): with every block swapped, the DiT's weights take about 4.5 GiB of pinned system memory in place of float16's 15, and a swap moves under a third of float16's bytes. |
 
 The dynamic GGUF saves no VRAM where the VAE's floor binds (an 8 GB card at 1080p); its DiT runs
@@ -193,6 +196,13 @@ memory is short for float16 or int8, the start names the smaller files: in its r
 that would fit the same `--max-size`, `--max-concurrent` and `--max-input` (with `--model-dir`
 given, saying that the file goes there), and in its plan, those that would swap fewer blocks
 ([the start](#the-start)); the choice stays yours.
+
+An int8 DiT is refused at the start where PyTorch would compute its rotation, a float32 matrix
+product, in TF32, which would move its codes far beyond the figures measured:
+`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1` in the server's environment, read before the card, or one
+of PyTorch's TF32 settings read on as the DiT loads. The refusal names it and the way out: unset
+the variable, or take the float16 file (`--dit-model seedvr2x_ema_7b_sharp_fp16.safetensors`).
+float16 and the dynamic GGUF start as before.
 
 ## The start
 
@@ -369,8 +379,10 @@ http://127.0.0.1:8390/health` and `/metrics` show the server's state.
 `--max-concurrent` is 1 by default. What running several at once gains has been measured only
 roughly: on an RTX 5090 with its desktop live, 12 pictures of 720p and 1080p from 4 clients went
 through at 40.3 a minute one at a time with the int8 DiT, and 42.8 two at once (38.5 with the
-float16 DiT one at a time, which can't run two on 32 GB; DESIGN.md, The image server). 1, 2 and
-4 at once are measured on the 96 GB card before a default is set.
+float16 DiT one at a time, which can't run two on 32 GB; DESIGN.md, The image server). That was
+on 2026-11-04, under FlashAttention 2, which seedvr2x has given up since for PyTorch's SDPA, the
+two running the DiT within 1.5% of each other. 1, 2 and 4 at once are measured on the 96 GB card
+before a default is set.
 
 More than one picture at a time needs the whole DiT on the card: a card that has to swap the
 DiT's blocks runs one at a time, and the start refuses more. A picture is admitted when fewer
