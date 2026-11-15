@@ -342,6 +342,22 @@ README](../seedvr2x/README.md#model-files)).
 
 - **What they take.** The model file chosen: 16.5 GB for float16, 8.3 GB for int8, 4.8 GB for the
   dynamic GGUF; the VAE, 0.5 GB; the shot detector (for seedvr2x Cuts), 30.5 MB.
+- **int8, measured.** Against the sharp 7B in float16 at the same seed (2026-11-15), the int8
+  file's output is 55.50 dB of PSNR-Y from float16's at 1080p and 55.99 at 4K, closer than
+  float16 itself at another seed (40.43 and 42.54 dB), and every int8 job ran where float16's
+  did, from 8 GB cards up. It is no faster: its windows took 17 to 30% longer than float16's
+  under Linux's driver, its jobs 1.6 to 5.5% longer, the fewer blocks it swaps not buying that
+  back; under WSL2's driver no job was longer. float16 stays the default.
+- **int8 and TF32.** The int8 file's rotation is a float32 matrix product, which TF32 would round
+  far beyond those figures, so an int8 run is refused where torch computes those products in
+  TF32: `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1` in the environment ComfyUI was started in, or a
+  setting of torch's turned on in ComfyUI's process (ComfyUI itself turns none on, 0.45.3:
+  another custom node most likely), read at every run, plan only and kept models included. Its
+  refusal says which, with the way out: unset the variable where ComfyUI is started and start it
+  again, or turn TF32 off where it was turned on, or choose the float16 file in seedvr2x Models:
+  `Sharp 7B int8: something in ComfyUI's process turned TF32 on for CUDA's float32 matrix
+  products (torch.backends.cuda.matmul.allow_tf32 reads True), ...`. float16 and the dynamic
+  GGUF run as before.
 - **Where they are.** On Windows `%USERPROFILE%\.cache\huggingface\hub`, on Linux
   `~/.cache/huggingface/hub`; or `hub` under the directory `HF_HOME` names, or the directory
   `HF_HUB_CACHE` names. ComfyUI's console says where each file is when seedvr2x Models runs
@@ -443,9 +459,10 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   only the room the plan needs, with 0.25 GiB over it for the buffer its partial unloads keep: its
   models stay where both fit. That room is one figure, the larger of ComfyUI's own reserve for the
   system (its `--reserve-vram`, 0.4 to 0.7 GiB by default) and the least seedvr2x leaves on a held
-  run (0.5 GiB: a driver that lends system memory, or a Linux card another program uses), not the
-  two added; the plan says which set it, and raising `--reserve-vram` raises the room. The card is
-  freed when the node ends, on Cancel and on an error too.
+  run (0.5 GiB: a driver that lends system memory, or a Linux card another program uses; 3 GiB on
+  a driver that lends whose card NVML can't read, its own figure leaving other programs out), not
+  the two added; the plan says which set it, and raising `--reserve-vram` raises the room. The
+  card is freed when the node ends, on Cancel and on an error too.
 - **A driver that lends system memory** (Windows, WSL2): seedvr2x's plan leaves room on the card,
   because the driver can borrow your computer's RAM where the card is full, which Windows shows as
   "shared GPU memory" and which slows a run. Turning NVIDIA's "CUDA - Sysmem Fallback Policy" to
@@ -466,11 +483,17 @@ file", which the nodes' refusal shows. Give each side its own cache (`HF_HOME`).
   fails where a step is short). The nodes say which applies once, in the console, where the
   driver lends system memory. The nodes set no limit on torch's memory: ComfyUI's process is
   shared with its other nodes, and a limit set there cannot be taken back.
-- **A card another program uses, on Linux** (a program other than ComfyUI listed on it, a
-  desktop's display server among them): Linux's driver lends nothing, but that program has only
-  the room the plan leaves to grow into, so the plan leaves the same room as on a driver that
-  lends, and the console says so, with what it found. A card ComfyUI alone uses is planned as
-  before.
+- **A card another program uses, on Linux** (a program other than ComfyUI that NVML, the
+  driver's own reading, lists on the card, a desktop's display server among them): Linux's driver
+  lends nothing, but that program has only the room the plan leaves to grow into, so the plan
+  leaves the same room as on a driver that lends, and the console says so, with what it found:
+  `seedvr2x's plan leaves room on the card: another program uses this graphics card (2 other
+  programs on it (Xorg, gnome-shell)), and it needs room to grow`. A display attached to the
+  card with no program listed on it, a text console, is no other program. Where NVML can't be
+  read, the card is taken for shared, held 0.5 GiB under what the driver reports free (on Linux
+  the card's own figure), and the console says that another program may use it, `maybe, NVML
+  unread`, with the reason. ComfyUI in a container most likely sees no program outside it listed
+  (not measured). A card ComfyUI alone uses is planned as before.
 - **A card too small** is refused before any model loads, with the way out in the nodes' own
   words: a smaller file in seedvr2x Models, a tile or the blocks swapped connected to the upscale
   node.
