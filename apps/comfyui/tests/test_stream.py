@@ -6,10 +6,12 @@ for packet; the trim, the crop and the rate as ComfyUI gives them; seedvr2x's re
 the memory the run holds the same for a clip ten times as long; nothing left by a Cancel or an
 error. Skipped without PyAV, which ComfyUI ships."""
 
+import ctypes
+import gc
 import shutil
 import subprocess
+import sys
 import threading
-import time
 from fractions import Fraction
 from io import BytesIO
 from pathlib import Path
@@ -36,7 +38,7 @@ from standins import (
 )
 from test_nodes import TARGET, fresh, planned_clip
 from test_progress import stop_at, tiled_plans
-from test_still import TILES
+from test_still import TILES, stand_in_dit
 
 from seedvr2x import clip, record
 from seedvr2x import frames as sizes
@@ -531,53 +533,92 @@ def test_a_writer_that_fails_ends_the_run_leaving_nothing(
     assert left(comfy_temp) == [] and writers() == []
 
 
-def resident() -> int:
-    with open("/proc/self/statm") as file:
-        return int(file.read().split()[1]) * 4096
+class _Mallinfo2(ctypes.Structure):
+    """glibc's struct mallinfo2 (malloc.h, glibc 2.33 and later): every field a size_t."""
+
+    _fields_ = [
+        (name, ctypes.c_size_t)
+        for name in (
+            *("arena", "ordblks", "smblks", "hblks", "hblkhd"),
+            *("usmblks", "fsmblks", "uordblks", "fordblks", "keepcost"),
+        )
+    ]
 
 
-def peak_while(action: Any) -> int:
-    """The process's resident memory at its most while `action` runs, over what it was before,
-    sampled every millisecond."""
-    import gc
-
-    gc.collect()
-    before, most, done = resident(), 0, threading.Event()
-
-    def sample() -> None:
-        nonlocal most
-        while not done.is_set():
-            most = max(most, resident())
-            time.sleep(0.001)
-
-    sampler = threading.Thread(target=sample)
-    sampler.start()
+def _mallinfo2() -> Any:
+    """glibc's mallinfo2, or None where the process's C library has none (Windows, macOS, musl,
+    a glibc before 2.33)."""
+    if sys.platform != "linux":
+        return None
     try:
-        action()
-    finally:
-        done.set()
-        sampler.join()
-    return most - before
+        call: Any = ctypes.CDLL(None).mallinfo2
+    except (OSError, AttributeError):
+        return None
+    call.restype, call.argtypes = _Mallinfo2, []
+    return call
 
 
-@pytest.mark.skipif(not Path("/proc/self/statm").exists(), reason="reads /proc")
-def test_a_clip_ten_times_as_long_holds_no_more_memory(machine: StandIn, tmp_path: Path) -> None:
+MALLINFO2 = _mallinfo2()
+
+
+def in_use() -> int:
+    """The bytes the process's allocations hold in glibc's heaps, every arena's (mallinfo2 sums
+    them: uordblks) and its chunks mapped apart (hblkhd), garbage collected first: what the run
+    holds, never what glibc keeps or gives back of its heaps, which the resident pages count
+    (unasked, glibc gave back the top of its heap between two readings, and the pages then
+    counted the same working set again as it grew back: impl-tests-1, 2026-11-15). Blind to
+    Python's small objects, which pymalloc keeps in arenas of its own; a frame is never one."""
+    gc.collect()
+    info = MALLINFO2()
+    return info.uordblks + info.hblkhd
+
+
+@pytest.mark.skipif(MALLINFO2 is None, reason="reads glibc's mallinfo2")
+def test_a_clip_ten_times_as_long_holds_no_more_memory(
+    machine: StandIn, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The run holds a slice of the source's frames, a shot's windows and the writer's queue,
     never the clip: a clip of 900 frames (100 shots of 9) holds what one of 90 (10 shots) does,
     within a shot's frames (its input and output in float32), where the clip's output alone would
-    be 10 times its own."""
+    be 10 times its own. The memory is read at each shot's end, where what a run keeps is whole
+    and the shot's own pass holds nothing: read at the run's largest moment, a leak counted only
+    from where that moment fell (a frame kept a shot read as little as 2.07 MiB over for 3.95
+    kept, in three runs, impl-tests-1). The stand-ins keep nothing a shot, as ComfyUI's bar keeps
+    no preview and the DiT no noise: kept to the test's end, their images and noise were 3.1 MiB
+    more over the longer clip."""
+    monkeypatch.setattr(ProgressBar, "keep_previews", False)
+    stand_in_dit(monkeypatch, keep=False)
+    readings: list[int] = []
+    shot_pass = stream.upscale_shot
+
+    def read_at_its_end(*args: Any, **kwargs: Any) -> None:
+        shot_pass(*args, **kwargs)
+        readings.append(in_use())
+
+    monkeypatch.setattr(stream, "upscale_shot", read_at_its_end)
     shots = 10
     short = source(tmp_path / "short.mkv", 9 * shots, audio=False)
     long = source(tmp_path / "long.mkv", 9 * shots * 10, audio=False)
     settings = plans.Settings(window=5)
 
-    def go(path: Path, count: int) -> None:
+    def most(path: Path, count: int) -> int:
+        readings.clear()
         cuts = tuple(Shot(start, start + 9) for start in range(0, count, 9))
         run_video(tmp_path, InputImpl.VideoFromFile(str(path)), settings, cuts=cuts)
+        assert len(readings) == count // 9
+        return max(readings)
 
-    go(short, 9 * shots)  # the models and the process's own buffers made once
-    first = peak_while(lambda: go(short, 9 * shots))
-    longer = peak_while(lambda: go(long, 9 * shots * 10))
+    most(short, 9 * shots)  # the models and the process's own buffers made once
+    # What is alive now left out of the collections, which then walk the runs' own objects alone
+    # (each took 0.14 s over the 436,000 objects of the test run alone, 17 s of its 28): what
+    # the freeze holds was made before the runs, so nothing a run keeps or drops is moved by it.
+    gc.collect()
+    gc.freeze()
+    try:
+        first = most(short, 9 * shots)
+        longer = most(long, 9 * shots * 10)
+    finally:
+        gc.unfreeze()
     shot = 9 * (WIDTH * HEIGHT + 4 * WIDTH * HEIGHT) * 3 * 4
     output = 9 * shots * 10 * 4 * WIDTH * HEIGHT * 3 * 4
     assert longer - first < max(shot, 2 * 2**20), (first, longer, output)

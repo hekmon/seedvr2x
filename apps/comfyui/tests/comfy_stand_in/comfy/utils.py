@@ -13,6 +13,9 @@ class ProgressBar:
     created: ClassVar["list[ProgressBar]"] = []
     # Called with each value the bar is moved to, after it is recorded: the tests' Cancel.
     on_update: ClassVar["Callable[[float], None] | None"] = None
+    # Off, a preview is recorded with no image, as ComfyUI's bar sends it and keeps nothing: for a
+    # test that reads the process's memory, which the images kept would grow as the run goes on.
+    keep_previews: ClassVar[bool] = True
 
     def __init__(self, total: float, node_id: str | None = None) -> None:
         self.total = total
@@ -35,7 +38,7 @@ class ProgressBar:
         self.updates.append(value)
         self.totals.append(self.total)
         if preview is not None:
-            self.previews.append((value, preview))
+            self.previews.append((value, preview if ProgressBar.keep_previews else None))
         if ProgressBar.on_update is not None:
             ProgressBar.on_update(value)
 

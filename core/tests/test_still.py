@@ -55,18 +55,22 @@ def pipeline_models(vae_models: model.Models, events: Events | None = None) -> m
     )
 
 
-def stand_in_dit(monkeypatch: pytest.MonkeyPatch, events: Events | None = None) -> list[Tensor]:
+def stand_in_dit(
+    monkeypatch: pytest.MonkeyPatch, events: Events | None = None, keep: bool = True
+) -> list[Tensor]:
     """Put a DiT of arithmetic in the place of model.condition and model.sample, the two calls
     sampling.window makes of the runner: the condition (T', h, w, 17) holds the latent and a
     channel of the noise, the output (T', h, w, 16) mixes the latent with the noise. Returns the
-    noise of each call."""
+    noise of each call; none with `keep` false, for a test that reads the process's memory, which
+    a window's noise kept until the test's end would grow as the run goes on."""
     noises: list[Tensor] = []
 
     def condition(models: model.Models, noise: Tensor, latent: Tensor) -> Tensor:
         return torch.cat([latent, noise[..., :1]], dim=-1)
 
     def sample(models: model.Models, noise: Tensor, cond: Tensor) -> Tensor:
-        noises.append(noise)
+        if keep:
+            noises.append(noise)
         if events is not None:
             events.append("sample")
         return cond[..., :16] * 0.7 + noise * 0.3

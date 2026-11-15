@@ -1064,8 +1064,10 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `seedvr2x-comfyui`, the SHA-256 the stand-in's load proves); the VIDEO given keeping the
   source's rate where Matroska reads 60000/1001 and 120000/1001 back otherwise; each pixel format
   through `yuv.to_rgb` (nv12 repacked); a plan only writing nothing; a Cancel and a writer that
-  fails leaving no file in the temp folder and no writer thread; and the resident memory of a
-  clip ten times as long the same within a shot's frames (sampled from `/proc/self/statm`).
+  fails leaving no file in the temp folder and no writer thread; and the memory of a clip ten
+  times as long the same within a shot's frames (glibc's bytes in use, mallinfo2, at each shot's
+  end, the stand-ins keeping nothing a shot: the resident pages counted what glibc gave back and
+  took again, and a run's largest moment counted a leak only from where it fell).
   `tests/test_nodes.py` holds frames given as Create Video gives them (VideoFromComponents) the
   same way, through the same pass; `tests/test_cuts_node.py` the detector's probabilities of a
   file streamed a few frames at a time equal bit for bit to `detector.probabilities` on its
