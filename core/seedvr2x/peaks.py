@@ -299,7 +299,11 @@ REFITTED = 1024  # the tile's side the refit starts at, in pixels
 # on the RTX 5090 on 2026-11-15 (DESIGN.md, Memory planner, Per-phase peaks; To measure, The cards
 # v0.1.0 is tested on), peaked 5.00 MiB over a plan by 15.67 at 1080p and at 4K, in every shot,
 # that square being the most any tile of their grids takes: 15.6749 GiB above what was allocated
-# before, 0.12 MiB under 15.675, the larger.
+# before, 0.12 MiB under 15.675, the larger. So do the two decodes whose hundredth stood under
+# their measure, both cut off at 720p's 752 rows: 752x832's, 11.493 GiB where the hundredth had
+# been 11.49 (3.1 MiB under), and 752x960's, 12.694 for 12.69 (4.1 MiB under); every other decode
+# is at or over its measure to the thousandth. The encodes whose hundredth stands under their
+# measure keep it: ENCODE_EXTRA, 0.4 GiB on every encode, covers the 4.3 MiB at the most.
 # The passes the one-output convolution takes (vendor/models/video_vae_v3/modules/
 # causal_inflation_lib.py, ONE_OUTPUT_FROM) take their peak measured with it (2026-10-17;
 # DESIGN.md, Memory planner, Budget: "the planner takes the peaks measured with it for the passes
@@ -362,9 +366,9 @@ MEASURED = {
     (1104, 1856): (19.05, 32.38),
     # Cut off at 720p's 752 rows.
     (752, 768): (6.94, 10.86),
-    (752, 832): (7.51, 11.49),
+    (752, 832): (7.51, 11.493),
     (752, 896): (8.09, 12.38),
-    (752, 960): (7.70, 12.69),
+    (752, 960): (7.70, 12.694),
     (752, 1024): (8.21, 13.54),
     (752, 1088): (8.73, 14.39),
     (752, 1152): (9.24, 14.92),

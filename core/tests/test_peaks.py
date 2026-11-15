@@ -589,11 +589,12 @@ def test_vae_tiles_measured() -> None:
         key for key, predicted in BEFORE_ONE_OUTPUT.items() if measured[key][0] != predicted[0]
     } == {(size, size) for size in range(1664, 2049, 64)}
     # The whole table by its sums, in GiB: the 45 encodes and the 45 decodes, then the
-    # 2026-10-11 measure's (to the thousandth, the 960-px square's decode being 15.675).
+    # 2026-10-11 measure's (to the thousandth: the decodes of the 960-px square, 15.675, of
+    # 752x832, 11.493, and of 752x960, 12.694).
     encodes, decodes = zip(*measured.values(), strict=True)
-    assert (round(sum(encodes), 3), round(sum(decodes), 3)) == (686.44, 1159.175)
+    assert (round(sum(encodes), 3), round(sum(decodes), 3)) == (686.44, 1159.182)
     encodes, decodes = zip(*old.values(), strict=True)
-    assert (round(sum(encodes), 3), round(sum(decodes), 3)) == (691.72, 1203.285)
+    assert (round(sum(encodes), 3), round(sum(decodes), 3)) == (691.72, 1203.292)
     # A square takes its measure on a frame its squares lay whole, whatever the overlap; a
     # larger square more. On another frame the grid's last tiles are cut off, and the pass takes
     # the most any of its tiles does, its square's measure at the least
@@ -679,6 +680,84 @@ def test_a_decode_in_960_px_tiles_is_planned_at_or_over_its_measure(
     assert predicted - planned == round(15.675 * GIB) - round(15.67 * GIB)
     assert measured - planned == pytest.approx(5.0 * 2**20, abs=0.01 * 2**20)
     assert 0 <= predicted - measured <= 0.13 * 2**20
+
+
+# Every tile's peaks to planner-limits.md's thousandths, the encode's and the decode's, in GiB:
+# its tables of 2026-10-11 ("seedvr2x's tiled passes: every tile's peak"), and for the passes
+# the one-output convolution takes, its tables of 2026-10-17 ("Under the one-output
+# convolution", With). 1024 px has a second measure of each, its shots of 21 to 301 frames:
+# 10.4742 and 17.4499 GiB (MEASURED's comment).
+THOUSANDTHS = {
+    (512, 512): (3.518, 5.886),
+    (576, 576): (4.380, 7.446),
+    (640, 640): (4.921, 8.087),
+    (704, 704): (5.953, 9.788),
+    (768, 768): (7.083, 11.089),
+    (832, 832): (8.311, 12.298),
+    (896, 896): (8.560, 14.100),
+    (960, 960): (9.817, 15.675),
+    (1024, 1024): (10.459, 17.450),
+    (1088, 1088): (11.806, 19.647),
+    (1152, 1152): (13.235, 21.986),
+    (1216, 1216): (14.152, 24.138),
+    (1280, 1280): (15.673, 26.396),
+    (1344, 1344): (16.790, 28.838),
+    (1408, 1408): (18.456, 31.313),
+    (1472, 1472): (19.736, 33.974),
+    (1536, 1536): (21.496, 36.743),
+    (1600, 1600): (23.209, 39.649),
+    (1664, 1664): (24.877, 42.455),
+    (1728, 1728): (26.720, 45.681),
+    (1792, 1792): (28.436, 48.928),
+    (1856, 1856): (30.458, 52.479),
+    (1920, 1920): (32.291, 55.687),
+    (1984, 1984): (34.283, 59.249),
+    (2048, 2048): (36.327, 63.342),
+    (1104, 1152): (12.684, 21.035),
+    (1104, 1216): (13.389, 22.242),
+    (1104, 1280): (13.546, 23.158),
+    (1104, 1344): (14.223, 24.180),
+    (1104, 1408): (14.901, 25.209),
+    (1104, 1472): (15.578, 26.266),
+    (1104, 1536): (16.255, 27.299),
+    (1104, 1600): (16.422, 28.259),
+    (1104, 1664): (17.079, 29.272),
+    (1104, 1728): (17.736, 30.254),
+    (1104, 1792): (18.393, 31.280),
+    (1104, 1856): (19.050, 32.380),
+    (752, 768): (6.936, 10.859),
+    (752, 832): (7.513, 11.493),
+    (752, 896): (8.091, 12.377),
+    (752, 960): (7.700, 12.694),
+    (752, 1024): (8.213, 13.540),
+    (752, 1088): (8.727, 14.386),
+    (752, 1152): (9.240, 14.919),
+    (752, 1216): (9.753, 15.585),
+}
+
+
+def test_every_decode_is_planned_at_or_over_its_measure() -> None:
+    # DESIGN.md, Memory planner, Per-phase peaks: "the planner takes the measured peak of every
+    # tile measured". To the hundredth, three decodes stood under their measure: the 960-px
+    # square's (15.67 for 15.675) and two tiles cut off at 720p's 752 rows, 752x832's (11.49 for
+    # 11.493, 3.1 MiB) and 752x960's (12.69 for 12.694, 4.1 MiB). Each takes its measure to the
+    # thousandth, and no decode stands under its measure. The encodes whose hundredth stands under
+    # their measure, 4.3 MiB at the most (1024 px's shots), are held over it by ENCODE_EXTRA.
+    measures = dict(THOUSANDTHS)
+    measures[1024, 1024] = (10.4742, max(17.4499, THOUSANDTHS[1024, 1024][1]))
+    assert set(measures) == set(peaks.MEASURED)
+    for key, (encode, decode) in measures.items():
+        assert peaks.MEASURED[key][1] >= decode, key
+        assert peaks.MEASURED[key][0] * GIB + peaks.ENCODE_EXTRA >= encode * GIB, key
+    assert [peaks.MEASURED[key][1] for key in ((960, 960), (752, 832), (752, 960))] == [
+        15.675,
+        11.493,
+        12.694,
+    ]
+    under = {key: encode - peaks.MEASURED[key][0] for key, (encode, _) in measures.items()}
+    assert len([gap for gap in under.values() if gap > 0]) == 16
+    assert max(under, key=lambda key: under[key]) == (1024, 1024)
+    assert round(max(under.values()) * 1024, 1) == 4.3
 
 
 def test_vae_tiles_nobody_measured() -> None:

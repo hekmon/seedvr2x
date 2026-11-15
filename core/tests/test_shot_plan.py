@@ -212,13 +212,13 @@ def test_a_pass_takes_the_tile_that_takes_the_most() -> None:
     # (tilegrid.grid), and by the table itself a shorter tile can take more: at 720p's rows the
     # encode of 752x896 measured 8.09 GiB and that of 752x960 7.70. Frames padded to 752x1792,
     # 2688 or 3584 in tiles of 960 px are laid 752x960 then 752x896: the encode takes the
-    # second tile's 8.09, where the largest tile alone gave 7.70; the decode the first's, 12.69
+    # second tile's 8.09, where the largest tile alone gave 7.70; the decode the first's, 12.694
     # over 12.38.
     measured = peaks.MEASURED
-    assert (measured[752, 960], measured[752, 896]) == ((7.70, 12.69), (8.09, 12.38))
+    assert (measured[752, 960], measured[752, 896]) == ((7.70, 12.694), (8.09, 12.38))
     for columns in (1792, 2688, 3584):
         assert tile_shapes((752, columns), Tiles(960)) == {(752, 960), (752, 896)}
-        assert vae_fits((752, columns), Tiles(960)) == pytest.approx((8.09, 12.69), abs=1e-8)
+        assert vae_fits((752, columns), Tiles(960)) == pytest.approx((8.09, 12.694), abs=1e-8)
     assert padded_size((720, 1792)) == (752, 1792)
     # The planner's choice follows: with what the 960-px encode takes by its largest tile alone
     # and no more, it isn't chosen, nor pinned.
