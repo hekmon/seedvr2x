@@ -354,11 +354,17 @@ class Service:
 
     def load(self) -> "Models":
         """The models loaded as the plan places them, then the reservation made: the share torch
-        doesn't hold yet allocated and freed, and torch held there."""
+        doesn't hold yet allocated and freed, and torch held there. Tf32Forced for an int8 DiT
+        where this process has torch compute CUDA's float32 matrix products in TF32
+        (weights.check_tf32_set), before the load: the variable is the plan's (check_tf32)."""
+        from seedvr2x import weights
+
         assert self.files is not None and self.made is not None
         started = time.monotonic()
         made = self.made
         files = self.files
+        if weights.tf32_set() is not None:
+            weights.check_tf32_set(self.card.dit_model(files.dit.path), files.dit.path.name)
         self.models = self.card.load(files, made.plan.models, still_plan.reserve_taken(made.plan))
         # The record's SHA-256, those of the very bytes the load read (pull.Hashes.proved).
         self.record_models = (

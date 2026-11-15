@@ -12,6 +12,7 @@ import torch
 from comfy.utils import ProgressBar
 from comfy_execution.graph_utils import ExecutionBlocker
 from comfyui import models, nodes, plans, progress, words
+from library_fixtures import TF32_WAYS, tf32_readings, tf32_turned_on
 from standins import (
     GIB,
     PICTURE,
@@ -182,6 +183,55 @@ def test_the_node_is_the_one_that_blocks(machine: StandIn, tmp_path) -> None:
     out, _ = upscale_image(handle(tmp_path), SETTINGS, pictures(), RESOLUTION, "1")
     assert not isinstance(out, ExecutionBlocker) and out.shape == (1, 48, 80, 3)
     assert nodes.UpscaleImage.GET_SCHEMA().outputs[0].io_type == "IMAGE"
+
+
+@pytest.mark.parametrize("way", list(TF32_WAYS))
+@pytest.mark.parametrize("plan_only", [True, False], ids=["plan only", "run"])
+def test_an_int8_run_is_refused_where_comfyuis_process_turned_tf32_on(
+    machine: StandIn,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    way: str,
+    plan_only: bool,
+) -> None:
+    # weights.check_tf32_set: something in ComfyUI's process turned TF32 on itself (another custom
+    # node, say), in any of torch's forms, the variable unset. Read at each run: an int8 DiT kept
+    # in RAM by an earlier run is refused once the setting is on, before the card is read, a plan
+    # only as a run, in the nodes' words, and runs again once it is off; no setting of torch's is
+    # changed; an fp16 DiT runs whatever the setting.
+    from seedvr2x import peaks, weights
+
+    monkeypatch.delenv(weights.TF32_OVERRIDE, raising=False)
+
+    def run(unique_id: str, keep: bool = True) -> None:
+        upscale_image(
+            handle(tmp_path, keep=keep),
+            SETTINGS,
+            pictures(),
+            RESOLUTION,
+            unique_id,
+            plan_only=plan_only,
+        )
+
+    with tf32_turned_on(way):
+        run("11", keep=False)
+    machine.dit_format = peaks.INT8
+    run("12")
+    loads, made = list(machine.loads), list(machine.made)
+    with tf32_turned_on(way) as (name, value):
+        on = tf32_readings()
+        with pytest.raises(words.Refused) as refused:
+            run("13")
+        assert tf32_readings() == on
+    assert str(refused.value) == (
+        "w.safetensors: something in ComfyUI's process turned TF32 on for CUDA's float32 matrix"
+        f" products ({name} reads {value}), and the int8 DiT's rotation is one: its codes would"
+        " move far beyond those seedvr2x measured, so an int8 DiT doesn't run there. Turn TF32"
+        " off where it was turned on, another custom node most likely, or choose an fp16 file as"
+        " the model in seedvr2x Models."
+    )
+    assert machine.loads == loads and machine.made == made
+    run("14")
 
 
 @pytest.mark.parametrize("value", [None, "0", "1", "", " 1", "true", "01"])

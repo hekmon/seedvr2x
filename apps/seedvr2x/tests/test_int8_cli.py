@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 import test_cli_run
 from levels import levels
+from library_fixtures import TF32_WAYS, tf32_readings, tf32_turned_on
 from test_cli_run import (
     CHECK_MODELS,
     FREE,
@@ -278,6 +279,83 @@ def test_an_int8_dit_is_refused_where_torch_s_tf32_is_forced_in_cublas(
     assert not any("the first pass" in message for message in caplog.messages)
     assert not (tmp_path / "out" / "manifest.json").exists()
     assert not (tmp_path / "plan.txt").exists()
+
+
+@pytest.mark.usefixtures("steps")
+@pytest.mark.parametrize("way", list(TF32_WAYS))
+@pytest.mark.parametrize("plan", [True, False], ids=["plan", "run"])
+def test_an_int8_dit_is_refused_as_it_loads_where_the_process_turned_tf32_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    way: str,
+    plan: bool,
+) -> None:
+    # DESIGN.md, Weights, TF32: a setting of the process's own (weights.check_tf32_set), in any of
+    # torch's forms, the variable unset: an int8 job is refused as its models load, --plan's
+    # calibration's load as the run's, nothing loaded and no unit made, in the command line's
+    # words; no setting of torch's changed by the run.
+    levels(caplog, logging.INFO)
+    source_path = job(tmp_path, monkeypatch)
+    models = tmp_path / "models"
+    models.mkdir()
+    int8_file(models / INT8)
+    write(models / VAE, as_dtype("vae", "F16"))
+    monkeypatch.setattr(weights, "check_models", CHECK_MODELS)
+    monkeypatch.setattr(cli, "_dit_model", DIT_MODEL)
+    monkeypatch.setattr(files, "sha256", hashed)
+    monkeypatch.setattr(test_cli_run, "digest_of", hashed)
+    monkeypatch.delenv(weights.TF32_OVERRIDE, raising=False)
+    loaded: list[Path] = []
+    stand_in_load: Any = model.load_models
+
+    def load(dit: Path, *arguments: Any) -> Any:
+        loaded.append(dit)
+        return stand_in_load(dit, *arguments)
+
+    monkeypatch.setattr(model, "load_models", load)
+    chosen = ("--model-dir", str(models), "--vae-model", VAE, "--dit-model", INT8)
+    more = ("--plan", str(tmp_path / "plan.txt")) if plan else ()
+    with tf32_turned_on(way) as (name, value):
+        on = tf32_readings()
+        status = cli.main(command(tmp_path, source_path, "out", *JOB, *chosen, *more))
+        assert tf32_readings() == on
+    assert status == 1 and loaded == []
+    refused = [message for message in caplog.messages if "TF32" in message]
+    assert len(refused) == 1 and refused[0].startswith(
+        f"{INT8}: this process has torch compute CUDA's float32 matrix products in TF32 ({name}"
+        f" reads {value}), and the int8 DiT's rotation is one: its codes would move far beyond"
+        " those seedvr2x measured, so an int8 DiT doesn't run there. Turn TF32 off where it was"
+        " turned on, or take an fp16 DiT file (--dit-model)"
+    )
+    assert not any("upscaled" in message for message in caplog.messages)
+    # Off again, the job runs (into an output of its own: the stand-in's hash of the source is
+    # another at each start).
+    caplog.clear()
+    more = ("--plan", str(tmp_path / "again.txt")) if plan else ()
+    assert cli.main(command(tmp_path, source_path, "again", *JOB, *chosen, *more)) == 0
+    assert loaded == [models / INT8] and "TF32" not in caplog.text
+
+
+@pytest.mark.usefixtures("steps")
+def test_an_fp16_dit_runs_where_the_process_turned_tf32_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    levels(caplog, logging.INFO)
+    source_path = job(tmp_path, monkeypatch)
+    models = tmp_path / "models"
+    models.mkdir()
+    write(models / FP16, as_dtype("7b", "F16"))
+    write(models / VAE, as_dtype("vae", "F16"))
+    monkeypatch.setattr(weights, "check_models", CHECK_MODELS)
+    monkeypatch.setattr(cli, "_dit_model", DIT_MODEL)
+    monkeypatch.setattr(files, "sha256", hashed)
+    monkeypatch.setattr(test_cli_run, "digest_of", hashed)
+    monkeypatch.delenv(weights.TF32_OVERRIDE, raising=False)
+    chosen = ("--model-dir", str(models), "--vae-model", VAE, "--dit-model", FP16)
+    with tf32_turned_on("allow_tf32"):
+        assert cli.main(command(tmp_path, source_path, "out", *JOB, *chosen)) == 0
+    assert "TF32" not in caplog.text
 
 
 @pytest.mark.usefixtures("steps")

@@ -1262,8 +1262,11 @@ def _session[T](
         files, architecture = entry.files, entry.architecture
     # An int8 DiT where torch's TF32 is forced in cuBLAS, refused before the card is read, a plan
     # only too, kept models or not (weights.check_tf32): the variable is ComfyUI's environment's.
+    # And one where something in ComfyUI's process turned TF32 on itself, another custom node
+    # say, read at each run (weights.check_tf32_set): a setting may change between two runs.
     try:
         weights.check_tf32(architecture, handle.dit)
+        weights.check_tf32_set(architecture, handle.dit)
     except Refusal as error:
         raise words.refusal(error, model_dir=bool(handle.model_dir)) from error
     if plan_only:

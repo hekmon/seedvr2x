@@ -23,7 +23,8 @@ runs 10% away), so every test has a ratio of 1.0, frozen clocks, unless it sets 
 (tests/test_clock.py)."""
 
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import IO, Any
 
 import pytest
@@ -130,6 +131,90 @@ LEAN_WINDOWS: list[tuple[int, int, int, bool, int]] = [
 
 
 FSCTL_SET_SPARSE = 0x000900C4
+
+
+# Each way a program turns TF32 on for CUDA's float32 matrix products in torch 2.12.1 to 2.14.1,
+# through its public API (weights.TF32_SETTINGS), with what weights.tf32_set then reads: the
+# legacy flag, the matrix products' precision at "high" and at "medium", the newer per-backend
+# precision and the generic one; and a mix of the legacy and new APIs, the precision "high" then
+# the per-backend one "none", where the legacy flag raises and the precision still reads "high".
+TF32_WAYS: dict[str, tuple[Callable[[Any], object], tuple[str, str]]] = {
+    "allow_tf32": (
+        lambda torch: setattr(torch.backends.cuda.matmul, "allow_tf32", True),
+        ("torch.backends.cuda.matmul.allow_tf32", "True"),
+    ),
+    "precision high": (
+        lambda torch: torch.set_float32_matmul_precision("high"),
+        ("torch.backends.cuda.matmul.allow_tf32", "True"),
+    ),
+    "precision medium": (
+        lambda torch: torch.set_float32_matmul_precision("medium"),
+        ("torch.backends.cuda.matmul.allow_tf32", "True"),
+    ),
+    "matmul fp32_precision": (
+        lambda torch: setattr(torch.backends.cuda.matmul, "fp32_precision", "tf32"),
+        ("torch.backends.cuda.matmul.fp32_precision", "'tf32'"),
+    ),
+    "generic fp32_precision": (
+        lambda torch: setattr(torch.backends, "fp32_precision", "tf32"),
+        ("torch.backends.cuda.matmul.fp32_precision", "'tf32'"),
+    ),
+    "mixed": (
+        lambda torch: (
+            torch.set_float32_matmul_precision("high"),
+            setattr(torch.backends.cuda.matmul, "fp32_precision", "none"),
+        ),
+        ("torch.get_float32_matmul_precision()", "'high'"),
+    ),
+}
+
+
+def tf32_readings() -> tuple[str, ...]:
+    """torch's TF32 settings for CUDA's matrix products as each of its readings gives them, a
+    reading torch refuses (a mix of the legacy and new APIs) as "raises"."""
+    import torch
+
+    matmul = torch.backends.cuda.matmul
+    # The generic precision is a property of torch.backends' module class, which pyright can't see.
+    backends: Any = torch.backends
+    found: list[str] = []
+    for read in (
+        lambda: matmul.allow_tf32,
+        torch.get_float32_matmul_precision,
+        lambda: matmul.fp32_precision,
+        lambda: backends.fp32_precision,
+    ):
+        try:
+            found.append(repr(read()))
+        except RuntimeError:
+            found.append("raises")
+    return tuple(found)
+
+
+@contextmanager
+def tf32_turned_on(way: str) -> Iterator[tuple[str, str]]:
+    """TF32 turned on in this process by `way` (TF32_WAYS) for the block, what tf32_set reads
+    given, and torch's settings put back after it exactly as found, the legacy precision first
+    and then the newer ones (a write through the newer API alone leaves the legacy precision at
+    "high"), each reading then held to what it gave before. Changes no CUDA state: the settings
+    are torch's context's."""
+    import torch
+
+    before = tf32_readings()
+    assert "raises" not in before, before
+    matmul = torch.backends.cuda.matmul
+    backends: Any = torch.backends
+    saved = (torch.get_float32_matmul_precision(), backends.fp32_precision)
+    saved_matmul = matmul.fp32_precision
+    turn, reading = TF32_WAYS[way]
+    try:
+        turn(torch)
+        yield reading
+    finally:
+        torch.set_float32_matmul_precision(saved[0])
+        backends.fp32_precision = saved[1]
+        matmul.fp32_precision = saved_matmul
+        assert tf32_readings() == before
 
 
 def _kernel32() -> Any:

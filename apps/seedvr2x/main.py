@@ -2388,8 +2388,9 @@ def _load(
     from seedvr2x import memory
     from seedvr2x.blockswap import HostMemoryError
     from seedvr2x.compiling import CompileError
+    from seedvr2x.errors import Tf32Forced
     from seedvr2x.model import load_models
-    from seedvr2x.weights import ModelError
+    from seedvr2x.weights import ModelError, check_tf32_set, tf32_set
 
     started = time.monotonic()
     # Where the driver spills, torch is held again, to the memory free now that the first pass
@@ -2401,6 +2402,12 @@ def _load(
         logger.error("%s, before the models loaded: nothing was run%s", _refused(error), kept)
         return None
     try:
+        # An int8 DiT where this process has torch compute CUDA's float32 matrix products in
+        # TF32, refused as it loads, torch imported (weights.check_tf32_set): the variable is the
+        # plan's (check_tf32), a setting of the process's this. Its header is read again only
+        # where a setting reads TF32 on.
+        if tf32_set() is not None:
+            check_tf32_set(_dit_model(model_files.dit.path), model_files.dit.path.name)
         models = load_models(
             model_files.dit.path,
             model_files.vae.path,
@@ -2409,13 +2416,14 @@ def _load(
             plan,
             compilation,
         )
-    except (ModelError, HostMemoryError, CompileError) as error:
+    except (ModelError, HostMemoryError, CompileError, Tf32Forced) as error:
         # A model file replaced since its check, during the first pass: refused as the check
         # refuses it, or as changed since its hash; or one whose bytes, read by its load, aren't
         # those the run took them for (pull.Hashes.proved). Or a host that can't hold the
         # pinned copies of the weights the plan has away from the GPU: refused before the run,
         # naming the RAM they take (DESIGN.md, BlockSwap, rewritten). Or a VAE that did not compile
-        # (--compile), refused as it is, never run plain in its place.
+        # (--compile), refused as it is, never run plain in its place. Or an int8 DiT where torch
+        # computes in TF32.
         logger.error("%s", _kept_before_command(planner.worded(error), kept))
         return None
     except torch.OutOfMemoryError as error:

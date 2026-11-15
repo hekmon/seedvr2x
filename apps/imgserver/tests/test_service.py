@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from library_fixtures import TF32_WAYS, tf32_readings, tf32_turned_on
 from PIL import Image
 from serving import (
     BOUND,
@@ -1272,3 +1273,41 @@ def test_an_int8_start_is_refused_where_torch_s_tf32_is_forced_in_cublas(
             " (--dit-model)"
         )
         assert server.service.made is None and machine.reserves == [] and not machine.plans
+
+
+@pytest.mark.parametrize("way", list(TF32_WAYS))
+@pytest.mark.parametrize(
+    "dit_format", [peaks.INT8, peaks.FP16, peaks.GGUF_7B_SHARP], ids=["int8", "fp16", "gguf"]
+)
+def test_an_int8_start_is_refused_as_it_loads_where_the_process_turned_tf32_on(
+    way: str,
+    dit_format: weights.Architecture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cpu_models: model.Models,
+) -> None:
+    """weights.check_tf32_set: a setting of the process's own, in any of torch's forms, the
+    variable unset, refuses a server started on an int8 DiT before its models load, in the
+    server's words, no setting of torch's changed; fp16 and the GGUF start."""
+    monkeypatch.delenv(weights.TF32_OVERRIDE, raising=False)
+    machine = StandIn(cpu_models, dit_format=dit_format)
+    with tf32_turned_on(way) as (name, value):
+        on = tf32_readings()
+        if dit_format != peaks.INT8:
+            with live(monkeypatch, tmp_path, cpu_models, machine=machine) as server:
+                assert server.service.state is services.State.READY
+            assert tf32_readings() == on
+            return
+        with live(monkeypatch, tmp_path, cpu_models, ready=False, machine=machine) as server:
+            with pytest.raises(Refusal) as error:
+                main.bring_up(server.running)
+            assert error.value.kind == "tf32"
+            assert reservation.worded(error.value) == (
+                "w.safetensors: this process has torch compute CUDA's float32 matrix products in"
+                f" TF32 ({name} reads {value}), and the int8 DiT's rotation is one: its codes would"
+                " move far beyond those seedvr2x measured, so an int8 DiT doesn't run there. Turn"
+                " TF32 off where it was turned on, or take an fp16 DiT file (--dit-model)"
+            )
+            assert server.service.made is not None and not machine.plans
+            assert machine.reserves == []
+        assert tf32_readings() == on

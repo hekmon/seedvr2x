@@ -565,11 +565,22 @@ def refusal(
 
 
 def _tf32(error: Tf32Forced) -> str:
-    """An int8 DiT refused where torch's TF32 is forced in cuBLAS (weights.check_tf32), the way
-    out in ComfyUI's terms: the variable is read by torch as ComfyUI starts, so it is unset where
-    ComfyUI is started and ComfyUI started again; or the fp16 twin chosen in seedvr2x Models."""
+    """An int8 DiT refused where torch computes CUDA's float32 matrix products in TF32, the way
+    out in ComfyUI's terms. Forced by the variable (weights.check_tf32): torch reads it as ComfyUI
+    starts, so it is unset where ComfyUI is started and ComfyUI started again. Turned on by a
+    setting of the process (weights.check_tf32_set): something in ComfyUI's process did, which
+    ComfyUI itself does not (0.45.3), so most likely another custom node, where it is turned off.
+    Or the fp16 twin chosen in seedvr2x Models."""
     setting = error.settings[0] if error.settings else Setting("dit_model")
     model = say(setting) if setting.value else f"an fp16 file as {say(setting)}"
+    if error.setting:
+        return (
+            f"{plans.short_label(error.file)}: something in ComfyUI's process turned TF32 on for"
+            f" CUDA's float32 matrix products ({error.setting} reads {error.value}), and the int8"
+            " DiT's rotation is one: its codes would move far beyond those seedvr2x measured, so"
+            " an int8 DiT doesn't run there. Turn TF32 off where it was turned on, another custom"
+            f" node most likely, or choose {model}."
+        )
     return (
         f"{plans.short_label(error.file)}: {error.reason}. Unset {error.variable} where ComfyUI is"
         f" started and start ComfyUI again, or choose {model}."

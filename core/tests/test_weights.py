@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from library_fixtures import cli_words, grow, sparse
+from library_fixtures import TF32_WAYS, cli_words, grow, sparse, tf32_readings, tf32_turned_on
 from test_gguf_file import Spec, body, entry, write_gguf
 
 from seedvr2x import gguf_file, weights
@@ -1609,6 +1609,73 @@ def test_an_int8_dit_alone_is_refused_where_tf32_is_forced(value: str | None, fo
     )
     assert "--" not in str(error)
     assert cli_words(error).endswith("or take an fp16 DiT file (--dit-model)")
+
+
+def test_torch_s_tf32_settings_are_read_off_where_nothing_turned_them_on() -> None:
+    # The three readings of weights.TF32_SETTINGS, in a process that set none: torch's defaults.
+    assert weights.TF32_SETTINGS == (
+        "torch.backends.cuda.matmul.allow_tf32",
+        "torch.get_float32_matmul_precision()",
+        "torch.backends.cuda.matmul.fp32_precision",
+    )
+    assert tf32_readings() == ("False", "'highest'", "'none'", "'none'")
+    assert weights.tf32_set() is None
+    assert tf32_readings() == ("False", "'highest'", "'none'", "'none'")
+    for other in (DIT_7B, DIT_3B, DIT_7B_DYN, DIT_7B_SHARP_DYN, DIT_7B_INT8):
+        weights.check_tf32_set(other, "w.safetensors")
+
+
+@pytest.mark.parametrize("way", list(TF32_WAYS))
+def test_an_int8_dit_alone_is_refused_where_the_process_turned_tf32_on(way: str) -> None:
+    # DESIGN.md, Weights, "int8 before v0.1.0 is tagged", TF32: a program can turn TF32 on for
+    # CUDA's float32 matrix products itself, in any of torch's forms (another custom node in
+    # ComfyUI's process could), where the variable is unset; the int8 DiT is refused as it loads,
+    # fp16's and the GGUF's run, and no setting is changed by the reading.
+    with tf32_turned_on(way) as (name, value):
+        on = tf32_readings()
+        assert weights.tf32_set() == (name, value)
+        assert tf32_readings() == on
+        for other in (DIT_7B, DIT_3B, DIT_7B_DYN, DIT_7B_SHARP_DYN):
+            weights.check_tf32_set(other, "w.safetensors")
+        with pytest.raises(Tf32Forced) as refused:
+            weights.check_tf32_set(DIT_7B_INT8, "w.safetensors")
+        assert tf32_readings() == on
+    error = refused.value
+    assert isinstance(error, Refusal) and error.kind == "tf32"
+    assert (error.variable, error.setting, error.value, error.file) == (
+        "",
+        name,
+        value,
+        "w.safetensors",
+    )
+    assert error.settings == (Setting("dit_model"),)
+    reason = (
+        f"this process has torch compute CUDA's float32 matrix products in TF32 ({name} reads"
+        f" {value}), and the int8 DiT's rotation is one: its codes would move far beyond those"
+        " seedvr2x measured, so an int8 DiT doesn't run there"
+    )
+    assert error.reason == reason
+    assert str(error) == (
+        f"w.safetensors: {reason}. Turn TF32 off where it was turned on, or take an fp16 DiT file"
+        " (DiT file)"
+    )
+    assert "--" not in str(error)
+    assert cli_words(error).endswith("or take an fp16 DiT file (--dit-model)")
+    # Off again, the int8 DiT runs.
+    assert weights.tf32_set() is None
+    weights.check_tf32_set(DIT_7B_INT8, "w.safetensors")
+
+
+def test_the_variable_s_tf32_is_read_as_the_settings_too() -> None:
+    # torch reads TORCH_ALLOW_TF32_CUBLAS_OVERRIDE once, as its context is made: in a process
+    # started with it, every reading says TF32 on, and the load refuses an int8 DiT as the plan
+    # does (check_tf32), naming the setting.
+    code = "from seedvr2x import weights\nprint(weights.tf32_set())\n"
+    environ = {**os.environ, weights.TF32_OVERRIDE: "1", "CUDA_VISIBLE_DEVICES": ""}
+    done = subprocess.run(
+        [sys.executable, "-c", code], env=environ, capture_output=True, text=True, check=True
+    )
+    assert done.stdout.strip() == "('torch.backends.cuda.matmul.allow_tf32', 'True')"
 
 
 def test_seedvr2x_s_int8_files_name_their_fp16_twin_as_the_way_out() -> None:

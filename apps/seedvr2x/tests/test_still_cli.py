@@ -35,6 +35,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
+from library_fixtures import TF32_WAYS, tf32_readings, tf32_turned_on
 from PIL import Image, ImageCms
 from posix_only import SYMLINKS
 from stand_ins import cpu_models, shipped_cpu_models  # noqa: F401
@@ -1980,6 +1981,41 @@ def test_plan_alone_with_a_webp_output_writes_nothing(machine: Machine, tmp_path
     source = make_picture(tmp_path / "in.png", bits=8)
     assert run(machine, source, tmp_path / "out.webp", "--plan") == 0
     assert not (tmp_path / "out.webp").exists() and not machine.loads
+
+
+@pytest.mark.parametrize("way", list(TF32_WAYS))
+def test_an_int8_dit_is_refused_for_a_picture_as_it_loads_where_the_process_turned_tf32_on(
+    machine: Machine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    way: str,
+) -> None:
+    # weights.check_tf32_set as a video's job has it (test_int8_cli.py): a setting of the
+    # process's own, the variable unset, refuses a picture's int8 DiT as its models load, nothing
+    # loaded or written; --plan loads nothing, so says the plan; an fp16 DiT runs.
+    from seedvr2x import peaks
+
+    monkeypatch.delenv(weights.TF32_OVERRIDE, raising=False)
+    source = make_picture(tmp_path / "in.png")
+    output = tmp_path / "out.png"
+    with tf32_turned_on(way) as (name, value):
+        on = tf32_readings()
+        assert run(machine, source, output) == 0
+        output.unlink()
+        monkeypatch.setattr(cli, "_dit_model", lambda path: peaks.INT8)
+        machine.loads.clear()
+        caplog.clear()
+        assert run(machine, source, output, "--plan") == 0
+        assert run(machine, source, output) == 1
+        assert tf32_readings() == on
+    assert not machine.loads and not output.exists()
+    assert (
+        f"w.safetensors: this process has torch compute CUDA's float32 matrix products in TF32"
+        f" ({name} reads {value}), and the int8 DiT's rotation is one: its codes would move far"
+        " beyond those seedvr2x measured, so an int8 DiT doesn't run there. Turn TF32 off where it"
+        " was turned on, or take an fp16 DiT file (--dit-model)"
+    ) in caplog.messages
 
 
 @pytest.mark.parametrize("value", [None, "0", "1", "", " 1", "true", "01"])

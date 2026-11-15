@@ -506,15 +506,20 @@ class HostMemoryError(Refusal):
 
 
 class Tf32Forced(Refusal):
-    """An int8 DiT in an environment that has torch turn TF32 on for cuBLAS's float32 matrix
-    products (kind "tf32"; weights.check_tf32): the W8A8 path's rotation is one, and TF32 would
+    """An int8 DiT where torch computes CUDA's float32 matrix products in TF32 (kind "tf32"): its
+    environment has torch turn TF32 on for cuBLAS (weights.check_tf32), or the process turned it on
+    itself (weights.check_tf32_set). The W8A8 path's rotation is one such product, and TF32 would
     move its codes far beyond the figures seedvr2x measured (DESIGN.md, Weights, "int8 before
     v0.1.0 is tagged"). The facts, beside the reason (Refusal.reason):
 
-    - variable, value: the environment variable and what it holds;
+    - variable: the environment variable that forces it, "" where a setting of the process does;
+    - setting: torch's setting that reads TF32 on (weights.TF32_SETTINGS), "" where the variable
+      forces it;
+    - value: what the variable holds, or what the setting reads;
     - file: the int8 DiT file's name, never its path;
-    - settings: the way out besides unsetting the variable, the DiT's file in fp16 (dit_model),
-      its value the int8 file's fp16 twin where it is one of seedvr2x's own, else none."""
+    - settings: the way out besides turning TF32 off where it was turned on, the DiT's file in
+      fp16 (dit_model), its value the int8 file's fp16 twin where it is one of seedvr2x's own,
+      else none."""
 
     def __init__(
         self,
@@ -525,9 +530,11 @@ class Tf32Forced(Refusal):
         value: str,
         file: str,
         settings: tuple[Setting, ...],
+        setting: str = "",
     ) -> None:
         super().__init__(message, kind="tf32", reason=reason)
         self.variable = variable
+        self.setting = setting
         self.value = value
         self.file = file
         self.settings = settings

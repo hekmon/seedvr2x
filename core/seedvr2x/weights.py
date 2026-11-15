@@ -578,6 +578,89 @@ def check_tf32(
     )
 
 
+# torch's settings of TF32 for CUDA's float32 matrix products, each a reading of its public API,
+# in the forms torch 2.12.1 to 2.14.1 offer (check_tf32_set): the legacy flag, the matrix products'
+# precision ("high" and "medium" take TF32 there), and the newer per-backend precision, which
+# reads "tf32" where the generic precision (torch.backends.fp32_precision) is "tf32" and its own
+# is unset. Each form reads the others' writes the same, at 2.12.1 and 2.14.1 alike (2026-11-15,
+# on the CPU: allow_tf32 set True, the precision "high" or "medium", fp32_precision "tf32", the
+# generic one "tf32", and the variable, each read through all three), with one exception: once
+# the newer API has set a precision, the two legacy readings raise RuntimeError (torch refuses a
+# "mix of the legacy and new APIs"), and the newer one, which never raises, gives the precision
+# set. The readings ask torch's context alone: no CUDA initialised, no card asked.
+TF32_SETTINGS = (
+    "torch.backends.cuda.matmul.allow_tf32",
+    "torch.get_float32_matmul_precision()",
+    "torch.backends.cuda.matmul.fp32_precision",
+)
+
+# What the newer per-backend precision reads where TF32 is off: "ieee" set, "none" unset (the
+# generic precision then decides, and the reading gives it where it is "tf32").
+IEEE = ("ieee", "none")
+
+
+def tf32_set() -> tuple[str, str] | None:
+    """The first of torch's settings (TF32_SETTINGS) that reads TF32 on for CUDA's float32 matrix
+    products in this process, and what it reads (its repr), or None where none does: a setting
+    the process made (another custom node in ComfyUI's, say), or the environment's variable
+    (tf32_forced), which torch reads as its context is made. Read only: no setting is changed.
+    Imports torch."""
+    import torch
+
+    matmul = torch.backends.cuda.matmul
+    readings: tuple[tuple[str, Callable[[], object], Callable[[object], bool]], ...] = (
+        (TF32_SETTINGS[0], lambda: matmul.allow_tf32, lambda value: value is True),
+        (TF32_SETTINGS[1], torch.get_float32_matmul_precision, lambda value: value != "highest"),
+        (TF32_SETTINGS[2], lambda: matmul.fp32_precision, lambda value: value not in IEEE),
+    )
+    for name, read, on in readings:
+        try:
+            value = read()
+        except RuntimeError:
+            # A legacy reading torch refuses once the newer API set a precision: the newer
+            # reading, last, says it.
+            continue
+        if on(value):
+            return name, repr(value)
+    return None
+
+
+def check_tf32_set(dit_model: Architecture, file: str) -> None:
+    """Refuse an int8 DiT (DIT_7B_INT8's layout) where torch computes CUDA's float32 matrix
+    products in TF32 in this process (tf32_set), as an app loads it, with torch imported:
+    Tf32Forced, naming the setting that reads it on, what it reads, the file (its name, `file`)
+    and the way out, TF32 turned off where it was turned on or the DiT's fp16 file, the int8 file's
+    twin where it is one of seedvr2x's own (INT8_TWINS). seedvr2x changes no setting of torch's.
+    An fp16 or a GGUF DiT runs as before (check_tf32)."""
+    if dit_model.layout != INT8:
+        return
+    found = tf32_set()
+    if found is None:
+        return
+    name, value = found
+    twin = INT8_TWINS.get(file, "")
+    setting = Setting("dit_model", twin)
+    reason = (
+        f"this process has torch compute CUDA's float32 matrix products in TF32 ({name} reads"
+        f" {value}), and the int8 DiT's rotation is one: its codes would move far beyond those"
+        " seedvr2x measured, so an int8 DiT doesn't run there"
+    )
+
+    def message(say: Say) -> str:
+        fp16 = say(setting) if twin else f"an fp16 DiT file ({say(setting)})"
+        return f"{file}: {reason}. Turn TF32 off where it was turned on, or take {fp16}"
+
+    raise Tf32Forced(
+        message,
+        reason=reason,
+        variable="",
+        value=value,
+        file=file,
+        settings=(setting,),
+        setting=name,
+    )
+
+
 def in_words(architecture: Architecture) -> str:
     """What a file of this architecture, in the dtypes seedvr2x runs it in, is, in words: "SeedVR2's
     7B DiT in fp16", "SeedVR2's 7B DiT in int8, W8A8 with comfy-kitchen's rotation", "SeedVR2's
