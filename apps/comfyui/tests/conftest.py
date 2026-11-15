@@ -15,7 +15,7 @@ from comfy.utils import ProgressBar
 from comfyui import console, models, progress
 from library_fixtures import no_card_failed, no_driver_asked, one_to_one_clock  # noqa: F401
 from stand_ins import cpu_models  # noqa: F401
-from standins import Lines, machine, not_a_status  # noqa: F401
+from standins import Lines, machine, not_a_status, on_the_cpu  # noqa: F401
 
 
 @pytest.fixture(autouse=True)

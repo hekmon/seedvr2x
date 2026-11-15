@@ -23,7 +23,17 @@ import torch
 from comfy.utils import ProgressBar
 from comfy_api.latest import InputImpl
 from comfyui import nodes, plans, stream, video, words
-from standins import RESOLUTION, StandIn, execute, handle, master_of, upscale_video
+from standins import (
+    RESOLUTION,
+    TORCH_CUDA_AVAILABLE,
+    OnTheCard,
+    StandIn,
+    card_seen,
+    execute,
+    handle,
+    master_of,
+    upscale_video,
+)
 from test_nodes import TARGET, fresh, planned_clip
 from test_progress import stop_at, tiled_plans
 from test_still import TILES
@@ -205,6 +215,37 @@ def test_a_tiled_files_video_is_the_librarys_tiled_pass(
     assert made.encode_tiles == TILES and made.decode_tiles == TILES
     expected = libraries(machine, read_frames(path), cuts, settings, quality)
     assert out.tobytes() == expected.tobytes()
+
+
+def test_a_visible_card_leaves_the_files_video_on_the_cpu(
+    machine: StandIn, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The suite's guard (standins.on_the_cpu), proved with no card: torch's own check made to find
+    # one, the node reads and converts the frames on the CPU, its output the library's pass on
+    # them; with torch's own check in its place, the node hands the card to the reader.
+    card_seen(monkeypatch)
+    assert TORCH_CUDA_AVAILABLE() and not torch.cuda.is_available()
+    devices: list[torch.device] = []
+    real = video.Decoded.__init__
+
+    def seen(self: Any, source: Any, probe: Any, device: torch.device) -> None:
+        devices.append(device)
+        if device.type == "cuda":
+            raise OnTheCard(device)
+        real(self, source, probe, device)
+
+    monkeypatch.setattr(video.Decoded, "__init__", seen)
+    path = source(tmp_path / "in.mkv", 9)
+    settings = plans.Settings(seed=4, window=5)
+    out, _ = run(tmp_path, InputImpl.VideoFromFile(str(path)), settings)
+    assert devices and {each.type for each in devices} == {"cpu"}
+    expected = libraries(machine, read_frames(path), (Shot(0, 9),), settings)
+    assert out.tobytes() == expected.tobytes()
+    monkeypatch.setattr(torch.cuda, "is_available", TORCH_CUDA_AVAILABLE)
+    devices.clear()
+    with pytest.raises(OnTheCard):
+        run(tmp_path, InputImpl.VideoFromFile(str(path)), settings)
+    assert [each.type for each in devices] == ["cuda"]
 
 
 def test_a_video_of_bytes_in_memory_is_read_as_its_file(machine: StandIn, tmp_path: Path) -> None:

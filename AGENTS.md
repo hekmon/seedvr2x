@@ -455,7 +455,7 @@ uv run --project ../apps/seedvr2x ruff check
 uv run --project ../apps/seedvr2x pyright
 uv run --project ../apps/seedvr2x pyright --pythonplatform Windows
 uv run --project ../apps/seedvr2x tools/vendor.py check
-uv run --project ../apps/seedvr2x pytest
+CUDA_VISIBLE_DEVICES= uv run --project ../apps/seedvr2x pytest
 ```
 
 From `apps/seedvr2x/`:
@@ -465,13 +465,18 @@ uv run ruff format --check
 uv run ruff check
 uv run pyright
 uv run pyright --pythonplatform Windows
-OMP_NUM_THREADS=2 uv run pytest -n 8
+CUDA_VISIBLE_DEVICES= OMP_NUM_THREADS=2 uv run pytest -n 8
 ```
 
 From `apps/imgserver/`, in its own environment, the same four as the CLI's, its pytest without
 `-n` (as the library's and the nodes'). From
 `apps/comfyui/`, in the CLI's environment, the same four with `uv run --project ../seedvr2x`
 before each (ruff.toml and pyrightconfig.json there are the CLI's settings).
+
+Every default suite, the four projects' and the floors', runs with the card hidden,
+`CUDA_VISIBLE_DEVICES=` (empty) before its pytest: its references are computed on the CPU, and a
+pass given a visible card computes on it, one 16-bit code or one float32 ulp from them (13 of the
+nodes' tests, 2026-11-15, which also hold torch to no CUDA device, `standins.on_the_cpu`).
 
 The library, the CLI and the nodes are also checked by pyright for the Windows platform
 (`--pythonplatform Windows`, a second command line, run from WSL or Linux): a POSIX-only name used
@@ -542,9 +547,10 @@ marker. The image server, Linux's alone by its lock, has no such line.
   (the three pins move with their floors; the tools' pins are the CLI's lock's, ruff for
   `tests/test_vendor.py`, whose `tools/vendor.py check` runs it by the interpreter, and av at
   ComfyUI's floor), then the library's suite from `core/` and the nodes' from `apps/comfyui/`, each
-  `"$FLOORS"/bin/python -m pytest -p no:cacheprovider --basetemp=<a directory on Linux's disk>`
-  with `OMP_NUM_THREADS` as in the CLI's environment. A baton that moves a range, or the library's
-  or the nodes' code a range covers, runs them once at its end, beside the one full suite. Its torch
+  `CUDA_VISIBLE_DEVICES= "$FLOORS"/bin/python -m pytest -p no:cacheprovider --basetemp=<a
+  directory on Linux's disk>` with `OMP_NUM_THREADS` as in the CLI's environment. A baton that
+  moves a range, or the library's or the nodes' code a range covers, runs them once at its end,
+  beside the one full suite. Its torch
   being a CPU build where every other environment's is CUDA's, two of the library's tests met names
   a CPU build lacks: `tests/test_memory.py`'s reading of torch's own allocator variables skips there
   (no CUDA allocator to ask), and `tests/test_detector_close.py` sets its stand-in for cuBLAS's

@@ -22,7 +22,10 @@ from comfyui import console, models, nodes, plans, words
 from standins import (
     PICTURE,
     RESOLUTION,
+    TORCH_CUDA_AVAILABLE,
+    OnTheCard,
     StandIn,
+    card_seen,
     execute,
     frames_video,
     handle,
@@ -766,6 +769,47 @@ def test_a_video_read_from_its_file_gives_the_probabilities_of_its_frames_held_w
     assert found.shots[0].start == 0 and found.shots[-1].end == 110
     # The times are the file's own rate: 25 fps.
     assert found.text == "no cut: the clip is one shot" or "(frame " in found.text
+
+
+def test_a_visible_card_leaves_the_cuts_node_on_the_cpu(
+    monkeypatch: pytest.MonkeyPatch, weights_dir: Path, tmp_path: Path
+) -> None:
+    # The suite's guard (standins.on_the_cpu), proved with no card: torch's own check made to find
+    # one, the detector runs on the CPU and gives the probabilities of the frames held whole; with
+    # torch's own check in its place, the node hands the card to the detector.
+    from comfy_api.latest import InputImpl
+
+    card_seen(monkeypatch)
+    assert TORCH_CUDA_AVAILABLE() and not torch.cuda.is_available()
+    video = InputImpl.VideoFromFile(str(written_clip(tmp_path / "clip.mkv", count=40)))
+    devices: list[torch.device] = []
+    real = shot_detector.Detector
+
+    def seen(path: Path, device: torch.device, **kwargs: Any) -> Any:
+        devices.append(device)
+        if device.type == "cuda":
+            raise OnTheCard(device)
+        return real(path, device, **kwargs)
+
+    monkeypatch.setattr(shot_detector, "Detector", seen)
+    streamed: list[npt.NDArray[np.float32]] = []
+    real_detected = shotcuts.detected
+
+    def kept(probabilities: npt.NDArray[np.float32], threshold: float) -> Any:
+        streamed.append(np.array(probabilities))
+        return real_detected(probabilities, threshold)
+
+    monkeypatch.setattr(shotcuts, "detected", kept)
+    run_cuts_value(video, model_dir=str(weights_dir))
+    assert [each.type for each in devices] == ["cpu"]
+    with real(weights_dir / pull.DETECTOR, torch.device("cpu")) as detector:
+        whole = shot_detector.probabilities(detector, whole_frames(video))
+    assert len(streamed) == 1 and np.array_equal(streamed[0], whole)
+    monkeypatch.setattr(torch.cuda, "is_available", TORCH_CUDA_AVAILABLE)
+    devices.clear()
+    with pytest.raises(OnTheCard):
+        run_cuts_value(video, model_dir=str(weights_dir))
+    assert [each.type for each in devices] == ["cuda"]
 
 
 def test_a_trimmed_video_is_scanned_for_the_frames_of_its_window_alone(

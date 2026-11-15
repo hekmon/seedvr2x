@@ -226,6 +226,34 @@ def comfy_model(
     return patcher
 
 
+# torch's own check of CUDA, as the process found it: the suite's guard (on_the_cpu) replaces it.
+TORCH_CUDA_AVAILABLE = torch.cuda.is_available
+
+
+@pytest.fixture(autouse=True)
+def on_the_cpu(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """torch finds no CUDA device in a test not marked gpu, whatever the machine: the nodes take
+    the card where torch finds one (nodes.py: the stand-in's device is CUDA's, as ComfyUI's is,
+    and they compute on it where torch.cuda.is_available()), and the tests' references are
+    computed on the CPU, from which the card's arithmetic differs (with the card visible, 13 of
+    them failed by one 16-bit code or one float32 ulp, 2026-11-15). The stand-in card stays
+    ComfyUI's for its bookkeeping (comfy.model_management), so that no expected value moves."""
+    if request.node.get_closest_marker("gpu") is None:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+
+def card_seen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """torch's own check (TORCH_CUDA_AVAILABLE) made to find one CUDA device, as on a machine whose
+    card is visible, with no card asked: the count the CUDA runtime gives replaced (a CPU build of
+    torch has none, so it is added), NVML's count not asked."""
+    monkeypatch.setattr(torch._C, "_cuda_getDeviceCount", lambda: 1, raising=False)
+    monkeypatch.setattr(torch.cuda, "_nvml_based_avail", lambda: False)
+
+
+class OnTheCard(Exception):
+    """A node handed the CUDA device: raised before anything is made on it."""
+
+
 @pytest.fixture
 def machine(cpu_models: model.Models, monkeypatch: pytest.MonkeyPatch) -> StandIn:
     """The stand-in machine in the nodes' place, the DiT of arithmetic in the library's, the model
