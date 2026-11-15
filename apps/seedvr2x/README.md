@@ -38,7 +38,9 @@ cutting it into pieces, fitting the GPU's memory: the parts where a long run is 
   free on the card: how many frames the model takes at once, how much of the model waits in
   system memory, how the picture is tiled. Every run prints its plan, a line per choice with
   its reason and the option that changes it, then each unit's time left. It is developed on a
-  96 GB card and checked on an RTX 5090, a 32 GB card driving a desktop.
+  96 GB card, and its plans ran on that card held to every size from 8 to 96 GB, alone and
+  beside a desktop, and on an RTX 5090 under WSL2 from 8 GB to its whole 32 driving a desktop,
+  every step within the memory its plan gave it.
 - **Crisper frames, for more GPU time.** The model rebuilds the last frame of every 4 closest to
   the original, the 3 before it further from it, with doubled lines on fast motion, so at the
   default, `--quality standard`, one frame in four looks sharper and edges pulse, most on line
@@ -77,11 +79,14 @@ Both start from the source, one video file, and differ only at the end.
 - **An NVIDIA driver of the 580 series or later** (580.65.06 on Linux; under WSL2, the
   Windows driver), which PyTorch's CUDA 13.0 build needs, and a card that CUDA 13 supports:
   NVIDIA's release notes list them.
-- **A CUDA GPU**: one NVIDIA card per job. What counts is the memory free at the start: at
-  least 8.3 GiB for a 1080p output and 23.5 GiB for 4K on
-  Linux, more for longer windows and fewer swapped blocks ([GPU memory](MANUAL.md#gpu-memory)).
-  [Under WSL2](MANUAL.md#under-wsl2), 10.7 and 25.9 GiB to run, up to 1.5 times as
-  long, and 12.7 and 27.9 GiB to run at full speed.
+- **A CUDA GPU**: one NVIDIA card per job. What counts is the memory free at the start, not the
+  card's size: at least 6.58 GiB for a 1080p output and 11.64 GiB for 4K on a Linux card nothing
+  else uses, and 6.08 and 14.83 GiB on a run held to the card, [under
+  WSL2](MANUAL.md#under-wsl2) or beside a desktop on Linux, which leaves each step a reserve of
+  its own; more gives longer windows and fewer swapped blocks
+  ([the plan](MANUAL.md#the-plan)). Measured, 1080p ran on cards of 8 GB and up, alone, beside
+  a desktop and under WSL2; 4K on 16 GB and up alone, and over 16 GB beside a desktop or under
+  WSL2.
 - **System memory**: the plans shown in the manual took 19 to 28 GiB: up to 15.8 GiB pinned for
   what leaves the card, 2.3–2.5 GiB for the process, and a tiled shot's scratch up to an
   allowance ([small cards](MANUAL.md#small-cards)). A host short of it gets a plan that fits,
@@ -331,10 +336,16 @@ different on 67 (preferred on 27, the regular 7B on 8), and it has the same memo
 
 - **The int8 files,** `--dit-model seedvr2x_ema_7b_sharp_int8_convrot.safetensors` or
   `seedvr2x_ema_7b_int8_convrot.safetensors`: the same 7Bs in half the weights, 7.76 GiB in
-  place of 15.35, multiplied in 8 bits. The plan counts a window's memory as float16's, plus
-  int8's buffers, on the side of too much: measured on 2026-11-15, int8's windows peaked under
-  their plan by more than float16's. Fewer blocks swapped, they are no faster for it under
-  Linux's driver, their windows 17 to 30% longer than float16's.
+  place of 15.35, multiplied in 8 bits. Measured on 2026-11-15 against the sharp 7B in float16
+  at the same seed: 55.50 dB of PSNR-Y from its output at 1080p and 55.99 at 4K, closer than
+  float16 itself at another seed (40.43 and 42.54); every int8 job ran where float16's did; and
+  no faster: fewer blocks swapped, its windows 17 to 30% longer than float16's, its jobs 1.6 to
+  5.5% longer under Linux's driver, none longer under WSL2's. The plan counts a window's memory
+  as float16's, plus int8's buffers, on the side of too much. An int8 DiT is refused where
+  PyTorch would compute its rotation, a float32 matrix product, in TF32, which would move its
+  codes far beyond those figures: `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1` in the environment, or a
+  setting of PyTorch's turned on in the process; the refusal gives the way out, unset it or take
+  the float16 file ([the manual](MANUAL.md#the-int8-files)).
 - **The dynamic GGUF files,** `--dit-model seedvr2x_ema_7b_sharp_dyn.gguf` or
   `seedvr2x_ema_7b_dyn.gguf` (4.8 GB): the model card's 4 GB tier and the closest 4 GB file to
   float16 ([VALIDATION.md](../../models/VALIDATION.md)). A type per block matrix (Q3_K, Q4_K or
