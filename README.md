@@ -99,8 +99,9 @@ possible:
   4.8 GB GGUF a precision per matrix, weighted by the model's own activations on anime, cel,
   live action and dark scenes.
 - **Measured, not assumed:** where another repository publishes a file of the same kind,
-  seedvr2x's is as close to the originals or closer, and the int8 file is as close to the
-  float16 model's output as a second run with another seed, at 1080p and 4K. The
+  seedvr2x's is as close to the originals or closer, and the int8 file's output is closer to the
+  float16 model's than a second float16 run with another seed, at 1080p and 4K: 55.5 dB of
+  PSNR-Y against 40.4 at 1080p, 56.0 against 42.5 at 4K. The
   [model card](https://huggingface.co/hekmon/seedvr2x) measures every file.
 - **Read by seedvr2x's own code:** the GGUF files are dequantised on the card, matrix by matrix
   just before each multiply, in float32, equal bit for bit to llama.cpp's own (its `gguf`
