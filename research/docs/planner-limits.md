@@ -484,7 +484,10 @@ are around the tile's; "the larger" is the larger of the fit and that line. The 
   same bytes each time, 10.4742 and 17.4499 GiB, for 10.4593 and 17.4499 fed alone: a pass's
   peak doesn't grow with the shot.
 - **seedvr2x's planner takes the larger where a tile has two measures,** to the hundredth
-  (`seedvr2x/peaks.py`, `MEASURED`). That moves five of its 90 entries from the tables' value:
+  (`seedvr2x/peaks.py`, `MEASURED`), and three decodes to the thousandth since 2026-11-15, which
+  stood under their measure at the hundredth: the 960-px square (15.675), 752 × 832 (11.493) and
+  752 × 960 (12.694) ([DESIGN.md](../../DESIGN.md#memory-planner), Memory planner). Taking the
+  larger moves five of its 90 entries from the tables' value:
   768 px's decode (11.11 for 11.089), 1024 px's encode and decode (10.47 for 10.459, 17.46 for
   17.450), 1536 px's decode (38.73 for 38.702) and 2048 px's (68.51 for 68.482).
 
