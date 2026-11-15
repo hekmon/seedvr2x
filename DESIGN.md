@@ -1141,12 +1141,13 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
   tested on the 96 GB card with the rest of v0.1.0's checks. They become the default where
   seedvr2x's own runs show (a) an output as close to float16's as another seed, at 1080p and
   4K, (b) a run on every card seedvr2x supports, (c) no card slower than with float16; else
-  float16 stays the default and int8 is an option. float16 stays one option away, and
-  milestone 1's regression is held on it. The roadmap shows int8 under next
-  until then. Its gain is memory: half the DiT's weights, so fewer blocks swapped; at 1080p
-  the plans keep fp16's windows on every card, bounded by their tokens once every block is
-  swapped (24 GB: 17 latents either way, 20 blocks swapped instead of 28). Its speed in a job
-  is unmeasured (the DiT is about a fifth of a 1080p job).
+  float16 stays the default and int8 is an option. Checked on 2026-11-15 (below): (a) and (b)
+  hold, (c) does not on Linux's driver: float16 stays the default, int8 an option one
+  `--dit-model` away, milestone 1's regression held on float16, and the roadmap shows int8
+  as an option. Its gain is memory: half the DiT's weights, so fewer blocks swapped; at
+  1080p the plans keep fp16's windows on every card, bounded by their tokens once every block
+  is swapped (24 GB: 17 latents either way, 20 blocks swapped instead of 28). Its cost is the
+  DiT's time: its windows 17 to 30% longer on the 96 GB card, whether blocks swap or not.
   - comfy-kitchen's compiled kernels ship as `cp312-abi3` wheels (0.2.40, on PyPI on
     2026-11-02), Python's stable ABI: they install on 3.13, seedvr2x's, and their CUDA
     extension imports there with the locked torch (impl-int8, 2026-11-02; a first reading of
@@ -1167,8 +1168,8 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
     as fp16's do; the DiT's figures go by format, read from the files' headers (weights 7.76
     GiB against 15.35), the format recorded in the plan (`dit_format`, fp16 where an older
     manifest has none). A window's memory is fp16's measured figure plus 0.38 GiB for int8's
-    buffers (rows 4,096 at a time), provisional until the card measures int8's own; an int8
-    plan says so in a line of its own, an fp16 plan prints as before.
+    buffers (rows 4,096 at a time), measured on 2026-11-15 to be on the side of too much
+    (below); an int8 plan says so in a line of its own, an fp16 plan prints as before.
   - On the card first, `pytest -m gpu` in `core/` (green on the RTX 5090, below): the CUDA path
     against the CPU's for the 7B's four shapes, comfy-kitchen 0.2.37's kernel on the same
     activations (opt-in, never a dependency; its one-row kernel, `int8_linear_m1`, not yet
@@ -1187,12 +1188,35 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
     copy's 36 MiB gone from the buffers. One chunk's computation under `torch.compile`, with
     `emulate_precision_casts` (without it 4% of the codes move), is the same bit for bit and
     takes the DiT to 42.7 s, for 13.6 s of compiling a job (4.5 s from a warm cache of 16
-    MB): it comes with `--compile`, in the pass after the card. comfy-kitchen 0.2.37's kernel
+    MB): it comes with `--compile`, in v0.2.0 (below). comfy-kitchen 0.2.37's kernel
     loads there (Python 3.13, sm_120), gives the same codes and is about twice as fast a call
     still; it stays a test's reference, not a dependency: int8's speed comes from PyTorch,
     maintained with it (the user, 2026-11-03). An int8 block kept on the card holds 2 MiB
     more than its bytes (torch's allocator rounds its two 27 MiB QKV matrices to 28; 72 MiB
     with all 36 kept): the planner counts it in that pass.
+  - Checked on 2026-11-15, the sharp 7B's int8 file against its float16 one, standard, seed
+    42 (impl-box-5: the 96 GB card headless under Linux's driver, emulating 8 to 72 GB, and
+    whole; impl-wsl2-2: the RTX 5090 under WSL2's, 8 to 24 GB emulated, and whole):
+    - (a) holds: PSNR-Y from float16's output at the same seed 55.50 dB on average and 50.48
+      at the worst frame at 1080p, 55.99 and 52.86 at 4K, where float16 at another seed is
+      40.43 and 36.50, 42.54 and 39.57; on a third clip at 4K, 56.34 and 52.81 against
+      42.09 and 37.87;
+    - (b) holds: every int8 job ran where float16's did, on both drivers, every step at or
+      under its plan; 4K is refused for both at 12 GB, and under WSL2 at 16 GB;
+    - (c) does not hold on Linux's driver: int8's jobs 1.6 to 5.5% slower at every size but
+      one (32 GB's 4K, 0.4% faster by the rest of its job, its DiT 29% slower), its windows
+      17 to 30% longer whether blocks swap or not, the 2 to 13 fewer blocks swapped not
+      buying them back. Under WSL2's driver no size is slower: the same time where its
+      windows are fp16's (16 GB: 37.6 s of DiT against 37.5), less where fewer blocks swap
+      (the whole card: 33.8 s against 36.1 at 1080p, 98.1 against 111.0 at 4K), a swap
+      costing more there;
+    - a window's memory: int8's 0.42 to 0.45 GiB under its plan, float16's 0.05 to 0.08
+      under theirs, on both cards: in windows of 7 latents and more at 1080p and of 6 at
+      4K, int8's buffers take nothing beyond float16's figure. They stay counted, on the
+      side of too much: a picture's window and shorter ones are unmeasured.
+    So float16 stays the default, by the rule above. int8's speed would come from its chunk
+    compiled (42.7 s of DiT against 51.7, above), under `--compile` alone: in v0.2.0, int8
+    being an option (decided that day).
   - Measured on the default model only (the user, 2026-11-02): the sharp 7B stays the default,
     and int8 changes only its format, to `seedvr2x_ema_7b_sharp_int8_convrot.safetensors`,
     where checks (a)-(c), run on that file against the sharp 7B's float16, hold. The regular
@@ -3613,7 +3637,11 @@ first pass, whose shots are its input, and before the models load:
       its area, and 0.3 GiB more, the most a measured one stood above that being 0.27. A
       tiled pass takes the most any tile of its grid takes: at 720p's rows an encode tile of
       896 px takes more than one of 960. One card and one cuDNN measured them all: another
-      generation's may choose other kernels, unmeasured.
+      generation's may choose other kernels, unmeasured. Measured again in bytes on the RTX
+      5090 on 2026-11-15 (To measure, the cards), a decode in tiles of 960 px is 5.00 MiB
+      over its figure, at 1080p and 4K alike and in every shot, where every other side
+      measured is 2.4 to 10.2 MiB under: decided that day, that side takes its measure, the
+      larger as for a tile measured twice (to build).
     - Built on 2026-10-12. On nine emulated cards a tiled decode came within 0.02 GiB of its
       measured tile, and a tiled encode 0.39 to 0.41 GiB under its prediction: the 0.4 GiB
       every encode is still taken to hold over its peak, which a measured tile no longer
@@ -3852,7 +3880,9 @@ first pass, whose shots are its input, and before the models load:
       makes its zeros in the layout the run gives each pass, the untiled encode's through the
       run's own transform, which costs the run nothing (a copy in the run would take 64 MB a
       slice at 1080p). Built on 2026-11-13 (impl-batch-1: a test holds the run's encoder
-      inputs, shapes and strides, to the warm-up's); a compiled 1080p job is the check left.
+      inputs, shapes and strides, to the warm-up's). Checked on 2026-11-15 (impl-box-5): a
+      compiled 1080p job compiled no graph after its warm-up, and with impl-box-3's tiles
+      pinned gave its 192 frames bit for bit.
     - The DiT isn't compiled in v0.1.0: 2–3% of a long 1080p job on a 32 GB card (the DiT is
       a fifth of its units; compiled block by block over seedvr2x's own swap, a window takes
       0.77–0.80 of plain's time), a loss on a short one (each new window length compiles
@@ -5319,9 +5349,9 @@ explanation.
   time's whole seconds, then steps a frame a key press; the two playlists `--plan` writes go
   from cut to cut); frame numbers count places where a source has frames missing
 - the model: v1 runs ByteDance's 7B in fp16, the sharp 7B by default and the regular one as the
-  reference every check is made against; int8 too, the default if seedvr2x's own runs hold
-  it, and the dynamic GGUF, 4.8 GB, for small cards ([Weights](#weights)); phase 2, in v0.2.0,
-  brings the other smaller files, each with its measured quality
+  reference every check is made against; int8 too, an option (half the DiT's memory, its
+  windows slower), and the dynamic GGUF, 4.8 GB, for small cards ([Weights](#weights));
+  phase 2, in v0.2.0, brings the other smaller files, each with its measured quality
 - what the model does to live action ([numerics.md](research/docs/numerics.md)): the
   perceptual metrics side with it over a plain upscale, the pixel ones with the plain upscale.
   It redraws grain and detail of the right kind at the wrong place, and from a heavily degraded
@@ -5874,15 +5904,21 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   while a 4K run brought the card within 4 to 6 GiB of full (the cause not isolated). Its
   growth in a 4K decode on the whole card took the room kept for it 0.48 GiB under the
   emulation's floor, 5.77 GiB still free, and the emulation ended the run; run again with the
-  desktop at 3.2 GiB, it passed. Left: 4K on a 16 GB card exactly, the whole card with no room
-  kept, the 960-px decodes' peaks in bytes.
+  desktop at 3.2 GiB, it passed. Measured on 2026-11-15 (impl-wsl2-2, the desktop idle at 3.1
+  to 3.8 GiB): 4K on a 16 GB card exactly is refused, 14.33 GiB needed and 14.18 counted on
+  of the 14.68 free, so that under WSL2 too 4K at the defaults takes a card over 16 GB; the
+  whole card with no room kept ran 4K and 1080p, the hold's margin alone between the run and
+  the desktop (0.69 to 1.13 GiB free at the least), nothing held again; and in bytes, the
+  960-px decodes are 5.00 MiB over their plan, every other side under (Memory planner,
+  decided that day). int8 at every size on both drivers: Weights.
 - **`torch.compile` on the 96 GB card** (see [Memory planner](#memory-planner)). The study ran
   on an RTX 5090 alone: the 96 GB card died before its part
   ([compile.md](research/docs/compile.md)). Left for it:
   - the VAE untiled at 1080p and on 4K's 1536 to 2048-px tiles: which tiles a compiled VAE
     may take on 48 to 96 GB cards. Measured on 2026-11-11, the range widened to 2,048 px
     (Memory planner, the shapes measured compiled); the 1080p decode untiled measured on one
-    clip, decided and built (2026-11-12), a job's check left;
+    clip, decided and built (2026-11-12), and checked in a job on 2026-11-15 (impl-box-5: the
+    planner's own compiled plan on the whole card, 54.99 GiB planned, 51.19 allocated);
   - the DiT above 22 latents and in long windows (76 and more), under SDPA, the one kernel
     since 2026-11-08: whether its compile pays on large cards, and what the jump at 20
     latents is. Measured on 2026-11-12 (Memory planner): 14 to 18% a step, the jump gone,
@@ -5904,7 +5940,7 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
     2,048-px tiles, a 5-frame shot's 120 among them, under the 1,024 per code object
     (impl-box-2); the 3 graphs a compiled 1080p job meets after its warm-up, found on
     2026-11-12 (the untiled encode's layout, Memory planner), the warm-up's fix built on
-    2026-11-13, a compiled 1080p job its check.
+    2026-11-13, and checked on 2026-11-15: no graph after a compiled 1080p job's warm-up.
   Other window layouts were modelled on the 12 cut lists: none pays more than the balanced
   windows, and none has fewer lengths.
 - **The nodes' versions on the GPU** (see [Repository and apps](#repository-and-apps), the
@@ -5912,7 +5948,17 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   ComfyUI's environments run it, against the references, made in the command line's
   environment (diffusers 0.40.0, torch 2.14.1): the same bits, or how close. Only the CPU
   suites ran there (impl-nodes-8, 2026-11-13). Before v0.2.0's publication, which lists the
-  versions tested.
+  versions tested. Measured on 2026-11-15 (impl-wsl2-2, the RTX 5090, milestone 1's 7b and
+  sharp cases at 720): torch 2.12.1 and torchvision 0.27.1, with the CUDA libraries they
+  bring (cuDNN 9.20 against 9.24 among them, not isolated), move every frame against 2.14.1's,
+  PSNR-Y 58.53 dB on average and 56.00 at the worst frame (7b), 56.82 and 53.28 (sharp),
+  where two seeds are 37 to 43 dB apart (Weights); diffusers from 0.39.0 to 0.42.1,
+  huggingface_hub, numpy, Pillow, einops and safetensors, at the floors and at the versions
+  of the ComfyUI instance made for seedvr2x's tests, move none. So a ComfyUI on another torch
+  gets the same upscale, not the references' bits; the regression stays the command line's
+  environment's. The upscale took the same time under both within a second; the start before
+  the first pass took 52 to 60 s more under 2.14.1's, both environments on a Windows drive
+  under WSL2, no line of the log inside it (not isolated).
 - **The nodes' VIDEO path on the GPU** (see [Repository and apps](#repository-and-apps), the
   nodes' VIDEO path, built on the CPU on 2026-11-13): the streamed pass's file against
   `clip.upscale` on the card, at standard and maximum; `yuv.to_rgb`'s division there (CUDA
