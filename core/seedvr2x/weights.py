@@ -34,6 +34,7 @@ from seedvr2x.errors import (
     ModelUnreadable,
     Say,
     Setting,
+    Tf32Forced,
     aside,
     worded,
 )
@@ -518,6 +519,63 @@ def check(path: Path, role: Role) -> Architecture:
 
         raise ModelUnknown(message, role=role, file=path.name, found=what, settings=settings)
     raise ModelUnknown(f"{path}: {what}: {tail}", role=role, file=path.name, found=what)
+
+
+# The environment variable that has torch turn TF32 on for cuBLAS's float32 matrix products
+# (DESIGN.md, Weights, "int8 before v0.1.0 is tagged", TF32), and torch's own reading of it, which
+# seedvr2x holds to (tests/test_weights.py): torch reads it once, as its context is made, and sets
+# the matrix products' precision "high" where c10::utils::check_env gives true, "highest" else
+# (aten/src/ATen/Context.h at v2.14.1, float32_matmul_precision, the CUDA matmul's TF32 following
+# it; the same line at v2.12.1, the library's floor, and at v2.13.0). check_env gives true for the
+# value "1" alone, false for "0" and nothing, with torch's warning, for any other value, the bytes
+# as they are, no space stripped and no case folded; a variable unset gives nothing
+# (c10/util/env.cpp at the three tags). seedvr2x never sets the precision, so the variable decides.
+TF32_OVERRIDE = "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE"
+# seedvr2x's int8 files and their fp16 twins, the way out a refusal names (check_tf32): the same
+# 7Bs (seedvr2x/pull.py's pins; tests/test_weights.py holds both names among them).
+INT8_TWINS = {
+    "seedvr2x_ema_7b_int8_convrot.safetensors": "seedvr2x_ema_7b_fp16.safetensors",
+    "seedvr2x_ema_7b_sharp_int8_convrot.safetensors": "seedvr2x_ema_7b_sharp_fp16.safetensors",
+}
+
+
+def tf32_forced(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether the environment has torch turn TF32 on for cuBLAS's float32 matrix products, as
+    torch reads TF32_OVERRIDE: its value "1" exactly. `environ`: the process's (os.environ) by
+    default."""
+    return (os.environ if environ is None else environ).get(TF32_OVERRIDE) == "1"
+
+
+def check_tf32(
+    dit_model: Architecture, file: str, environ: Mapping[str, str] | None = None
+) -> None:
+    """Refuse an int8 DiT (DIT_7B_INT8's layout) where TF32 is forced (tf32_forced), before any
+    model loads, as an app's plan does: Tf32Forced, naming the variable, the file (its name, `file`)
+    and the way out, the variable unset or the DiT's fp16 file, the int8 file's twin where it is
+    one of seedvr2x's own (INT8_TWINS). An fp16 or a GGUF DiT runs as before: their matrix products
+    are in half precision, which TF32 doesn't touch."""
+    if dit_model.layout != INT8 or not tf32_forced(environ):
+        return
+    twin = INT8_TWINS.get(file, "")
+    setting = Setting("dit_model", twin)
+    reason = (
+        f"{TF32_OVERRIDE}=1 in the environment has torch turn TF32 on for cuBLAS's float32 matrix"
+        " products, and the int8 DiT's rotation is one: its codes would move far beyond those"
+        " seedvr2x measured, so an int8 DiT doesn't run there"
+    )
+
+    def message(say: Say) -> str:
+        fp16 = say(setting) if twin else f"an fp16 DiT file ({say(setting)})"
+        return f"{file}: {reason}. Unset {TF32_OVERRIDE}, or take {fp16}"
+
+    raise Tf32Forced(
+        message,
+        reason=reason,
+        variable=TF32_OVERRIDE,
+        value="1",
+        file=file,
+        settings=(setting,),
+    )
 
 
 def in_words(architecture: Architecture) -> str:

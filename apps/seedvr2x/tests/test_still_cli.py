@@ -1980,3 +1980,45 @@ def test_plan_alone_with_a_webp_output_writes_nothing(machine: Machine, tmp_path
     source = make_picture(tmp_path / "in.png", bits=8)
     assert run(machine, source, tmp_path / "out.webp", "--plan") == 0
     assert not (tmp_path / "out.webp").exists() and not machine.loads
+
+
+@pytest.mark.parametrize("value", [None, "0", "1", "", " 1", "true", "01"])
+@pytest.mark.parametrize("plan", [True, False], ids=["plan", "run"])
+def test_an_int8_dit_is_refused_for_a_picture_where_torch_s_tf32_is_forced_in_cublas(
+    machine: Machine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    value: str | None,
+    plan: bool,
+) -> None:
+    # weights.check_tf32 as a video's job has it (test_int8_cli.py): torch reads
+    # TORCH_ALLOW_TF32_CUBLAS_OVERRIDE as set for "1" alone. A picture with an int8 DiT is refused
+    # there before the card is asked, --plan as the run; an fp16 DiT runs whatever the variable.
+    from seedvr2x import peaks
+
+    if value is None:
+        monkeypatch.delenv(weights.TF32_OVERRIDE, raising=False)
+    else:
+        monkeypatch.setenv(weights.TF32_OVERRIDE, value)
+    source = make_picture(tmp_path / "in.png")
+    output = tmp_path / "out.png"
+    more = ("--plan",) if plan else ()
+    assert run(machine, source, output, *more) == 0
+    monkeypatch.setattr(cli, "_dit_model", lambda path: peaks.INT8)
+    machine.asked.clear()
+    machine.loads.clear()
+    output.unlink(missing_ok=True)
+    caplog.clear()
+    status = run(machine, source, output, *more)
+    if value != "1":
+        assert status == 0 and "TF32" not in caplog.text
+        return
+    assert status == 1
+    assert not machine.asked and not machine.loads and not output.exists()
+    assert (
+        "w.safetensors: TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1 in the environment has torch turn TF32"
+        " on for cuBLAS's float32 matrix products, and the int8 DiT's rotation is one: its codes"
+        " would move far beyond those seedvr2x measured, so an int8 DiT doesn't run there. Unset"
+        " TORCH_ALLOW_TF32_CUBLAS_OVERRIDE, or take an fp16 DiT file (--dit-model)"
+    ) in caplog.messages

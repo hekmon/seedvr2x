@@ -182,3 +182,57 @@ def test_the_node_is_the_one_that_blocks(machine: StandIn, tmp_path) -> None:
     out, _ = upscale_image(handle(tmp_path), SETTINGS, pictures(), RESOLUTION, "1")
     assert not isinstance(out, ExecutionBlocker) and out.shape == (1, 48, 80, 3)
     assert nodes.UpscaleImage.GET_SCHEMA().outputs[0].io_type == "IMAGE"
+
+
+@pytest.mark.parametrize("value", [None, "0", "1", "", " 1", "true", "01"])
+@pytest.mark.parametrize("plan_only", [True, False], ids=["plan only", "run"])
+def test_an_int8_run_is_refused_where_torch_s_tf32_is_forced_in_cublas(
+    machine: StandIn,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str | None,
+    plan_only: bool,
+) -> None:
+    # DESIGN.md, Weights, "int8 before v0.1.0 is tagged", TF32 (weights.check_tf32): torch reads
+    # TORCH_ALLOW_TF32_CUBLAS_OVERRIDE as set for "1" alone, as ComfyUI starts. An int8 DiT is
+    # refused there before the card is read or anything loads, a plan only as a run, in the nodes'
+    # words; elsewhere, and for an fp16 DiT whatever the variable, the node runs.
+    from seedvr2x import peaks, weights
+
+    if value is None:
+        monkeypatch.delenv(weights.TF32_OVERRIDE, raising=False)
+    else:
+        monkeypatch.setenv(weights.TF32_OVERRIDE, value)
+    upscale_image(
+        handle(tmp_path, keep=False), SETTINGS, pictures(), RESOLUTION, "12", plan_only=plan_only
+    )
+    machine.dit_format = peaks.INT8
+    machine.loads.clear()
+    machine.made.clear()
+    if value != "1":
+        upscale_image(
+            handle(tmp_path, keep=False),
+            SETTINGS,
+            pictures(),
+            RESOLUTION,
+            "13",
+            plan_only=plan_only,
+        )
+        return
+    with pytest.raises(words.Refused) as refused:
+        upscale_image(
+            handle(tmp_path, keep=False),
+            SETTINGS,
+            pictures(),
+            RESOLUTION,
+            "13",
+            plan_only=plan_only,
+        )
+    assert str(refused.value) == (
+        "w.safetensors: TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1 in the environment has torch turn TF32"
+        " on for cuBLAS's float32 matrix products, and the int8 DiT's rotation is one: its codes"
+        " would move far beyond those seedvr2x measured, so an int8 DiT doesn't run there. Unset"
+        " TORCH_ALLOW_TF32_CUBLAS_OVERRIDE where ComfyUI is started and start ComfyUI again, or"
+        " choose an fp16 file as the model in seedvr2x Models."
+    )
+    assert machine.loads == [] and machine.made == []

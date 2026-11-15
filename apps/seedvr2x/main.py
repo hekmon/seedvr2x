@@ -1067,7 +1067,7 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.frames import check_target, factor_said, output_size, target_size
     from seedvr2x.shot_plan import Pins
     from seedvr2x.shots import SHARED, Shot
-    from seedvr2x.weights import check_models
+    from seedvr2x.weights import check_models, check_tf32, tf32_forced
 
     # The build, the source, the target, the cut list and the model files are checked before
     # anything touches the GPU, but for a job resumed, which is first checked against its record
@@ -1284,6 +1284,11 @@ def _run(args: argparse.Namespace) -> int:
         check_models(
             *(dit, vae, pull.advice(model_files)), None if detector is None else detector.path
         )
+        # An int8 DiT where torch's TF32 is forced in cuBLAS is refused before the first pass, as
+        # every app refuses it before its models load, --plan too (weights.check_tf32): its header
+        # is read again only where the variable is set.
+        if dit is not None and tf32_forced():
+            check_tf32(_dit_model(dit), dit.name)
         if recorded is not None:
             # A job recorded, finished or not, holds its model files to its record by size and
             # time, and reads none where both match: its load, if it runs, proves them, hashing

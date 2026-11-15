@@ -138,6 +138,10 @@ def models_refused() -> dict[str, Refusal]:
     }
 
 
+# The environment torch reads as forcing TF32 in cuBLAS (weights.TF32_OVERRIDE).
+FORCED = {"TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": "1"}
+
+
 def refusals() -> dict[str, Refusal]:
     probe = ProbeRefusal(
         Result("int8 linear", 0.5, 0.01, "bfloat16 spacings", False, "2026-11-05T10:00:00"),
@@ -155,6 +159,11 @@ def refusals() -> dict[str, Refusal]:
         yuv.reading("yuva420p", 64, 16)
     except Refusal as refused:
         source = refused
+    tf32 = Refusal("")
+    try:
+        weights.check_tf32(peaks.INT8, plans.DEFAULT_DIT.replace("_fp16", "_int8_convrot"), FORCED)
+    except Refusal as refused:
+        tf32 = refused
     compile_ = CompileRefused(
         lambda say: (
             f"{say(Setting('compile'))} compiles only the shapes measured\n"
@@ -181,6 +190,7 @@ def refusals() -> dict[str, Refusal]:
         "probe": probe,
         "too small": too_small,
         "source": source,
+        "tf32": tf32,
         **models_refused(),
         "host copies": HostMemoryError(
             "the weights that leave the GPU need 15.81 GiB of host memory, pinned, and the host has"
@@ -784,3 +794,23 @@ def test_each_kind_of_source_has_its_own_way_of_making_the_file_again() -> None:
     assert "a fault in seedvr2x" in said["rgb-matrix"]
     # The line the node shows is the nodes' own, not the message.
     assert words.refusal(_source_refusals()["size"]).line == words.REFUSED
+
+
+def test_an_int8_dit_refused_where_tf32_is_forced_names_comfyuis_start_and_the_fp16_twin() -> None:
+    # weights.check_tf32 on seedvr2x's own int8 files: the way out is the variable unset where
+    # ComfyUI starts (torch reads it as ComfyUI imports it) and ComfyUI started again, or the same
+    # 7B's fp16 file chosen in seedvr2x Models, by its label.
+    for sharp, model in ((True, "Sharp 7B"), (False, "7B")):
+        name = f"seedvr2x_ema_7b{'_sharp' if sharp else ''}_int8_convrot.safetensors"
+        twin = weights.INT8_TWINS[name]
+        with pytest.raises(Refusal) as error:
+            weights.check_tf32(peaks.INT8, name, FORCED)
+        said = str(words.refusal(error.value))
+        assert said.startswith(
+            f"{model} int8: TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1 in the environment"
+        )
+        assert said.endswith(
+            "Unset TORCH_ALLOW_TF32_CUBLAS_OVERRIDE where ComfyUI is started and start ComfyUI"
+            f" again, or choose the model {plans.DIT_LABELS[twin]} in seedvr2x Models."
+        )
+        assert "--" not in said

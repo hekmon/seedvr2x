@@ -160,7 +160,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     from seedvr2x import memory, picture, png, pull, still_plan, webp
     from seedvr2x.errors import JobError, Refusal
     from seedvr2x.frames import check_picture_target, factor_said, output_size, target_size
-    from seedvr2x.weights import check_models
+    from seedvr2x.weights import check_models, check_tf32, tf32_forced
 
     # Refused first, before the file is read and before anything else is asked of the machine:
     # no ffmpeg, no torch, no GPU.
@@ -210,6 +210,10 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     model_files = pull.resolve(args.model_dir, args.dit_model, args.vae_model, detector=False)
     dit, vae = (None if file.absent else file.path for file in (model_files.dit, model_files.vae))
     check_models(dit, vae, pull.advice(model_files), None)
+    # An int8 DiT where torch's TF32 is forced in cuBLAS, refused before the card is asked, --plan
+    # too (weights.check_tf32).
+    if dit is not None and tf32_forced():
+        check_tf32(reads.dit_model(dit), dit.name)
     pull.check_pinned(model_files, load=True)
     # The allocator, set before torch is imported (seedvr2x/memory.py), where the run first takes
     # the GPU: one refused before, for its picture, its settings or its model files, asks the card

@@ -35,6 +35,7 @@ from library_fixtures import cli_words, grow, sparse
 from test_gguf_file import Spec, body, entry, write_gguf
 
 from seedvr2x import gguf_file, weights
+from seedvr2x.errors import Refusal, Setting, Tf32Forced
 from seedvr2x.weights import (
     DIT_3B,
     DIT_7B,
@@ -1534,3 +1535,92 @@ def test_dynamic_real_headers(name: str, architecture: Architecture) -> None:
         )
     assert tuple(digits) == architecture.types
     assert tuple(blocks.values()) == architecture.blocks and other == architecture.other
+
+
+# ---- An int8 DiT where torch's TF32 is forced in cuBLAS (weights.check_tf32) ---------------------
+
+# torch's reading of TORCH_ALLOW_TF32_CUBLAS_OVERRIDE (c10/util/env.cpp's check_env at v2.12.1 to
+# v2.14.1, read by aten/src/ATen/Context.h's float32_matmul_precision): true for "1" alone, false
+# for "0", nothing with a warning for any other value, nothing for a variable unset. Each value,
+# and whether torch turns TF32 on by it.
+TF32_PARSE = [
+    (None, False),
+    ("1", True),
+    ("0", False),
+    ("", False),
+    (" 1", False),
+    ("1 ", False),
+    ("1\n", False),
+    ("01", False),
+    ("1.0", False),
+    ("2", False),
+    ("true", False),
+    ("TRUE", False),
+    ("yes", False),
+    ("on", False),
+]
+
+
+@pytest.mark.parametrize(("value", "forced"), TF32_PARSE)
+def test_tf32_is_forced_where_torch_reads_the_variable_as_set(
+    value: str | None, forced: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert weights.TF32_OVERRIDE == "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE"
+    environ = {} if value is None else {weights.TF32_OVERRIDE: value}
+    assert weights.tf32_forced(environ) is forced
+    # The process's environment by default.
+    if value is None:
+        monkeypatch.delenv(weights.TF32_OVERRIDE, raising=False)
+    else:
+        monkeypatch.setenv(weights.TF32_OVERRIDE, value)
+    assert weights.tf32_forced() is forced
+
+
+@pytest.mark.parametrize(("value", "forced"), TF32_PARSE)
+def test_an_int8_dit_alone_is_refused_where_tf32_is_forced(value: str | None, forced: bool) -> None:
+    # DESIGN.md, Weights, "int8 before v0.1.0 is tagged", TF32: the W8A8 path's rotation is a
+    # float32 matrix product, which TF32 would change; fp16's and the GGUF's are not.
+    environ = {} if value is None else {weights.TF32_OVERRIDE: value}
+    for other in (DIT_7B, DIT_3B, DIT_7B_DYN, DIT_7B_SHARP_DYN):
+        weights.check_tf32(other, "w.safetensors", environ)
+    if not forced:
+        weights.check_tf32(DIT_7B_INT8, "w.safetensors", environ)
+        return
+    with pytest.raises(Tf32Forced) as refused:
+        weights.check_tf32(DIT_7B_INT8, "w.safetensors", environ)
+    error = refused.value
+    assert isinstance(error, Refusal) and error.kind == "tf32"
+    assert (error.variable, error.value, error.file) == (
+        weights.TF32_OVERRIDE,
+        "1",
+        "w.safetensors",
+    )
+    assert error.settings == (Setting("dit_model"),)
+    reason = (
+        "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1 in the environment has torch turn TF32 on for cuBLAS's"
+        " float32 matrix products, and the int8 DiT's rotation is one: its codes would move far"
+        " beyond those seedvr2x measured, so an int8 DiT doesn't run there"
+    )
+    assert error.reason == reason
+    # The library's own words name no option; the command line's name its own.
+    assert str(error) == (
+        f"w.safetensors: {reason}. Unset TORCH_ALLOW_TF32_CUBLAS_OVERRIDE, or take an fp16 DiT"
+        " file (DiT file)"
+    )
+    assert "--" not in str(error)
+    assert cli_words(error).endswith("or take an fp16 DiT file (--dit-model)")
+
+
+def test_seedvr2x_s_int8_files_name_their_fp16_twin_as_the_way_out() -> None:
+    from seedvr2x import pull
+
+    # Both of seedvr2x's int8 files, each paired with the fp16 file of the same 7B, all pinned.
+    assert set(weights.INT8_TWINS) == {name for name in pull.PINNED if "_int8_" in name}
+    for int8, fp16 in weights.INT8_TWINS.items():
+        assert int8 in pull.PINNED and fp16 in pull.PINNED
+        assert pull.MODEL_OF[int8] == pull.MODEL_OF[fp16]
+        with pytest.raises(Tf32Forced) as refused:
+            weights.check_tf32(DIT_7B_INT8, int8, {weights.TF32_OVERRIDE: "1"})
+        assert refused.value.settings == (Setting("dit_model", fp16),)
+        assert str(refused.value).endswith(f"or take DiT file {fp16}")
+        assert cli_words(refused.value).endswith(f"or take --dit-model {fp16}")

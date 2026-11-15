@@ -46,6 +46,7 @@ from seedvr2x.errors import (
     Setting,
     SourceRefused,
     TargetTooSmall,
+    Tf32Forced,
 )
 from seedvr2x.memory import GIB
 from seedvr2x.probe import ProbeRefusal
@@ -558,7 +559,21 @@ def refusal(
         return Refused(_model_files(error, model_dir, node))
     if isinstance(error, HostMemoryError):
         return Refused(_host_memory(error, keep))
+    if isinstance(error, Tf32Forced):
+        return Refused(_tf32(error))
     return Refused(error.words(lambda setting: say(setting, node)))
+
+
+def _tf32(error: Tf32Forced) -> str:
+    """An int8 DiT refused where torch's TF32 is forced in cuBLAS (weights.check_tf32), the way
+    out in ComfyUI's terms: the variable is read by torch as ComfyUI starts, so it is unset where
+    ComfyUI is started and ComfyUI started again; or the fp16 twin chosen in seedvr2x Models."""
+    setting = error.settings[0] if error.settings else Setting("dit_model")
+    model = say(setting) if setting.value else f"an fp16 file as {say(setting)}"
+    return (
+        f"{plans.short_label(error.file)}: {error.reason}. Unset {error.variable} where ComfyUI is"
+        f" started and start ComfyUI again, or choose {model}."
+    )
 
 
 # The way out every video refusal has: ComfyUI's own decode, which reads any file, then the frames

@@ -1260,6 +1260,12 @@ def _session[T](
         files, architecture = _prepare(handle, machine_, preparing)
     else:
         files, architecture = entry.files, entry.architecture
+    # An int8 DiT where torch's TF32 is forced in cuBLAS, refused before the card is read, a plan
+    # only too, kept models or not (weights.check_tf32): the variable is ComfyUI's environment's.
+    try:
+        weights.check_tf32(architecture, handle.dit)
+    except Refusal as error:
+        raise words.refusal(error, model_dir=bool(handle.model_dir)) from error
     if plan_only:
         ours = None if entry is None else entry.patcher
         # No probe runs for a plan only; the margin an earlier run of this process found counts.

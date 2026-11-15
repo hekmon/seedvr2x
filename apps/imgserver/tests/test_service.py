@@ -1231,3 +1231,44 @@ def test_the_starts_plan_lines_word_their_pointers_as_the_servers_own_options(
     # and none of the tiles' pointers, a bound's plan having no target.
     options_named = {word for each in lines for word in each.split() if word.startswith("--")}
     assert options_named <= {"--dit-model", "--swap-blocks"}, options_named
+
+
+@pytest.mark.parametrize("value", [None, "0", "1", "", " 1", "true", "01"])
+@pytest.mark.parametrize(
+    "dit_format", [peaks.INT8, peaks.FP16, peaks.GGUF_7B_SHARP], ids=["int8", "fp16", "gguf"]
+)
+def test_an_int8_start_is_refused_where_torch_s_tf32_is_forced_in_cublas(
+    value: str | None,
+    dit_format: weights.Architecture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cpu_models: model.Models,
+) -> None:
+    """DESIGN.md, Weights, "int8 before v0.1.0 is tagged", TF32 (weights.check_tf32): torch reads
+    TORCH_ALLOW_TF32_CUBLAS_OVERRIDE as set for "1" alone, and a server started on an int8 DiT is
+    refused there before the card is read or any model loads, in the server's words (its
+    --dit-model, the stand-in's file no pinned one, so no twin named); fp16 and the GGUF start."""
+    if value is None:
+        monkeypatch.delenv(weights.TF32_OVERRIDE, raising=False)
+    else:
+        monkeypatch.setenv(weights.TF32_OVERRIDE, value)
+    machine = StandIn(cpu_models, dit_format=dit_format)
+    refused = value == "1" and dit_format == peaks.INT8
+    if not refused:
+        with live(monkeypatch, tmp_path, cpu_models, machine=machine) as server:
+            assert server.service.state is services.State.READY
+            assert server.service.made is not None
+            assert server.service.made.plan.dit_model == dit_format
+        return
+    with live(monkeypatch, tmp_path, cpu_models, ready=False, machine=machine) as server:
+        with pytest.raises(Refusal) as error:
+            main.bring_up(server.running)
+        assert error.value.kind == "tf32"
+        assert reservation.worded(error.value) == (
+            "w.safetensors: TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1 in the environment has torch turn"
+            " TF32 on for cuBLAS's float32 matrix products, and the int8 DiT's rotation is one:"
+            " its codes would move far beyond those seedvr2x measured, so an int8 DiT doesn't run"
+            " there. Unset TORCH_ALLOW_TF32_CUBLAS_OVERRIDE, or take an fp16 DiT file"
+            " (--dit-model)"
+        )
+        assert server.service.made is None and machine.reserves == [] and not machine.plans

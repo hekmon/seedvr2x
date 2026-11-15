@@ -214,3 +214,88 @@ def test_an_int8_resume_is_judged_early_by_int8_s_figures(
     assert {dit_model for _, dit_model in asked} == {peaks.INT8}
     assert any("does not hold the recorded plan" in message for message in caplog.messages)
     assert not any("isn't judged before the checks" in message for message in caplog.messages)
+
+
+# torch's reading of TORCH_ALLOW_TF32_CUBLAS_OVERRIDE (weights.TF32_OVERRIDE; c10/util/env.cpp's
+# check_env at v2.14.1): "1" alone forces TF32 in cuBLAS; "0", unset or any other value doesn't.
+TF32_VALUES = [None, "0", "1", "", " 1", "1 ", "true", "TRUE", "yes", "01", "2"]
+
+
+@pytest.mark.usefixtures("steps")
+@pytest.mark.parametrize("value", TF32_VALUES)
+@pytest.mark.parametrize("plan", [True, False], ids=["plan", "run"])
+def test_an_int8_dit_is_refused_where_torch_s_tf32_is_forced_in_cublas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    value: str | None,
+    plan: bool,
+) -> None:
+    # DESIGN.md, Weights, "int8 before v0.1.0 is tagged", TF32: the variable forces TF32 in
+    # cuBLAS, and the W8A8 path's rotation is a float32 matrix product. An int8 job is refused
+    # where torch reads the variable as set, before its first pass and any model, --plan as the
+    # run, naming the variable and the way out in the command line's words; elsewhere it runs.
+    levels(caplog, logging.INFO)
+    source_path = job(tmp_path, monkeypatch)
+    models = tmp_path / "models"
+    models.mkdir()
+    int8_file(models / INT8)
+    write(models / VAE, as_dtype("vae", "F16"))
+    monkeypatch.setattr(weights, "check_models", CHECK_MODELS)
+    monkeypatch.setattr(cli, "_dit_model", DIT_MODEL)
+    monkeypatch.setattr(files, "sha256", hashed)
+    monkeypatch.setattr(test_cli_run, "digest_of", hashed)
+    if value is None:
+        monkeypatch.delenv(weights.TF32_OVERRIDE, raising=False)
+    else:
+        monkeypatch.setenv(weights.TF32_OVERRIDE, value)
+    loaded: list[Path] = []
+    stand_in_load: Any = model.load_models
+
+    def load(dit: Path, *arguments: Any) -> Any:
+        loaded.append(dit)
+        return stand_in_load(dit, *arguments)
+
+    monkeypatch.setattr(model, "load_models", load)
+    chosen = ("--model-dir", str(models), "--vae-model", VAE, "--dit-model", INT8)
+    more = ("--plan", str(tmp_path / "plan.txt")) if plan else ()
+    status = cli.main(command(tmp_path, source_path, "out", *JOB, *chosen, *more))
+    if value != "1":
+        assert status == 0 and "TF32" not in caplog.text
+        assert loaded == [models / INT8]  # --plan's calibration loads them too
+        return
+    assert status == 1 and loaded == []
+    refused = [
+        message for message in caplog.messages if "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE" in message
+    ]
+    assert refused == [
+        f"{INT8}: TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1 in the environment has torch turn TF32 on for"
+        " cuBLAS's float32 matrix products, and the int8 DiT's rotation is one: its codes would"
+        " move far beyond those seedvr2x measured, so an int8 DiT doesn't run there. Unset"
+        " TORCH_ALLOW_TF32_CUBLAS_OVERRIDE, or take an fp16 DiT file (--dit-model)"
+    ]
+    # Before the first pass, which reads the whole source: nothing of the job is made.
+    assert not any("the first pass" in message for message in caplog.messages)
+    assert not (tmp_path / "out" / "manifest.json").exists()
+    assert not (tmp_path / "plan.txt").exists()
+
+
+@pytest.mark.usefixtures("steps")
+def test_an_fp16_dit_runs_where_torch_s_tf32_is_forced_in_cublas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Its matrix products are in half precision, which the variable doesn't touch: the job runs.
+    levels(caplog, logging.INFO)
+    source_path = job(tmp_path, monkeypatch)
+    models = tmp_path / "models"
+    models.mkdir()
+    write(models / FP16, as_dtype("7b", "F16"))
+    write(models / VAE, as_dtype("vae", "F16"))
+    monkeypatch.setattr(weights, "check_models", CHECK_MODELS)
+    monkeypatch.setattr(cli, "_dit_model", DIT_MODEL)
+    monkeypatch.setattr(files, "sha256", hashed)
+    monkeypatch.setattr(test_cli_run, "digest_of", hashed)
+    monkeypatch.setenv(weights.TF32_OVERRIDE, "1")
+    chosen = ("--model-dir", str(models), "--vae-model", VAE, "--dit-model", FP16)
+    assert cli.main(command(tmp_path, source_path, "out", *JOB, *chosen)) == 0
+    assert "TF32" not in caplog.text

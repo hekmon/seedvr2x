@@ -321,9 +321,14 @@ class Service:
 
     def plan(self) -> reservation.Made:
         """The card read, the plan made for the bound and the reservation counted on it:
-        ReservationRefused where it doesn't fit, naming what would."""
+        ReservationRefused where it doesn't fit, naming what would; Tf32Forced for an int8 DiT
+        where torch's TF32 is forced in cuBLAS (weights.check_tf32), before the card is read."""
+        from seedvr2x import weights
+
         assert self.files is not None
         options, machine = self.options, self.card
+        dit_model = machine.dit_model(self.files.dit.path)
+        weights.check_tf32(dit_model, self.files.dit.path.name)
         logger.info("card: %s", machine.device_name())
         reading = machine.reading(machine.free())
         asked = reservation.Asked(
@@ -333,7 +338,7 @@ class Service:
             options.queue,
             reading,
             machine.host(),
-            machine.dit_model(self.files.dit.path),
+            dit_model,
             options.pins,
             PurePath(options.dit).name,
             options.model_dir is not None,

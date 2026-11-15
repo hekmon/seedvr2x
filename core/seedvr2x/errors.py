@@ -505,6 +505,34 @@ class HostMemoryError(Refusal):
         self.available = available
 
 
+class Tf32Forced(Refusal):
+    """An int8 DiT in an environment that has torch turn TF32 on for cuBLAS's float32 matrix
+    products (kind "tf32"; weights.check_tf32): the W8A8 path's rotation is one, and TF32 would
+    move its codes far beyond the figures seedvr2x measured (DESIGN.md, Weights, "int8 before
+    v0.1.0 is tagged"). The facts, beside the reason (Refusal.reason):
+
+    - variable, value: the environment variable and what it holds;
+    - file: the int8 DiT file's name, never its path;
+    - settings: the way out besides unsetting the variable, the DiT's file in fp16 (dit_model),
+      its value the int8 file's fp16 twin where it is one of seedvr2x's own, else none."""
+
+    def __init__(
+        self,
+        message: Message,
+        *,
+        reason: str,
+        variable: str,
+        value: str,
+        file: str,
+        settings: tuple[Setting, ...],
+    ) -> None:
+        super().__init__(message, kind="tf32", reason=reason)
+        self.variable = variable
+        self.value = value
+        self.file = file
+        self.settings = settings
+
+
 class PictureRefused(Refusal):
     """A picture seedvr2x refuses to read (kind in picture.KINDS), with the parts an application
     words its own way out by (Refusal.kind, reason, way). Facts besides, None where a kind has
