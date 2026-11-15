@@ -589,11 +589,11 @@ def test_vae_tiles_measured() -> None:
         key for key, predicted in BEFORE_ONE_OUTPUT.items() if measured[key][0] != predicted[0]
     } == {(size, size) for size in range(1664, 2049, 64)}
     # The whole table by its sums, in GiB: the 45 encodes and the 45 decodes, then the
-    # 2026-10-11 measure's.
+    # 2026-10-11 measure's (to the thousandth, the 960-px square's decode being 15.675).
     encodes, decodes = zip(*measured.values(), strict=True)
-    assert (round(sum(encodes), 2), round(sum(decodes), 2)) == (686.44, 1159.17)
+    assert (round(sum(encodes), 3), round(sum(decodes), 3)) == (686.44, 1159.175)
     encodes, decodes = zip(*old.values(), strict=True)
-    assert (round(sum(encodes), 2), round(sum(decodes), 2)) == (691.72, 1203.28)
+    assert (round(sum(encodes), 3), round(sum(decodes), 3)) == (691.72, 1203.285)
     # A square takes its measure on a frame its squares lay whole, whatever the overlap; a
     # larger square more. On another frame the grid's last tiles are cut off, and the pass takes
     # the most any of its tiles does, its square's measure at the least
@@ -645,6 +645,40 @@ def test_vae_tiles_measured() -> None:
     rounded = {512: (3.5, 5.9), 768: (7.1, 11.1), 1024: (10.4, 17.4), 1536: (21.4, 38.7)}
     for size, predicted in rounded.items():
         assert max(abs(a - b) for a, b in zip(predicted, old_squares[size], strict=True)) < 0.11
+
+
+# Whole runs' decodes in tiles of 960 px against their plan, in bytes: the RTX 5090 under WSL2's
+# driver, the whole card, on 2026-11-15 (impl-wsl2-2; DESIGN.md, To measure, The cards v0.1.0 is
+# tested on), two plans pinned (--window 23 --encode-tile 1408 --decode-tile 960 --swap-blocks 29
+# at 1080p, --window 7 --encode-tile 1280 --decode-tile 960 --swap-blocks 34 at 4K), the VAE and
+# the DiT's unswapped blocks and slots on the card in the decode, split on, torch's max allocated
+# reset at each step, the same peak in every shot (3 at 1080p, 2 at 4K): the padded frame, the
+# output, the blocks swapped, the plan's decode peak then (the square's decode at 15.67 GiB) and
+# the measured one.
+DECODES_960 = (
+    (OURS_1080, HD, 29, 21_631_101_318, 21_636_345_344),
+    (OURS_4K, (2160, 3840), 34, 19_365_434_758, 19_370_673_664),
+)
+
+
+@pytest.mark.parametrize(("padded", "output", "swapped", "planned", "measured"), DECODES_960)
+def test_a_decode_in_960_px_tiles_is_planned_at_or_over_its_measure(
+    padded: tuple[int, int], output: tuple[int, int], swapped: int, planned: int, measured: int
+) -> None:
+    # DESIGN.md, Memory planner, Per-phase peaks: "a decode in tiles of 960 px is 5.00 MiB over its
+    # figure, at 1080p and 4K alike and in every shot, ... that side takes its measure, the larger
+    # as for a tile measured twice". The square is the most any tile of the grid takes, and its
+    # decode moved from 15.67 GiB to its measure's 15.675 alone: the plan 0.005 GiB higher, at or
+    # over the measure by 0.12 MiB at the most, every other term as it was.
+    tiles = Tiles(960)
+    tile = peaks._tile  # pyright: ignore[reportPrivateUsage]
+    figures = {shape: tile(960, *shape, 1) for shape in tile_shapes(padded, tiles)}
+    assert max(figures, key=lambda shape: figures[shape]) == (960, 960)
+    assert peaks.MEASURED[960, 960][1] == 15.675
+    predicted = peaks.decode_peak(padded, output, tiles, None, swapped, split=True)
+    assert predicted - planned == round(15.675 * GIB) - round(15.67 * GIB)
+    assert measured - planned == pytest.approx(5.0 * 2**20, abs=0.01 * 2**20)
+    assert 0 <= predicted - measured <= 0.13 * 2**20
 
 
 def test_vae_tiles_nobody_measured() -> None:

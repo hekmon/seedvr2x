@@ -289,7 +289,13 @@ REFITTED = 1024  # the tile's side the refit starts at, in pixels
 # padding. Each tile was measured once, on one card, and 512 px's encode was its process's first
 # pass. Where a tile has a second measure on file, the larger: the first whole frames in tiles
 # (512, 768, 1024, 1536 and 2048 px, and 1280 px at 1080p; 0.03 GiB over the tile alone at the
-# most), and shots of 21 to 301 frames in 1024-px tiles (10.4742 and 17.4499 GiB).
+# most), and shots of 21 to 301 frames in 1024-px tiles (10.4742 and 17.4499 GiB). The 960-px
+# square's decode is its measure to the thousandth, 15.675 GiB (planner-limits.md's table), where
+# the hundredth had been 15.67, 5.12 MiB under it: whole frames in 960-px tiles, measured in bytes
+# on the RTX 5090 on 2026-11-15 (DESIGN.md, Memory planner, Per-phase peaks; To measure, The cards
+# v0.1.0 is tested on), peaked 5.00 MiB over a plan by 15.67 at 1080p and at 4K, in every shot,
+# that square being the most any tile of their grids takes: 15.6749 GiB above what was allocated
+# before, 0.12 MiB under 15.675, the larger.
 # The passes the one-output convolution takes (vendor/models/video_vae_v3/modules/
 # causal_inflation_lib.py, ONE_OUTPUT_FROM) take their peak measured with it (2026-10-17;
 # DESIGN.md, Memory planner, Budget: "the planner takes the peaks measured with it for the passes
@@ -319,7 +325,7 @@ MEASURED = {
     (768, 768): (7.08, 11.11),
     (832, 832): (8.31, 12.30),
     (896, 896): (8.56, 14.10),
-    (960, 960): (9.82, 15.67),
+    (960, 960): (9.82, 15.675),
     (1024, 1024): (10.47, 17.46),
     (1088, 1088): (11.81, 19.65),
     (1152, 1152): (13.24, 21.99),
