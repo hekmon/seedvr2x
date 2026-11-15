@@ -42,9 +42,10 @@ LINE = (
 )
 
 # test_deband.py's banded clip at the stand-in's size, as many frames as test_cli_run.py's JOB
-# cuts: a slow gradient, an 8-bit step every few pixels, tagged.
+# cuts: a slow gradient, an 8-bit step every few pixels, tagged; seeded as test_deband.py's.
 BANDED = (
-    f"gradients=s=64x48:c0=0x302818:c1=0x584838:speed=0.02:r=25:d=1,format=yuv420p,setparams={TAGS}"
+    "gradients=s=64x48:c0=0x302818:c1=0x584838:speed=0.02:r=25:d=1:seed=1,"
+    f"format=yuv420p,setparams={TAGS}"
 )
 
 

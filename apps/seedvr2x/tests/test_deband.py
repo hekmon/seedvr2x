@@ -54,11 +54,13 @@ DEBANDED = (
 )
 
 # A banded clip: a slow gradient of 32 codes across 256 pixels, an 8-bit step every 8 or so, the
-# kind of flat steps deband takes out; tagged so that every read takes its tags, none guessed.
+# kind of flat steps deband takes out; tagged so that every read takes its tags, none guessed. The
+# seed is fixed: unseeded, gradients picks its line's points at random each run (ffmpeg-filters).
 WIDTH, HEIGHT, FRAMES = 256, 144, 48
 TAGS = "range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709:chroma_location=left"
 BANDED = (
-    f"gradients=s={WIDTH}x{HEIGHT}:c0=0x302818:c1=0x584838:speed=0.02:r=25:d={FRAMES / 25},"
+    f"gradients=s={WIDTH}x{HEIGHT}:c0=0x302818:c1=0x584838:speed=0.02:r=25:d={FRAMES / 25}"
+    ":seed=1,"
     f"format=yuv420p,setparams={TAGS}"
 )
 
@@ -240,11 +242,14 @@ def test_the_first_pass_reads_the_source_as_it_is(banded: Path) -> None:
 def test_a_shot_read_by_seek_is_the_frames_of_a_whole_read(tmp_path: Path) -> None:
     # A shot's first frame inside a GOP of an inter-coded source, read by the reader's seek from
     # the keyframe before its own, gives with --deband the frames a read from the start gives:
-    # deband keeps nothing from one frame to the next (impl-box-1 on five H.264 sources).
+    # deband keeps nothing from one frame to the next (impl-box-1 on five H.264 sources). Its
+    # keyframes every 12 frames, at 0, 12, 24 and 36, scene cuts off: on, x264 put them at 0, 11,
+    # 19, 30 and 41 in one full suite, frame 30 a keyframe.
     path = tmp_path / "banded.mkv"
     run(
         *("-f", "lavfi", "-i", BANDED, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18"),
-        *("-x264-params", "keyint=12:min-keyint=12:bframes=3:b-pyramid=normal:log-level=error"),
+        "-x264-params",
+        "keyint=12:min-keyint=12:scenecut=0:bframes=3:b-pyramid=normal:log-level=error",
         str(path),
     )
     source = examine(path, deband=True)
