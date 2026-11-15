@@ -559,12 +559,53 @@ models of the same architecture, memory and time:
 The files, where they come from and how they are checked are in the README's
 [Model files](README.md#model-files); the [model card](https://huggingface.co/hekmon/seedvr2x)
 has the table of every format. The int8 files hold the DiT's weights in 7.76 GiB in place of
-15.35; their memory and speed are measured on the 96 GB card before v0.1.0 is tagged, and the
-plan says, in a line of its own, that it counts a window's memory as float16's, plus int8's
-buffers, until then. Version 0.2.0 brings the fp8 and NVFP4 files of both 7Bs and the other
-GGUF types, each with its measured quality. The VAE stays in float16: its weights take 0.47 GiB,
-so a smaller file would save nothing, and its memory is the pictures it computes, which tiling
-bounds.
+15.35 ([below](#the-int8-files)). Version 0.2.0 brings the fp8 and NVFP4 files of both 7Bs and
+the other GGUF types, each with its measured quality. The VAE stays in float16: its weights take
+0.47 GiB, so a smaller file would save nothing, and its memory is the pictures it computes,
+which tiling bounds.
+
+### The int8 files
+
+`--dit-model seedvr2x_ema_7b_sharp_int8_convrot.safetensors` or
+`--dit-model seedvr2x_ema_7b_int8_convrot.safetensors` (8.3 GB): the two 7Bs, their block
+matrices rotated before they are rounded to int8 and multiplied in 8 bits. Measured on
+2026-11-15, the sharp 7B's int8 file against its float16 one, at `standard` and the same seed,
+on the 96 GB card under Linux's driver, held to every size from 8 to 72 GB and whole, and on an
+RTX 5090 under WSL2, from 8 GB to the whole card:
+
+- **Closer to float16 than float16 itself at another seed.** 55.50 dB of PSNR-Y from float16's
+  output on average at 1080p and 55.99 at 4K, 50.48 and 52.86 at the worst frame, where float16
+  at another seed is 40.43 and 42.54 dB from it, 36.50 and 39.57 at its worst frame; on a third
+  clip at 4K, 56.34 against 42.09.
+- **It runs wherever float16 runs.** Every int8 job ran where float16's did, every step at or
+  under its plan, and 4K was refused for both at 12 GB, and at 16 GB under WSL2. Its weights
+  take 7.76 GiB in place of 15.35, and a swapped block 0.21 GiB of pinned system memory in place
+  of 0.42, so the plan swaps fewer blocks: 2 to 13 fewer in the jobs measured on Linux.
+- **No faster.** Under Linux's driver its windows take 17 to 30% longer than float16's, whether
+  blocks swap or not, and the fewer blocks swapped don't buy that back: its jobs took 1.6 to
+  5.5% longer at every size but one (a 4K job at 32 GB, 0.4% shorter by the rest of the job).
+  Under WSL2's driver, where a swap costs more, no job was longer: the same time where its
+  windows are float16's, less where it swaps fewer blocks (on the whole card its DiT took 33.8 s
+  against 36.1 at 1080p, 98.1 against 111.0 at 4K).
+- **Only an option.** The sharp 7B in float16 stays the default. int8's speed would come from
+  its computation compiled, which comes with `--compile` in version 0.2.0.
+- **What the plan says.** Its DiT line says that it counts a window's memory as float16's, plus
+  int8's buffers: on the side of too much, int8's windows having peaked 0.41 to 0.46 GiB under
+  their plan, where float16's peak 0.05 to 0.08 under theirs.
+- **Refused where PyTorch computes in TF32.** The rotation is a float32 matrix product, which
+  TF32 would round far beyond the figures above. PyTorch leaves TF32 off for those products, and
+  seedvr2x never turns it on, but `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1` in the environment forces
+  it, and a program can turn it on in its own process. So an int8 DiT is refused, saying why,
+  where the variable is `1`, read at the start before any model loads, `--plan` too, or where
+  one of PyTorch's settings reads TF32 on as the DiT loads (the matmul's `allow_tf32`, the
+  float32 matmul precision, or the per-backend precision); float16 and the GGUF run as before,
+  and cuDNN's own TF32 is left as it is. The way out is in the refusal: unset the variable, or
+  turn the setting off where it was turned on, or take the float16 file. The refusal's text, as
+  the code words it:
+
+```
+seedvr2x_ema_7b_sharp_int8_convrot.safetensors: TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1 in the environment has torch turn TF32 on for cuBLAS's float32 matrix products, and the int8 DiT's rotation is one: its codes would move far beyond those seedvr2x measured, so an int8 DiT doesn't run there. Unset TORCH_ALLOW_TF32_CUBLAS_OVERRIDE, or take --dit-model seedvr2x_ema_7b_sharp_fp16.safetensors
+```
 
 ### The dynamic GGUF
 
@@ -1228,25 +1269,62 @@ own, of one latent ([still pictures](#still-pictures)).
   for the VAE's passes and their tiles shrink, then the window shortens. Each such line says
   so, with the figures (`shortened from 17 latents for the host's memory`).
 
-The windows this gives at the two usual sizes, in latents (and frames), for cards with nothing
-else on them (an N GB card having about N − 1.5 GiB free), from the planner's own figures:
+The windows this gives a long shot at the two usual sizes, in latents, with the blocks swapped,
+from the planner's own figures: on a card nothing else uses on Linux ("alone"), and on a run
+held to the card ("held": [under WSL2](#under-wsl2), or beside [another
+program](#a-card-another-program-uses-on-linux) on Linux), each from the free memory seedvr2x
+found on the 96 GB card held to that size, about the size less 1.1 GiB, and on its whole card:
 
-| Card | 1080p, no block swapped | 1080p, all 36 swapped | 4K, no block swapped | 4K, all 36 swapped |
-|---|---|---|---|---|
-| 16 GB | the weights don't fit | 12 (45) | the weights don't fit | 3: under 5, refused |
-| 24 GB | 6 (21) | 20 (77) | under 5: swaps instead | 5 (17) |
-| 32 GB | 14 (53) | 28 (109) | 3: swaps instead | 6 (21) |
-| 48 GB | 30 (117) | 44 (173) | 7 (25) | 10 (37) |
-| 96 GB | 77 (305) | 91 (361) | 19 (73) | 22 (85) |
+| Card | Free | 1080p, alone | 1080p, held | 4K, alone | 4K, held |
+|---|---|---|---|---|---|
+| 8 GB | 6.91 GiB | 10, 36 swapped | 7, 35 | refused | refused |
+| 12 GB | 10.91 GiB | 18, 36 | 14, 36 | refused | refused |
+| 16 GB | 14.91 GiB | 26, 35 | 20, 36 | 6, 34 | 5, 36 |
+| 24 GB | 22.91 GiB | 41, 34 | 34, 36 | 10, 33 | 8, 34 |
+| 32 GB | 30.91 GiB | 58, 34 | 48, 33 | 14, 32 | 12, 34 |
+| 48 GB | 46.91 GiB | 86, 29 | 74, 25 | 23, 35 | 21, 36 |
+| 96 GB | 94.27 GiB | 169, 12 | 169, 23 | 44, 19 | 44, 29 |
 
-A window takes 5 latents at least (it shares 2 with each neighbour and keeps one of its
-own), so a cell under 5 is under the floor: the plan swaps blocks instead, and where all 36
-swapped still hold fewer than 5, the job is refused. By the planner, 4K's 5-latent window takes
-36.74 GiB free with every block on the GPU and 22.40 with all 36 swapped: a 24 GB card swaps all
-36, a 16 GB card is refused.
+A held plan is the smaller at a size: it leaves 0.5 GiB to the rest of the card and each step a
+reserve of its own beyond its peak. A window takes 5 latents at least (it shares 2 with each
+neighbour and keeps one of its own). By the planner, the least free memory each size takes:
 
-A 96 GB card ran windows of 76 latents (301 frames) at 1080p with every block on the GPU, and
-of 22 at 4K with all 36 swapped; a card held to 24 GB ran 4K's windows of 5.
+| Output | Alone | Held |
+|---|---|---|
+| 1080p | 6.58 GiB: its decode in 512-px tiles, the decoder's tail a frame at a time, a peak of 4.73 GiB, the VAE's room of 1.25 and the margin of 0.6 | 6.08 GiB: the same decode, a reserve of 0.85 beyond its peak, the VAE's room lowered to 0.5, and the 0.5 GiB left to the card |
+| 4K | 11.64 GiB: the 5-latent window with every block swapped, a peak of 11.04 GiB, and the margin | 14.83 GiB: the same window, 3.29 of reserve beyond its peak, and the 0.5 GiB left to the card |
+
+So a card of 8 GB runs 1080p, and 4K takes a card of 16 GB alone, over 16 GB held: a 16 GB card
+beside a desktop, or under WSL2, had 14.36 to 14.68 GiB free.
+
+The jobs run on those sizes (2026-11-11 to 15), the sharp 7B in float16 at `standard`: an 8 s
+clip of three shots to 1080p, ×2 from 540p, and 120 frames to 4K, ×2 from 1080p. On Linux's
+driver, the 96 GB card held to each size by a program holding the rest of it, alone, and beside
+a desktop's share played by a program, 0.54 GiB growing to 1.1 and back; under WSL2, an RTX 5090
+beside its own desktop, held to each size with room kept for the desktop, and whole. Each cell
+gives the window, in latents, and the blocks swapped (at 1080p the clip's longest shot is 23
+latents, which caps its windows from 16 GB up). Every step ran at or under its planned peak but
+the 960-px decodes under WSL2, 3 to 14 MiB over it, inside their reserve (planned at their
+measure since):
+
+| Card | 1080p, alone | 4K, alone | 1080p, beside a desktop | 4K, beside a desktop | 1080p, WSL2 | 4K, WSL2 |
+|---|---|---|---|---|---|---|
+| 8 GB | 9, 35 swapped | refused | 7, 36 | – | 7, 36 | – |
+| 12 GB | 13, 30 | refused | 13, 36 | – | 13, 35 | refused |
+| 16 GB | 23, 32 | 6, 34 | 13, 27 | refused | 13, 26 | refused |
+| 24 GB | 23, 13 | 9, 28 | 23, 23 | 7, 31 | 23, 22 | 7, 30 |
+| 32 GB | 23, 0 | 12, 23 | – | 12, 35 | 23, 12 (whole card) | 9, 27 to 30 (whole card) |
+| 48 GB | 23, 0 | 21, 26 | 23, 0 | 12, 0 | | |
+| 72 GB | 23, 0 | 21, 0 | – | – | | |
+| 96 GB | 23, 0 | 21, 0 | – | – | | |
+
+(– not run.) On the 96 GB card, 1080p took 3.4 to 4.0 min and 4K 8.9 to 9.6 min at every size,
+alone and beside the desktop: a smaller card costs little time there. The desktop's share was
+never refused under the hold, none of its 288 requests; before the hold, the same desktop was
+refused 5 to 18 times a 1080p run from 12 to 48 GB, and 4K ran out of memory from 16 to 48 GB
+once it grew. Under WSL2, the whole card left 26.5 to 27.7 GiB to a run beside its desktop of
+3.1 to 4.5 GiB, and both sizes ran with the hold's margin alone between them, 0.69 to 1.13 GiB
+free on the card at the least.
 
 - **Nothing caps a large card:** the memory a small card spends on swapped blocks and tiles
   goes, on a large one, to longer windows.
@@ -1254,10 +1332,9 @@ of 22 at 4K with all 36 swapped; a card held to 24 GB ran 4K's windows of 5.
   window in the middle of a shot shares 2 with each neighbour and keeps at least one of its own.
   When the smallest window doesn't fit with every block swapped, or the smallest tiles don't,
   the job is refused before the models load. The message gives the free memory that size
-  takes, what is free, and the largest output size that fits: 4K takes 23.47 GiB free, so a 16 GB
-  card never runs it, and 1080p takes 8.27 GiB, so
-  an 8 GB card doesn't run that either. A shot's length doesn't count on the card: a very long
-  shot is bounded by the host's memory alone, its refusal naming the shot.
+  takes, what is free, and the largest output size that fits: 4K takes 11.64 GiB free, and 14.33
+  counted on a held run, under the 0.5 GiB left to the card. A shot's length doesn't count on
+  the card: a very long shot is bounded by the host's memory alone, its refusal naming the shot.
 
 ### Fixing a choice yourself
 
@@ -1303,9 +1380,11 @@ bit, so `--swap-blocks` isn't a setting, and a resume may swap more or fewer.
 
 ## Small cards
 
-seedvr2x is developed on a 96 GB card and made for cards of 16 to 32 GB too, checked on an RTX
-5090 with a desktop running. There, the plan decides whether a job runs at all, and it asks
-more of the rest of the machine.
+seedvr2x is developed on a 96 GB card and made for cards of 16 to 32 GB too: its plans ran on
+that card held to every size from 8 to 96 GB, alone and beside a desktop, and on an RTX 5090
+under WSL2 from 8 GB to its whole 32, every step within the memory its plan gave it ([the
+plan](#the-plan)). There, the plan decides whether a job runs at all, and it asks more of the
+rest of the machine.
 
 **What a small card asks of the host:**
 
@@ -1330,11 +1409,14 @@ included. A job it can't fit, or whose copies the host won't pin, is refused bef
 naming the memory it needs, part by part.
 
 **What a small card can't run:** a size whose smallest window or smallest tiles don't fit,
-counted from what is free at the start, not from the card's size. 4K takes 22.40 GiB free.
+counted from what is free at the start, not from the card's size. 4K takes 11.64 GiB free on
+a card alone, 14.83 on a run held to the card, and 1080p 6.58 and 6.08 ([the plan](#the-plan)):
+an 8 GB card runs 1080p, and 4K takes 16 GB alone, more than 16 held.
 
 **What to expect:**
 
-- A 16 GB card can't hold the float16 DiT's 15.35 GiB of weights: it swaps every block.
+- A 16 GB card can't hold the float16 DiT's 15.35 GiB of weights: it swaps most of its
+  blocks, 26 to 34 of the 36 in the jobs measured.
 - Below 48 GB, a 1080p decode only fits tiled; at 4K every card tiles it, the 96 GB one
   included.
 - These cards also compute more slowly: an RTX 5080 has 84 compute units (SMs) where the
@@ -1389,15 +1471,24 @@ with a reserve of its own, and each unit checking the card first. It says which 
 
 and the plan's card line ends with `the card shared:` and the same words. A card nothing else
 uses says `no other program on the GPU at the start`, with the allocator, and runs as before.
-Where NVML can't tell, the card is taken for shared, and the line says why. Your own `PYTORCH_CUDA_ALLOC_CONF` stands
-either way. To run a card unheld, no other program may hold a context on it when the job
-starts; a display attached to the card with nothing running on it, a text console, is no other
-program.
+Where NVML can't tell, the card is taken for shared, and the line says why. Your own
+`PYTORCH_CUDA_ALLOC_CONF` stands either way. To run a card unheld, no other program may hold a
+context on it when the job starts; a display attached to the card with nothing running on it, a
+text console, is no other program.
+
+Held so, the same growing desktop beside the 96 GB card held to 8 to 48 GB (2026-11-13) had none
+of its 288 requests refused, and 4K ran at 24, 32 and 48 GB, 1080p from 8 to 48, every step at
+or under its plan, in the time the card took alone. 4K at 16 GB is refused at the start there,
+its smallest plan taking 14.33 GiB of the 13.86 counted on, the 14.36 free less the 0.5 left to
+the card: on Linux, 4K beside a desktop takes a card over 16 GB, and alone a card of 16 GB runs
+it ([the plan](#the-plan)).
 
 ## Under WSL2
 
-In practice: nothing to set. The plan counts on about 5 GiB less than the card has free, keep
-other programs off the GPU during a job, and run one seedvr2x per card. Why:
+In practice: nothing to set. The plan counts on 0.5 GiB less than the card has free and leaves
+each step a reserve of its own beyond its peak; keep other programs off the GPU during a job,
+run one seedvr2x per card, and keep seedvr2x, its jobs and its model files on Linux's own disk
+([below](#where-each-part-goes)). Why:
 
 Under WSL2, the GPU is Windows', and Windows' driver gives memory the card doesn't have: past
 the card, it lends system memory, whatever NVIDIA's "CUDA - Sysmem Fallback Policy" says. A
@@ -1416,21 +1507,20 @@ its start:
   process's, not the card's. PyTorch is limited to that, less 0.5 GiB left to the rest of the
   card, and a step past the limit is refused, an error the run catches, where the driver would
   have lent.
-- **The plan counts on 4.5 GiB less again,** the reserve PyTorch's allocator needs beyond a
-  step's peak there (the 0.6 GiB margin is inside it). So the plan's budget is well under what
-  nvidia-smi shows free: on an RTX 5090 beside a desktop holding 4.6 to 5.8 GiB of the card,
-  the plan counted on 20.0 to 21.2 GiB of the 25.0 to 26.2 free. The plan's first two lines give
-  each figure.
-- **Where a job would be refused with 4.5, it takes 2.5,** said in a `reserve:` line under its
-  `budget:` line: a step
-  short of room then slows down rather than being refused, and a job that fits with 4.5 runs up
-  to 1.5 times as long with 2.5. It takes the same frames. A resume whose recorded plan no
-  longer fits with 4.5 takes 2.5 too, before it stops. This holds under PyTorch's own allocator
-  with expandable segments, seedvr2x's default there; under an allocator of your own the job is
-  refused with 4.5, the refusal saying so. With 2.5, an RTX 5090 ran 4K's smallest window
-  beside a desktop holding 3.2 GiB. Its plan of the Sol Levante example at 4K
-  said it so, run by a build before 0.1.0: here its figures in 0.1.0's two
-  lines, where that build gave them in one:
+- **Each step keeps a reserve of its own beyond its peak,** the room PyTorch's allocator needs
+  there to keep its speed, measured step by step: beyond a DiT window's peak P (its memory over
+  the weights it keeps on the card), the larger of 0.6 GiB and 0.33 of P, at most 4.5 GiB;
+  beyond a VAE pass's, the larger of 1.25 GiB and a fifth of P. The plan's budget is the card's
+  free memory less the 0.5 GiB, and a step fits where its peak and its reserve do: 4K's smallest
+  window, a peak of 11.04 GiB, keeps 3.29 beside it. The plan's first two lines give each
+  figure, the second the reserve of each step. Under PyTorch's own allocator without the
+  expandable segments (a `PYTORCH_CUDA_ALLOC_CONF` of your own), the reserve is 4.5 GiB beside
+  every step, taken off the budget.
+
+  A build before 0.1.0 took that 4.5 GiB under the segments too, and 2.5 where a job would
+  otherwise have been refused, said in a `reserve:` line: 0.1.0 has neither, and these lines of
+  its plan of the Sol Levante example at 4K, on an RTX 5090 beside a desktop holding 3.2 GiB,
+  wait for a run of this version to take their place:
 
   ```
   06:02:17 plan: budget: 24.19 GiB, the 27.19 GiB free less torch's limit, 0.50 GiB under it, and the reserve of 2.50 GiB left to torch's allocator beyond a step's peak; the margin of 0.60 GiB is in the reserve
@@ -1438,20 +1528,20 @@ its start:
   06:02:17 plan: windows: 5 latents at most (17 frames), the longest the budget holds: 8 of 62 shots in one window, 471 joins; a longer window, fewer joins; --window N caps them
   ```
 
-  Windows of 5 latents, the least a job runs: 4K fits that card, just, and the job was
-  estimated at about 7 hours. Its 22.87 GiB is the smallest window's peak under SDPA alone: on
-  Linux the 0.6 GiB margin comes on top (23.47,
-  [GPU memory](#the-plan)), where under WSL2 the reserve holds it.
 - **What a job needs free,** by the planner's own rules, on the whole card (NVML's figure):
 
-  | Output | On Linux | Under WSL2, to run (reserve 2.5 GiB, slower) | Under WSL2, at full speed (reserve 4.5 GiB) |
-  |---|---|---|---|
-  | 1080p | 8.27 GiB | 10.67 GiB | 12.67 GiB |
-  | 4K | 23.47 GiB | 25.87 GiB | 27.87 GiB |
+  | Output | On Linux, a card nothing else uses | Held: under WSL2, or beside another program on Linux |
+  |---|---|---|
+  | 1080p | 6.58 GiB | 6.08 GiB |
+  | 4K | 11.64 GiB | 14.83 GiB |
 
-  Under WSL2, the Linux floor's 0.6 GiB margin goes, and the 0.5 GiB left to the card and the
-  reserve come on top. The RTX 5090 above had 27.19 GiB free: 0.68 short of full speed at 4K
-  under SDPA, as `--verbose` says, and 1.32 over what it needs to run.
+  Held, the Linux floor's 0.6 GiB margin goes, and the 0.5 GiB left to the card and each step's
+  reserve come on top ([the plan](#the-plan)). On an RTX 5090 beside its desktop, 1080p ran on
+  every size from 8 GB to the whole card, and 4K at 24 GB and on the whole card, refused at
+  12 GB and at 16 GB exactly, where 14.18 GiB were counted on of the 14.68 free: under WSL2, 4K
+  takes a card over 16 GB. The whole card, 27.0 to 27.7 GiB free beside an idle desktop of 3.1
+  to 3.8, ran both with the hold's margin alone, the card 0.69 to 1.13 GiB from full at the
+  least.
 - **Each unit checks the card first.** When another program has taken memory since the plan,
   the run gives PyTorch's cache back, and, within the reserve the plan took, holds itself again
   to what is left, says so in a warning, and goes on. Past that, it stops in one line, its units
@@ -1463,14 +1553,34 @@ its start:
   frames being maybe not those of a run with more room.
 - **One seedvr2x per card:** each plans from what is free when it starts, and the other's
   growth would stop it.
-- **The model files on Linux's own disk,** where it has room (`HF_HOME` or `HF_HUB_CACHE`
-  pointing into WSL2's own file system, or `--model-dir` a directory there). Each start's load
-  reads every model file once, checking its SHA-256 as it reads, and WSL2 reads a Windows drive
-  through 9p at 170 to 250 MB/s, where Windows itself reads the same file at 4 to 9 GB/s: the
-  DiT's 16.5 GB take about 70 s to read and hash from a Windows drive, against about 7 s from
-  Linux's disk, where the hash is the bound. The mount is the slow way in for a tiled pass's
-  scratch file and the compile cache too. The trade-off is the room: 17 GB inside WSL2's virtual
-  disk.
+
+### Where each part goes
+
+WSL2 reads and writes a Windows drive through its 9p bridge, one read at 170 to 250 MB/s where
+Windows itself reads the same file at 4 to 9 GB/s, and every file opened there goes through it.
+So what seedvr2x reads or writes at every start, and a job's work, go on Linux's own disk, inside
+WSL2's virtual disk, where it has room:
+
+- **seedvr2x itself, and its environment:** clone the repository, and so its `.venv`, on Linux's
+  disk. The environment is thousands of small files: from a Windows drive, `seedvr2x --help`
+  took 1.5 s against 0.12 from Linux's disk, and the modules a run imports before its first line
+  90 s against 2.6 (each the median of five runs, warm, the card hidden), at every start of a
+  job and of a resume, diffusers alone 49 s of it
+  ([load-memory.md](../../research/docs/load-memory.md#the-environment-on-a-windows-drive)).
+- **The model files:** `HF_HOME` or `HF_HUB_CACHE` pointing into WSL2's own file system, or
+  `--model-dir` a directory there. Each start's load reads every model file once, checking its
+  SHA-256 as it reads: the DiT's 16.5 GB take about 70 s to read and hash from a Windows drive,
+  against about 7 s from Linux's disk, where the hash is the bound.
+- **The output, and so the job's directory:** a tiled pass's scratch file, past its allowance in
+  system memory, sits beside the job's units, and a Windows drive allocates it at 29 MB/s and
+  takes as long again to close it: 18 s each for 509 MB, against 0.005 s and 0.06 s on Linux's
+  disk. Write the output on Linux's disk, and copy the finished file to Windows after.
+- **The compile cache,** which `--compile` keeps in the job's directory: its thousands of small
+  files took a new 1080p job 6 min 23 s to 6 min 27 s to compile on a Windows drive, against
+  4 min 0 s on Linux's disk ([compiling the VAE](#compiling-the-vae---compile)).
+
+The trade-off is the room: 17 GB of model files, and the output's masters (100 to 135 GiB an
+hour of 1080p, [disk use](#disk-use)), inside WSL2's virtual disk.
 
 ## On Windows itself
 
@@ -1687,14 +1797,14 @@ One rule decides all of it: the upscale must look like its source, in any player
   ignores the sample aspect, so its upscale of a 16:9 DVD comes out 16% too narrow (NTSC) or
   30% (PAL). `--input-sar` corrects a wrong or missing tag.
 - **Size.** `--resolution` is the output's short side, a portrait source's too, 1080 by default:
-  numz's default, kept, and a size every card the planner aims at runs (from 8.3 GiB free, where
-  4K takes 22.4). A 1080p source given the default comes out at its own size, redrawn rather
-  than enlarged; a larger source comes out smaller by default, and a line says so, naming the
-  `--resolution` that keeps its size. On two 1080p Blu-ray sources at their own size, judged by
-  eye, a live-action film couldn't be told from its source; on an anime episode, small faces in
-  motion looked redrawn and moving credits' kanji showed artefacts. A clean source leaves a
-  same-size redraw little to repair: the model is made for old or damaged ones. The model works
-  on frames padded to multiples of 16, and the padding is trimmed: the output is the size asked.
+  numz's default, kept, and a size every card the planner aims at runs (from 6.58 GiB free, where 4K
+  takes 11.64; [the plan](#the-plan)). A 1080p source given the default comes out at its own size,
+  redrawn rather than enlarged; a larger source comes out smaller by default, and a line says so,
+  naming the `--resolution` that keeps its size. On two 1080p Blu-ray sources at their own size,
+  judged by eye, a live-action film couldn't be told from its source; on an anime episode, small
+  faces in motion looked redrawn and moving credits' kanji showed artefacts. A clean source leaves a
+  same-size redraw little to repair: the model is made for old or damaged ones. The model works on
+  frames padded to multiples of 16, and the padding is trimmed: the output is the size asked.
   seedvr2x pads with rows mirrored from the picture, then black ones, where numz pads with black
   alone, which costs the bottom 16 rows of its output 3–10 dB
   ([numerics.md](../../research/docs/numerics.md#reflectblack16)).
@@ -1800,8 +1910,7 @@ When the environment is all that differs, the refusal says so and names `--accep
 the tiles, and plans the rest again from the memory free that day: the swapped blocks, what
 stays on the GPU. Its plan's lines say so (`kept from the job's record, so that the output
 stays bit for bit`). If what it recorded no longer fits, it says so early and stops before the
-models load, the job kept ([below](#a-resume-short-of-the-cards-memory)); [under
-WSL2](#under-wsl2) it first tries the reserve of 2.5 GiB.
+models load, the job kept ([below](#a-resume-short-of-the-cards-memory)).
 
 **The directory is the job's.** It must hold what the job's record names and nothing else,
 dotfiles included: a file from anywhere else is refused before anything is written there, never
@@ -2055,17 +2164,20 @@ mid-job, at every new window length. Off by default.
   On an RTX 5090 at 1080p, a new job compiled in 4 min 0 s with its directory on Linux's own
   disk, and a resume in 1 min 31 s. Under WSL2 with the directory on a Windows drive, the
   cache's thousands of small files go through the drive's mount: 6 min 23 s to 6 min 27 s for a
-  new job, 1 min 49 s for a resume, and 8 min 38 s to 8 min 42 s for a new 4K job. `--plan` pays
-  it too, to calibrate the compiled passes.
+  new job, 1 min 49 s for a resume, and 8 min 38 s to 8 min 42 s for a new 4K job. On the 96 GB
+  card's host, the directory on Linux's disk, a new 1080p job of 3 shapes compiled in 1 min 46 s
+  and its resume in 33 s, a new 4K job of 8 shapes in 4 min 9 s and its resume in 1 min 23 s.
+  `--plan` pays it too, to calibrate the compiled passes.
 - **The plan's `compile:` line says how long,** from the job's own tile shapes and its drive:
   about 40 s a shape for a new job and 15 s on a resume on Linux's own disk, 65 s and 20 s on a
   Windows drive. The 1080p job measured had 6 shapes, the 4K one 8: on Linux's disk, 4 min for a
   new job and 1 min 30 s for a resume for 6 shapes, 5 min 20 s and 2 min for 8 shapes. These
   rates were measured on the RTX 5090's host; the compilation is the CPU's work, so another
-  machine's may differ: they are provisional until more are measured. Here is a new 1080p job on
-  a Windows drive, for which the line said 6 min 30 s. The Windows drive's rates were fitted on
-  this job and the 4K one (Linux's on one 1080p job), so this checks the fit, not another
-  machine:
+  machine's may differ: the 96 GB card's host took less than the line said in every case (about
+  2 min, 45 s, 5 min 20 s and 2 min for its four compilations above), and the rates stay
+  provisional until more are measured. Here is a new 1080p job on a Windows drive, for which
+  the line said 6 min 30 s. The Windows drive's rates were fitted on this job and the 4K one
+  (Linux's on one 1080p job), so this checks the fit, not another machine:
 
   ```
   03:55:15 plan: compile: the VAE compiled (--compile), each pass held to 1.1 times its plain peak, in the shapes measured only; compiling its 6 shapes takes about 6 min 30 s for this new job, about 2 min on a resume, its cache warm (measured on an RTX 5090's host, on a Windows drive), paid before the DiT loads, at every start and resume, its cache kept in the job's directory
@@ -2279,7 +2391,10 @@ bar shows either way.
 ### The plan, line by line
 
 This run's plan, its card line as 0.1.0 prints it (0.1.0 adds the smaller DiT files' line after
-the blocks swapped, where one would swap fewer: [small cards](#small-cards)):
+the blocks swapped, where one would swap fewer: [small cards](#small-cards)). Its budget line is
+the earlier build's: the flat reserve of 4.5 GiB beside every step, which 0.1.0 takes only under
+PyTorch's own allocator without the expandable segments, its budget line giving each step's own
+reserve in its place ([under WSL2](#under-wsl2)); the block waits for a run of this version:
 
 ```
 03:35:43 plan: card: NVIDIA GeForce RTX 5090, 14.91 GiB free on the whole card by NVML: the run is held to the card's own memory, its driver giving more than the card has
@@ -2309,9 +2424,11 @@ why it was taken, what it costs, and the option that changes it ([GPU memory](#g
 
 - **card** and **budget:** what the plan counts on. Under WSL2, the whole card's free memory
   (14.91 GiB here, the other program and the desktop holding the rest), less 0.5 GiB left to the
-  card and the 4.5 GiB reserve: 9.91 GiB. On Linux it is one line, the free memory less the 0.6
-  GiB margin. `--verbose` puts a line after the card's with the driver's own figure, which the
-  run isn't held to.
+  card and, in that build, the 4.5 GiB reserve: 9.91 GiB; 0.1.0 counts on the 14.41 and leaves
+  each step its own reserve beyond its peak, which the budget line names. On Linux, on a card
+  nothing else uses, it is one line, the free memory less the 0.6 GiB margin. Under WSL2,
+  `--verbose` puts a line after the card's with the driver's own figure, which the run isn't
+  held to.
 - **frames:** the model works on frames padded to multiples of 16 (the padding is trimmed);
   a latent of this size is 8,280 tokens, what a window's memory and time go by.
 - **shots:** the longest decides the windows: here 42 frames, 12 latents.
@@ -2598,3 +2715,4 @@ A picture keeps none of these: its output is the one file `-o` names.
 | `TORCHINDUCTOR_CACHE_DIR` | PyTorch's compile cache: under `--compile`, replaced by the job's own `compile-cache/` ([compiling the VAE](#compiling-the-vae---compile)). |
 | `PYTORCH_CUDA_ALLOC_CONF`, `PYTORCH_ALLOC_CONF` | PyTorch's allocator. Unless you set one, seedvr2x sets the first: `backend:native,expandable_segments:True` on Linux, WSL2 included, `backend:cudaMallocAsync` on Windows itself ([GPU memory](#what-nvidia-smi-shows)). |
 | `CUDA_VISIBLE_DEVICES` | CUDA's own: which card the job sees. |
+| `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` | PyTorch's: `1` has it compute float32 matrix products in TF32. An int8 DiT is refused where it is `1`, read at the start, `--plan` too; float16 and the GGUF run as before ([the int8 files](#the-int8-files)). |
