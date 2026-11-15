@@ -800,12 +800,12 @@ def _rungs_said(plan: Plan) -> list[str]:
 def _int8_said() -> str:
     """The plan's line of a DiT in int8 (said): its weights' bytes, by its header (peaks.INT8),
     and that a window's memory beside them is counted as fp16's plus the int8 path's buffers
-    (peaks.INT8_BUFFERS), provisional until int8's own is measured (peaks.INT8_*). A DiT in fp16,
-    the default, has no line of its own: weights.check_models' line names it."""
+    (peaks.INT8_BUFFERS), on the side of too much where windows were measured (peaks.INT8_*). A
+    DiT in fp16, the default, has no line of its own: weights.check_models' line names it."""
     return (
         f"DiT: its weights in int8, {_gib(peaks.weights_bytes(peaks.INT8))} GiB, half of fp16's;"
         f" a window's memory counted as fp16's plus {_gib(peaks.INT8_BUFFERS)} GiB for int8's"
-        " buffers until int8's own is measured; --dit-model names the file"
+        " buffers; --dit-model names the file"
     )
 
 

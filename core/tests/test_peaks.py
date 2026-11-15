@@ -273,8 +273,8 @@ def test_the_int8_dit_s_figures() -> None:
     saved = 36 * (453_133_312 - 226_862_080)
     assert peaks.loaded(int8) == peaks.DIT_LOADED - saved
     assert f"{gib(peaks.loaded(int8)):.3f}" == "8.285" and f"{gib(saved):.3f}" == "7.586"
-    # Its window's peak: fp16's with those weights, and the W8A8 path's buffers (provisional,
-    # peaks.INT8_*): the same tokens and windows.
+    # Its window's peak: fp16's with those weights, and the W8A8 path's buffers (peaks.INT8_*, on
+    # the side of too much where measured): the same tokens and windows.
     for padded, latents in ((OURS_1080, 1), (OURS_1080, 20), (OURS_4K, 7)):
         plain = peaks.dit_peak(padded, latents)
         quantised = peaks.dit_peak(padded, latents, dit_model=int8)

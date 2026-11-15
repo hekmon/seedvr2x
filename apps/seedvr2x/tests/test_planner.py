@@ -993,8 +993,8 @@ def test_an_int8_dit_plans_by_its_own_figures() -> None:
     # path's buffers (peaks.dit_peak), its blocks' pinned copies and its VAE phases' share by its
     # blocks' bytes; on cards of 16 to 48 GB at 1080p, a shot of 301 frames, a window as long as
     # fp16's or longer, with fewer blocks swapped or as few, every predicted peak under the
-    # budget, and its line saying int8. The int8 figures beyond the weights are provisional
-    # (peaks.INT8_*).
+    # budget, and its line saying int8. The int8 figures beyond the weights are fp16's and the
+    # path's buffers (peaks.INT8_*), on the side of too much where measured.
     job = (HD, shots(76), Pins(), 64 * GIB)
     for card in (16, 24, 32, 48):
         fp16, fp16_peaks = planner.plan(our_free(card), *job, split=True)
@@ -1042,8 +1042,7 @@ def test_an_int8_dit_plans_by_its_own_figures() -> None:
     said = planner.said(int8_24, int8_24_peaks, "a card", *job[:3])
     assert said_line(said, "DiT") == (
         "plan: DiT: its weights in int8, 7.76 GiB, half of fp16's; a window's memory counted as"
-        " fp16's plus 0.38 GiB for int8's buffers until int8's own is measured; --dit-model names"
-        " the file"
+        " fp16's plus 0.38 GiB for int8's buffers; --dit-model names the file"
     )
     # A recorded plan planned again around its shape, and a resume's refusal, in int8's figures.
     recorded = replace(bare(int8_24), swapped=0, resident_encode=None, resident_decode=None)

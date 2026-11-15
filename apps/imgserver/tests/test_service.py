@@ -1217,7 +1217,7 @@ def test_the_starts_plan_lines_word_their_pointers_as_the_servers_own_options(
     caplog.clear()
     lines, _ = plan_lines(monkeypatch, tmp_path, cpu_models, caplog, 24, dit_format=peaks.INT8)
     assert next(each for each in lines if each.startswith("plan: DiT:")).endswith(
-        "int8's buffers until int8's own is measured; --dit-model names the file"
+        "int8's buffers; --dit-model names the file"
     )
     assert next(each for each in lines if each.startswith("plan: blocks swapped: none")).endswith(
         "the DiT fitting whole on the GPU; --swap-blocks N swaps some"

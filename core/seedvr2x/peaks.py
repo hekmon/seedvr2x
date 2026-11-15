@@ -3,7 +3,7 @@ DiT's peak in a window and where its weights are, the VAE's encode and decode in
 tiled, in bytes, by the fits of research/docs/planner-limits.md and research/docs/vram.md,
 measured on numz's CLI with the 7B fp16 (FP16), and by the peaks measured on seedvr2x's own tiled
 passes (MEASURED); the DiT in seedvr2x's int8 files (INT8) by its weights, read from its files'
-headers, and the fp16 fit's other terms, provisional until measured (INT8_*); the compiled
+headers, and the fp16 fit's other terms with the int8 path's buffers (INT8_*); the compiled
 passes' range; and the store a tiled pass takes. The library's (DESIGN.md, Repository and
 apps), as the bricks are; the planner (shot_plan.py) chooses a job's plan with them.
 Sizes are (height, width) in pixels; `padded` is the frame the model takes, the target padded
@@ -119,14 +119,18 @@ DIT_BUFFERS = 59_643_736
 
 # The DiT in seedvr2x's int8 files (INT8; DESIGN.md, Weights, "int8 before v0.1.0 is tagged"):
 # its peak is the fp16 fit's with its weights' bytes in the place of fp16's (loaded), exact, and
-# these terms, PROVISIONAL (impl-int8, 2026-11-02): nothing of the int8 DiT is measured yet, and
-# DESIGN.md's release gate has the 96 GB card measure them before v0.1.0 is tagged, the planner
-# keeping no blind spot. All of them are here:
+# these terms, written on 2026-11-02 (impl-int8) before any int8 window was measured. Measured on
+# 2026-11-15 on the 96 GB card under Linux's driver and on the RTX 5090 under WSL2's, the sharp
+# 7B's int8 file against its fp16 one (DESIGN.md, Weights, "int8 before v0.1.0 is tagged"): int8's
+# windows peaked 0.42 to 0.45 GiB under their plan, fp16's 0.05 to 0.08 under theirs, in windows
+# of 7 latents and more at 1080p and of 6 at 4K, so that int8's buffers took nothing beyond fp16's
+# figure there. They stay counted, on the side of too much: a picture's window and shorter ones
+# are unmeasured. All of them are here:
 # - INT8_PER_TOKEN and INT8_PER_WINDOW: the fp16 fit's PER_TOKEN and PER_WINDOW, the attention's
 #   constant beside them as beside fp16's (DIT_ATTENTION). Between the linears the activations are
 #   the same tensors, in the pipeline's bfloat16, and a linear's output is the same size; a
 #   linear's input is rounded to bfloat16 W8A8_ROWS rows at a time, where autocast rounds an fp16
-#   linear's input whole. Measured, they would replace these;
+#   linear's input whole;
 # - INT8_BUFFERS: what the W8A8 path holds beside a linear's output while it runs, W8A8_ROWS rows
 #   at a time (seedvr2x/int8.py's linear), by the 7B's block matrices' shapes (W8A8_MATRICES): the
 #   most of three moments, max(8 K, K + 4 N, 8 N) bytes a row for a matrix of K inputs and N
@@ -574,7 +578,7 @@ def dit_peak(
     """The predicted peak of the DiT's phase, in bytes: one window of `latents` latents of padded
     frames, `swapped` of the DiT's blocks swapped, the VAE's weights on the GPU meanwhile unless
     vae_in_dit is False, the DiT in the format of its file (dit_model, one of DITS;
-    ValueError for another): in int8, its weights' bytes and the INT8_* terms (provisional); in a
+    ValueError for another): in int8, its weights' bytes and the INT8_* terms; in a
     dynamic GGUF file, its weights' bytes and GGUF_BUFFERS (measured).
 
     A swapped block takes its BLOCK off the peak, but for the SLOTS on the GPU (DESIGN.md,

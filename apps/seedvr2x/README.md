@@ -331,9 +331,10 @@ different on 67 (preferred on 27, the regular 7B on 8), and it has the same memo
 
 - **The int8 files,** `--dit-model seedvr2x_ema_7b_sharp_int8_convrot.safetensors` or
   `seedvr2x_ema_7b_int8_convrot.safetensors`: the same 7Bs in half the weights, 7.76 GiB in
-  place of 15.35, multiplied in 8 bits. Their memory and speed are measured on the 96 GB card
-  before v0.1.0 is tagged; until then the plan counts a window's memory as float16's, plus
-  int8's buffers.
+  place of 15.35, multiplied in 8 bits. The plan counts a window's memory as float16's, plus
+  int8's buffers, on the side of too much: measured on 2026-11-15, int8's windows peaked under
+  their plan by more than float16's. Fewer blocks swapped, they are no faster for it under
+  Linux's driver, their windows 17 to 30% longer than float16's.
 - **The dynamic GGUF files,** `--dit-model seedvr2x_ema_7b_sharp_dyn.gguf` or
   `seedvr2x_ema_7b_dyn.gguf` (4.8 GB): the model card's 4 GB tier and the closest 4 GB file to
   float16 ([VALIDATION.md](../../models/VALIDATION.md)). A type per block matrix (Q3_K, Q4_K or

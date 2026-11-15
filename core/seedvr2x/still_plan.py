@@ -1717,8 +1717,7 @@ def said(
         lines.append(
             f"DiT: its weights in int8, {_gib(peaks.weights_bytes(peaks.INT8))} GiB, half of"
             f" fp16's; a window's memory counted as fp16's plus {_gib(peaks.INT8_BUFFERS)} GiB for"
-            " int8's buffers until int8's own is measured"
-            + aside(say, f"; {say(Setting('dit_model'))} names the file")
+            " int8's buffers" + aside(say, f"; {say(Setting('dit_model'))} names the file")
         )
     elif plan.dit_model in (peaks.GGUF_7B, peaks.GGUF_7B_SHARP):
         weights_gib = _gib(peaks.weights_bytes(plan.dit_model))
