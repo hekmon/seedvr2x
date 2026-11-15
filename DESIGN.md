@@ -1226,8 +1226,14 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
     reference and the sharp 7B beside it, and seedvr2x's own quality figures, on the sharp 7B.
   - TF32: the rotation is a float32 matmul, so TF32 in cuBLAS would change its codes far
     beyond those figures. It is off by default and seedvr2x never sets it, but
-    `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` forces it: the pass after the card's measurements makes
-    an int8 run refuse it, saying why, as no difference stays silent.
+    `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` forces it, and a program can turn it on in its own
+    process, another custom node in ComfyUI's among them. An int8 run refuses both, saying
+    why, as no difference stays silent (built on 2026-11-15): the variable, which torch
+    reads once as it starts, read by each app before its models load, `--plan` too; torch's
+    own settings (the matmul's `allow_tf32`, the float32 matmul precision and the newer
+    per-backend one) read as each app loads the DiT, and by the nodes at every run, models
+    kept and plan only too. cuDNN's TF32, on by default, stays as it is: the rotation is
+    cuBLAS's.
 - **The dynamic GGUF before v0.1.0 too** (the user, 2026-11-04, for the small cards ComfyUI's
   nodes serve): the model card's 4 GB tier, `seedvr2x_ema_7b_sharp_dyn.gguf` and the regular
   7B's beside it (4.8 GB, each block matrix in Q3_K, Q4_K or Q5_K, chosen among Q3_K to Q8_0
@@ -3641,7 +3647,13 @@ first pass, whose shots are its input, and before the models load:
       5090 on 2026-11-15 (To measure, the cards), a decode in tiles of 960 px is 5.00 MiB
       over its figure, at 1080p and 4K alike and in every shot, where every other side
       measured is 2.4 to 10.2 MiB under: decided that day, that side takes its measure, the
-      larger as for a tile measured twice (to build).
+      larger as for a tile measured twice. Built that day, 15.675 GiB for 15.67; and, the
+      table read again against planner-limits.md's thousandths, the two decodes still under
+      their measure, both of tiles cut off at 720p's rows, take theirs too: 752×832's
+      11.493 GiB for 11.49 and 752×960's 12.694 for 12.69, 3.1 and 4.1 MiB more. Every
+      decode is planned at or over its measure. The encodes keep their hundredth, 16 of
+      them up to 4.3 MiB under their measure, the 0.4 GiB every encode is planned over its
+      peak covering them.
     - Built on 2026-10-12. On nine emulated cards a tiled decode came within 0.02 GiB of its
       measured tile, and a tiled encode 0.39 to 0.41 GiB under its prediction: the 0.4 GiB
       every encode is still taken to hold over its peak, which a measured tile no longer
@@ -5910,7 +5922,7 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   whole card with no room kept ran 4K and 1080p, the hold's margin alone between the run and
   the desktop (0.69 to 1.13 GiB free at the least), nothing held again; and in bytes, the
   960-px decodes are 5.00 MiB over their plan, every other side under (Memory planner,
-  decided that day). int8 at every size on both drivers: Weights.
+  decided and built that day). int8 at every size on both drivers: Weights.
 - **`torch.compile` on the 96 GB card** (see [Memory planner](#memory-planner)). The study ran
   on an RTX 5090 alone: the 96 GB card died before its part
   ([compile.md](research/docs/compile.md)). Left for it:
