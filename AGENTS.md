@@ -335,6 +335,18 @@ beside it; the `__init__.py` is seedvr2x's.
     on named pipes of seedvr2x's own (`media/channel.py`: `pipe:N` takes no inherited handle
     there; ffmpeg given `-y`, which takes the pipe for an existing file), Linux's `pass_fds` as
     before;
+  - the log of ffmpeg's errors, which a decode's strict read takes while ffmpeg runs, read by
+    seedvr2x through an opening of its own (`media/decode.py`, `_logs`), on Linux too: a file
+    another process is writing is never read or mapped by a descriptor sharing the position it
+    writes at (a log read once its writer has exited, as the other logs are, is seedvr2x's
+    alone). Python's mmap on Windows moves the position of the descriptor it maps to 0
+    (CPython's `new_mmap_object`, 3.8 to 3.14); the decoder mapped the log by the descriptor
+    ffmpeg's handle was inherited from, and a stand-in's second piece was written at 0, not 13,
+    the line's start lost (impl-fix-3, 2026-11-16). The log is opened twice: on POSIX its name
+    is removed before ffmpeg starts; on Windows both openings delete it on close
+    (`O_TEMPORARY`, the second because the first's delete access refuses an opening without
+    it), as `tempfile.TemporaryFile` does there, the file gone 0.1 to 1.7 ms after the decode's
+    end (`tests/test_decode.py`'s `on_windows` twin beside its Linux half);
   - every child in a Job Object that kills them when seedvr2x ends (`media/ffmpeg.py`,
     `_in_a_job`, PDEATHSIG's twin: `ends_with_us` returns None there, no preexec_fn); a
     `--segment-cmd` run by cmd.exe (COMSPEC, `/d /v:off /s /c`: no AutoRun, no delayed
@@ -606,8 +618,9 @@ marker. The image server, Linux's alone by its lock, has no such line.
   directory, without `-n`: the tests share the one card.
 - **Windows' cases.** The tests of Windows' twins are named `on_windows` and skip elsewhere, each
   beside a Linux half that holds its words with Windows faked (kernel32 and the platform):
-  `tests/test_channel.py`, `tests/test_files.py`, `tests/test_ends_with_us.py`,
-  `tests/test_segment_cmd_windows.py`, `tests/test_groups.py`, `tests/test_closing.py` and
+  `tests/test_channel.py`, `tests/test_decode.py`, `tests/test_files.py`,
+  `tests/test_ends_with_us.py`, `tests/test_segment_cmd_windows.py`, `tests/test_groups.py`,
+  `tests/test_closing.py` and
   `tests/test_stop.py`'s (the console's Ctrl-C, Ctrl-Break and close sent to a hidden console of
   the test's own). Each project's suite runs natively too, on the CPU, each test running or
   skipping by its reason (impl-win-4, 2026-11-10, the CLI's and the library's again by impl-win-5
