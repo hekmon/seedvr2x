@@ -462,10 +462,13 @@ def test_a_plan_bound_by_the_system_memory_is_rebuilt_from_the_logged_bytes(
     # figure to 0.01 GiB: two decimals of GiB rebuilt it wrongly near a step (found by a sweep of
     # +-0.005 GiB that missed one). Found: the smallest host with a plan other than the one below
     # it, to the byte; the bytes of the log rebuild each side of it. The card's figure picked
-    # where the plan swaps blocks (20 GiB: 11 to 12 of them by the host; the segments' reserve by
-    # step, which takes no flat 4.5 off the figure, holds the DiT whole at 24.8 GiB, where the
-    # host could bind nothing).
-    free = reg.Free(round(20 * GIB), 30 * GIB, True)
+    # where the plan swaps blocks by the host under the allocator each platform's runs take
+    # (readings): at 21 GiB, 11 to 9 of them from 15.98 GiB of host under the segments, 9 to 8
+    # from 15.14 under cudaMallocAsync, Windows'. At 20 the pool swapped 11 whatever the host,
+    # which failed the case natively (impl-wsl2-3, 2026-11-16). The segments' reserve by step,
+    # which takes no flat 4.5 off the figure, holds the DiT whole at 24.8 GiB, where the host
+    # could bind nothing.
+    free = reg.Free(round(21 * GIB), 30 * GIB, True)
 
     def blocks(host: int) -> str:
         lines = reg.planner_says(reg.readings(free, monkeypatch)[0], inputs(), host)
