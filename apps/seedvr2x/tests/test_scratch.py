@@ -639,7 +639,7 @@ def test_passes_keep_nothing_of_the_shot_on_the_device(
         )
         assert [len(held) for held in handed] == [len(given), len(tiled_given)]
         assert given == tiled_given == model.decode_slices(models, latents) and sum(given) == frames
-        assert not (tmp_path / tilegrid.SCRATCH).exists()
+        assert gone(tmp_path / tilegrid.SCRATCH)
         # One figure per call of the VAE: a slice of the shot, and of each tile in a tiled pass.
         uses = [encode, tiled_encode, decode, tiled_decode]
         encodes, decodes = len(model.encode_slices(models, frames)), len(given)
