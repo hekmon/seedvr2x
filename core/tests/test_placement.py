@@ -273,9 +273,12 @@ def test_a_plan_s_load_never_has_the_dit_whole_on_the_device(loaded: Loaded) -> 
 
 def test_the_driver_is_asked() -> None:
     # The startup probe (seedvr2x/memory.py) on a real driver, its calls through ctypes and all:
-    # it answers, in under two seconds, and leaves the card as it found it. A driver reached
-    # without WSL's device refuses what the card can't hold; under WSL, Windows' driver gave it
-    # (driver 616.92, 2026-10-11), and whichever it does now is said in the test's output.
+    # it answers, in under two seconds, and leaves the card as it found it. Linux's driver
+    # refuses what the card can't hold; Windows' gives it, under WSL (driver 616.92, 2026-10-11),
+    # and whichever it does now is said in the test's output, and natively, where Windows itself
+    # is taken for a driver that lends (memory.windows): its figure over the card's by NVML there,
+    # Driver(spills=True, asked=0, free=29566697472, total=34162343936, card=25748246528) beside
+    # the desktop (impl-wsl2-3, 2026-11-16).
     # Asked, by one request of OVER more than it reports free, where that figure and the whole
     # card's by NVML agree within OVER, or the card's isn't read. Not asked where it reports more
     # than the card has by more than OVER, other programs' memory left out of its figure: taken
@@ -301,6 +304,8 @@ def test_the_driver_is_asked() -> None:
     else:
         assert found.spills and found.asked == 0, found
         assert found.free > found.card + memory.OVER, found
-    if not memory.paravirtual():
+    if memory.windows():
+        assert found.spills, found
+    elif not memory.paravirtual():
         assert not found.spills
     assert abs(torch.cuda.mem_get_info(device)[0] - before) < SLACK
