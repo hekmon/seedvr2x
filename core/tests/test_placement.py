@@ -18,6 +18,7 @@ set it); the probe runs under the command line's, cudaMallocAsync.
 import gc
 import hashlib
 import os
+import sys
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -102,6 +103,18 @@ def allocated(device: torch.device) -> int:
     return torch.cuda.memory_allocated(device)
 
 
+# The process's resident memory is read from Linux's /proc alone (resident, measure_resident,
+# host_figures): natively on Windows the setup of the tests that read it refused, no
+# /proc/self/clear_refs (impl-wsl2-3, 2026-11-16). Elsewhere the host's figures are None: the test
+# whose subject they are skips, and the others hold them on Linux alone.
+HOST_READ = sys.platform != "win32"
+LINUX_RESIDENT = pytest.mark.skipif(
+    not HOST_READ,
+    reason="the process's resident memory read from Linux's /proc (VmRSS, VmHWM, clear_refs): a"
+    " Windows twin not yet written",
+)
+
+
 def resident(peak: bool = False) -> int:
     """The process's resident system memory now, in bytes, or with `peak` its most since
     measure_resident: VmRSS and VmHWM of /proc/self/status."""
@@ -114,8 +127,17 @@ def resident(peak: bool = False) -> int:
 
 def measure_resident() -> None:
     """Start the kernel's high-water mark of this process's resident memory again from what
-    is resident now (proc(5): 5 written to /proc/PID/clear_refs)."""
-    Path("/proc/self/clear_refs").write_text("5")
+    is resident now (proc(5): 5 written to /proc/PID/clear_refs), where it is read (HOST_READ)."""
+    if HOST_READ:
+        Path("/proc/self/clear_refs").write_text("5")
+
+
+def host_figures() -> tuple[int | None, int | None]:
+    """The process's resident memory at its most since measure_resident and now, in bytes; None
+    and None where it isn't read (HOST_READ)."""
+    if not HOST_READ:
+        return None, None
+    return resident(peak=True), resident()
 
 
 @dataclass
@@ -127,16 +149,17 @@ class Loaded:
     digests: list[str]
     peak: int
     vae: str
-    # The process's resident system memory at the load's peak, and once loaded, in bytes.
-    host_peak: int
-    host_after: int
+    # The process's resident system memory at the load's peak, and once loaded, in bytes; None
+    # where it isn't read (HOST_READ).
+    host_peak: int | None
+    host_after: int | None
 
 
 @pytest.fixture(scope="module")
 def loaded() -> Iterator[Loaded]:
     measure_resident()
     models = model.load_models(found(DITS), found(VAES), torch.device("cuda:0"))
-    host_peak, host_after = resident(peak=True), resident()
+    host_peak, host_after = host_figures()
     digests, peak = windows(models)
     yield Loaded(models, digests, peak, round_trip(models), host_peak, host_after)
     models.runner.dit = models.runner.vae = None
@@ -195,10 +218,12 @@ def test_swapping_changes_no_bit_and_takes_its_blocks_off_the_peak(loaded: Loade
     assert abs(allocated(device) - away) < SLACK
 
 
+@LINUX_RESIDENT
 def test_a_load_s_peak_in_system_memory_is_what_it_leaves(loaded: Loaded) -> None:
     # The models loaded whole, every weight bound for the device: the process never held the
     # file's pages, 16.5 GiB resident at such a load's peak when it read the file through a
     # mapping, for 1.25 once loaded (this test on that read: 16.48 for 1.22).
+    assert loaded.host_peak is not None and loaded.host_after is not None
     over = loaded.host_peak - loaded.host_after
     assert over < LOAD_OVER, (loaded.host_peak / GIB, loaded.host_after / GIB)
 
@@ -215,12 +240,14 @@ def test_a_plan_s_load_never_has_the_dit_whole_on_the_device(loaded: Loaded) -> 
     plan = ModelPlan(swapped=36, resident_encode=0, resident_decode=0, vae_in_dit=False)
     measure_resident()
     models = model.load_models(found(DITS), found(VAES), device, model_plan=plan)
-    host_peak, host_after = resident(peak=True), resident()
+    host_peak, host_after = host_figures()
     placement, vae = models.placement, models.vae
     assert placement is not None and vae is not None
     # In system memory, the pinned copies and no more: the VAE's weights, cast on the device,
-    # come from the buffer the file is read through, not from a mapping of the file.
-    assert host_peak - host_after < LOAD_OVER, (host_peak / GIB, host_after / GIB)
+    # come from the buffer the file is read through, not from a mapping of the file. Where the
+    # host is read (HOST_READ).
+    if host_peak is not None and host_after is not None:
+        assert host_peak - host_after < LOAD_OVER, (host_peak / GIB, host_after / GIB)
     # The load's peak on the device: the buffers, and the VAE's weights one tensor at a time,
     # cast there on their way to their host copy: never a block of the DiT (0.026 GiB measured).
     assert torch.cuda.max_memory_allocated(device) - before < SLACK
