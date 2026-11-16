@@ -19,7 +19,7 @@ import pytest
 
 from media import ffmpeg
 from media.conversion import PIXEL_FORMATS, Conversion
-from media.decode import Decoder, decode_command, to_float32
+from media.decode import Decoder, _logs, decode_command, to_float32
 from media.ffmpeg import MediaError, input_args
 from media.probe import probe
 from media.reader import FramesLeft
@@ -38,6 +38,11 @@ def _usable() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _usable(), reason="needs ffmpeg 7.1 or later with zscale, idet and ffv1"
+)
+
+on_windows = pytest.mark.skipif(sys.platform != "win32", reason="Windows' delete on close")
+on_posix = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX's removal of an open file's name"
 )
 
 WIDTH, HEIGHT = 64, 16  # multiples of 4: 4:1:1 and 4:1:0 included
@@ -698,35 +703,37 @@ class _Process:
 
 
 def test_strict_read_takes_a_line_of_the_log_whole() -> None:
-    # ffmpeg writes a line in pieces ("[ffv1 @ 0x...] " then the message) into the log it shares
-    # with the decoder: a strict read that failed at the first piece killed ffmpeg before the
-    # rest and read "[ffv1 @ 0x...]" alone, without "slice CRC mismatch" (seen under load). A
-    # line is taken once it ends, or the log's last once ffmpeg has exited.
+    # ffmpeg writes a line in pieces ("[ffv1 @ 0x...] " then the message) into the log, which the
+    # decoder reads by an opening of its own: a strict read that failed at the first piece killed
+    # ffmpeg before the rest and read "[ffv1 @ 0x...]" alone, without "slice CRC mismatch" (seen
+    # under load). A line is taken once it ends, or the log's last once ffmpeg has exited.
     decoder = object.__new__(Decoder)
     process = _Process()
     decoder._strict = True
     decoder._process = process  # type: ignore[assignment]
-    decoder._log = tempfile.TemporaryFile()
-    descriptor = decoder._log.fileno()
+    writing, decoder._log = _logs()
+    descriptor = writing.fileno()
     decoder._check()  # nothing reported
     os.write(descriptor, b"[ffv1 @ 0x55d0c8] ")
     decoder._check()  # a piece of a line: ffmpeg is still writing it
     os.write(descriptor, b"slice CRC mismatch 1234\n")
     with pytest.raises(MediaError, match=r"fails a strict read: \[ffv1 @ 0x55d0c8\] slice CRC"):
         decoder._check()
+    writing.close()
     # ffmpeg gone with a last line that has no newline: the log is whole, taken as it is.
     decoder = object.__new__(Decoder)
     decoder._strict = True
     decoder._process = process  # type: ignore[assignment]
-    decoder._log = tempfile.TemporaryFile()
-    descriptor = decoder._log.fileno()
+    writing, decoder._log = _logs()
+    descriptor = writing.fileno()
     os.write(descriptor, b"[ffv1 @ 0x55d0c8] slice CRC mismatch")
     decoder._check()
     process.exited = True
     with pytest.raises(MediaError, match=r"fails a strict read: .*slice CRC mismatch$"):
         decoder._check()
+    writing.close()
     # A line written in two pieces by a process of its own, a delay between: never taken cut.
-    log = tempfile.TemporaryFile()
+    writing, log = _logs()
     writer = subprocess.Popen(
         [
             sys.executable,
@@ -734,8 +741,9 @@ def test_strict_read_takes_a_line_of_the_log_whole() -> None:
             "import os, sys, time; os.write(2, b'[ffv1 @ 0x1] '); time.sleep(1);"
             " os.write(2, b'slice CRC mismatch\\n')",
         ],
-        stderr=log,
+        stderr=writing,
     )
+    writing.close()
     decoder = object.__new__(Decoder)
     decoder._strict = True
     decoder._process = writer  # type: ignore[assignment]
@@ -748,6 +756,114 @@ def test_strict_read_takes_a_line_of_the_log_whole() -> None:
         while True:
             decoder._check()
             time.sleep(0.05)
+
+
+# A stand-in for ffmpeg writing a line in two pieces on its stderr, the decoder's log, the second
+# once the file `go` exists, and noting in the file `positions` its stderr's position, the offset
+# it writes at, after the first piece, before the second and after it. Then alive, as ffmpeg
+# decoding ahead, until it is killed.
+PIECES = r"""
+import os, sys, time
+go, positions = sys.argv[1:3]
+def note():
+    with open(positions, "a") as file:
+        file.write(f"{os.lseek(2, 0, os.SEEK_CUR)}\n")
+os.write(2, b"[ffv1 @ 0x1] ")
+note()
+deadline = time.monotonic() + 30
+while not os.path.exists(go) and time.monotonic() < deadline:
+    time.sleep(0.01)
+note()
+os.write(2, b"slice CRC mismatch\n")
+note()
+time.sleep(60)
+"""
+
+
+def _noted(positions: Path, count: int) -> list[int]:
+    """The positions PIECES noted, once there are `count` of them."""
+    deadline = time.monotonic() + 30
+    while not positions.exists() or len(positions.read_text().split()) < count:
+        assert time.monotonic() < deadline, "the stand-in noted no position in 30 s"
+        time.sleep(0.01)
+    return [int(noted) for noted in positions.read_text().split()]
+
+
+def _left(directory: Path, within: float) -> list[str]:
+    """The names in directory once it is empty, or once `within` seconds have passed."""
+    deadline = time.monotonic() + within
+    while any(directory.iterdir()) and time.monotonic() < deadline:
+        time.sleep(0.001)
+    return sorted(path.name for path in directory.iterdir())
+
+
+def _a_line_in_two_pieces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[list[int], str, list[str]]:
+    """A strict decode whose ffmpeg is PIECES, checked three times between the pieces, its own
+    opening of the log moved to the log's start after each check, as Windows' mmap moved the
+    descriptor it mapped (media/decode.py, _logs), the temporary directory tmp_path/temporary: the
+    positions the stand-in noted, the strict read's message and the names in the directory while
+    the stand-in runs."""
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temporary))
+    go, positions = tmp_path / "go", tmp_path / "positions"
+    command = [sys.executable, "-c", PIECES, str(go), str(positions)]
+    monkeypatch.setattr("media.decode.decode_command", lambda *_: command)
+    decoder = Decoder([], RGB16, WIDTH, HEIGHT, strict=True)
+    try:
+        _noted(positions, 1)
+        running = sorted(path.name for path in temporary.iterdir())
+        for _ in range(3):
+            decoder._check()  # a piece of a line: ffmpeg is still writing it
+            decoder._log.seek(0)
+        go.touch()
+        noted = _noted(positions, 3)
+        with pytest.raises(MediaError) as raised:
+            decoder._check()
+    finally:
+        decoder.stop()
+    return noted, str(raised.value), running
+
+
+@on_posix
+def test_ffmpeg_writes_its_log_at_a_position_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Whatever seedvr2x's reads do to the position of its own opening of the log, the one ffmpeg
+    # writes at stays where ffmpeg left it: the line whole, its first piece never overwritten. The
+    # name is gone before ffmpeg starts, the file with the last of the two.
+    noted, message, running = _a_line_in_two_pieces(tmp_path, monkeypatch)
+    assert noted == [13, 13, 32]
+    assert message.endswith("which fails a strict read: [ffv1 @ 0x1] slice CRC mismatch")
+    assert running == [] and _left(tmp_path / "temporary", within=0) == []
+
+
+@on_windows
+def test_on_windows_ffmpeg_writes_its_log_at_a_position_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Windows' twin: the log named while ffmpeg runs, as tempfile.TemporaryFile's is there, both
+    # openings deleting it on close, so that it goes with the last handle on it, ffmpeg's or
+    # seedvr2x's; an opening that doesn't share that is refused. Mapped by the descriptor whose
+    # position ffmpeg's handle shared, as the decoder read it before, the log lost its line's
+    # start there, Python's mmap moving that position to 0: [13, 0, 19] natively (impl-fix-3,
+    # 2026-11-16).
+    noted, message, running = _a_line_in_two_pieces(tmp_path, monkeypatch)
+    assert noted == [13, 13, 32]
+    assert message.endswith("which fails a strict read: [ffv1 @ 0x1] slice CRC mismatch")
+    # Gone once the killed ffmpeg's handle is: 0.1 to 1.7 ms after the decode's end natively, as
+    # before the change (impl-fix-3, 2026-11-16).
+    assert len(running) == 1 and _left(tmp_path / "temporary", within=5) == []
+    writing, reading = _logs()
+    try:
+        with pytest.raises(PermissionError):
+            open(writing.name, "rb")  # refused: nothing to close
+    finally:
+        writing.close()
+        reading.close()
+    assert _left(tmp_path / "temporary", within=0) == []
 
 
 def test_checksums_catch_what_ffmpeg_decodes_silently(tmp_path: Path) -> None:

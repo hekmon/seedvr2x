@@ -1,15 +1,15 @@
 """Decoding to 16-bit RGB through an ffmpeg pipe, frames read as they are needed."""
 
 import io
-import mmap
 import os
 import subprocess
+import sys
 import tempfile
 import zlib
 from collections import deque
 from collections.abc import Sequence
 from types import TracebackType
-from typing import Self, cast
+from typing import IO, BinaryIO, Self, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -85,20 +85,26 @@ class Decoder:
         # ffmpeg's errors go to a file rather than a pipe: ffmpeg never waits on it, and its size
         # says at once whether ffmpeg has reported anything (strict).
         try:
-            self._log = tempfile.TemporaryFile()
+            writing, self._log = _logs()
         except OSError as error:
             what = f"decoding with ffmpeg: no temporary file for its errors: {error}"
             raise MediaError(what) from error
         # In a process group of its own, out of reach of the terminal's Ctrl-C, which only
         # seedvr2x handles (stop.py).
-        self._process = subprocess.Popen(
-            decode_command(input_args, conversion),
-            stdout=subprocess.PIPE,
-            stderr=self._log,
-            process_group=0,
-            creationflags=NEW_GROUP,
-            preexec_fn=ends_with_us(),
-        )
+        try:
+            self._process = subprocess.Popen(
+                decode_command(input_args, conversion),
+                stdout=subprocess.PIPE,
+                stderr=writing,
+                process_group=0,
+                creationflags=NEW_GROUP,
+                preexec_fn=ends_with_us(),
+            )
+        except BaseException:
+            self._log.close()
+            raise
+        finally:
+            writing.close()  # ffmpeg's alone from here: seedvr2x reads by its own opening
         assert self._process.stdout is not None
         # Buffered, as Popen opens it by default.
         self._stdout = cast(io.BufferedReader, self._process.stdout)
@@ -194,18 +200,19 @@ class Decoder:
     def _check(self) -> None:
         """When strict, fail if ffmpeg has reported anything yet: a line once it ends, or the
         log's last line once ffmpeg has exited. ffmpeg writes a line in pieces (a context's
-        address, then its message), and the log is shared with it at one offset, so that a
-        failure taken at the first piece killed ffmpeg before the rest: the message read
-        "[ffv1 @ 0x...]" without "slice CRC mismatch" (test_strict_read_enforces_slice_crcs under
-        load). The next check, or the one after the exit, sees the line whole."""
+        address, then its message), so that a failure taken at the first piece killed ffmpeg
+        before the rest: the message read "[ffv1 @ 0x...]" without "slice CRC mismatch"
+        (test_strict_read_enforces_slice_crcs under load). The next check, or the one after the
+        exit, sees the line whole."""
         if not self._strict:
             return
         size = os.fstat(self._log.fileno()).st_size
         if not size:
             return
-        # A mapping reads the log's end without moving the offset ffmpeg writes at.
-        with mmap.mmap(self._log.fileno(), size, access=mmap.ACCESS_READ) as seen:
-            ended = seen[size - 1 : size] == b"\n"
+        # By seedvr2x's own opening of the log, whose position is not the one ffmpeg writes at
+        # (_logs).
+        self._log.seek(size - 1)
+        ended = self._log.read(1) == b"\n"
         if ended or self._process.poll() is not None:
             raise self._error("an error reported, which fails a strict read")
 
@@ -215,11 +222,48 @@ class Decoder:
         self._process.wait()
         errors = ""
         if not self._log.closed:
-            self._log.seek(0)  # ffmpeg is done writing at the offset the file shares with it
+            self._log.seek(0)
             lines = deque(self._log, maxlen=20)
             errors = " / ".join(line.decode(errors="replace").strip() for line in lines)
             self._log.close()
         return MediaError(f"decoding with ffmpeg: {what}" + (f": {errors}" if errors else ""))
+
+
+def _logs() -> tuple[IO[bytes], BinaryIO]:
+    """A new temporary file for ffmpeg's errors, opened twice, each opening with a position of its
+    own: the first for ffmpeg to write by (its stderr), the second for seedvr2x to read by. A file
+    another process is writing is never read or mapped by a descriptor sharing the position it
+    writes at; a log read once its writer has exited, as the other logs are (media/reader.py,
+    checksums.py, assembly.py), is seedvr2x's alone. Python's mmap on Windows moves the position of
+    the descriptor it maps to 0 (CPython 3.13's Modules/mmapmodule.c, new_mmap_object's lseek), and
+    ffmpeg's handle, inherited from it, shares that position. A strict read that mapped the log so
+    lost the start of ffmpeg's line natively: a stand-in writing "[ffv1 @ 0x1] " then "slice CRC
+    mismatch", three checks between, wrote its second piece at offset 0, not 13 (impl-fix-3,
+    2026-11-16).
+
+    The file goes with its last opening, whatever ends seedvr2x and ffmpeg: on POSIX its name is
+    removed once both are open, before ffmpeg starts. Windows removes no open file: both openings
+    take O_TEMPORARY (FILE_FLAG_DELETE_ON_CLOSE), as tempfile.TemporaryFile's own there, the
+    second because the first's delete access refuses any opening that doesn't share it (a second
+    opening without it: PermissionError, natively). OSError where the temporary directory takes
+    no file."""
+    if sys.platform == "win32":
+        writing = tempfile.NamedTemporaryFile()
+        try:
+            flags = os.O_RDONLY | os.O_BINARY | os.O_NOINHERIT | os.O_TEMPORARY
+            return writing, open(os.open(writing.name, flags), "rb")
+        except BaseException:
+            writing.close()
+            raise
+    descriptor, name = tempfile.mkstemp()
+    try:
+        reading = open(name, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    finally:
+        os.unlink(name)
+    return open(descriptor, "wb", buffering=0), reading
 
 
 def to_float32(frames: npt.NDArray[np.uint16]) -> npt.NDArray[np.float32]:
