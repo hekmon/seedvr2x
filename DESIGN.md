@@ -80,11 +80,13 @@ never requires it.
 ### Not in the first version
 - AMD/ROCm (still images and the image server are in v0.1.0 since 2026-11-02:
   [Repository and apps](#repository-and-apps), step 3)
-- Windows and macOS: v0.2.0, the multi-platform version and the one with every model file
-  (the user: Windows on 2026-10-24, macOS and the files with it on 2026-11-04). Linux runs it,
-  WSL2 included.
-- ComfyUI's nodes, published: with v0.2.0, on Linux, Windows and macOS (the user,
-  2026-11-04). Their design and code begin before v0.1.0, run from a local ComfyUI
+- macOS: v0.2.0, the version with every model file (the user: macOS and the files with it on
+  2026-11-04). v0.1.0 runs on Linux, WSL2 included, and on Windows, with a card of its own
+  memory (the user, 2026-11-17; Windows had been v0.2.0's since 2026-10-24, and the command
+  has run natively there since 2026-11-09, impl-win-2 to 5); a machine whose CPU and GPU share
+  one memory is v0.2.0's.
+- ComfyUI's registry: the nodes are in v0.1.0, on Linux and Windows (the user, 2026-11-17),
+  and go to ComfyUI's registry with v0.2.0 and macOS
   ([Repository and apps](#repository-and-apps), step 4)
 - A job's work directory away from its output file (the user asked, on 2026-10-24, for the
   scratch on one disk and the file on another): its masters live there, as large as the file.
@@ -173,7 +175,11 @@ never requires it.
     DVD (97% over the whole). Its counts go in the manifest, for information.
 - Windows and macOS: Linux first, since inference is mostly a Linux world. Both come in
   v0.2.0, first-class (the user: Windows on 2026-10-24, macOS with it and both first-class on
-  2026-11-04, ComfyUI's nodes needing them). Windows starts with an analysis of:
+  2026-11-04, ComfyUI's nodes needing them). Decided again on 2026-11-17 (the user): Windows,
+  on a card of its own memory, is v0.1.0's with Linux, the command and the nodes stable there;
+  what this file leaves to v0.2.0 on Windows itself (the share kept back for its desktop, a
+  resume's early reading by NVML) is v0.1.0's now, settled or shipped as provisional and said
+  so. Windows starts with an analysis of:
   - `torch.compile`'s Triton there: none in PyTorch's Windows build, so `--compile` is refused
     on Windows, saying why (built 2026-11-09, impl-win-2); FlashAttention 2 is gone since
     2026-11-08, SDPA, the one kernel, working everywhere
@@ -269,12 +275,15 @@ seedvr2x/                the repository
   [The image server](#the-image-server)'s. In v0.1.0 with the CLI's still images (the user,
   2026-11-02), built and measured with the rest, neither holding the release if it isn't
   ready with it.
-- **ComfyUI's nodes, begun before v0.1.0 and published with v0.2.0** (the user: after v0.1.0
-  on 2026-11-02, in it on 2026-11-03, published with v0.2.0 on 2026-11-04). ComfyUI is where
+- **ComfyUI's nodes, in v0.1.0, in ComfyUI's registry with v0.2.0** (the user: after v0.1.0
+  on 2026-11-02, in it on 2026-11-03, published with v0.2.0 on 2026-11-04; in v0.1.0 on Linux
+  and Windows, the registry with v0.2.0 and macOS, on 2026-11-17: their GPU checks, video-3,
+  and the user's runs from start to end in a ComfyUI on each are v0.1.0's). ComfyUI is where
   most users will meet seedvr2x first, on their own cards, small ones included: the nodes show
   what seedvr2x brings, and send users on to the CLI for the rest. Their specification began
   on 2026-11-04 (the user):
-  - **Published with v0.2.0.** With seedvr2x's own placement (below), Windows and macOS are
+  - **Published with v0.2.0** (the plan of 2026-11-04; since 2026-11-17 in v0.1.0, the
+    registry with v0.2.0). With seedvr2x's own placement (below), Windows and macOS are
     first-class for the nodes: the library runs right there, not only imports. Their design and
     code begin now, in `apps/comfyui/`, installed by hand into a local ComfyUI for
     development (ComfyUI v0.44.0 under WSL2, the library installed editable in its
@@ -904,8 +913,9 @@ In steps:
    later, takes the same four modules. Built on 2026-11-03 (impl-still), on the CPU, no video
    plan moving over the plan matrix's 5,480 cases. Neither holds the release if it isn't ready
    with the rest; the roadmap shows them under next until then.
-4. ComfyUI's nodes, begun before v0.1.0 and published with v0.2.0 (the user, 2026-11-04),
-   assembling the same bricks, built by a conductor of their own. Their specification, begun
+4. ComfyUI's nodes, begun before v0.1.0 and published with v0.2.0 (the user, 2026-11-04; in
+   v0.1.0 since 2026-11-17, ComfyUI's registry with v0.2.0), assembling the same bricks, built
+   by a conductor of their own. Their specification, begun
    on 2026-11-04 (above), waited for two things, both done that day: the measurement of
    ComfyUI's own SeedVR2 and numz's nodes beside seedvr2x, and the shot's pass moved to the
    library (above). Specified on 2026-11-05 (above) and built that day (impl-nodes): the
@@ -2233,6 +2243,13 @@ Decided by the user on 2026-11-09, on impl-win-4's renders of the user's dark an
   frame, keep 55 and 61% of it, lost by the resize itself (the float32 resize alone keeps
   50 to 54%), not by the casts. `gradfun`'s dither reaches it at about half its amplitude,
   as texture, the resize halving it (84% of it in the bright cartoon's flat fields).
+- **Dropped as an option** (the user, 2026-11-17): `--deband` goes, and the deband runs
+  inside `--quality animation`
+  ([Each frame on its own](#each-frame-on-its-own---quality-animation)). The eyes found it a
+  gain on animation (two dark shaded animations and the user's dark animation) and a loss of
+  detail on live action (two films, 2026-11-11), and on an animation that needed none it
+  changed nothing (2026-11-16). Its chain, its fingerprint, the settings' key and the record's
+  field stay, the level taking them.
 
 ## Pipeline, per shot
 
@@ -2557,7 +2574,8 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   in 1 of 2 loops, the other the same.
 - **The option:** `--quality standard|enhanced|maximum` (the user, 2026-10-20: a name a user
   understands, the runs a shot being the code's): `standard` by default, one run a shot;
-  `enhanced`, 2 runs; `maximum`, 4 runs.
+  `enhanced`, 2 runs; `maximum`, 4 runs; and since 2026-11-17 `animation`, each frame on its
+  own ([below](#each-frame-on-its-own---quality-animation)).
 - **Validated** on 2026-10-21. On the 96 GB card, `maximum` gave measurement's 4-run
   composite and `enhanced` its 2-run composite, 45 of 45 frames each, bit for bit
   (cartoon-bright at 1080p, untiled, numz's draw and padding, no correction). On an RTX 5090,
@@ -2567,6 +2585,60 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   `yuv420p10le` or PNG, with `split` or none, nor of the float frames dumped (a CPU test
   against the frames kept in float). Milestone 7's long runs were `standard` alone
   (2026-10-28): left, the user's eyes on a long run at a level above it.
+
+### Each frame on its own: `--quality animation`
+
+Decided on 2026-11-17 (the user, on impl-box-7's renders of six shots of an animated episode
+against impl-box-6's): a fourth level, which upscales each frame of a shot on its own, in a
+latent of its own, every frame from the shot's noise, the source debanded. Built before
+v0.1.0, in the command line and in the nodes.
+- **Why.** The packing that makes `maximum` worth its runs (above) also blends drawings. On
+  six shots of an animated episode, 720p to 1080p with the sharp 7B (impl-box-7, 2026-11-17),
+  every frame was a new drawing in 132 of the 170 groups (some 16-px block changing its mean
+  by more than 2 codes), and at `standard` a group's first frame carried about a quarter of
+  the later frames' lines (0.26 and 0.29 of them on a shot of fast motion, on high-passed
+  luma), its third 0.05. The VAE alone, each latent decoded as encoded, made none (within
+  0.013), so the DiT's step blends them. A frame alone in its latent measured within 0.005,
+  `maximum`'s choice of run within 0.011; the eyes still saw ghosts at `maximum` when played,
+  and none with each frame on its own.
+- **The noise.** Each frame made a shot of its own, seeded as a shot is, by its first frame,
+  flickered where the picture holds still: its mean change from frame to frame 0.11 to 0.30
+  8-bit codes over `standard`'s, 1.0 on a vertical pan. With the same noise for every frame,
+  the still parts came back to `standard`'s level on three shots (1.12, 1.10 and 1.02 against
+  1.15, 1.11 and 1.21), two thirds of the extra gone on the pan and a third on a slow shot
+  held on threes; where the picture moves, steadier than `standard` on five shots of six
+  (4.44 against 5.00 on the first), 2% less on the sixth, and `maximum` steadier there on five
+  shots of six (the pan: 3.97 against 4.43).
+  So every frame of a shot takes the shot's noise, the shot's seed as today, its first
+  frame's.
+- **The eyes** (the user, 2026-11-17, against `maximum`): sharper, firmer lines, the faces
+  better; no ghosting when played; the 16-px columns gone from a sky (weaker by the measure
+  too: 0.75 of `standard`'s amplitude, a new noise for each frame). Against it: a simpler,
+  softer sky with fewer colour levels, a little noise in hair where `maximum`'s flat colours
+  are clean, and a little flicker on the pan, less than `standard`'s. The user: "If I had to
+  choose, oneframe" (impl-box-7's name for it), and the episode as `standard` leaves it is not
+  shippable.
+- **Cost.** 1.8 times `standard`'s time: 6 min 47 s for a shot of 206 frames, against 3 min
+  47 s and `maximum`'s 11 min 13 s, on the 96 GB card. The DiT runs a latent for every frame
+  where `standard` runs one for four; the VAE's passes cost about the same.
+- **The source debanded** (the user, 2026-11-17): the level takes `--deband`'s place
+  ([Banded sources](#banded-sources---deband)): ffmpeg's `deband` in the command line's reads,
+  as `--deband` ran it, and in the nodes a deband in torch, written from the algorithm's
+  description, held to ffmpeg's by a test within a measured margin (the nodes' conversion is
+  held to zscale's so). To measure first, the night of 2026-11-17: whether the level still
+  needs it (the deband study's banded scenes and its scenes at risk, with it and without),
+  and what it does to the softer sky; if it isn't needed, the level runs without it, and the
+  option goes all the same.
+- **Not measured:** live action, so the level is advised for animation alone until it is;
+  its sharpness by a number (the eyes judged it).
+- **Parked** (the user, 2026-11-17): a held drawing's frames packed into one latent (a cut at
+  each new drawing, impl-box-7's `drawings`): 16% faster than each frame on its own on a shot
+  animated on threes and a little steadier there (0.64 against 0.74), the same in fast
+  action, where every frame is a new drawing; a change of drawing the rule misses would be
+  packed and blended, on content not tested.
+- **The option:** `--quality animation`, and the nodes' quality widget (the user, 2026-11-17:
+  a level, since a frame on its own leaves `maximum`'s runs nothing to choose; its name says
+  when to take it).
 
 ## Colour correction
 
