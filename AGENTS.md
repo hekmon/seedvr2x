@@ -640,7 +640,10 @@ marker. The image server, Linux's alone by its lock, has no such line.
   launcher whose child is the interpreter. Run natively with `-n 4` for the CLI, its basetemp on a
   local disk. A card another program uses is asked under Linux's driver alone (`memory.startup`),
   so its cases read Linux's platform natively on Windows, as `tests/test_memory.py`'s do (its
-  `_Platform` in memory's `sys`, never the process's): `tests/test_share.py` by its autouse
+  `_Platform` in memory's `sys`, never the process's; its GPU tests, which read the card through
+  the real libraries, keep the process's own: with Linux's, `test_the_card_s_free_memory_is_read`
+  asked natively for Linux's NVML and read None, impl-wsl2-4, 2026-11-17): `tests/test_share.py`
+  by its autouse
   `linux_unless_faked`, taken from it by name, and the CLI's shared and unshared runs of
   `tests/test_cli_run.py` by `shared_card` (impl-batch-1's review, 2026-11-13: both failed natively
   before, read and not yet run there).

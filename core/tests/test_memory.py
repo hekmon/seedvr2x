@@ -303,14 +303,19 @@ class _Platform:
 
 
 @pytest.fixture(autouse=True)
-def linux_unless_faked(monkeypatch: pytest.MonkeyPatch) -> None:
+def linux_unless_faked(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """memory reads the platform from its own `sys`, which is Linux's for every test here that
     doesn't fake Windows (`monkeypatch.setattr(memory.sys, "platform", "win32")`): natively on
     Windows the code would ask for nvcuda.dll and nvml.dll, take cudaMallocAsync for the default
     and read no expandable segments, where these tests' stand-ins and expectations are Linux's
     (63 of them failed natively, 2026-11-10). The Windows cases are the faked ones; a
-    proxy, never the process's `sys.platform`, which subprocess and pathlib read."""
-    if sys.platform == "win32":
+    proxy, never the process's `sys.platform`, which subprocess and pathlib read.
+
+    Not for a test marked gpu: it reads the card through the process's own platform, the real
+    libraries of the platform it runs on. Natively on Windows the proxy asked for Linux's
+    libnvidia-ml.so.1 and `memory.card_free(0)` was None in 3 of 3 fresh processes, where
+    nvml.dll and nvcuda.dll gave an int every time outside this file (impl-wsl2-4, 2026-11-17)."""
+    if sys.platform == "win32" and request.node.get_closest_marker("gpu") is None:
         monkeypatch.setattr(memory, "sys", _Platform("linux"))
 
 
