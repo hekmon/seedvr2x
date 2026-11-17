@@ -379,7 +379,7 @@ def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(
     import gc
     from fractions import Fraction
 
-    from test_still_cli import scene
+    from test_still_cli import check_none_refused, refused_allocations, scene
 
     import main as cli
     from seedvr2x import memory, peaks
@@ -423,6 +423,25 @@ def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(
     try:
         models = model.load_models(dit, vae, device, None, made.model_plan)
         from_memory(monkeypatch, frames)
+        # A clip.upscale first at the case's level, its output dropped: under the cap the
+        # process's first pass met 20 refused cuDNN workspaces in the VAE's untiled encode and
+        # gave other bits, the passes after it none, agreeing bit for bit, and uncapped every pass
+        # agreed (impl-wsl2-4, 2026-11-17); a refused workspace's kernels are kept for the
+        # process's life (peaks.py:436-442).
+        clip.upscale(
+            models,
+            frames,
+            target,
+            SEED,
+            window=made.window,
+            encode_tiles=made.encode_tiles,
+            decode_tiles=made.decode_tiles,
+            correct=True,
+            quality=level,
+        )
+        # num_ooms is torch's own allocator's count; cudaMallocAsync's stats have none, and
+        # nothing is checked there.
+        refused_before = refused_allocations(device)
         told: list[tuple[str, int, int]] = []
         ours = clip.upscale(
             models,
@@ -447,12 +466,14 @@ def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(
             level,
             target,
         )
+        refused_after = refused_allocations(device)
         print(f"peak allocated {torch.cuda.max_memory_allocated(device) / GIB:.2f} GiB")
     finally:
         del models
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.set_per_process_memory_fraction(1.0, device)
+    check_none_refused(refused_before, refused_after)
     # Each run in two windows (a run from frame 3 has 22 frames: 7 latents still), the last run
     # the shortest.
     runs = job.QUALITY[level]

@@ -873,9 +873,14 @@ marker. The image server, Linux's alone by its lock, has no such line.
   refused; `test_clip_cli.py` each level bit for bit to the shot's pass run run by run as
   `run.py` does (`runs_pipeline`: the shot from the run's first frame, `Correction`'s `first`,
   the shot's seed), 1 to 3 windows, tiled and not, corrected and not, and under `-m gpu` the
-  sharp 7B at standard and at maximum. The plan is the same at
-  every level (the runs one after the other, the first the longest): the plan matrix's both halves
-  unmoved by the move of the choice to the library.
+  sharp 7B at standard and at maximum, each case after a pass of the library's own at its level:
+  under the test's cap a cuDNN workspace refused runs other kernels for the process's life (on the
+  RTX 5090, natively and under WSL2, the first pass's untiled encode met 20 refusals and its bits
+  differed from the later passes', which agreed among themselves; uncapped, every pass agreed:
+  impl-wsl2-4, 2026-11-17), so both sides compared come after it, and an allocation refused while
+  they run fails the test as a refusal, not as other bits. The plan is the same at every level
+  (the runs one after the other, the first the longest): the plan matrix's both halves unmoved by
+  the move of the choice to the library.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
   `test_pull_cli.py` holds what the command line does over it. `tests/test_pull_lines.py` holds a

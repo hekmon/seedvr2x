@@ -217,6 +217,30 @@ def scene(height: int, width: int, seed: int) -> npt.NDArray[np.float32]:
     return np.clip(pixels, 0, 1).astype(np.float32)
 
 
+def refused_allocations(device: torch.device) -> int | None:
+    """The allocations torch's own allocator has refused so far on `device` (memory_stats'
+    num_ooms), or None where the stats have no such key (cudaMallocAsync's)."""
+    return torch.cuda.memory_stats(device).get("num_ooms")
+
+
+def check_none_refused(before: int | None, after: int | None) -> None:
+    """The compared passes of a GPU test met no refused allocation (`refused_allocations` the
+    same before and after them; nothing checked where the stats have no count). Under the cap
+    these tests set, the clip test's first pass (test_clip_cli.py) met 20 refused allocations on
+    the RTX 5090, natively and under WSL2 (impl-wsl2-4, 2026-11-17), cuDNN's workspaces of the
+    VAE's causal convolutions in the plan's untiled encode (18 of 796 MiB, one of 2,062 and one
+    of 2,694 MiB): a refused workspace runs other kernels, and 99.836% of the values differed, at
+    most 0.158986 natively and 0.075906 under WSL2; the passes after it, in the same process, met
+    none and agreed bit for bit (peaks.py:436-442)."""
+    if before is None or after is None:
+        return
+    assert after == before, (
+        f"{after - before} allocations were refused while the compared passes ran: a refused"
+        " cuDNN workspace runs other kernels, and the passes then differ. This is the test's"
+        " room (the cap it sets), not a path that differs"
+    )
+
+
 @pytest.mark.gpu
 @pytest.mark.skipif(not GPU_MODELS, reason="needs SEEDVR2X_MODEL_DIR")
 @pytest.mark.parametrize("case", GPU_CASES)
