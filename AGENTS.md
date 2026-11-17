@@ -1641,7 +1641,8 @@ marker. The image server, Linux's alone by its lock, has no such line.
   frame, tiled and corrected, and under `-m gpu` on CUDA with the sharp 7B and the VAE from
   `SEEDVR2X_MODEL_DIR`, untiled at 720p, the plan's own at 1080p, and both passes tiled at 1080p
   pinned to 1728 and 1024 px, the models placed by the plan for one picture in the card's free
-  memory less 4 GiB left to the desktop (the smaller of the driver's and NVML's readings); a picture
+  memory less 4 GiB left to the desktop (the smaller of the driver's and NVML's readings), each
+  case after a pass of the library's own, as `test_clip_cli.py`'s GPU cases; a picture
   told by its content whatever its name, a video named `.png` sent to the video path; every option
   of the parser taken or refused on a still (a new one unclassified fails), each refusal; `-o`'s
   rules and a write that fails leaving nothing; `--plan` alone saying the plan, loading and writing

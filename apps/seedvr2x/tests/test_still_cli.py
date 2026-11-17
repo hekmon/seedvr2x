@@ -318,6 +318,21 @@ def test_a_picture_is_a_shot_of_one_frame_on_the_gpu(
             yield lambda n: pixels[None][:n]
 
         monkeypatch.setattr(shot, "_copy_reader", copy_reader)
+        # A pass of the library's own first, its output dropped, as test_clip_cli.py's GPU test
+        # runs one: there, under the same cap, the process's first pass met 20 refused cuDNN
+        # workspaces and gave other bits, the passes after it none (impl-wsl2-4, 2026-11-17).
+        still.upscale(
+            models,
+            pixels,
+            target,
+            SEED,
+            encode_tiles=tiles.encode,
+            decode_tiles=tiles.decode,
+            correct=True,
+        )
+        # num_ooms is torch's own allocator's count; cudaMallocAsync's stats have none, and
+        # nothing is checked there.
+        refused_before = refused_allocations(device)
         ours = still.upscale(
             models,
             pixels,
@@ -336,12 +351,14 @@ def test_a_picture_is_a_shot_of_one_frame_on_the_gpu(
             Correction(Path("input.mkv"), Path("input.crc32"), size[1], size[0]),
             target,
         )
+        refused_after = refused_allocations(device)
         print(f"peak allocated {torch.cuda.max_memory_allocated(device) / GIB:.2f} GiB")
     finally:
         del models
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.set_per_process_memory_fraction(1.0, device)
+    check_none_refused(refused_before, refused_after)
     assert ours.shape == expected.shape == (out_height, out_width, 3)
     assert ours.dtype == expected.dtype == np.float32
     assert ours.std() > 0.05
