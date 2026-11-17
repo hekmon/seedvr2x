@@ -609,7 +609,10 @@ marker. The image server, Linux's alone by its lock, has no such line.
   (`gradients` picks its line's points at random without `seed`), and an x264 or x265 source whose
   test needs a keyframe or a frame type at a frame has it from its options (keyint and min-keyint
   equal, `scenecut=0`), never from x264's reading of the content (`tests/test_deband.py`'s seek
-  test, whose keyframes moved with its unseeded gradients, 2026-11-15). The exception is
+  test, whose keyframes moved with its unseeded gradients, 2026-11-15), and an ICC profile is
+  made once and kept, LittleCMS stamping its creation time into it to the second
+  (`tests/test_still_cli.py`'s `srgb_profile`: two made a second apart failed a comparison,
+  2026-11-17). The exception is
   `tests/test_index.py`'s `ENCODES`, which keep the encoders' own choices on `testsrc2`, a content
   the same every time (their open GOPs, and the frames its damage tests overwrite at packets 100
   and 101); x264 itself isn't always the same (of 80 encodes, 16 at a time, 2 decoded to other

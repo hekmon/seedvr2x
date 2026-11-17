@@ -26,6 +26,7 @@ import zlib
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from fractions import Fraction
+from functools import cache
 from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
@@ -558,6 +559,10 @@ def png_written(pixels: npt.NDArray[np.float32], bits: int, made: record.Record)
     )
 
 
+# Made once for the file: LittleCMS stamps a profile's creation time into its header to the second
+# (bytes 24 to 35), so two made a second apart differ, and the WebP test that made one for its
+# source and another to compare with failed once in a run of this file (2026-11-17).
+@cache
 def srgb_profile() -> bytes:
     return ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
 
