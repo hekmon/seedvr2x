@@ -109,10 +109,16 @@ possible:
 
 ## Roadmap
 
-- **In development: version 0.1.0,** on Linux, one GPU per job:
+- **In development: version 0.1.0,** on Linux and Windows, one GPU per job, a card with its own
+  memory:
   - **The `seedvr2x` command** for long videos and for still pictures
     (`uv run seedvr2x photo.png --resolution 2160 -o photo.2160p.png`), through the same
     models, tiling and colour correction.
+  - **A quality for animation,** `--quality animation`: each frame upscaled on its own, from
+    one noise for the whole shot, so that drawings changing from frame to frame stay apart
+    and the picture stays steady where it holds still.
+  - **ComfyUI nodes,** built on the same library, for ComfyUI's own workflows: pictures, and
+    videos written to a file shot by shot.
   - **An image server:** pictures over HTTP, the models loaded once and kept on the GPU, in a
     container.
   - **The 7B in smaller files,** for smaller cards: int8, 8.3 GB, and the dynamic GGUF, 4.8 GB,
@@ -122,12 +128,10 @@ possible:
     that it runs the same model. Since then seedvr2x's own outputs are its reference, and the
     model code changes wherever a measurement shows a gain.
 - **Next, after 0.1.0:**
-  - **Version 0.2.0, Windows, macOS and every model file:** the `seedvr2x` command on Windows
-    and on macOS (Apple's M chips), Linux and WSL2 running it today; and the 7B's other smaller
+  - **Version 0.2.0, macOS and every model file:** the `seedvr2x` command and the nodes on
+    macOS (Apple's M chips), the nodes in ComfyUI's registry; and the 7B's other smaller
     files, already published: fp8, NVFP4 and the other GGUF types, 4.8 to 8.8 GB instead of
     16.5.
-  - **ComfyUI nodes,** built on the same library, for ComfyUI's own workflows, on pictures and
-    clips that fit in RAM: begun, published with version 0.2.0, on Linux, Windows and macOS.
 - **Later:**
   - **Several GPUs for one job,** one process per card, each taking its own shots.
   - **HDR sources,** their HDR10 metadata carried to the output.
