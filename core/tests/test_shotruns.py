@@ -16,9 +16,35 @@ from seedvr2x.shots import Shot
 
 
 def test_the_levels_and_their_runs() -> None:
-    assert QUALITY == {"standard": 1, "enhanced": 2, "maximum": 4}
+    assert QUALITY == {"standard": 1, "enhanced": 2, "maximum": 4, "animation": 1}
     assert RUN_OFFSETS == {1: (0,), 2: (0, 2), 4: (0, 1, 2, 3)}
     assert set(RUN_OFFSETS) == set(QUALITY.values())
+
+
+def test_animation_takes_each_frame_alone_and_reads_its_source_debanded() -> None:
+    # One run a shot, whole, each of its frames through the pass alone (DESIGN.md, Each frame on
+    # its own), and the one level that reads its source debanded.
+    assert shotruns.EACH_FRAME == {"animation"} and shotruns.DEBANDED == {"animation"}
+    assert [level for level in QUALITY if shotruns.each_frame(level)] == ["animation"]
+    assert [level for level in QUALITY if shotruns.debanded(level)] == ["animation"]
+    shot = Shot(30, 90)
+    assert shot_runs(shot, QUALITY["animation"]) == [Run(shot, 0)]
+    assert kept_frames(shot, QUALITY["animation"]) == 0
+    assert shotruns.taken_from(7, QUALITY["animation"]) == [0] * 7
+
+
+def test_a_frame_alone_is_a_window_of_one_latent() -> None:
+    assert shotruns.frame_layout(1) == [(0, 1)]
+    assert shotruns.frame_layout(4) == [(0, 1), (1, 2), (2, 3), (3, 4)]
+    with pytest.raises(ValueError):
+        shotruns.frame_layout(0)
+
+
+def test_a_level_that_takes_each_frame_alone_is_planned_as_a_shot_of_one_frame() -> None:
+    shots = [Shot(0, 10), Shot(10, 300), Shot(300, 301)]
+    for level in ("standard", "enhanced", "maximum"):
+        assert shotruns.planned_shots(shots, level) == shots
+    assert shotruns.planned_shots(shots, "animation") == [Shot(0, 1)]
 
 
 def test_a_runs_place_counts_from_its_first_frame() -> None:

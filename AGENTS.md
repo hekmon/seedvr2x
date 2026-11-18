@@ -37,12 +37,17 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
                          master, 16-bit 4:4:4 YCbCr, BT.709, limited range
     clip.py              a clip's frames in memory, a call a shot (its seed by the shot's first
                          frame, the clip's one output array written into), upscaled on models
-                         already loaded, its plan for the clip's shots (shot_plan's, the output
-                         and the windows and scratch kept in system memory counted)
-    shotruns.py          the runs of a shot (the levels of `--quality` and the nodes' quality,
-                         each run's first frame, the run each frame is taken from, the frames
-                         kept between runs), plain Python; the CLI's job.py imports it, clip.py
-                         runs a clip by it
+                         already loaded, at animation each frame alone as a clip of one frame at
+                         the clip's seed, its plan for the clip's shots (shot_plan's, the output
+                         and the windows and scratch kept in system memory counted; at animation
+                         a frame's)
+    shotruns.py          the runs of a shot (the four levels of `--quality`, standard, enhanced,
+                         maximum and animation, and the nodes' quality, each run's first frame,
+                         the run each frame is taken from, the frames kept between runs; the
+                         levels that take each frame alone, `EACH_FRAME`, and that read their
+                         source debanded, `DEBANDED`, animation each; a frame alone's windows,
+                         `frame_layout`, and the shots a plan is made for, `planned_shots`),
+                         plain Python; the CLI's job.py imports it, clip.py runs a clip by it
     shotcuts.py          the cuts drawn from the shot detector's probabilities (Cut, detections,
                          detected, possible, the default and the possible cuts' thresholds) and a
                          time's form (timecode, the CLI's and the nodes'), plain Python and NumPy;
@@ -863,7 +868,8 @@ marker. The image server, Linux's alone by its lock, has no such line.
   frames), in 1 to 3 windows, each tiled pass alone and both, corrected and not, and under
   `-m gpu` on CUDA with the sharp 7B in two windows. The runs of a shot (`seedvr2x/shotruns.py`;
   `quality` of `clip.upscale`, the nodes' `quality`): `core/tests/test_shotruns.py` holds the levels
-  (standard 1 run, enhanced 2 from frames 0 and 2, maximum 4 from 0 to 3), the run each frame is
+  (standard 1 run, enhanced 2 from frames 0 and 2, maximum 4 from 0 to 3, animation 1, each frame
+  alone and its source debanded), the run each frame is
   taken from against the closed forms written out apart, a short shot having fewer runs, the
   frames kept between runs and their bytes, and the module importing no torch (the rule held to
   measurement's composer stays the CLI's `tests/test_runs.py`, through `job`'s re-exports, which
@@ -883,7 +889,15 @@ marker. The image server, Linux's alone by its lock, has no such line.
   impl-wsl2-4, 2026-11-17), so both sides compared come after it, and an allocation refused while
   they run fails the test as a refusal, not as other bits. The plan is the same at every level
   (the runs one after the other, the first the longest): the plan matrix's both halves unmoved by
-  the move of the choice to the library.
+  the move of the choice to the library. Each frame alone, `--quality animation` (DESIGN.md, Each
+  frame on its own: one run a shot, each frame through the pass as a shot of one frame, at the
+  shot's seed): `test_shotruns.py` holds its flags (`each_frame`, `debanded`), `frame_layout` and
+  `planned_shots`; `test_clip.py` its output equal bit for bit to clips of each frame alone at the
+  clip's seed, 1, 2 and 5 frames, tiled and not, corrected and not, each frame's encode and noise
+  seeded by the clip's seed and its draw a latent's, the steps and phases frame by frame ("frame"
+  first), a Cancel between frames leaving nothing alive, a NaN naming its frame, and the plan a
+  frame's (`planned_shots`), the whole output taken off the host, the other levels' plans as
+  before.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
   `test_pull_cli.py` holds what the command line does over it. `tests/test_pull_lines.py` holds a

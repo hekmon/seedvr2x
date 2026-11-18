@@ -76,10 +76,10 @@ class Model:
 @dataclass(frozen=True)
 class Video:
     """What a video's record holds besides a picture's: the cap on the DiT windows the plan chose,
-    in latents (0: each shot in one window, uncapped), --quality's level (standard, enhanced or
-    maximum), whether the VAE was compiled (--compile), whether the job was planned again on a
-    resume (--accept-env-change: its values are then the job's plan, each unit's own in its
-    manifest), and its cuts: cut_threshold, the threshold they were detected at as the job's
+    in latents (0: each shot in one window, uncapped), --quality's level (standard, enhanced,
+    maximum or animation), whether the VAE was compiled (--compile), whether the job was planned
+    again on a resume (--accept-env-change: its values are then the job's plan, each unit's own in
+    its manifest), and its cuts: cut_threshold, the threshold they were detected at as the job's
     settings write it ("0.3"), or cuts_sha256, the SHA-256 of the list --cuts named
     (cuts_sha256()), one of the two; and deband, the filter the frames were read through
     (--deband: "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0",

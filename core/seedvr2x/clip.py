@@ -6,19 +6,19 @@ does (Models.enter), so that a node can call it in a loop on the models it keeps
 
 A clip is a shot, Shot(0, T), seeded as such (shots.Shot.seed), and the pass is the shot's own
 (seedvr2x/shot_pass.py): encode_shot, sample_windows over the layout of shots.shot_layout,
-merge_windows, decode_shot with the colour correction read from the frames in memory. So the
-output is bit for bit what the command line gives the same frames as a shot of one run, and, at
-`quality` enhanced or maximum, as a shot of 2 or 4 runs (shotruns; apps/seedvr2x/tests/
-test_clip_cli.py holds both): the runs are made one after the other, each fed the shot from its
-first frame, whole, and each writes into the one output array only the frames shotruns.run_of
-takes from it. A clip cut into shots is one call a shot, `start` giving the shot's place in the
-clip (its seed, as the command line seeds it) and `output` the clip's array to write into. What
-differs is where things wait, all in system memory: each window's output goes to the CPU as soon
-as it is made, as the command line writes it to a file (units.Units.save_window), and is merged
-there; a tiled pass keeps its scratch in tiling.InMemory, whole, at 12.7 MB a 1080p frame; the
-output is one array, allocated once, nothing kept between a shot's runs but that array, and the
-host holds one run's latent and windows at a time, the first run's, the longest. The plan counts
-them (plan), at every level."""
+merge_windows, decode_shot with the colour correction read from the frames in memory. So the output
+is bit for bit what the command line gives the same frames as a shot of one run, at `quality`
+enhanced or maximum, as a shot of 2 or 4 runs, and at animation, as a shot each of whose frames goes
+alone (shotruns; apps/seedvr2x/tests/test_clip_cli.py holds them): the runs are made one after the
+other, each fed the shot from its first frame, whole, and each writes into the one output array only
+the frames shotruns.run_of takes from it. A clip cut into shots is one call a shot, `start` giving
+the shot's place in the clip (its seed, as the command line seeds it) and `output` the clip's array
+to write into. What differs is where things wait, all in system memory: each window's output goes to
+the CPU as soon as it is made, as the command line writes it to a file (units.Units.save_window),
+and is merged there; a tiled pass keeps its scratch in tiling.InMemory, whole, at 12.7 MB a 1080p
+frame; the output is one array, allocated once, nothing kept between a shot's runs but that array,
+and the host holds one run's latent and windows at a time, the first run's, the longest; at
+animation, one frame's. The plan counts them (plan), at every level."""
 
 import traceback
 from collections.abc import Callable, Generator, Iterator, Sequence
@@ -46,15 +46,16 @@ from seedvr2x.shot_pass import (
 )
 from seedvr2x.shot_plan import Peaks, Pins, PlanError
 from seedvr2x.shot_plan import plan as shot_plan
-from seedvr2x.shotruns import QUALITY, shot_runs, taken_from
+from seedvr2x.shotruns import QUALITY, each_frame, planned_shots, shot_runs, taken_from
 from seedvr2x.shots import Shot, shot_layout
 from seedvr2x.weights import Architecture
 
 __all__ = ["NonFinite", "Stage", "Step", "Tile", "output_bytes", "plan", "upscale"]
 
 # The steps a clip is made of, as `step` is told them: the one encode, each DiT window, and the
-# decode's frames, of each run; and, with several runs, the start of each ("run").
-Stage = Literal["run", "encode", "window", "decode"]
+# decode's frames, of each run; with several runs, the start of each ("run"); with each frame
+# alone, the start of each frame ("frame").
+Stage = Literal["run", "frame", "encode", "window", "decode"]
 
 # step(stage, done, total), called between the steps of upscale: ("encode", 1, 1) after the encode;
 # ("window", n, windows) after the n-th window; ("decode", frames, T) after each slice of the
@@ -62,6 +63,9 @@ Stage = Literal["run", "encode", "window", "decode"]
 # With several runs (`quality` enhanced or maximum), ("run", n, runs) is told first, before the
 # n-th run's encode, and the steps after it are that run's, counted from its own first frame;
 # with one run, standard's, none is told, and the steps are as they were before runs existed.
+# With each frame alone (`quality` animation, shotruns.each_frame), ("frame", n, T) is told before
+# the n-th frame's encode, and the steps after it are that frame's: ("encode", 1, 1), ("window", 1,
+# 1) and ("decode", 1, 1).
 Step = Callable[[Stage, int, int], None]
 
 # tile(pass, done, total), told by a tiled encode or decode of upscale: the tiles done of the
@@ -88,6 +92,7 @@ def plan(
     correct: bool,
     dit_model: Architecture = peaks.FP16,
     held: bool = False,
+    quality: str = "standard",
 ) -> tuple[Plan, Peaks]:
     """The plan for one clip in memory, resized to `target`: shot_plan.plan of its shots, with
     `free` (bytes, or the reading the run made), `pins`, `host_available` (bytes of system memory;
@@ -105,11 +110,14 @@ def plan(
     window or refuses the clip, as for any host short of memory. The plan is the same at every
     `quality` level (upscale): the runs are made one after the other, the first run is the whole
     shot and the longest, and a later one is shorter, so that no run holds more than it, in
-    system memory or on the card. ValueError for no frame."""
+    system memory or on the card. At a level that takes each frame alone (shotruns.each_frame:
+    animation), the plan is a frame's, a shot of one frame (shotruns.planned_shots), each frame
+    going alone through the passes, the output array still the clip's. ValueError for no frame."""
     cut = [Shot(0, shots)] if isinstance(shots, int) else list(shots)
     if not cut or any(each.frames < 1 for each in cut):
         raise ValueError("a clip of no frame")
     frames = sum(each.frames for each in cut)
+    cut = planned_shots(cut, quality)
     taken = output_bytes(frames, target)
     available = host_available
     if available is not None:
@@ -215,14 +223,18 @@ def upscale(
     and 2, or 0 to 3 (shotruns.shot_runs; a clip too short to have a run's first frame has no
     such run), each a whole run of its own with its windows and its correction against the same
     input frames from its first frame; the output's frames are those each run gives
-    (shotruns.run_of), written into the one array as each run decodes them. tail_frames is the
+    (shotruns.run_of), written into the one array as each run decodes them. At animation
+    (shotruns.each_frame), each frame of the clip goes alone, frame after frame, as a shot of one
+    frame seeded by the clip's seed: its own encode, a window of one latent, its decode and its
+    correction against its own frame, written into its place in the array. tail_frames is the
     plan's (Plan.tail_frames): each run's decode with its tail a frame at a time, on for the
     decode and off after it, whatever ends it.
 
     The steps one after the other, a phase entered before each (Models.enter): the encode, each
     window with its output sent to system memory as it is made, the windows merged, and the decode
-    written into the output slice by slice; a run after the other. step, when given, is told
-    after each (Step; and before each run, with several); it may raise anything, BaseException
+    written into the output slice by slice; a run after the other, or a frame after the other.
+    step, when given, is told after each (Step; and before each run, with several, or each frame,
+    with each frame alone); it may raise anything, BaseException
     included, to stop the clip: nothing is then left on the device by this call, the decode closed
     and the frames of the failing call released, but what the models hold, and the output holds
     the frames the runs made (a stopped call's output is the caller's to drop). tile, when given,
@@ -252,16 +264,22 @@ def upscale(
     taken = np.asarray(taken_from(count, level))
     try:
         with model.marking(models.device):
-            for number, each in enumerate(runs, 1):
-                if step is not None and len(runs) > 1:
-                    step("run", number, len(runs))
-                _run(
-                    *(models, frames, each.offset, target, clip_seed, output),
-                    *(window, encode_tiles, decode_tiles, correct, step, start),
-                    taken == each.offset,
-                    tile,
-                    tail_frames,
+            if each_frame(quality):
+                _frames_alone(
+                    *(models, frames, target, clip_seed, output, encode_tiles, decode_tiles),
+                    *(correct, step, start, tile, tail_frames),
                 )
+            else:
+                for number, each in enumerate(runs, 1):
+                    if step is not None and len(runs) > 1:
+                        step("run", number, len(runs))
+                    _run(
+                        *(models, frames, each.offset, target, clip_seed, output),
+                        *(window, encode_tiles, decode_tiles, correct, step, start),
+                        taken == each.offset,
+                        tile,
+                        tail_frames,
+                    )
     except BaseException as error:
         # Whatever stopped the clip, a step's cancel included: the frames of the calls it passed
         # through hold the slice being corrected on the device, and would keep it for as long as
@@ -272,6 +290,37 @@ def upscale(
         model.unless_failed(models.device, lambda: traceback.clear_frames(traceback_))
         raise
     return output
+
+
+def _frames_alone(
+    models: Models,
+    frames: npt.NDArray[np.float32],
+    target: tuple[int, int],
+    seed: int,
+    output: npt.NDArray[np.float32],
+    encode_tiles: Tiles | None,
+    decode_tiles: Tiles | None,
+    correct: bool,
+    step: Step | None,
+    start: int,
+    tile: Tile | None,
+    tail_frames: bool,
+) -> None:
+    """Each frame of the clip alone (shotruns.each_frame), frame after frame: frame f through the
+    pass as the clip of that frame alone is, a shot of one frame with the clip's `seed` (the
+    frame's latent of its own, a window of one latent, its correction against its own frame),
+    written into output[f]. `start` is the clip's first frame in its source."""
+    alone = np.ones(1, dtype=np.bool_)
+    count = frames.shape[0]
+    for frame in range(count):
+        if step is not None:
+            step("frame", frame + 1, count)
+        _run(
+            *(models, frames[frame : frame + 1], 0, target, seed, output[frame : frame + 1]),
+            *(None, encode_tiles, decode_tiles, correct, step, start + frame, alone),
+            tile,
+            tail_frames,
+        )
 
 
 def _run(

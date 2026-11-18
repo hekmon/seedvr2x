@@ -1,10 +1,12 @@
 """The runs of a shot, and the frames each one keeps (DESIGN.md, Several runs of a shot, an option
-for quality): the levels of `--quality` and `quality`, each run's first frame in its shot, and the
-run each of a shot's frames is taken from. A brick of the library, plain Python and no torch: the
-command line plans, records and resumes by it, and clip.py runs a clip's shots by it, so that both
-choose the same frames. A module of its own, not shots.py: shots.py is the shot and its windows,
-which every pass imports; this is the layer above it that only a job with several runs reads."""
+for quality): the levels of `--quality` and `quality`, each run's first frame in its shot, the run
+each of a shot's frames is taken from, and the levels that take each frame of a shot alone. A brick
+of the library, plain Python and no torch: the command line plans, records and resumes by it, and
+clip.py runs a clip's shots by it, so that both choose the same frames. A module of its own, not
+shots.py: shots.py is the shot and its windows, which every pass imports; this is the layer above it
+that a job's level reads."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from seedvr2x.shots import Shot
@@ -17,8 +19,28 @@ RUN_OFFSETS: dict[int, tuple[int, ...]] = {1: (0,), 2: (0, 2), 4: (0, 1, 2, 3)}
 # The levels of --quality, each with its runs a shot (DESIGN.md, Several runs of a shot: the user,
 # 2026-10-20, a name a user understands, the runs a shot being the code's): standard, the default,
 # one run; enhanced two, offered on the user's blind verdict (two runs beat one on 7 of 8 stills);
-# maximum four (four beat two on 7 of 8).
-QUALITY = {"standard": 1, "enhanced": 2, "maximum": 4}
+# maximum four (four beat two on 7 of 8); animation one, each of its frames through the pass alone
+# (EACH_FRAME).
+QUALITY = {"standard": 1, "enhanced": 2, "maximum": 4, "animation": 1}
+
+# The levels whose run takes each frame of its shot alone (DESIGN.md, Each frame on its own:
+# `--quality animation`, decided on 2026-11-17): a frame upscaled as a shot of one frame is, in a
+# latent of its own, its own encode, a window of one latent, its decode and its colour correction
+# against its own source frame, every frame with the shot's seed (Shot.seed), so that the noise
+# does not change from frame to frame inside a shot. On six shots of an animated episode the DiT
+# blended a latent's 4 drawings, a quarter of the later frames' lines in a group's first, none in a
+# frame alone; a new noise for each frame flickered where the picture held still, the shot's noise
+# brought it back to standard's level (impl-box-7). The output of a shot is bit for bit the shot's
+# pass run on each of its frames as a one-frame shot seeded by the shot's seed, frame after frame
+# (core/tests/test_clip.py; the command line's, apps/seedvr2x/tests/test_clip_cli.py).
+EACH_FRAME = frozenset({"animation"})
+
+# The levels that read their source debanded (DESIGN.md, Each frame on its own: "the source
+# debanded", the user, 2026-11-17): the command line through ffmpeg's deband in its reads, which
+# --deband ran until the option went into the level. The one place that says so: the night of
+# 2026-11-17 measures whether the level still needs it, and a level without it is one name less
+# here.
+DEBANDED = frozenset({"animation"})
 
 # A frame's places in a run, best first (DESIGN.md, Several runs of a shot): its first frame, a
 # latent of its own (-1), then the last of a group of 4 (3), the one a latent is stamped on in the
@@ -98,6 +120,34 @@ def taken_from(shot_frames: int, runs: int) -> list[int]:
     return [run_of(runs, frame) for frame in range(shot_frames)]
 
 
+def each_frame(level: str) -> bool:
+    """Whether `level`, a level of QUALITY, takes each frame of a shot alone (EACH_FRAME)."""
+    return level in EACH_FRAME
+
+
+def debanded(level: str) -> bool:
+    """Whether `level`, a level of QUALITY, reads its source debanded (DEBANDED)."""
+    return level in DEBANDED
+
+
+def frame_layout(frames: int) -> list[tuple[int, int]]:
+    """The windows of a shot of `frames` frames whose frames are each taken alone (each_frame), in
+    latents: one latent a frame, each a window of its own, [(0, 1), (1, 2), ...]."""
+    if frames < 1:
+        raise ValueError(f"a shot of {frames} frames")
+    return [(frame, frame + 1) for frame in range(frames)]
+
+
+def planned_shots(shots: Sequence[Shot], level: str) -> list[Shot]:
+    """The shots a plan is made for at `level`: the shots themselves, or, where each frame is
+    taken alone (each_frame), a shot of one frame, which each of their frames is, so that the
+    plan's windows, passes and pins are a frame's (the longest shot decides a plan,
+    shot_plan.plan). The shots' own count and lengths still say the job's frames and time."""
+    if each_frame(level):
+        return [Shot(0, 1)]
+    return list(shots)
+
+
 def kept_frames(shot: Shot, runs: int) -> int:
     """The frames of shot its runs but the last give, which wait on disk while its runs are
     decoded in turn (apps/seedvr2x/run.py, Kept): none with one run."""
@@ -118,14 +168,20 @@ def kept_bytes(shot: Shot, runs: int, size: tuple[int, int]) -> int:
 
 
 __all__ = [
+    "DEBANDED",
+    "EACH_FRAME",
     "KEPT_SAMPLE_BYTES",
     "PLACES_BEST_FIRST",
     "QUALITY",
     "RUN_OFFSETS",
     "Run",
+    "debanded",
+    "each_frame",
+    "frame_layout",
     "kept_bytes",
     "kept_frames",
     "place",
+    "planned_shots",
     "run_of",
     "shot_runs",
     "taken_from",
