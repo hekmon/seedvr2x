@@ -94,6 +94,20 @@ class Refused(Exception):
             self.line = line
 
 
+def level_refused(level: object, levels: Sequence[str]) -> str:
+    """Upscale Video's quality given a value its widget doesn't offer (a link may carry anything):
+    the levels it has; for animation, the library's level the nodes don't offer yet (their deband
+    in torch is still to come, plans.LEVELS), that seedvr2x's command line has it."""
+    have = f"choose {', '.join(levels[:-1])} or {levels[-1]}"
+    if level == "animation":
+        return (
+            "quality 'animation', each frame upscaled on its own, isn't in these nodes yet: it"
+            f" reads the video debanded, which they don't do yet; seedvr2x's command line has it."
+            f" Here, {have}."
+        )
+    return f"quality {level!r}: must be one of {', '.join(levels)}."
+
+
 # ---- A setting, as the nodes call it -------------------------------------------------------------
 
 

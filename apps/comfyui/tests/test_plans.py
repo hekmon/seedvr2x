@@ -436,7 +436,10 @@ def test_quality_is_a_combo_of_the_levels_on_upscale_video_alone_in_a_users_word
     assert "quality" not in schema_inputs(nodes.UpscaleImage)
     quality = schema_inputs(nodes.UpscaleVideo)["quality"]
     assert quality.io_type == "COMBO" and quality.display_name == "quality"
-    assert quality.options == list(QUALITY) == ["standard", "enhanced", "maximum"]
+    # The library's levels but animation, which the nodes don't offer until their deband in torch
+    # (plans.LEVELS).
+    assert quality.options == list(plans.LEVELS) == ["standard", "enhanced", "maximum"]
+    assert [level for level in QUALITY if level not in plans.LEVELS] == ["animation"]
     assert quality.default == "standard" and not quality.optional
     # MANUAL.md's section, in a ComfyUI user's words: the runs, each frame from the run that
     # rebuilds it best, the gain where there is motion, none on a still shot, the cost in time;

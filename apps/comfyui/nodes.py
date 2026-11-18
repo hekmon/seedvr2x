@@ -416,7 +416,7 @@ def _correction_inputs() -> list[Any]:
 def _quality_input() -> Any:
     return io.Combo.Input(
         "quality",
-        options=list(QUALITY),
+        options=list(plans.LEVELS),
         default=plans.QUALITY_DEFAULT,
         display_name=plans.LABELS["quality"],
         # MANUAL.md, Several runs of a shot: 2 or 4 times the time, no more memory; sharper lines
@@ -904,11 +904,9 @@ class UpscaleVideo(io.ComfyNode):
         with _refusing(show):
             show(progress.PLANNING)
             _checked(models)
-            if quality not in QUALITY:
+            if quality not in plans.LEVELS:
                 # A combo is held to its options at queue time; a link may carry anything.
-                raise words.Refused(
-                    f"{plans.LABELS['quality']} {quality!r}: must be one of {', '.join(QUALITY)}."
-                )
+                raise words.Refused(words.level_refused(quality, plans.LEVELS))
             settings = _settings(
                 window=window,
                 encode_tile=encode_tile,

@@ -1982,7 +1982,11 @@ marker. The image server, Linux's alone by its lock, has no such line.
   model's grid and given in latents, a number off the grid refused queued or linked, a value no
   value node gives refused at the upscale node's start; every input and output with a
   label and a tooltip, none in the library's terms; the colour correction a BOOLEAN, split or
-  none, `quality` a combo (standard, enhanced, maximum) on Upscale Video alone, its tooltip's
+  none, `quality` a combo of the library's three levels that pack a shot's frames in its latents
+  (`plans.LEVELS`: standard, enhanced, maximum; animation, which reads its source debanded, not
+  offered until the nodes' own deband in torch, and refused in their words where a link gives it,
+  before anything loads, `words.level_refused`: `tests/test_nodes.py`) on Upscale Video alone, its
+  tooltip's
   points (among them the pulse at standard, one frame in four closer to the original than the
   three before it and looking sharper, the measure and the eye said apart, never "is sharper",
   and maximum's every frame from a run where it is rebuilt closest; nothing said of enhanced's,

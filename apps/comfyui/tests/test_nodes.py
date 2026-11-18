@@ -488,6 +488,19 @@ def test_a_level_the_node_does_not_have_is_refused_before_anything_loads(
             handle(tmp_path), plans.Settings(window=5), frames, RESOLUTION, quality="ultra"
         )
     assert len(machine.loads) == loads
+    # The library's animation, which the nodes don't offer yet (plans.LEVELS): refused in the
+    # nodes' words, the levels they have named, before anything loads.
+    with pytest.raises(words.Refused) as caught:
+        upscale_video(
+            handle(tmp_path), plans.Settings(window=5), frames, RESOLUTION, quality="animation"
+        )
+    assert str(caught.value) == (
+        "quality 'animation', each frame upscaled on its own, isn't in these nodes yet: it reads"
+        " the video debanded, which they don't do yet; seedvr2x's command line has it. Here,"
+        " choose standard, enhanced or maximum."
+    )
+    assert "--" not in str(caught.value)
+    assert len(machine.loads) == loads
 
 
 def test_the_runs_of_a_shot_are_one_pass_a_shot_its_frames_into_the_one_file(
