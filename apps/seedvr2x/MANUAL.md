@@ -690,7 +690,7 @@ Measured ([numerics.md](../../research/docs/numerics.md)):
 There is no strength or detail option in version 1. What remains of the over-rendering goes
 both ways with the content, and the one global blend measured washes lines out to the eye.
 
-### Banded sources: `--deband`
+### Banded sources: the deband of `--quality animation`
 
 An 8-bit source's smooth gradient comes in steps of one code, about 0.4% of the range, which no
 eye sees in the source. On a dark animated sky both 7B models drew them as contour lines across
@@ -698,8 +698,9 @@ the gradient, at `standard` and at `maximum`, which the eye sees: most likely wh
 source leaves the steps as wide flat plateaus with hard borders, the grain that would hide them
 taken off by its encoder.
 
-`--deband` smooths the steps before the model sees them: ffmpeg's own `deband` without its blur
-and with its four thresholds at 0.012
+`--quality animation` ([each frame on its own](#each-frame-on-its-own---quality-animation))
+smooths the steps before the model sees them, as the option `--deband` did before it went into
+the level: ffmpeg's own `deband` without its blur and with its four thresholds at 0.012
 (`deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0`), on every frame the job reads,
 brought to 16 bits first so that the values it puts between two codes are kept, then converted
 to RGB as any read is. On that sky it brought the terraces under a plain bicubic upscale's, where
@@ -711,27 +712,19 @@ to 8.2%, keeping the fine shadows of a painted short. The model's input keeps th
 through its own casts and resize, whole in the dark tones where the banding was found: 99 to
 101% of it on the study's scenes.
 
-- **Advised for:** animation with banded gradients. Not for live action: its dark scenes lose
-  detail to it.
-- **Where it helps:** eight sources were scanned as the study's 540p re-encodes of them, the
-  downscale and the encode making most of the bands, as they would in a low-resolution source:
-  the banding found was in dark shaded animation and near-black haze with smooth gradients, and
-  in some dark live action; not in bright animation with clean lines, nor in finely painted
-  gradients.
-- **What it may cost:** on other sources it may take faint lines or fine gradients for banding
-  and smooth them, so it is never on by default.
+- **For animation:** the eyes took it on animation with banded gradients, and found it changed
+  nothing on an animation that needed none. On live action its dark scenes lose detail to it,
+  which is one reason the level is for animation.
 - **What it touches:** the frames the model is given and the colour correction's reference, the
   input copies, which hold the frames the model saw; every read, a resume's too: a shot read from
   its first frame gives the frames a read from the start gives. The shot detector reads the
-  source as it is, so the cuts are the same with it or without.
+  source as it is, so the cuts are the same at every level.
 - **A setting of the job:** in its manifest, in the record of each output (`seedvr2x_deband`)
-  and on a line of the plan. A resume with `--deband` given or left out otherwise than its job
-  began is another job, refused naming the option, once a unit is made; a plan that has made
-  none is planned again.
-- **What it doesn't do:** seedvr2x doesn't tell a banded source by itself, so the plan never
-  suggests `--deband`: the scores tried found the strongly banded scenes but missed the clip the
-  option was made for. A picture refuses it, being read without ffmpeg, and so do sources in
-  `yuv411p`, `yuv410p` or `yuv440p`, a chroma subsampling ffmpeg has no 16-bit format of.
+  and on a line of the plan, at `--quality animation` alone. A job begun with `--deband` at
+  another level is another job, refused naming it.
+- **What it doesn't do:** the other levels read the source as it is. `yuv411p`, `yuv410p` and
+  `yuv440p` sources are refused at `animation`, a chroma subsampling ffmpeg has no 16-bit
+  format of.
 
 ## Several runs of a shot: `--quality`
 
@@ -739,7 +732,8 @@ through its own casts and resize, whole in the dark tones where the banding was 
 model once over each shot; `enhanced` runs it twice and `maximum` four times, each run with
 the shot's grid of latents shifted by a frame, and keeps each frame from the run that rebuilds
 it best. It costs 2
-or 4 times the GPU time, and no more memory.
+or 4 times the GPU time, and no more memory. `animation`, for animation, upscales each frame on
+its own ([below](#each-frame-on-its-own---quality-animation)), at about 1.8 times the time.
 
 ### Why one run isn't the best the model can do
 
@@ -783,6 +777,28 @@ Where it gains most and least:
   on clean digital footage, a face in a helmet ("cleaner", "finer and more controlled
   details"); on the one grainy live-action film tried, they preferred `standard` more often:
   smoother skin, less noise. One film: try yours (below).
+
+### Each frame on its own: `--quality animation`
+
+The packing that makes `maximum` worth its runs also blends drawings. On six shots of an
+animated episode, where nearly every frame was a new drawing, the DiT put about a quarter of a
+group's later frames' lines into its first frame at `standard`, and the eyes still saw ghosts at
+`maximum` when played. `--quality animation` upscales each frame of a shot on its own, in a
+latent of its own, so that no drawing is packed with another:
+
+- **What it does:** each frame goes through the model as a shot of one frame would: its own
+  encode, its own step of the DiT, its own decode and colour correction against its own source
+  frame. Every frame of a shot takes the shot's noise, its seed the shot's, so that the noise
+  doesn't change from frame to frame where the picture holds still. Its source is read debanded
+  ([banded sources](#banded-sources-the-deband-of---quality-animation)).
+- **What it gave:** to the eyes, against `maximum`, sharper and firmer lines, better faces and
+  no ghosting when played; a simpler, softer sky with fewer colour levels, a little noise in hair
+  where `maximum`'s flat colours are clean, and a little flicker on a pan, less than
+  `standard`'s.
+- **What it costs:** about 1.8 times `standard`'s time (6 min 47 s for a shot of 206 frames,
+  against 3 min 47 s at `standard` and 11 min 13 s at `maximum`), a frame's memory, and no frames
+  kept on disk between runs.
+- **For animation:** nothing was measured on live action.
 
 ### An example: Sol Levante
 
@@ -836,7 +852,7 @@ The bird's 73 frames at `maximum` on an RTX 5090: the plan's line, then each run
 by the frame it starts from.
 
 ```
-05:52:56 plan: quality: maximum, 4 runs a shot, 8 in all, each frame from its best run: about 4 times standard's GPU time, one run's memory; 0.56 GiB of frames on disk for the longest shot; --quality standard or enhanced: 1 or 2 runs
+05:52:56 plan: quality: maximum, 4 runs a shot, 8 in all, each frame from its best run: about 4 times standard's GPU time, one run's memory; 0.56 GiB of frames on disk for the longest shot; --quality standard or enhanced: 1 or 2 runs; animation takes each frame on its own, for animation, about 1.8 times standard's time
 05:55:15 time: about 4 min 20 s on this GPU as it runs now: 1 min 4 s for 8 encodes, 53 s for 8 windows, 2 min 23 s for the decode and write of 1 segment
 05:55:58 shot 1/2, run 2/4 (from its frame 1), frames 1 to 62 (62), seed 42: encoded in 13.1 s, VRAM peak 19.88 GiB; about 3 min 48 s left, the job ending about 06:00
 05:56:13 shot 1/2, run 2/4 (from its frame 1): window 1/1, latents 0 to 16, in 11.6 s, VRAM peak 21.80 GiB; about 3 min 38 s left, the job ending about 06:00
@@ -1117,8 +1133,8 @@ with their SHA-256, the seed, the colour correction, the tiles and the attention
 says what made it), and for
 a video its window cap, `--quality`, `--compile`, its cuts (the threshold they were detected
 at, or, for a list given with `--cuts`, the SHA-256 of its cuts written one frame number a line,
-not of the file) and, with `--deband`, the filter its frames were read through. That is what
-changes the output's bits, so an output can be made again from it, on the same GPU and
+not of the file) and, at `--quality animation`, the deband its frames were read through. That
+is what changes the output's bits, so an output can be made again from it, on the same GPU and
 libraries. It is always written, with no option to leave it out, and
 holds nothing personal: no path, no date, no machine. Beside it is the mark platforms read to
 label a picture made or enhanced with a generative AI model, IPTC's digital source type
@@ -2402,7 +2418,7 @@ reserve in its place ([under WSL2](#under-wsl2)); the block waits for a run of t
 03:35:43 plan: frames: 1920x1080 padded to 1920x1104 for the model, 8,280 tokens a latent
 03:35:43 plan: shots: 3, the longest of 42 frames (12 latents)
 03:35:43 plan: windows: 7 latents at most (25 frames), the longest the budget holds: 2 of 3 shots in one window, 1 join; a longer window, fewer joins; --window N caps them
-03:35:43 plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs 2 or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU time
+03:35:43 plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs 2 or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU time; animation takes each frame on its own, for animation, about 1.8 times standard's time
 03:35:43 plan: blocks swapped: 33 of the DiT's 36, the fewest that hold the window: slower, not worse; --swap-blocks N
 03:35:43 plan: the VAE: off the GPU in the DiT's phase, its 0.47 GiB given to the window
 03:35:43 plan: the DiT in the VAE's passes: which model stays on the GPU in which phase, as much of the DiT as fits beside each: in the encode, 1 of the DiT's blocks on the GPU; in the decode, the DiT off the GPU
@@ -2436,8 +2452,9 @@ why it was taken, what it costs, and the option that changes it ([GPU memory](#g
   The two short shots fit whole; the long one runs in two windows, 1 join.
 - **quality:** the level, and what the others would cost ([several runs of a
   shot](#several-runs-of-a-shot---quality)).
-- **deband:** with `--deband` alone, after the quality line: the filter, where it runs, and the
-  shot detection reading the source as it is ([banded sources](#banded-sources---deband)).
+- **deband:** at `--quality animation` alone, after the quality line: the filter, where it runs,
+  and the shot detection reading the source as it is ([banded
+  sources](#banded-sources-the-deband-of---quality-animation)).
 - **blocks swapped:** 33 of the DiT's 36 wait in system memory, so that the window gets their
   room. Slower, not worse: swapping changes no bit. A DiT file in float16 or int8 that swaps
   blocks may be followed by a line naming the smaller files that would plan the job better,
@@ -2607,9 +2624,8 @@ this manual is.
 | `--dit-model DIT_MODEL` | The DiT's file: `seedvr2x_ema_7b_sharp_fp16.safetensors` by default, or `seedvr2x_ema_7b_fp16.safetensors`, or the two in int8, `seedvr2x_ema_7b_sharp_int8_convrot.safetensors` and `seedvr2x_ema_7b_int8_convrot.safetensors`: half the DiT's weights, multiplied in 8 bits, or the two in the dynamic GGUF, `seedvr2x_ema_7b_sharp_dyn.gguf` and `seedvr2x_ema_7b_dyn.gguf`: under a third of float16's weights ([the model](#the-model)). |
 | `--vae-model VAE_MODEL` | The VAE's file, `seedvr2x_ema_vae_fp16.safetensors` by default. |
 | `--seed SEED` | The seed, 42 by default ([seeds](#seeds-and-reproducibility)). |
-| `--quality LEVEL` | `standard` (the default), `enhanced` or `maximum`: each shot run 1, 2 or 4 times ([several runs of a shot](#several-runs-of-a-shot---quality)). |
+| `--quality LEVEL` | `standard` (the default), `enhanced` or `maximum`: each shot run 1, 2 or 4 times ([several runs of a shot](#several-runs-of-a-shot---quality)); `animation`: each frame on its own, its source debanded, for animation, about 1.8 times `standard`'s time ([each frame on its own](#each-frame-on-its-own---quality-animation)). |
 | `--color-correction {split,none}` | `split` by default ([colour correction](#colour-correction)). |
-| `--deband` | Smooth the source's banding before the model: ffmpeg's deband at 16 bits on every frame the job reads, the shots found on the source as it is; never on by default, a setting of the job, refused for a picture ([banded sources](#banded-sources---deband)). |
 | `--compile` | Compile the VAE: about a tenth less time on a long job, minutes of compilation at every start, its frames not plain code's; a setting of the job ([compiling the VAE](#compiling-the-vae---compile)). |
 
 **What the source says of itself, when it is missing or wrong**
