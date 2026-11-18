@@ -34,7 +34,10 @@ from job import (
     MIN_SEGMENT,
     QUALITY,
     SEED_LIMIT,
+    debanded,
     default_smaller,
+    each_frame,
+    layout_of,
 )
 from media.conversion import DEBAND, MATRICES
 from media.ffmpeg import MediaError
@@ -607,14 +610,20 @@ def _parser() -> argparse.ArgumentParser:
         # clips by VMAF and LPIPS; looking sharper is the user's eye, 2026-11-08, which the
         # luma's Laplacian variance contradicts on 6 of 8): what was measured and what the eye
         # sees apart, neither from the other.
+        # animation (DESIGN.md, Each frame on its own, decided on 2026-11-17): what it does, its
+        # time against standard's (6 min 47 s against 3 min 47 s for a shot of 206 frames on the
+        # 96 GB card) and for what, nothing measured on live action.
         help="standard, enhanced or maximum: each shot run 1, 2 or 4 times, its latent grid shifted"
         " a frame each time, and each frame taken from the run that rebuilds it best. The model"
         " packs a shot's frames in groups of 4 and rebuilds the last of each group closest to the"
         " original, so at standard one frame in four comes out closer to the original than the"
         " three before it, and looks sharper: edges that pulse, most on line art, dark scenes and"
         " motion; maximum takes every frame from a run where it is rebuilt closest. 2 or 4 times"
-        " the GPU time, the same memory, and disk for the frames between the runs; --plan says it"
-        " before anything runs; see the manual (default: standard)",
+        " the GPU time, the same memory, and disk for the frames between the runs. animation:"
+        " each frame of a shot upscaled on its own, from the shot's noise, its source debanded,"
+        " about 1.8 times standard's time: for animation, where the model blends the drawings a"
+        " group packs; not measured on live action. --plan says it before anything runs; see the"
+        " manual (default: standard)",
     )
     # split, the colour study's winner, in place of numz's lab (DESIGN.md, Colour correction).
     parser.add_argument(
@@ -990,7 +999,8 @@ def _video_arguments(args: argparse.Namespace) -> None:
     take the video's here, once, so that every reader below finds the value it always found and a
     job's settings and record are unchanged (a picture takes --resolution's default in stills.py);
     --plan without a file, the picture's (stills.BARE_PLAN), and a PNG format for a picture alone
-    or a .png or .webp name for the output are refused, as a video's; and --compile on Windows."""
+    or a .png or .webp name for the output are refused, as a video's; --window at a level that
+    takes each frame alone (animation); and --compile on Windows."""
     from seedvr2x.errors import JobError
 
     if args.compile and sys.platform == "win32":
@@ -1029,6 +1039,16 @@ def _video_arguments(args: argparse.Namespace) -> None:
         args.format = DEFAULT_FORMAT
     if args.quality is None:
         args.quality = DEFAULT_QUALITY
+    if args.window is not None and each_frame(args.quality):
+        # A frame alone is one latent in the DiT (DESIGN.md, Each frame on its own): refused, as
+        # a picture refuses it (stills.REFUSED), before anything is read or made.
+        raise JobError(
+            f"--window: at --quality {args.quality} each frame is one latent in the DiT, with no"
+            " windows to cap; run without --window"
+        )
+    # The level that reads its source debanded (shotruns.debanded; DESIGN.md, Each frame on its
+    # own: animation), through --deband's chain, setting and record.
+    args.deband = getattr(args, "deband", False) or debanded(args.quality)
     if args.min_segment is None:
         args.min_segment = MIN_SEGMENT
 
@@ -1385,7 +1405,11 @@ def _run(args: argparse.Namespace) -> int:
         )
         _say_default_smaller(args, resolution_given, declared)
         import manifest
-        from seedvr2x.shots import shot_layout
+        from seedvr2x.shotruns import planned_shots
+
+        # The shots the plan is made for: the job's, or a shot of one frame where the level
+        # takes each frame alone (DESIGN.md, Each frame on its own), its plan a frame's.
+        planned_for = planned_shots(shots, args.quality)
 
         def recorded_as(plan_record: dict[str, Any] | None, window: int | None) -> "Manifest":
             """The job's record with the plan's record, its runs laid out under `window`, the
@@ -1398,9 +1422,9 @@ def _run(args: argparse.Namespace) -> int:
                 source,
                 shots,
                 # Each run's windows: with one run a shot, each shot's (DESIGN.md, Several runs
-                # of a shot).
+                # of a shot); one a frame where the level takes each frame alone (job.layout_of).
                 [
-                    shot_layout(run.frames, window)
+                    layout_of(run.frames, window, args.quality)
                     for shot in shots
                     for run in shot_runs(shot, QUALITY[args.quality])
                 ],
@@ -1480,7 +1504,7 @@ def _run(args: argparse.Namespace) -> int:
         reshaped: Plan | None = None
         plan_record: dict[str, Any] | None = None
         if prior is not None and not planned(prior.recorded):
-            kept_plan = _recorded_plan(directory / NAME, prior.recorded, shots, target)
+            kept_plan = _recorded_plan(directory / NAME, prior.recorded, planned_for, target)
             if complete(prior.recorded):
                 # A finished job makes nothing again, and its manifest isn't rewritten
                 # (DESIGN.md, Pause and resume), its plan no more than the rest: it stays as
@@ -1519,7 +1543,7 @@ def _run(args: argparse.Namespace) -> int:
             dit_model = _dit_model(dit)
             try:
                 plan, peaks = planner.plan_naming(
-                    *(free, target, shots, pins, host),
+                    *(free, target, planned_for, pins, host),
                     split=split,
                     recorded=kept_plan,
                     compile_vae=args.compile,
@@ -1539,7 +1563,7 @@ def _run(args: argparse.Namespace) -> int:
                 # With --accept-env-change, planned again for what is left (same place).
                 try:
                     plan, peaks = planner.plan_again(
-                        *(free, target, shots, pins, host),
+                        *(free, target, planned_for, pins, host),
                         recorded=kept_plan,
                         refused=error,
                         split=split,
@@ -1578,7 +1602,7 @@ def _run(args: argparse.Namespace) -> int:
                 smaller=planner.smaller_swaps(
                     plan,
                     peaks,
-                    (free, target, shots, pins, host),
+                    (free, target, planned_for, pins, host),
                     dict(
                         split=split,
                         recorded=kept_plan,
@@ -1696,7 +1720,7 @@ def _run(args: argparse.Namespace) -> int:
         from manifest import COMPILE_CACHE
         from seedvr2x.passes import Compilation
 
-        shapes = planner.compile_shapes(plan, target, shots, QUALITY[args.quality])
+        shapes = planner.compile_shapes(plan, target, planned_for, QUALITY[args.quality])
         compilation = Compilation(shapes, directory / COMPILE_CACHE)
 
     def open_scratch(path: Path) -> Writer:
@@ -1738,8 +1762,8 @@ def _run(args: argparse.Namespace) -> int:
         levels = None
         if planned(record.content()):
             levels = {
-                level: _level_units(shots, segments, runs, plan, target)
-                for level, runs in QUALITY.items()
+                level: _level_units(shots, segments, level, args.quality, plan, target)
+                for level in QUALITY
             }
         rate = None if final is None else _disk_rate(final.parent)
         assembly = None if rate is None else _assembly_estimate(record, rate)
@@ -2461,10 +2485,9 @@ def _calibrated(
     from calibration import FIRST, FRAMES, calibrate
     from job import shot_runs
     from seedvr2x.shot_pass import NonFinite
-    from seedvr2x.shots import shot_layout
 
     runs = [run for shot in shots for run in shot_runs(shot, QUALITY[args.quality])]
-    layouts = [shot_layout(run.frames, plan.window) for run in runs]
+    layouts = [layout_of(run.frames, plan.window, args.quality) for run in runs]
     longest = max(end - start for layout in layouts for start, end in layout)
     stream = source.stream
 
@@ -2522,16 +2545,26 @@ def _calibrated(
 def _level_units(
     shots: "Sequence[Shot]",
     segments: "Sequence[OutputSegment]",
-    runs: int,
+    level: str,
+    planned: str,
     plan: "Plan",
     target: tuple[int, int],
 ) -> "list[Unit]":
-    """The units of a job of shots and segments with nothing made, `runs` runs a shot
-    (timing.units_of): its --quality level's."""
+    """The units of a job of shots and segments with nothing made at the --quality level `level`
+    (timing.units_of): its runs a shot, and each frame alone where it takes them so; the job's
+    `plan` made at the level `planned`. A plan made where each frame goes alone is a frame's
+    (shotruns.planned_shots), its window a latent, which lays out no shot of a level that packs
+    them: there, each shot is counted in one window, uncapped, the time a plan of that level would
+    take not made here."""
     from timing import tokens, units_of
 
     per_latent = tokens(target, 1)
-    return units_of(shots, segments, runs, plan.window, per_latent)
+    window = plan.window
+    if each_frame(planned) and not each_frame(level):
+        window = None
+    return units_of(
+        shots, segments, QUALITY[level], window, per_latent, each_frame=each_frame(level)
+    )
 
 
 def _say_times(
@@ -3630,6 +3663,7 @@ def _early_memory(
     from seedvr2x import memory
     from seedvr2x.errors import Refusal
     from seedvr2x.passes import Plan
+    from seedvr2x.shotruns import planned_shots
     from seedvr2x.shots import Shot
 
     state = memory.card_state()
@@ -3641,6 +3675,9 @@ def _early_memory(
     try:
         known = Plan.recorded(recorded.get("plan"))
         shots = [Shot(int(shot["start"]), int(shot["end"])) for shot in recorded["shots"]]
+        # The recorded job's level, which a resume is held to (a frame's plan at animation).
+        settings: dict[str, Any] = recorded.get("settings") or {}
+        shots = planned_shots(shots, str(settings.get("quality", "standard")))
         planner.check_recorded(known, shots, target)
         dit_model = _early_dit_model(args)
         if dit_model is None:
@@ -5667,7 +5704,8 @@ def _room_on_disk(
         """What shot keeps of its frames, and its scratch's file, in bytes."""
         return (
             kept_bytes(shot, runs, size),
-            scratch_file(plan, target, shot.frames),
+            # A frame's scratch where each frame goes alone (DESIGN.md, Each frame on its own).
+            scratch_file(plan, target, 1 if each_frame(args.quality) else shot.frames),
         )
 
     if not left or max(sum(parts(shot)) for shot in left) == 0:
@@ -5707,7 +5745,7 @@ def _room_on_disk(
             if count > 1
             else f"{level} none"
             for level, count in QUALITY.items()
-            if count < runs
+            if count < runs and not each_frame(level)
         ]
         ways.append(f"take a lower level ({', '.join(lower)})")
     if spilled:

@@ -83,7 +83,7 @@ REFUSED = {
     ),
     "quality": (
         "--quality",
-        "a shot's repeated runs are for video; a picture is encoded alone, once",
+        "a level is how a video's shots run; a picture is encoded alone, once",
     ),
     "min_segment": ("--min-segment", "a picture has no output segments to merge"),
     "input_matrix": (

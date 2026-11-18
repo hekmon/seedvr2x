@@ -59,7 +59,8 @@ def pick(kind: str, f: int) -> int:
 
 KINDS = {2: "grid2", 4: "grid4"}
 # The --quality levels by their runs a shot (job.QUALITY), as a manifest records them.
-LEVELS = {runs: level for level, runs in job.QUALITY.items()}
+# Those that pack a shot's frames in its latents: animation, one run too, takes each frame alone.
+LEVELS = {runs: level for level, runs in job.QUALITY.items() if not job.each_frame(level)}
 LENGTHS = range(1, 61)
 
 
@@ -322,7 +323,8 @@ def test_planned_looks_at_every_run(tmp_path: Path) -> None:
 
 
 def test_the_level_is_checked(tmp_path: Path) -> None:
-    with pytest.raises(JobError, match='quality "best", where seedvr2x has standard, enhanced and'):
+    levels = "standard, enhanced, maximum and animation"
+    with pytest.raises(JobError, match=f'quality "best", where seedvr2x has {levels}'):
         Manifest(
             tmp_path / "manifest.json",
             {"seed": 42, "quality": "best"},

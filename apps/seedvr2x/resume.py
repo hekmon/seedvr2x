@@ -29,6 +29,7 @@ from manifest import (
     WINDOW_CAP,
     Manifest,
     checksums_file,
+    recorded_layout,
     recorded_runs,
     size,
 )
@@ -40,7 +41,7 @@ from seedvr2x.passes import Plan
 from seedvr2x.pull import TIMES
 from seedvr2x.shots import Shot, window_layout
 from seedvr2x.tiling import SCRATCH
-from units import CHECKSUMS, COPY, KEPT, run_file
+from units import CHECKSUMS, COPY, KEPT, frame_latent, run_file, window_file
 
 # The fields a resume reads and doesn't compare: how far the job went, in its shots and segments;
 # what is recorded for information only (DESIGN.md, Pause and resume): where an input is and when
@@ -69,8 +70,11 @@ CHANGES = "environment_changes"
 # and the scratch a tiled pass keeps beside them (tiling.SCRATCH) and the frames a shot's runs
 # keep for its decode (units.KEPT): derived data, never recorded, so a leftover wherever a kill
 # left it.
+# A window's number has 4 digits or more (units.window_file): a shot of each frame alone has a
+# window a frame, 10,000 and more in a shot of 7 minutes at 24 fps; a frame's latent 6 or more
+# (units.frame_latent).
 UNIT_FILE = re.compile(
-    rf"(?:run[1-3]_)?(?:latent\.pt|window_\d{{4}}\.pt)"
+    rf"(?:run[1-3]_)?(?:latent\.pt|latent_\d{{6,}}\.pt|window_\d{{4,}}\.pt)"
     rf"|{'|'.join(map(re.escape, (COPY, CHECKSUMS, SCRATCH, KEPT)))}"
 )
 
@@ -265,11 +269,7 @@ def recorded_job(path: Path, content: dict[str, Any], source: Source) -> Manifes
         content["environment"],
         source,
         [Shot(int(shot["start"]), int(shot["end"])) for shot in shots],
-        [
-            [(int(first), int(end)) for first, end in run["windows"]]
-            for shot in shots
-            for run in recorded_runs(shot)
-        ],
+        [recorded_layout(run) for shot in shots for run in recorded_runs(shot)],
         [
             OutputSegment(name.removesuffix(".mkv"), int(entry["start"]), int(entry["end"]))
             for name, entry in zip(files, entries, strict=True)
@@ -449,7 +449,7 @@ def reshape(manifest: Manifest, recorded: dict[str, Any]) -> Reshaped:
     counts = Reshaped()
     layouts = list(manifest.layouts)
     for index, entry in enumerate(run for shot in recorded["shots"] for run in recorded_runs(shot)):
-        was = [(int(first), int(end)) for first, end in entry["windows"]]
+        was = recorded_layout(entry)
         now = list(layouts[index])
         done: int = entry["windows_done"]
         if done == len(was) and was != now:
@@ -643,8 +643,12 @@ def _kept(manifest: Manifest, index: int) -> set[str]:
     for run in manifest.shot_runs(index):
         offset = manifest.runs[run].offset
         done = manifest.windows_done[run]
-        kept.update(run_file(offset, f"window_{window:04d}.pt") for window in range(done))
-        if manifest.encoded[run] and done < len(manifest.layouts[run]):
+        kept.update(run_file(offset, window_file(window)) for window in range(done))
+        if manifest.encoded[run] and manifest.each_frame:
+            # Each frame's latent until its window is kept (units.frame_latent).
+            frames = len(manifest.layouts[run])
+            kept.update(run_file(offset, frame_latent(frame)) for frame in range(done, frames))
+        elif manifest.encoded[run] and done < len(manifest.layouts[run]):
             kept.add(run_file(offset, "latent.pt"))
         if manifest.encoded[run] and manifest.split and offset == 0:
             kept.update((COPY, CHECKSUMS))

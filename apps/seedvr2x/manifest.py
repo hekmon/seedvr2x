@@ -17,10 +17,11 @@ from pathlib import Path
 from typing import Any, cast
 
 import seedvr2x
-from job import QUALITY, OutputSegment, Run, shot_runs
+from job import QUALITY, OutputSegment, Run, each_frame, shot_runs
 from media.files import write_whole
 from media.source import Source
 from seedvr2x.errors import JobError
+from seedvr2x.shotruns import frame_layout
 from seedvr2x.shots import Shot, window_layout
 
 # The CLI's own code, which code_sha256 hashes and the environment record imports: its top-level
@@ -167,6 +168,15 @@ def complete(content: dict[str, Any]) -> bool:
         return bool(segments) and all(segment["finished"] for segment in segments)
     except (KeyError, TypeError):
         return False
+
+
+def recorded_layout(run: Any) -> list[tuple[int, int]]:
+    """Of a run's record in a manifest's content (recorded_runs), its windows, latents [start,
+    end): those it lists, or, where it lists none, a run that takes each frame alone, one latent a
+    window (shotruns.frame_layout) over its latents (Manifest._run)."""
+    if "windows" not in run:
+        return frame_layout(int(run["latents"]))
+    return [(int(first), int(end)) for first, end in run["windows"]]
 
 
 def recorded_runs(shot: Any) -> list[Any]:
@@ -338,6 +348,10 @@ class Manifest:
         self.run_shots: list[int] = [
             index for index, shot in enumerate(self.shots) for _ in shot_runs(shot, count)
         ]
+        # Each shot's runs, their indices in runs, in order (shot_runs).
+        self._shot_runs: list[list[int]] = [[] for _ in self.shots]
+        for run, shot in enumerate(self.run_shots):
+            self._shot_runs[shot].append(run)
         if len(self.layouts) != len(self.runs):
             raise ValueError(f"{len(self.layouts)} layouts for {len(self.runs)} runs")
         if not self.window_caps:
@@ -358,6 +372,12 @@ class Manifest:
     def runs_per_shot(self) -> int:
         """The runs of each shot, its level's (LEVEL, job.QUALITY): 1, 2 or 4."""
         return QUALITY[self.settings.get(LEVEL, "standard")]
+
+    @property
+    def each_frame(self) -> bool:
+        """Whether the job's level takes each frame of a shot alone (shotruns.each_frame:
+        animation), its runs' windows one latent a frame."""
+        return each_frame(self.settings.get(LEVEL, "standard"))
 
     def shot_of(self, run: int) -> int:
         """The index of the shot run `run` is of."""
@@ -428,7 +448,7 @@ class Manifest:
 
     def shot_runs(self, index: int) -> list[int]:
         """The runs of shot `index`, in order: their indices in runs."""
-        return [run for run, shot in enumerate(self.run_shots) if shot == index]
+        return list(self._shot_runs[index])
 
     def write(self) -> None:
         """Write the manifest, whole or not at all, even after a power cut."""
@@ -485,12 +505,16 @@ class Manifest:
     def _run(self, run: int) -> dict[str, Any]:
         """Run `run`'s record: its latents, its windows and how far it went."""
         layout = self.layouts[run]
-        record: dict[str, Any] = {
-            "latents": layout[-1][1],
-            "windows": [list(window) for window in layout],
-            "encoded": self.encoded[run],
-            "windows_done": self.windows_done[run],
-        }
+        record: dict[str, Any] = {"latents": layout[-1][1]}
+        # A run that takes each frame alone lists no windows: one latent a window, as many as
+        # its frames (recorded_layout). Over an episode of 34,548 frames in 400 shots, the
+        # manifest written after every unit is 1.74 MB with them listed against 0.11 MB, 11 ms a
+        # write against 5 on Linux's disk, 60 GB written over the episode (impl-anim-1,
+        # 2026-11-17).
+        if not self.each_frame:
+            record["windows"] = [list(window) for window in layout]
+        record["encoded"] = self.encoded[run]
+        record["windows_done"] = self.windows_done[run]
         if self.window_caps[run] is not None:
             record[WINDOW_CAP] = self.window_caps[run]
         return record

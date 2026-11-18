@@ -897,7 +897,24 @@ marker. The image server, Linux's alone by its lock, has no such line.
   seeded by the clip's seed and its draw a latent's, the steps and phases frame by frame ("frame"
   first), a Cancel between frames leaving nothing alive, a NaN naming its frame, and the plan a
   frame's (`planned_shots`), the whole output taken off the host, the other levels' plans as
-  before.
+  before; `test_clip_cli.py` the clip at animation bit for bit to the shot's pass over each frame
+  alone (`frames_alone`), and its GPU case at animation too, after a pass of the library's own at
+  the level, not yet run (written without a card, impl-anim-1, 2026-11-17).
+- A job at `--quality animation` (`run.py`'s `_sample_frames` and `_decode_frames`): one run a
+  shot; its encode one unit of the shot's frames, each frame's latent in a file of its own
+  (`units.frame_latent`, `latent_NNNNNN.pt`), recorded once all are; a unit a frame for the DiT
+  (`units.window_file`, `window_NNNN.pt`, the frame's latent given up once its window is kept);
+  the segment's decode a frame at a time, one reader of the shot's input copy feeding the
+  corrections in turn (`run._Following`). A frame-alone run's record lists no windows
+  (`manifest.recorded_layout` reads one latent a window from its `latents`); a resume's unit
+  files are `window_\d{4,}` and `latent_\d{6,}` (`resume.UNIT_FILE`). The plan is a frame's
+  (`shotruns.planned_shots`), and `--window` is refused at the start, nothing made.
+  `tests/test_animation_cli.py` holds a job at animation, split and none, equal frame for frame
+  (masters and `--dump-frames`) to 25 jobs of one frame each on the source ffmpeg debanded
+  (`test_deband_cli.py`'s), seeded by their shot's first frame, the encodes reading the same
+  frames; the units in order, the record, the plan's lines; `--window` refused for a run and for
+  `--plan`, nothing made; a stop inside a shot's frames and its resume, the files kept named and
+  the masters the uninterrupted job's; the unit files past 9,999 windows; the help.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
   `test_pull_cli.py` holds what the command line does over it. `tests/test_pull_lines.py` holds a

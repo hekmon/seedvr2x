@@ -18,12 +18,15 @@ from seedvr2x.shotruns import PLACES_BEST_FIRST as PLACES_BEST_FIRST
 from seedvr2x.shotruns import QUALITY as QUALITY
 from seedvr2x.shotruns import RUN_OFFSETS as RUN_OFFSETS
 from seedvr2x.shotruns import Run as Run
+from seedvr2x.shotruns import debanded as debanded
+from seedvr2x.shotruns import each_frame as each_frame
+from seedvr2x.shotruns import frame_layout
 from seedvr2x.shotruns import kept_bytes as kept_bytes
 from seedvr2x.shotruns import kept_frames as kept_frames
 from seedvr2x.shotruns import place as place
 from seedvr2x.shotruns import run_of as run_of
 from seedvr2x.shotruns import shot_runs as shot_runs
-from seedvr2x.shots import Shot
+from seedvr2x.shots import Shot, shot_layout
 
 # numz seeds Python's, NumPy's and torch's generators with each seed (common/seed.py), and NumPy
 # takes seeds in [0, 2**32). numz seeds again before the VAE encode, with the seed plus
@@ -39,6 +42,16 @@ DEFAULT_RESOLUTION = 1080
 # The runs of a shot, the levels of --quality and the frames each run keeps are the library's
 # (seedvr2x.shotruns, which clip.py runs a clip's shots by), imported above and re-exported under
 # the names the command's modules and tests use.
+
+
+def layout_of(frames: int, window: int | None, quality: str) -> list[tuple[int, int]]:
+    """The windows of a run of `frames` frames at the --quality level `quality`, in latents: laid
+    out by the plan's cap, `window` (shots.shot_layout), or, where the level takes each frame
+    alone (shotruns.each_frame: animation), one window of one latent a frame, whatever the cap
+    (shotruns.frame_layout; DESIGN.md, Each frame on its own)."""
+    if each_frame(quality):
+        return frame_layout(frames)
+    return shot_layout(frames, window)
 
 
 @dataclass(frozen=True)

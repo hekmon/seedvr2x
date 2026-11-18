@@ -15,7 +15,7 @@ from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from job import QUALITY, kept_bytes, shot_runs
+from job import QUALITY, each_frame, kept_bytes, shot_runs
 from media.conversion import DEBAND
 from seedvr2x import memory, peaks, pull
 from seedvr2x.errors import PinRefused, Refusal, Setting
@@ -43,6 +43,7 @@ from seedvr2x.shot_plan import (
     _resident_said,  # pyright: ignore[reportPrivateUsage]
     plan,
 )
+from seedvr2x.shotruns import planned_shots
 from seedvr2x.shots import SHARED, Shot
 from seedvr2x.weights import Architecture
 
@@ -427,13 +428,20 @@ def check_recorded(
     _check_tiles(padded_size(target), recorded)
 
 
-def _deband_said() -> str:
-    """The plan's line of --deband (said): the filter, where it runs, and what it leaves alone
-    (DESIGN.md, Input, "Banded sources")."""
+def _deband_said(quality: str) -> str:
+    """The plan's line of the deband (said): the filter, where it runs, what it leaves alone
+    (DESIGN.md, Input, "Banded sources"), and what turned it on: --deband, or the level that
+    reads its source debanded (shotruns.debanded; DESIGN.md, Each frame on its own)."""
+    why = f"--quality {quality}" if each_frame(quality) else "--deband"
     return (
         f"deband: on, ffmpeg's {DEBAND} on every frame the job reads, at 16 bits before their"
-        " conversion to RGB (--deband); the shot detection reads the source as it is"
+        f" conversion to RGB ({why}); the shot detection reads the source as it is"
     )
+
+
+# The time each frame alone takes against standard's (DESIGN.md, Each frame on its own, Cost: 6
+# min 47 s for a shot of 206 frames against standard's 3 min 47 s, on the 96 GB card, 2026-11-17).
+ANIMATION_TIME = 1.8
 
 
 def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) -> str:
@@ -445,18 +453,35 @@ def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) 
     (DESIGN.md, Several runs of a shot: "4x the GPU time"): each level's time in seconds needs the
     calibration, which comes after the plan's lines, the models loaded (main._say_times)."""
     runs_per_shot = QUALITY[quality]
+    # The level that takes each frame alone, said where another level is, and what it is for.
+    animation = (
+        f"animation takes each frame on its own, for animation, about {ANIMATION_TIME} times"
+        " standard's time"
+    )
+    if each_frame(quality):
+        return (
+            f"quality: {quality}, each frame of a shot upscaled on its own, in a latent of its own,"
+            f" from the shot's noise, its source debanded: about {ANIMATION_TIME} times standard's"
+            " time, a frame's memory; for animation, where the model blends the drawings a latent"
+            " packs, nothing measured on live action; --quality standard, enhanced or maximum"
+            " packs a shot's frames in its latents"
+        )
     if runs_per_shot == 1:
         return (
             "quality: standard, the default, one run a shot; --quality enhanced or maximum runs 2"
             " or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the"
-            " GPU time"
+            f" GPU time; {animation}"
         )
     runs = sum(len(shot_runs(shot, runs_per_shot)) for shot in shots)
     # The frames a shot's earlier runs give wait on disk, at 16 bits, in the shot's unit directory
     # until its last run's decode (run.Kept): the most a shot keeps, said so that a user sees the
     # room it takes before anything runs.
     kept = max(kept_bytes(shot, runs_per_shot, output_size(target)) for shot in shots)
-    levels = [(level, count) for level, count in QUALITY.items() if level != quality]
+    levels = [
+        (level, count)
+        for level, count in QUALITY.items()
+        if level != quality and not each_frame(level)
+    ]
     others = (
         f"{' or '.join(level for level, _ in levels)}:"
         f" {' or '.join(str(count) for _, count in levels)} runs"
@@ -464,7 +489,8 @@ def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) 
     return (
         f"quality: {quality}, {runs_per_shot} runs a shot, {runs} in all, each frame from its best"
         f" run: about {runs_per_shot} times standard's GPU time, one run's memory;"
-        f" {kept / 2**30:.2f} GiB of frames on disk for the longest shot; --quality {others}"
+        f" {kept / 2**30:.2f} GiB of frames on disk for the longest shot; --quality {others};"
+        f" {animation}"
     )
 
 
@@ -636,14 +662,18 @@ def said(
     job outside the shapes measured is refused, plan)."""
     from seedvr2x.shots import shot_layout
 
+    # Where the level takes each frame alone, the plan is a frame's (shotruns.planned_shots): its
+    # windows, passes and scratch said for a shot of one frame, the shots line the job's.
+    each = each_frame(quality)
+    planned = planned_shots(shots, quality)
     job = _job(
-        *(predicted.reading, target, shots, False),
+        *(predicted.reading, target, planned, False),
         plan.compile_vae,
         predicted.dit_model,
     )
     height, width = job.padded
     out_height, out_width = output_size(target)
-    frames = Counter(shot.frames for shot in shots)
+    frames = Counter(shot.frames for shot in planned)
     if layouts is None:
         windows = {count: len(shot_layout(count, plan.window)) for count in frames}
         whole = sum(number for count, number in frames.items() if windows[count] == 1)
@@ -660,14 +690,22 @@ def said(
         lines.append(_int8_said())
     elif job.dit_model in (peaks.GGUF_7B, peaks.GGUF_7B_SHARP):
         lines.append(_gguf_said(job.dit_model))
-    lines.append(
-        f"shots: {len(shots)}, the longest of {_count(job.frames, 'frame')}"
-        f" ({_count(job.lengths[-1], 'latent')})"
-    )
-    lines.append(_windows_said(job, plan, predicted, pins, recorded, whole, joins, len(shots)))
+    if each:
+        longest = max(shot.frames for shot in shots)
+        lines.append(
+            f"shots: {len(shots)}, the longest of {_count(longest, 'frame')}, each frame a latent"
+            " of its own (--quality animation)"
+        )
+        lines.append("windows: one a frame, of its one latent, the frame's own DiT step")
+    else:
+        lines.append(
+            f"shots: {len(shots)}, the longest of {_count(job.frames, 'frame')}"
+            f" ({_count(job.lengths[-1], 'latent')})"
+        )
+        lines.append(_windows_said(job, plan, predicted, pins, recorded, whole, joins, len(shots)))
     lines.append(_quality_said(shots, target, quality))
     if deband:
-        lines.append(_deband_said())
+        lines.append(_deband_said(quality))
     lines.append(_swap_said(plan, pins))
     if smaller is not None:
         lines.append(smaller)
@@ -726,9 +764,14 @@ def said(
             if over
             else "which holds every shot's"
         )
+        whose = "the longest tiled shot"
+        if each:
+            # Each frame's pass is a shot of one frame's (shotruns.planned_shots).
+            whose = "a frame, each frame's pass alone"
+            where = "over it, it goes whole to a memory-mapped file" if over else "which holds it"
         lines.append(
             "scratch: what a tiled pass keeps of the shot's frames between its tiles:"
-            f" {_gib(predicted.scratch)} GiB for the longest tiled shot; in system memory up to an"
+            f" {_gib(predicted.scratch)} GiB for {whose}; in system memory up to an"
             f" allowance of {allowance / 100:.2f} GiB, {where}"
         )
     if disk is not None:
@@ -741,7 +784,7 @@ def said(
         f" {_gib(predicted.budget - predicted.need(predicted.bound))} GiB under the budget"
     )
     if plan.compile_vae:
-        shapes = compile_shapes(plan, target, shots, QUALITY[quality])
+        shapes = compile_shapes(plan, target, planned, QUALITY[quality])
         compiling = _compile_time_said(
             compile_cache, recorded, len(shapes.encode) + len(shapes.decode)
         )

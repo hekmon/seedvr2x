@@ -2133,6 +2133,7 @@ def test_plan_said(
         " caps them",
         "plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs"
         " 2 or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU"
+        " time; animation takes each frame on its own, for animation, about 1.8 times standard's"
         " time",
         "plan: blocks swapped: none, the window fitting with the DiT whole on the GPU;"
         " --swap-blocks N swaps some",

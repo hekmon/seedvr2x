@@ -37,6 +37,7 @@ from job import OutputSegment, shot_runs
 from seedvr2x.clock import spoken, wall
 from seedvr2x.frames import padded_length, padded_size
 from seedvr2x.passes import Phase
+from seedvr2x.shotruns import frame_layout
 from seedvr2x.shots import Shot, shot_layout
 from stop import late
 
@@ -204,6 +205,7 @@ def units_of(
     finished: Sequence[bool] | None = None,
     start: Phase | None = None,
     layouts: Sequence[Sequence[tuple[int, int]]] | None = None,
+    each_frame: bool = False,
 ) -> list[Unit]:
     """The units a job has left, in the order the run makes them (run.run_job): its shots, each
     run `per_shot` times (job.shot_runs), their windows capped at `window` latents
@@ -220,7 +222,12 @@ def units_of(
 
     layouts: each run's windows as the job records them, in the order of runs, where a resume
     planned again for the memory free (--accept-env-change) left runs by the cap they were made
-    under; else they are laid out by `window`."""
+    under; else they are laid out by `window`.
+
+    each_frame: the job's level takes each frame alone (shotruns.each_frame; DESIGN.md, Each frame
+    on its own): a run's encode is its frames', each alone, and each frame a window of one latent
+    of its own, a unit named for the frame ("shot 3/12's frame 5/206"), which draws a latent's
+    noise, its frame's (run._sample_frames); its decode, its frames' one at a time."""
     units: list[Unit] = []
     run = 0  # the runs' index across the job, as the manifest's
     for number, segment in enumerate(segments):
@@ -231,7 +238,12 @@ def units_of(
             runs = shot_runs(shots[index], per_shot)
             for position, each in enumerate(runs):
                 name = run_name(index, len(shots), position, len(runs), each.offset, per_shot)
-                layout = shot_layout(each.frames, window) if layouts is None else layouts[run]
+                if layouts is not None:
+                    layout = layouts[run]
+                elif each_frame:
+                    layout = frame_layout(each.frames)
+                else:
+                    layout = shot_layout(each.frames, window)
                 done = 0 if windows_done is None else windows_done[run]
                 if done < len(layout) and not (encoded is not None and encoded[run]):
                     units.append(
@@ -240,10 +252,13 @@ def units_of(
                 for k in range(done, len(layout)):
                     first, end = layout[k]
                     parts: tuple[tuple[Kind, int], ...] = (("window", (end - first) * per_latent),)
-                    if k == done:
-                        drawn: tuple[Kind, int] = ("draw", layout[-1][1] * per_latent)
+                    if each_frame or k == done:
+                        # A run's first window left draws the run's noise; each frame alone draws
+                        # its own latent's, the shot's seed's.
+                        latents = 1 if each_frame else layout[-1][1]
+                        drawn: tuple[Kind, int] = ("draw", latents * per_latent)
                         parts += (drawn,)
-                    said = f"{name}'s window {k + 1}/{len(layout)}"
+                    said = f"{name}'s {'frame' if each_frame else 'window'} {k + 1}/{len(layout)}"
                     units.append(Unit(("window", run, k), said, parts))
                 decodes.append(("decode", each.frames))
                 run += 1

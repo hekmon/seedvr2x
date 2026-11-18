@@ -106,7 +106,10 @@ def run_job(
     of a shot), each run is a whole run of the shot fed from its first frame, its encode and its
     windows units of their own, in turn; the shot's decode decodes its runs in turn, each giving
     the frames job.run_of takes from it, and writes the shot's frames in their order
-    (_decode_runs).
+    (_decode_runs). At a level that takes each frame alone (units.manifest.each_frame; DESIGN.md,
+    Each frame on its own), a shot's one run encodes each of its frames alone, the shot's frames
+    a unit, then samples each frame's latent in a window of its own, a unit a frame, and its
+    decode decodes each frame's alone, in order (_sample_frames, _decode_frames).
 
     What units kept already is skipped (DESIGN.md, Pause and resume): a finished segment; a
     shot's encode and the windows done; the input frames of what is skipped, never decoded, the
@@ -180,6 +183,7 @@ def job_units(
         finished=manifest.finished,
         start=start,
         layouts=manifest.layouts,
+        each_frame=manifest.each_frame,
     )
 
 
@@ -323,6 +327,11 @@ def _sample(
     the CPU."""
     if progress is None:
         progress = Progress(Clock(), [], stopping.now)
+    if units.manifest.each_frame:
+        _sample_frames(
+            index, models, inputs, shots, target, seed, plan, units, stop, copies, progress
+        )
+        return
     run = units.manifest.runs[index]
     shot = Shot(run.start, run.end)  # the frames the run is fed
     name = _name(units, shots, index)
@@ -425,6 +434,118 @@ def _sample(
     units.drop_latent(index)
 
 
+def _sample_frames(
+    index: int,
+    models: Models,
+    inputs: "Inputs",
+    shots: Sequence[Shot],
+    target: tuple[int, int],
+    seed: int,
+    plan: Plan,
+    units: Units,
+    stop: Stop | None,
+    copies: Copies | None,
+    progress: Progress,
+) -> None:
+    """_sample of run `index` of a job whose level takes each frame alone (DESIGN.md, Each frame on
+    its own): each frame of the shot through the pass as a shot of that frame alone is, with the
+    shot's seed, its noise the same for every frame. The encode, a unit, encodes the shot's
+    frames one at a time, read in order through one reader, each in a latent of its own kept in
+    its file as it is made (units.save_frame_latent), the input copy written from the same reads
+    as a run's; then each frame's latent is sampled in a window of one latent, a unit a frame
+    (units.save_window), its latent's file given up once its window is kept. A resumed run
+    samples on from its first frame without a window, from the latents kept, or encodes the shot
+    again where its encode was not recorded."""
+    run = units.manifest.runs[index]
+    shot = Shot(run.start, run.end)
+    name = _name(units, shots, index)
+    frames = units.manifest.layouts[index][-1][1]
+    done = units.windows_done(index)
+    encoded = units.manifest.encoded[index]
+    if copies is not None and encoded:
+        if not (units.copy_path(index).exists() and units.checksums_path(index).exists()):
+            _copy_again(index, name, inputs, shot, units, stop, copies)
+    if done == frames:
+        return
+    if not encoded:
+        key = ("encode", index)
+        _begin(stop, f"{name}'s encode", progress.cost(key))
+        logger.debug("%s: encoding each frame alone", name)
+        started = _started(models)
+        models.enter("encode")
+        counted = not (progress.first_encode and inputs.seeks(shot.start))
+        progress.first_encode = False
+        read = inputs.reader(shot)
+        tiles = plan.encode_tiles
+
+        def encode_each(read: Callable[[int], npt.NDArray[np.float32]]) -> None:
+            for frame in range(frames):
+                store = _scratch(units, index, tiles, plan.scratch_allowance)
+                latent = encode_shot(
+                    *(models, read, 1, target, run.seed(seed)), tiles=tiles, store=store
+                )
+                finite(latent, f"{name}'s encode of its frame {frame + 1}/{frames}")
+                units.save_frame_latent(index, frame, latent)
+                del latent
+
+        with memory.watched(
+            models.device, f"{name}'s encode", "latents, and the frames from them,"
+        ):
+            if copies is None:
+                encode_each(read)
+            else:
+                with _copying(units, index, copies) as copy:
+                    encode_each(_copied(read, copy))
+        units.frames_encoded(index)
+        spent = _spent(models, started, f"{name}'s encode")
+        left = _made(
+            *(progress, key, "encode", shot.frames, started, f"{name}'s encode", counted),
+        )
+        logger.info(
+            "%s, frames %d to %d (%d), seed %d: each frame encoded alone in %s; %s",
+            name,
+            shot.start,
+            shot.end - 1,
+            shot.frames,
+            run.seed(seed),
+            spent,
+            left,
+        )
+    per_latent = tokens(target, 1)
+    for frame in range(done, frames):
+        key = ("window", index, frame)
+        unit = f"{name}'s frame {frame + 1}/{frames}"
+        _begin(stop, unit, progress.cost(key))
+        logger.debug("%s: frame %d/%d", name, frame + 1, frames)
+        started = _started(models)
+        entering, term = _enter(models, "dit", progress, key)
+        # The frame's own latent, its noise drawn from it as a shot of one frame draws its own
+        # (shot_pass.sample_windows), the shot's seed: the same noise for every frame.
+        sampled = sample_windows(models, units.frame_latent(index, frame), [(0, 1)], run.seed(seed))
+        output = next(sampled)
+        del sampled
+        finite(output, unit)
+        units.save_window(index, frame, output)
+        units.drop_frame_latent(index, frame)
+        spent = _spent(models, started, f"{name}: frame {frame + 1}/{frames}")
+        left = _made(
+            *(progress, key, "window", per_latent, started, unit),
+            entering=entering,
+            term=term,
+            drawn=per_latent,
+        )
+        logger.info(
+            "%s: frame %d/%d (%d), sampled alone in %s; %s",
+            name,
+            frame + 1,
+            frames,
+            shot.start + frame,
+            spent,
+            left,
+        )
+        del output
+
+
 def _name(units: Units, shots: Sequence[Shot], index: int) -> str:
     """Run `index`'s name in the logs (timing.run_name): its shot's, "shot 3/12", with several runs
     a shot the run's too, "shot 3/12, run 2/4 (from its frame 1)"."""
@@ -483,6 +604,9 @@ def _decode(
     of unit `key`, its segment's decode and write, its time given to progress (_made)."""
     run = units.manifest.runs[index]
     name = _name(units, shots, index)
+    if units.manifest.each_frame:
+        _decode_frames(index, name, models, target, plan, units, write, copies, progress, key)
+        return
     logger.debug("%s: decoding", name)
     started = _started(models)
     entering, term = _enter(models, "decode", progress, key)
@@ -513,6 +637,89 @@ def _decode(
     )
     logger.info(
         "%s: decoded in %s; RAM %.2f GiB, peak %.2f GiB; %s",
+        name,
+        spent,
+        _resident() / GIB,
+        _peak() / GIB,
+        left,
+    )
+
+
+@dataclass(frozen=True)
+class _Following:
+    """The reference of a frame decoded alone (_decode_frames; shot_pass.Reference): the next
+    frames of one reader of its shot's input copy, read in order across the shot's frames, so that
+    the copy is decoded once a shot, not from its start for each frame."""
+
+    read: Callable[[int], npt.NDArray[np.float32]]
+    width: int
+    height: int
+    first: int = 0
+
+    @contextmanager
+    def reader(self, count: int) -> Generator[Callable[[int], npt.NDArray[np.float32]]]:
+        yield self.read
+
+
+def _decode_frames(
+    index: int,
+    name: str,
+    models: Models,
+    target: tuple[int, int],
+    plan: Plan,
+    units: Units,
+    write: Callable[[npt.NDArray[np.float32]], None],
+    copies: Copies | None,
+    progress: Progress,
+    key: Key,
+) -> None:
+    """_decode of run `index` of a job whose level takes each frame alone (DESIGN.md, Each frame on
+    its own): each frame's window decoded alone, as a shot of that frame is, in order, its frame
+    written as it comes; with copies, corrected against its own frame of the shot's input copy,
+    one reader of it giving the frames in turn (_Following). A part of unit `key`."""
+    run = units.manifest.runs[index]
+    frames = run.frames
+    logger.debug("%s: decoding each frame alone", name)
+    started = _started(models)
+    entering, term = _enter(models, "decode", progress, key)
+    store = _scratch(units, index, plan.decode_tiles, plan.scratch_allowance)
+
+    def decode_each(follow: Callable[[int], npt.NDArray[np.float32]] | None) -> None:
+        for frame in range(frames):
+            merged = merge_windows([units.take_window(index, frame)], [(0, 1)])
+            reference = None
+            if copies is not None and follow is not None:
+                reference = _Following(follow, copies.width, copies.height)
+            decode_shot(
+                *(models, merged, 1, target, write, name, run.start + frame, reference),
+                tiles=plan.decode_tiles,
+                store=store,
+                tail_frames=plan.tail_frames,
+            )
+            del merged
+
+    try:
+        with memory.watched(models.device, f"{name}'s decode", "frames"):
+            if copies is None:
+                decode_each(None)
+            else:
+                paths = (units.copy_path(index), units.checksums_path(index))
+                correction = Correction(*paths, copies.width, copies.height)
+                with correction.reader(frames) as follow:
+                    decode_each(follow)
+    except CopyError:
+        # Derived data: removed, the next run makes it again from the input (_sample_frames).
+        units.copy_path(index).unlink(missing_ok=True)
+        units.checksums_path(index).unlink(missing_ok=True)
+        raise
+    spent = _spent(models, started, f"{name}'s decode")
+    left = _made(
+        *(progress, key, "decode", frames, started, f"{name}'s decode"),
+        entering=entering,
+        term=term,
+    )
+    logger.info(
+        "%s: each frame decoded alone in %s; RAM %.2f GiB, peak %.2f GiB; %s",
         name,
         spent,
         _resident() / GIB,

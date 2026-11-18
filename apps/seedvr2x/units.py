@@ -46,6 +46,17 @@ def run_file(offset: int, name: str) -> str:
     return name if offset == 0 else f"run{offset}_{name}"
 
 
+def window_file(window: int) -> str:
+    """The name of the file of a run's window `window`, counted from 0 (before run_file)."""
+    return f"window_{window:04d}.pt"
+
+
+def frame_latent(frame: int) -> str:
+    """The name of the file of the latent of a run's frame `frame`, counted from 0, where the run
+    takes each frame alone (before run_file)."""
+    return f"latent_{frame:06d}.pt"
+
+
 class Units:
     """Units kept in the job's directory, the output directory or a .mkv path's work directory,
     beside the manifest, for a resume: under resume/shot_<start>/, the shot's latent.pt, then
@@ -122,12 +133,40 @@ class Units:
         is: written from its copy on the CPU, values and memory layout kept (sampling.moved), which
         is given up once the file is whole."""
         self.settle()
-        _save(sampled, self._unit(run, f"window_{window:04d}.pt"))
+        _save(sampled, self._unit(run, window_file(window)))
         self.manifest.window_done(run, window)
 
     def drop_latent(self, run: int) -> None:
         """Give up run `run`'s latent: its windows are all done."""
         self._unit(run, "latent.pt").unlink(missing_ok=True)
+
+    # A run that takes each frame alone (shotruns.each_frame; DESIGN.md, Each frame on its own):
+    # each frame's latent in a file of its own, so that the encode holds one frame's in system
+    # memory at a time; the encode, the shot's frames, is the unit, recorded once every frame's
+    # file is whole (frames_encoded), and a frame's file goes once its window is kept.
+
+    def save_frame_latent(self, run: int, frame: int, latent: Tensor) -> None:
+        """Keep the latent of frame `frame` of run `run`, (1, h, w, 16) as its encode gives it,
+        values and memory layout kept, unrecorded until the run's every frame's is
+        (frames_encoded)."""
+        self.settle()
+        _save(latent, self._unit(run, frame_latent(frame)))
+
+    def frames_encoded(self, run: int) -> None:
+        """Record run `run`'s encode, every frame's latent kept."""
+        self.manifest.shot_encoded(run)
+
+    def frame_latent(self, run: int, frame: int) -> Tensor:
+        """The latent of frame `frame` of run `run`, read back, on the CPU."""
+        return _load(self._unit(run, frame_latent(frame)))
+
+    def drop_frame_latent(self, run: int, frame: int) -> None:
+        """Give up the latent of frame `frame` of run `run`: its window is kept."""
+        self._unit(run, frame_latent(frame)).unlink(missing_ok=True)
+
+    def take_window(self, run: int, window: int) -> Tensor:
+        """Window `window` of run `run`, read back, on the CPU (take_windows, one at a time)."""
+        return _load(self._unit(run, window_file(window)))
 
     def finished(self, segment: int) -> bool:
         """Whether segment `segment` is finished already."""
@@ -137,8 +176,7 @@ class Units:
         """Run `run`'s windows, in order, read back, on the CPU; they stay on disk until its
         segment is finished, which a resume may decode again."""
         return [
-            _load(self._unit(run, f"window_{window:04d}.pt"))
-            for window in range(self.windows_done(run))
+            _load(self._unit(run, window_file(window))) for window in range(self.windows_done(run))
         ]
 
     def segment_finished(self, segment: int) -> None:

@@ -34,6 +34,7 @@ from seedvr2x.frames import output_size
 from seedvr2x.passes import Tiles
 from seedvr2x.peaks import GIB
 from seedvr2x.shot_pass import decode_shot, encode_shot, merge_windows, sample_windows
+from seedvr2x.shotruns import each_frame
 from seedvr2x.shots import Shot, shot_layout
 from shot import Correction
 
@@ -301,6 +302,65 @@ def test_a_clip_at_a_level_is_the_shots_runs_as_the_command_line_makes_them(
     assert ours.tobytes() != made[0].tobytes()
 
 
+def frames_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    models: model.Models,
+    frames: npt.NDArray[np.float32],
+    seed: int,
+    encode_tiles: Tiles | None,
+    decode_tiles: Tiles | None,
+    corrected: bool,
+    target: tuple[int, int] = TARGET,
+) -> npt.NDArray[np.float32]:
+    """The clip at animation as the command line runs it (run.py's frames alone): the shot's pass
+    over each frame alone (shots_pipeline), at the shot's `seed`, corrected against that frame,
+    its copy's reader that frame alone (from_memory, replaced for each)."""
+    made: list[npt.NDArray[np.float32]] = []
+    for frame in range(frames.shape[0]):
+        alone = frames[frame : frame + 1]
+        from_memory(monkeypatch, alone)
+        correction = correction_of(alone) if corrected else None
+        made.append(
+            shots_pipeline(
+                models, alone, seed, None, encode_tiles, decode_tiles, correction, target
+            )
+        )
+    return np.concatenate(made)
+
+
+@pytest.mark.parametrize(
+    ("count", "tiles", "correct"),
+    [(SHORT, None, False), (SHORT, TILES, True), (MIDDLE, None, True)],
+    ids=["5f", "5f-ed-corrected", "25f-corrected"],
+)
+def test_a_clip_at_animation_is_each_frame_as_a_shot_of_one_frame_as_the_command_line_runs_it(
+    monkeypatch: pytest.MonkeyPatch,
+    count: int,
+    tiles: Tiles | None,
+    correct: bool,
+    cpu_models: model.Models,  # noqa: F811
+) -> None:
+    # DESIGN.md, Each frame on its own: frame f is the shot's pass over that frame alone, a shot
+    # of one frame at the clip's seed (its first frame's), corrected against that frame, as
+    # run.py's frames alone run it (tests/test_animation_cli.py holds the job to it).
+    frames = clip_of(count, 7)
+    stand_in_dit(monkeypatch)
+    models = pipeline_models(cpu_models)
+    expected = frames_alone(monkeypatch, models, frames, SEED, tiles, tiles, correct)
+    ours = clip.upscale(
+        models,
+        frames,
+        TARGET,
+        SEED,
+        window=5,
+        encode_tiles=tiles,
+        decode_tiles=tiles,
+        correct=correct,
+        quality="animation",
+    )
+    assert ours.tobytes() == expected.tobytes()
+
+
 def test_the_library_chooses_the_runs_the_command_line_does() -> None:
     # job.py imports the choice from seedvr2x.shotruns, the one clip.py runs by: the very objects.
     for name in (
@@ -314,6 +374,8 @@ def test_the_library_chooses_the_runs_the_command_line_does() -> None:
         "shot_runs",
         "kept_frames",
         "kept_bytes",
+        "each_frame",
+        "debanded",
     ):
         assert getattr(job, name) is getattr(shotruns, name), name
 
@@ -368,14 +430,16 @@ GPU_HELD_BACK = 3 * GIB
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not GPU_MODELS, reason="needs SEEDVR2X_MODEL_DIR")
-@pytest.mark.parametrize("level", ["standard", "maximum"])
+@pytest.mark.parametrize("level", ["standard", "maximum", "animation"])
 def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(
     monkeypatch: pytest.MonkeyPatch, level: str
 ) -> None:
     """clip.upscale with the real models on CUDA, with the colour correction, in two windows,
     equals the shot of the command line bit for bit (float32 output), at standard's one run and at
-    maximum's four (runs_pipeline), under the plan clip.plan gives in the card's free memory less
-    GPU_SPARE, the models loaded once for both."""
+    maximum's four (runs_pipeline), and at animation each frame alone as a shot of one frame at
+    the shot's seed (frames_alone), under the plan clip.plan gives at the level in the card's free
+    memory less GPU_SPARE. Not yet run at animation (impl-anim-1, 2026-11-17: written without a
+    card)."""
     import gc
     from fractions import Fraction
 
@@ -406,10 +470,13 @@ def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(
         free - GPU_SPARE,
         target,
         GPU_FRAMES,
-        Pins(window=GPU_WINDOW),
+        # A frame alone is one latent in the DiT: no window to pin (the command line refuses
+        # --window at animation).
+        Pins() if each_frame(level) else Pins(window=GPU_WINDOW),
         host,
         correct=True,
         dit_model=peaks.FP16,
+        quality=level,
     )
     print(
         f"\nclip: {GPU_FRAMES} frames of {GPU_SIZE[1]}x{GPU_SIZE[0]} to {target[1]}x{target[0]};"
@@ -455,17 +522,29 @@ def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(
             step=lambda stage, done, total: told.append((stage, done, total)),
             quality=level,
         )
-        expected = runs_pipeline(
-            models,
-            frames,
-            SEED,
-            made.window,
-            made.encode_tiles,
-            made.decode_tiles,
-            True,
-            level,
-            target,
-        )
+        if each_frame(level):
+            expected = frames_alone(
+                monkeypatch,
+                models,
+                frames,
+                SEED,
+                made.encode_tiles,
+                made.decode_tiles,
+                True,
+                target,
+            )
+        else:
+            expected = runs_pipeline(
+                models,
+                frames,
+                SEED,
+                made.window,
+                made.encode_tiles,
+                made.decode_tiles,
+                True,
+                level,
+                target,
+            )
         refused_after = refused_allocations(device)
         print(f"peak allocated {torch.cuda.max_memory_allocated(device) / GIB:.2f} GiB")
     finally:
@@ -474,14 +553,21 @@ def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(
         torch.cuda.empty_cache()
         torch.cuda.set_per_process_memory_fraction(1.0, device)
     check_none_refused(refused_before, refused_after)
+    if each_frame(level):
+        # Each frame told, then its one encode, window and decode.
+        assert [each for each in told if each[0] == "frame"] == [
+            ("frame", n + 1, GPU_FRAMES) for n in range(GPU_FRAMES)
+        ]
+        assert [each for each in told if each[0] == "window"] == [("window", 1, 1)] * GPU_FRAMES
     # Each run in two windows (a run from frame 3 has 22 frames: 7 latents still), the last run
     # the shortest.
-    runs = job.QUALITY[level]
-    assert [each for each in told if each[0] == "window"] == [
-        ("window", 1, 2),
-        ("window", 2, 2),
-    ] * runs
-    assert told[-1] == ("decode", GPU_FRAMES - runs + 1, GPU_FRAMES - runs + 1)
+    else:
+        runs = job.QUALITY[level]
+        assert [each for each in told if each[0] == "window"] == [
+            ("window", 1, 2),
+            ("window", 2, 2),
+        ] * runs
+        assert told[-1] == ("decode", GPU_FRAMES - runs + 1, GPU_FRAMES - runs + 1)
     assert ours.shape == expected.shape and ours.dtype == expected.dtype == np.float32
     assert ours.std() > 0.05
     if not np.array_equal(ours, expected):

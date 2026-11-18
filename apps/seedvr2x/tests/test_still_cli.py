@@ -674,7 +674,7 @@ GIVEN: dict[str, tuple[list[str], str]] = {
     "cuts": (["--cuts", "cuts.txt"], "no shots"),
     "cut_threshold": (["--cut-threshold", "0.5"], "no shots"),
     "segment_cmd": (["--segment-cmd", "cat > {out}"], "no video segments"),
-    "quality": (["--quality", "maximum"], "encoded alone"),
+    "quality": (["--quality", "maximum"], "a level is how a video's shots run"),
     "min_segment": (["--min-segment", "2"], "no output segments"),
     "input_matrix": (["--input-matrix", "bt709"], "no YUV matrix"),
     "frame_rate": (["--frame-rate", "25"], "no frame rate"),
