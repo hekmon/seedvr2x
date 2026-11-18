@@ -1025,47 +1025,53 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `tests/test_seek_sources.py` holds the index and its reads to measurement's real sources, on the
   CPU: opt-in, it reads the list of sources named by `SEEDVR2X_SEEK_SOURCES`, each with
   `seek_test.py`'s outputs for it (its docstring says the list's format), and skips without it.
-- `--deband` (DESIGN.md, Input, "Banded sources"; `media/conversion.py`'s `DEBAND`, `DEEP` and
-  `Conversion.deband`): the reads' chain brings the frames to their 16-bit format by zscale (a
+- The deband of `--quality animation` (DESIGN.md, Input, "Banded sources", and Each frame on its
+  own: `--deband`, built on 2026-11-11, went into the level on 2026-11-17; `media/conversion.py`'s
+  `DEBAND`, `DEEP` and `Conversion.deband`; the one place a job's deband is decided,
+  `main._video_arguments`'s `args.deband = debanded(args.quality)`, the levels in
+  `shotruns.DEBANDED`): the reads' chain brings the frames to their 16-bit format by zscale (a
   limited range shifted, a full range scaled, exactly: swscale's full-range expansion is not),
   runs `deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0` there (thresholds 0.012 on
   all four, decided on 2026-11-11) and converts to RGB from that format; a conversion without it
   is the chain of before, byte for byte. `tests/test_deband.py` holds the filter strings with and
   without it against main's literals, every planar format's 16-bit twin (yuv411p, yuv410p and
-  yuv440p, which have none, refused naming `--deband`), the 16 bits exact (a full range's chroma
-  centred, v * 257 - 128), a read with it equal
+  yuv440p, which have none, refused naming `--quality animation`), the 16 bits exact (a full
+  range's chroma centred, v * 257 - 128), a read with it equal
   frame for frame (MD5 of the reader's RGB) to the source debanded by ffmpeg alone (the format
   filter, deband on one thread, into a 16-bit FFV1 file) and read without it, the first pass's
   index and shot detector frames the same with it and without (a contract: the first pass
   takes no conversion), and a shot read by the reader's
   seek inside a GOP of an x264 source (B-frames) equal to a read from the start, with it;
   `tests/test_zscale.py` its chain on one slice and its bytes the same on 1 and 16 filter
-  threads. `tests/test_deband_cli.py`: the frames each encode reads and the masters (the colour
-  correction's reference included) of a job with it those of a job without it on the source
-  debanded by ffmpeg, the settings' key, the record's `seedvr2x_deband` (masters and finished
-  file) and the plan's line only when on, a resume with the other value refused as another job
-  naming `--deband` (`main.SETTING_OPTIONS`), a plan with no unit made planned again with the
-  other value from its first pass's record, a resume with it, its input copy deleted and made
-  again, giving the uninterrupted job's masters, the help with no figure;
-  `tests/test_still_cli.py` a picture's refusal; `core/tests/test_record.py` the field. deband
+  threads. `tests/test_deband_cli.py`: the settings' key, the record's `seedvr2x_deband` (masters
+  and finished file) and the plan's line at animation alone, none at the other levels; a job
+  begun with `--deband` at another level (its manifest given the key) refused as another job,
+  the line naming the option gone and the level (`main.SETTING_OPTIONS`); a resume at animation
+  or from it another job naming both settings; a plan with no unit made planned again at the
+  other level from its first pass's record; a resume at animation, its input copy deleted and
+  made again, giving the uninterrupted job's masters; the option gone from the parser and the
+  help. That the model and the correction are given the source debanded by ffmpeg is
+  `tests/test_animation_cli.py`'s (a job's frames those of one-frame jobs on that source). A
+  picture has no level: `--deband` is refused for it as for any video, by the parser;
+  `core/tests/test_record.py` the field. deband
   is among `ffmpeg.FILTERS`, so a build without it is refused. Its two chains, a limited and a
   full range, are a digest of their own (`media/fingerprint.py`'s `deband_fingerprint`, run on a
   gradient frame that deband changes 67% and 80% of the samples of, where the noise frame the
-  conversions run on changed 0.13% and 2.2%), run and recorded by a job with `--deband` alone,
+  conversions run on changed 0.13% and 2.2%), run and recorded by a job that debands alone,
   under `environment.deband_conversions`, and counted in a resume's comparison and in an
-  accepted change's record only between two jobs that both took it (`resume.DEBAND_KEY`,
+  accepted change's record only between two jobs that both deband (`resume.DEBAND_KEY`,
   `debands`, as inductor's packages count between two compiled jobs): a change in ffmpeg's
   deband alone refuses no job that never used it, and the conversions' digest holds the fifteen
   decodes and the writers' alone. `tests/test_fingerprint.py` holds the two digests apart, the
   deband one moving with the chain alone, and the gradient's share of changed samples;
   `tests/test_deband_cli.py` the comparison and the resume of each kind of job. No line
-  suggests `--deband`: CAMBI found the strongly banded scenes and missed the clip the option was
-  made for (impl-box-1), so no detection is built.
+  suggests the level for a banded source: CAMBI found the strongly banded scenes and missed the
+  clip `--deband` was made for (impl-box-1), so no detection is built.
 - A source's planes to RGB in torch (`seedvr2x/yuv.py`; DESIGN.md, Repository and apps, the
   nodes' VIDEO path), where zscale is not to be had: the CLI's table of pixel formats, matrices and
   chroma sitings, its guesses for an untagged stream and its refusals are the library's
   (`yuv.reading`, refusing as `SourceRefused` with a kind of `yuv.KINDS`), which
-  `media/conversion.py` takes, its own words kept for `--input-matrix` and `--deband`.
+  `media/conversion.py` takes, its own words kept for `--input-matrix` and the level's deband.
   A source whose sides its chroma subsampling doesn't divide (zimg refuses them) is refused
   at the start by the same rule (`yuv.check_size`, which `to_rgb` applies; `media/source.py`'s
   `_sides_refusal` in `declare`), naming its size, format and subsampling and giving the lossless

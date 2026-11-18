@@ -430,12 +430,11 @@ def check_recorded(
 
 def _deband_said(quality: str) -> str:
     """The plan's line of the deband (said): the filter, where it runs, what it leaves alone
-    (DESIGN.md, Input, "Banded sources"), and what turned it on: --deband, or the level that
-    reads its source debanded (shotruns.debanded; DESIGN.md, Each frame on its own)."""
-    why = f"--quality {quality}" if each_frame(quality) else "--deband"
+    (DESIGN.md, Input, "Banded sources"), and what turned it on: the level that reads its source
+    debanded (shotruns.debanded; DESIGN.md, Each frame on its own)."""
     return (
         f"deband: on, ffmpeg's {DEBAND} on every frame the job reads, at 16 bits before their"
-        f" conversion to RGB ({why}); the shot detection reads the source as it is"
+        f" conversion to RGB (--quality {quality}); the shot detection reads the source as it is"
     )
 
 
@@ -622,9 +621,9 @@ def said(
     Every value the planner sets is in it: the card's free memory and the budget, with the
     margin, and on a run held to the card the torch's limit and the reserve, by their names and
     figures (_card_said, _budget_said); the padded frames and the attention backend; the shots;
-    the windows; the --quality level, at every level (_quality_said); --deband, when given
-    (_deband_said: a setting, not the planner's; said only when on, so that a job without it says
-    the plan of before); the swapped blocks, where
+    the windows; the --quality level, at every level (_quality_said); the deband, where the level
+    debands (_deband_said: a setting, not the planner's; said only when on, so that a job without
+    it says the plan of before); the swapped blocks, where
     the VAE is in the DiT's phase and what of the DiT stays in the VAE's; the system memory;
     each VAE pass, untiled or its tiles, their overlap and grid; the room a VAE pass is held to
     (VAE_ROOM); the scratch of the longest tiled shot; the disk the job takes (disk.py); the

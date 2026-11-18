@@ -4,11 +4,12 @@ it with the job's record, as it does the rest of the environment: zimg, which do
 conversions (zscale), is a library of its own, and an ffmpeg linked to the system's libzimg takes
 its upgrades without a new version string.
 
-Two digests, not one: the conversions every job runs (`fingerprint`), and --deband's chains
-(`deband_fingerprint`), which only a job that took --deband runs and records, under a key of its
-own (environment.current), and which a resume compares only between two such jobs
-(resume.differences), as inductor's packages count only between two compiled jobs. One digest of
-both would refuse the resume of a job that never debanded when ffmpeg's deband alone changed."""
+Two digests, not one: the conversions every job runs (`fingerprint`), and the deband's chains
+(`deband_fingerprint`), which only a job that debands (--quality animation) runs and records,
+under a key of its own (environment.current), and which a resume compares only between two such
+jobs (resume.differences), as inductor's packages count only between two compiled jobs. One
+digest of both would refuse the resume of a job that never debanded when ffmpeg's deband alone
+changed."""
 
 import hashlib
 import re
@@ -44,7 +45,7 @@ DECODES = (
     Conversion("gbrp16le", "gbr", "full", "left"),
 )
 
-# --deband's chains (Conversion.deband), their zscale bringing a limited and a full range to 16
+# The deband's chains (Conversion.deband), their zscale bringing a limited and a full range to 16
 # bits before the filter, run on a gradient frame (_gradient), not the noise of _frame: deband
 # changed 0.13% of the output samples of the noise frame in a limited range and 2.2% in a full
 # one, and 67% and 80% of the gradient's (ffmpeg 9.0.2, 256x64 yuv420p, the chain with deband
@@ -80,8 +81,8 @@ def fingerprint() -> str:
 
 
 def deband_fingerprint() -> str:
-    """The SHA-256 of --deband's test chains' output, in hex, on a gradient frame: the digest a
-    --deband job records beside the conversions' (environment.current).
+    """The SHA-256 of the deband's test chains' output, in hex, on a gradient frame: the digest a
+    job that debands records beside the conversions' (environment.current).
 
     Raises MediaError when ffmpeg fails them."""
     return _digest(

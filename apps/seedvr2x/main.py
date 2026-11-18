@@ -661,20 +661,6 @@ def _parser() -> argparse.ArgumentParser:
         " a whole number (24000/1001, 25): its frames taken at that rate, only if every one lies"
         " within half a frame of that rate's timeline",
     )
-    # An input deband, opt-in, never a default (DESIGN.md, Input, "Banded sources", decided on
-    # 2026-11-09): ffmpeg's deband in the reads' conversion (media/conversion.py, DEBAND). The
-    # help names the sources the study found banded (impl-box-1: dark shaded animation, near-black
-    # haze) and what it may cost elsewhere, with no figure in it, as --compile's.
-    parser.add_argument(
-        "--deband",
-        action="store_true",
-        help="smooth the source's banding before the model sees it: ffmpeg's deband on every frame"
-        " the job reads, at the reads' full precision, before their conversion to RGB; the shot"
-        " detection reads the source as it is. For sources whose smooth gradients come in visible"
-        " steps, most often dark shaded animation and near-black haze, where the model draws the"
-        " steps as contour lines; elsewhere it may take faint lines or fine gradients for banding,"
-        " so it is never on by default. A setting, which a resume repeats; not for a picture",
-    )
     parser.add_argument(
         "--window",
         type=int,
@@ -1046,9 +1032,11 @@ def _video_arguments(args: argparse.Namespace) -> None:
             f"--window: at --quality {args.quality} each frame is one latent in the DiT, with no"
             " windows to cap; run without --window"
         )
-    # The level that reads its source debanded (shotruns.debanded; DESIGN.md, Each frame on its
-    # own: animation), through --deband's chain, setting and record.
-    args.deband = getattr(args, "deband", False) or debanded(args.quality)
+    # The one place a job's deband is decided: the level that reads its source debanded
+    # (shotruns.debanded; DESIGN.md, Each frame on its own: animation), through the chain, the
+    # setting and the record --deband had, which went into the level on 2026-11-17 (DESIGN.md,
+    # Banded sources: "Dropped as an option").
+    args.deband = debanded(args.quality)
     if args.min_segment is None:
         args.min_segment = MIN_SEGMENT
 
@@ -3999,9 +3987,10 @@ def _settings(
         # "24" for a whole rate, "24000/1001" otherwise, either read back exactly (kept by
         # design, 2026-10-10).
         "frame_rate": None if args.frame_rate is None else str(args.frame_rate),
-        # --deband's filter as the reads run it (media/conversion.py, DEBAND), which changes every
-        # frame the model is given: a resume with the other value is another job. Written only
-        # when on, so that a job without it records the settings of before.
+        # The deband's filter as the reads run it (media/conversion.py, DEBAND), which changes
+        # every frame the model is given, written by the level that debands alone (_video_arguments:
+        # --quality animation), so that a job begun with --deband at another level, which the
+        # option wrote, is another job. A job without it records the settings of before.
         **({"deband": DEBAND} if args.deband else {}),
     }
     return settings
@@ -4178,9 +4167,10 @@ def _identity(
 
 
 def _deband_fingerprint(args: argparse.Namespace) -> str | None:
-    """--deband's chains' fingerprint (media/fingerprint.py) for a job that took --deband, which
-    runs and records it; None for any other, whose start then runs no deband chain and whose
-    record has no such key (resume.DEBAND_KEY)."""
+    """The deband chains' fingerprint (media/fingerprint.py) for a job that debands (the level's,
+    --quality animation; --deband's until 2026-11-17), which runs and records it; None for any
+    other, whose start then runs no deband chain and whose record has no such key
+    (resume.DEBAND_KEY)."""
     if not args.deband:
         return None
     from media.fingerprint import deband_fingerprint
@@ -5211,9 +5201,12 @@ def _replan(record: "Manifest", prior: _Prior, shape: list[str]) -> None:
 
 
 # The option a setting's difference names beside its key, where the key alone would not say
-# which option to give or leave out: --deband's is written only when on (_settings), its line
-# `settings.deband: null -> "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0"`.
-SETTING_OPTIONS = {"deband": "--deband"}
+# which option to give or leave out: the deband's is written only when on (_settings), its line
+# `settings.deband: null -> "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0"`, by
+# --quality animation alone since --deband went into the level (DESIGN.md, Banded sources,
+# "Dropped as an option", 2026-11-17): a job begun with --deband at another level is another job,
+# named so, as the retired test modes are.
+SETTING_OPTIONS = {"deband": "--deband, an option no more: --quality animation debands"}
 
 
 def _another_job(

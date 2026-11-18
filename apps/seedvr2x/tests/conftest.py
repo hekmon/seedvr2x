@@ -55,7 +55,7 @@ def the_linux_driver(monkeypatch: pytest.MonkeyPatch) -> None:
 #
 # A run of the command line checks the build (media/ffmpeg.py's check: six or eight ffmpeg
 # processes, its listings) and takes the conversions' fingerprint (media/fingerprint.py: one
-# ffmpeg of 19 conversions; --deband's 2 are asked apart, by a job with it) at its start.
+# ffmpeg of 19 conversions; the deband's 2 are asked apart, by a job that debands) at its start.
 # Counted on 2026-11-07, tests/test_cli_run.py alone made 814 checks and 834 fingerprints,
 # 177 s of its 459, about 6,300 of its 8,898 ffmpeg processes. Here an unchanged build is asked
 # each listing and the fingerprint once: what
@@ -130,7 +130,7 @@ def _remembered_fingerprint() -> str:
 
 
 def _remembered_deband_fingerprint() -> str:
-    """The same for --deband's chains, which a job with --deband asks at its start: the key holds
+    """The same for the deband's chains, which a job that debands asks at its start: the key holds
     their chains and the gradient frame they run on."""
     program = _program("ffmpeg") if _Memo.on else None
     if program is None:

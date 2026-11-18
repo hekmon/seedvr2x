@@ -60,7 +60,7 @@ def test_failed_conversions_refused(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_the_deband_chains_have_a_digest_of_their_own() -> None:
-    # --deband's chains are no part of the conversions' digest (resume.DEBAND_KEY): a job that
+    # The deband's chains are no part of the conversions' digest (resume.DEBAND_KEY): a job that
     # never debanded is not refused when ffmpeg's deband alone changes. Here the filter's
     # string stands for the change.
     plain, banded = fingerprint(), deband_fingerprint()
