@@ -85,9 +85,6 @@ never requires it.
   memory (the user, 2026-11-17; Windows had been v0.2.0's since 2026-10-24, and the command
   has run natively there since 2026-11-09, impl-win-2 to 5); a machine whose CPU and GPU share
   one memory is v0.2.0's.
-- ComfyUI's registry: the nodes are in v0.1.0, on Linux and Windows (the user, 2026-11-17),
-  and go to ComfyUI's registry with v0.2.0 and macOS
-  ([Repository and apps](#repository-and-apps), step 4)
 - A job's work directory away from its output file (the user asked, on 2026-10-24, for the
   scratch on one disk and the file on another): its masters live there, as large as the file.
 - Machines whose CPU and GPU share one memory: NVIDIA's DGX Spark (128 GB for both) and its RTX
@@ -275,22 +272,39 @@ seedvr2x/                the repository
   [The image server](#the-image-server)'s. In v0.1.0 with the CLI's still images (the user,
   2026-11-02), built and measured with the rest, neither holding the release if it isn't
   ready with it.
-- **ComfyUI's nodes, in v0.1.0, in ComfyUI's registry with v0.2.0** (the user: after v0.1.0
+- **ComfyUI's nodes, in v0.1.0 and in ComfyUI's registry with it** (the user: after v0.1.0
   on 2026-11-02, in it on 2026-11-03, published with v0.2.0 on 2026-11-04; in v0.1.0 on Linux
-  and Windows, the registry with v0.2.0 and macOS, on 2026-11-17: their GPU checks, video-3,
-  and the user's runs from start to end in a ComfyUI on each are v0.1.0's). ComfyUI is where
+  and Windows on 2026-11-17, in the registry with v0.2.0 and macOS that morning and with
+  v0.1.0 that evening: their GPU checks, video-3, and the user's runs from start to end in a
+  ComfyUI on each, installed from the registry, are v0.1.0's). ComfyUI is where
   most users will meet seedvr2x first, on their own cards, small ones included: the nodes show
   what seedvr2x brings, and send users on to the CLI for the rest. Their specification began
   on 2026-11-04 (the user):
-  - **Published with v0.2.0** (the plan of 2026-11-04; since 2026-11-17 in v0.1.0, the
-    registry with v0.2.0). With seedvr2x's own placement (below), Windows and macOS are
-    first-class for the nodes: the library runs right there, not only imports. Their design and
-    code begin now, in `apps/comfyui/`, installed by hand into a local ComfyUI for
-    development (ComfyUI v0.44.0 under WSL2, the library installed editable in its
-    environment; the user's ComfyUI Desktop on Windows is the user's side of the test);
-    nothing of them is published with v0.1.0. They are published with v0.2.0,
-    the multi-platform version, when the command reaches Windows and macOS too and a user can
-    follow them to it. Published,
+  - **Published with v0.1.0** (the plan of 2026-11-04 was v0.2.0, the version on several
+    platforms; since 2026-11-17 the command runs on Windows too, and the nodes and their entry
+    in ComfyUI's registry are v0.1.0's, on Linux and Windows). With seedvr2x's own placement
+    (below), Windows and macOS are first-class for the nodes: the library runs right there, not
+    only imports. Their design and code began in `apps/comfyui/`, installed by hand into a
+    local ComfyUI for development (ComfyUI v0.44.0 under WSL2, the library installed editable
+    in its environment; the user's ComfyUI Desktop on Windows is the user's side of the test).
+  - **In ComfyUI's registry with v0.1.0** (the user, 2026-11-17 evening; the registry's
+    specification: its `classifiers` help users find a node, and its documents don't say
+    whether ComfyUI's Manager hides or refuses a node by them), on these conditions, each built
+    and tested before the entry is published:
+    - classifiers for Windows, Linux and NVIDIA's CUDA; macOS's with v0.2.0;
+    - the nodes refuse by themselves wherever they can't run (macOS, an AMD or Intel card, no
+      card, a CPU and GPU sharing one memory), in their words, before any download;
+    - the install the registry runs, built and tested on fresh setups (ComfyUI Desktop, the
+      portable build, Linux), never moves ComfyUI's own packages (the registry's standards:
+      nothing installed by pip at run time, nothing done to other nodes);
+    - ComfyUI's API: `comfy_api.latest` while they are built; published, the numbered version
+      they were tested on, pinned (today v0_0_2, which ComfyUI's documents call "current (and
+      first)" and say may change "without warning"; the stable one will be the version before
+      the latest, none yet), `requires-comfyui` set to the versions tested, and a smoke test at
+      each ComfyUI release;
+    - the publisher account and its key are the user's.
+    A baton of its own, after impl-anim-2.
+    Published,
     they sit in this repository, where ComfyUI's own install (its Manager, its registry) finds
     them. Only the bare minimum ComfyUI needs to find and import them sits at the root, a
     `pyproject.toml` and an `__init__.py`, commented so: the `__init__.py` only imports the
@@ -752,7 +766,8 @@ seedvr2x/                the repository
     chosen file needs gives the right numbers, and measures the allocator's margin on a few
     small steps; cached on disk by a fingerprint (seedvr2x's version, torch and its CUDA, the
     driver, the GPU, the allocator), run again when any of them changes; where it fails, the
-    loader refuses, saying why. The versions tested are listed before v0.2.0's publication.
+    loader refuses, saying why. The versions tested are listed before the nodes' publication,
+    with v0.1.0.
     The library's caps on Pillow and huggingface_hub, below 14 and 3, were widened on
     2026-11-05 for the Windows portable's 13.0.0 and 2.3.0, its tests passing with them. Met in
     the user's own ComfyUI on 2026-11-12 (Comfy Desktop: Python 3.12, torch 2.13, transformers
@@ -913,8 +928,8 @@ In steps:
    later, takes the same four modules. Built on 2026-11-03 (impl-still), on the CPU, no video
    plan moving over the plan matrix's 5,480 cases. Neither holds the release if it isn't ready
    with the rest; the roadmap shows them under next until then.
-4. ComfyUI's nodes, begun before v0.1.0 and published with v0.2.0 (the user, 2026-11-04; in
-   v0.1.0 since 2026-11-17, ComfyUI's registry with v0.2.0), assembling the same bricks, built
+4. ComfyUI's nodes, begun before v0.1.0 (the user, 2026-11-04: published with v0.2.0; since
+   2026-11-17 in v0.1.0, and in ComfyUI's registry with it), assembling the same bricks, built
    by a conductor of their own. Their specification, begun
    on 2026-11-04 (above), waited for two things, both done that day: the measurement of
    ComfyUI's own SeedVR2 and numz's nodes beside seedvr2x, and the shot's pass moved to the
@@ -2592,6 +2607,12 @@ Decided on 2026-11-17 (the user, on impl-box-7's renders of six shots of an anim
 against impl-box-6's): a fourth level, which upscales each frame of a shot on its own, in a
 latent of its own, every frame from the shot's noise, the source debanded. Built before
 v0.1.0, in the command line and in the nodes.
+- **Built** in the library and the command line (impl-anim-1, 2026-11-17; the nodes refuse it
+  until their deband is built) **and run on both cards** (2026-11-18): its GPU test passed on
+  the 96 GB card under Linux's driver and on the RTX 5090 natively and under WSL2; on the six
+  shots below, its frames were the research renders' bit for bit (673 of 673, each shot at its
+  seed, impl-box-9), a second run of one shot the same. `--window` is refused at the level, as
+  a picture refuses it: each frame is one latent in the DiT, with no windows to cap.
 - **Why.** The packing that makes `maximum` worth its runs (above) also blends drawings. On
   six shots of an animated episode, 720p to 1080p with the sharp 7B (impl-box-7, 2026-11-17),
   every frame was a new drawing in 132 of the 170 groups (some 16-px block changing its mean
@@ -2618,17 +2639,54 @@ v0.1.0, in the command line and in the nodes.
   are clean, and a little flicker on the pan, less than `standard`'s. The user: "If I had to
   choose, oneframe" (impl-box-7's name for it), and the episode as `standard` leaves it is not
   shippable.
-- **Cost.** 1.8 times `standard`'s time: 6 min 47 s for a shot of 206 frames, against 3 min
-  47 s and `maximum`'s 11 min 13 s, on the 96 GB card. The DiT runs a latent for every frame
-  where `standard` runs one for four; the VAE's passes cost about the same.
+- **Cost.** On one shot of 206 frames, by research means (a cut at every frame), 1.8 times
+  `standard`'s time: 6 min 47 s against 3 min 47 s and `maximum`'s 11 min 13 s, on the 96 GB
+  card; the level as built, 5 min 59 s (impl-box-9, 2026-11-18). Over an episode it costs more
+  (the first night of each, 2026-11-18, the whole by extrapolation from the frames finished):
+  - on the 96 GB card, 1.61 s a frame (13,479 of 34,548 frames made): about 2.1 times
+    `standard`'s 0.75 s a frame on the same episode, run on older code under cudaMallocAsync
+    with a 120-latent window cap (impl-box-3, 2026-11-11), and 2.2 times by the plan's own
+    estimate at `standard` on today's code (7 h 0 min, against 15 h 26 min);
+  - on the RTX 5090, about 2.1 s a frame (7,289 of 37,393 frames, impl-wsl2-6), where
+    `standard` wasn't run: its plan's estimate, 19 h 24 min, is 1.87 s a frame.
+  The DiT runs a latent for every frame where `standard` runs one for four, and on the 96 GB
+  card the VAE's passes cost more a frame too: 0.37 s a frame to encode and 0.72 to decode and
+  write, against the 0.19 and 0.41 the calibration takes from a window's frames (about
+  `standard`'s: its plan for the episode at `standard` is within 3% of impl-box-3's run). A
+  frame alone fills a latent of its own, where `standard`'s frames share them four to one
+  (inferred).
+  - **The plan's time is off at this level,** by the first nights' rates: short by a third on
+    the 96 GB card (10 h 8 min for that episode, against 15 h 26 min), long by about 15% on
+    the RTX 5090 (25 h, against 21.8 h). The calibration times the VAE's passes on a window's
+    frames, and the level prices its frames alone at that rate: to encode, 0.19 and 0.24 s a
+    frame on the two cards against 0.37 and 0.52 run; to decode and write, 0.41 and 1.43
+    against 0.72 and 0.79, the cause of each gap not isolated; its DiT within 13% (0.44 s a
+    frame against 0.50 on the 96 GB card). To fix: the calibration times the level's own
+    units, a frame alone through each pass.
+    `--until` held all the same, the run's own clock taking over as
+    its units are made: the runs stopped at 05:57 and 06:00.
+  - **The users' documents and the plan's line** lose "about 1.8 times": the plan prints each
+    level's time on the card it runs on, right once the calibration is; the documents say
+    about twice `standard`'s time, as measured on the 96 GB card. On a card of 32 GB the
+    ratio is to measure: `standard` on the RTX 5090, on the frames the level made there.
 - **The source debanded** (the user, 2026-11-17): the level takes `--deband`'s place
   ([Banded sources](#banded-sources---deband)): ffmpeg's `deband` in the command line's reads,
   as `--deband` ran it, and in the nodes a deband in torch, written from the algorithm's
   description, held to ffmpeg's by a test within a measured margin (the nodes' conversion is
-  held to zscale's so). To measure first, the night of 2026-11-17: whether the level still
-  needs it (the deband study's banded scenes and its scenes at risk, with it and without),
-  and what it does to the softer sky; if it isn't needed, the level runs without it, and the
-  option goes all the same.
+  held to zscale's so). Kept (the user, 2026-11-18). An episode that gains little from a
+  deband (the user's eyes at `standard`, 2026-11-16) shows its cost alone: on six of its shots
+  the level with it and without could hardly be told apart played; paused, without it the
+  colours and lines a little more vivid and more noise in the textures, maybe the source's own
+  grain, with it a very little paler and less noise (the user's eyes, 2026-11-18, on
+  impl-box-8's renders against impl-box-7's). Where the picture holds
+  still, it lowered the flicker on all six shots, by 0.04 to 0.15 8-bit codes, under
+  `standard`'s on four; where it moves, the same within 0.12 but on one shot, 0.33 steadier.
+  The scenes that need it gain a lot (a dark sky and a face: the user's eyes at `maximum` on
+  2026-11-11, recalled on 2026-11-18): at the level,
+  the three banded scenes' terraces fell 7 to 10% with it, CAMBI's
+  maximum on all three and its mean on two, the dark sky's mean rising across its frames
+  (0.67 to 1.09; the terraces read from the eyes' 10-bit copies cut to 8 bits, CAMBI at 10;
+  impl-wsl2-6, 2026-11-18).
 - **Not measured:** live action, so the level is advised for animation alone until it is;
   its sharpness by a number (the eyes judged it).
 - **Parked** (the user, 2026-11-17): a held drawing's frames packed into one latent (a cut at
@@ -6038,8 +6096,9 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   nodes' install). The library at its floors (diffusers 0.39.0 and torch 2.12.1 today), as
   ComfyUI's environments run it, against the references, made in the command line's
   environment (diffusers 0.40.0, torch 2.14.1): the same bits, or how close. Only the CPU
-  suites ran there (impl-nodes-8, 2026-11-13). Before v0.2.0's publication, which lists the
-  versions tested. Measured on 2026-11-15 (impl-wsl2-2, the RTX 5090, milestone 1's 7b and
+  suites ran there (impl-nodes-8, 2026-11-13). Before the nodes' publication, with v0.1.0,
+  which lists the versions tested.
+  Measured on 2026-11-15 (impl-wsl2-2, the RTX 5090, milestone 1's 7b and
   sharp cases at 720): torch 2.12.1 and torchvision 0.27.1, with the CUDA libraries they
   bring (cuDNN 9.20 against 9.24 among them, not isolated), move every frame against 2.14.1's,
   PSNR-Y 58.53 dB on average and 56.00 at the worst frame (7b), 56.82 and 53.28 (sharp),
