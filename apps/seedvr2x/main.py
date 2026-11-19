@@ -1754,12 +1754,15 @@ def _run(args: argparse.Namespace) -> int:
             return 1
         models, loading = loaded
         planned_kept = "no time estimated; the plan and its cut list are kept"
-        calibrated = _calibrated(models, *calibrating, planned_kept)
+        # Each level's time is said where nothing is made yet, deghost's from frames timed alone.
+        every = planned(record.content())
+        alone = every or each_frame(args.quality)
+        calibrated = _calibrated(models, *calibrating, planned_kept, alone=alone)
         if calibrated is None:
             return 1
         left = job_units(units, plan, target, start="decode")
         levels = None
-        if planned(record.content()):
+        if every:
             levels = {
                 level: _level_units(shots, segments, level, args.quality, plan, target)
                 for level in QUALITY
@@ -1811,7 +1814,7 @@ def _run(args: argparse.Namespace) -> int:
     made = "nothing of the job made" + _first_kept(kept_first)
     if kept_first is None and prior is not None:
         made = _kept(record, len(segments))
-    calibrated = _calibrated(models, *calibrating, made)
+    calibrated = _calibrated(models, *calibrating, made, alone=each_frame(args.quality))
     if calibrated is None:
         return 1
     clock = calibrated.clock
@@ -2469,14 +2472,18 @@ def _calibrated(
     writer: "Callable[[Path], Writer]",
     directory: Path,
     kept: str,
+    *,
+    alone: bool = False,
 ) -> "Calibrated | None":
     """The job's time estimates calibrated (calibration.calibrate), through its own passes: the
     source's size, its colour correction, its writer (`writer`, the job's kind of output at a
     path), its tiles, its longest window and run, the source's first frames read through the job's
     reader, its files on the disk of `directory`, the job's directory, beside it, not in it (a
     kill would leave them there, where a resume refuses what its manifest doesn't name); None once
-    a failure is logged, with what is kept (`kept`). SIGTERM unwinds it, as it does the model
-    files' fetch: its scratch removed, its ffmpeg processes stopped."""
+    a failure is logged, with what is kept (`kept`); with `alone`, frames alone timed through each
+    pass too (calibrate's `alone`), for a level that takes each frame alone, the job's or one whose
+    time --plan says. SIGTERM unwinds it, as it does the model files' fetch: its scratch removed,
+    its ffmpeg processes stopped."""
     import numpy as np
     import numpy.typing as npt
     import torch
@@ -2531,6 +2538,7 @@ def _calibrated(
                 split=args.color_correction == "split",
                 writer=writer,
                 directory=directory.parent,
+                alone=alone,
             )
     except (MediaError, NonFinite) as error:
         logger.error("%s, in the time estimates' calibration: %s", error, kept)

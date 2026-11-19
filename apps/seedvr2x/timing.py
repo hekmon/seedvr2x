@@ -43,9 +43,33 @@ from stop import late
 
 logger = logging.getLogger("cli.timing")
 
-Kind = Literal["encode", "window", "decode", "enter-dit", "enter-decode", "draw"]
+Kind = Literal[
+    "encode",
+    "window",
+    "decode",
+    "encode-alone",
+    "window-alone",
+    "decode-alone",
+    "enter-dit",
+    "enter-decode",
+    "draw",
+]
 # The kinds of unit, each a model of its own (DESIGN.md, Memory planner, Time estimates).
 KINDS: tuple[Kind, ...] = ("encode", "window", "decode")
+# The same kinds where each frame goes alone (shotruns.each_frame; DESIGN.md, Each frame on its
+# own, "The plan's time is off at this level"), each a model of its own, timed by the calibration
+# on frames alone (calibration.calibrate's `alone`): priced at a window's frames' rate, the
+# level's encode came out at 0.19 and 0.24 s a frame on the 96 GB card and the RTX 5090 against
+# 0.37 and 0.52 run, its decode and write at 0.41 and 1.43 against 0.72 and 0.79, and the plan
+# said 10 h 8 min for an episode that took 15 h 26 min on the first card, 25 h for one that took
+# 21.8 h on the second (impl-box-9, impl-wsl2-6, 2026-11-18).
+ALONE: dict[Kind, Kind] = {
+    "encode": "encode-alone",
+    "window": "window-alone",
+    "decode": "decode-alone",
+}
+# The kind each unit's kind is of, a frame alone's that of its pass (Unit.phase).
+OF: dict[Kind, Kind] = {**{kind: kind for kind in KINDS}, **{v: k for k, v in ALONE.items()}}
 # The terms a unit pays besides its kind's model, measured like the rest (DESIGN.md, the same
 # section, decided on 2026-10-21): the change of phase a unit opens (Models.enter), a constant per
 # phase entered, and a run's first window's noise draw, a rate per token of the run's latent. None
@@ -89,7 +113,7 @@ class Clock:
     def __init__(self, models: Mapping[Kind, Model] | None = None) -> None:
         self._models: dict[Kind, Model] = dict(models or {})
         self._ratios: dict[Kind, deque[float]] = {
-            kind: deque(maxlen=RATIOS) for kind in (*KINDS, *TERMS)
+            kind: deque(maxlen=RATIOS) for kind in (*KINDS, *ALONE.values(), *TERMS)
         }
         # A calibration is a kind's first measure, at a ratio of 1 to its own model: counted among
         # the last ratios, so that the first unit alone doesn't set the correction. On a job of 78
@@ -99,7 +123,7 @@ class Clock:
         for kind in self._models:
             self._ratios[kind].append(1.0)
         self.calibrated = bool(self._models)
-        self._units: dict[Kind, int] = dict.fromkeys((*KINDS, *TERMS), 0)
+        self._units: dict[Kind, int] = dict.fromkeys((*KINDS, *ALONE.values(), *TERMS), 0)
         self._record: dict[str, object] = {}
         for kind in self._models:
             self._said(kind)
@@ -152,7 +176,8 @@ class Clock:
 
 
 def _sized(kind: Kind, size: int) -> int:
-    """size as a kind's model takes it: an encode's or a decode's frames padded to 4n + 1."""
+    """size as a kind's model takes it: an encode's or a decode's frames padded to 4n + 1; a
+    frame alone's are its frames, each a shot of one frame, which pads to none."""
     return padded_length(size) if kind in ("encode", "decode") else size
 
 
@@ -189,8 +214,9 @@ class Unit:
 
     @property
     def phase(self) -> Kind:
-        """The kind the unit is of, its terms aside: a segment's decode and write is a decode."""
-        return next(kind for kind, _ in self.parts if kind in KINDS)
+        """The kind the unit is of, its terms aside: a segment's decode and write is a decode, a
+        frame alone's units those of their pass (OF)."""
+        return next(OF[kind] for kind, _ in self.parts if kind in OF)
 
 
 def units_of(
@@ -227,9 +253,14 @@ def units_of(
     each_frame: the job's level takes each frame alone (shotruns.each_frame; DESIGN.md, Each frame
     on its own): a run's encode is its frames', each alone, and each frame a window of one latent
     of its own, a unit named for the frame ("shot 3/12's frame 5/206"), which draws a latent's
-    noise, its frame's (run._sample_frames); its decode, its frames' one at a time."""
+    noise, its frame's (run._sample_frames); its decode, its frames' one at a time; each part of
+    a frame alone's kind (ALONE), priced by the frames the calibration timed alone."""
     units: list[Unit] = []
     run = 0  # the runs' index across the job, as the manifest's
+    # A frame alone's parts are of their own kinds (ALONE), the packed frames' of the passes'.
+    encoding: Kind = ALONE["encode"] if each_frame else "encode"
+    windowing: Kind = ALONE["window"] if each_frame else "window"
+    decoding: Kind = ALONE["decode"] if each_frame else "decode"
     for number, segment in enumerate(segments):
         group = [i for i, shot in enumerate(shots) if segment.start <= shot.start < segment.end]
         first_run = run
@@ -247,11 +278,11 @@ def units_of(
                 done = 0 if windows_done is None else windows_done[run]
                 if done < len(layout) and not (encoded is not None and encoded[run]):
                     units.append(
-                        Unit(("encode", run), f"{name}'s encode", (("encode", each.frames),))
+                        Unit(("encode", run), f"{name}'s encode", ((encoding, each.frames),))
                     )
                 for k in range(done, len(layout)):
                     first, end = layout[k]
-                    parts: tuple[tuple[Kind, int], ...] = (("window", (end - first) * per_latent),)
+                    parts: tuple[tuple[Kind, int], ...] = ((windowing, (end - first) * per_latent),)
                     if each_frame or k == done:
                         # A run's first window left draws the run's noise; each frame alone draws
                         # its own latent's, the shot's seed's.
@@ -260,7 +291,7 @@ def units_of(
                         parts += (drawn,)
                     said = f"{name}'s {'frame' if each_frame else 'window'} {k + 1}/{len(layout)}"
                     units.append(Unit(("window", run, k), said, parts))
-                decodes.append(("decode", each.frames))
+                decodes.append((decoding, each.frames))
                 run += 1
         if finished is not None and finished[number]:
             # Its runs' encodes and windows were made too: a finished segment's are kept by none.
@@ -420,8 +451,22 @@ class Progress:
             return "the job's last unit made"
         seconds = self.left()
         if seconds is None:
-            missing = [kind for kind in KINDS if not self.clock.knows(kind)]
-            what = {"encode": "an encode", "window": "a window", "decode": "a decode"}
+            # The kinds of the parts left alone: a job whose frames are packed lists none of a
+            # frame alone's, which a clock without them does not wait for.
+            listed = {kind for parts in self._parts.values() for kind, _ in parts}
+            missing = [
+                kind
+                for kind in (*KINDS, *ALONE.values())
+                if kind in listed and not self.clock.knows(kind)
+            ]
+            what = {
+                "encode": "an encode",
+                "window": "a window",
+                "decode": "a decode",
+                "encode-alone": "an encode of frames alone",
+                "window-alone": "a frame's window",
+                "decode-alone": "a decode of frames alone",
+            }
             first = what[missing[0]] if missing else "the assembly"
             return f"the job's time left known once {first} is timed"
         # The estimates are in the run's clock: said in the wall's, as the time of day is

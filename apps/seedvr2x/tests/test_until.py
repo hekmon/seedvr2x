@@ -88,12 +88,12 @@ WINDOW = 5
 
 
 class Minutes(Clock):
-    """A clock by which every encode, window and shot's decode takes STEP, whatever its size, and
-    which no unit's time corrects: the stand-in's take milliseconds. `observed` lists what the run
-    gave it."""
+    """A clock by which every encode, window and shot's decode takes STEP, whatever its size, a
+    frame alone's too (timing.ALONE), and which no unit's time corrects: the stand-in's take
+    milliseconds. `observed` lists what the run gave it."""
 
     def __init__(self) -> None:
-        super().__init__(dict.fromkeys(timing.KINDS, Model(STEP, 0.0)))
+        super().__init__(dict.fromkeys((*timing.KINDS, *timing.ALONE.values()), Model(STEP, 0.0)))
         self.observed: list[tuple[Kind, int]] = []
 
     def observe(self, kind: Kind, size: int, seconds: float) -> None:
@@ -401,8 +401,11 @@ def test_plan_says_whether_the_job_ends_by_then(
         "time at each --quality: standard about 10 min 0 s (this job's), enhanced about"
         " 17 min 0 s, maximum about 28 min 0 s"
     ) in caplog.text
-    # A new job's plan records the models, for information.
-    assert set(manifest(tmp_path / "out")["plan"]["timings"]) == {"encode", "window", "decode"}
+    # A new job's plan records the models, for information, a frame alone's too (Minutes).
+    assert set(manifest(tmp_path / "out")["plan"]["timings"]) == {
+        *("encode", "window", "decode"),
+        *timing.ALONE.values(),
+    }
     assert progress(tmp_path / "out") == ([False, False], [0, 0, 0])
     # A deadline the job doesn't reach: the first unit that wouldn't end by it, and how far the
     # job gets (the segment's decode, begun at 4 steps, would end at 6.3).
@@ -689,8 +692,10 @@ def test_plan_runs_the_calibration_through_the_job_s_steps(
     # the run's own steps (calibration.calibrate takes run.encode_shot, run.sample_windows and
     # run.decode_shot): the encodes' warm-up and two lengths, each after a window of 2 latents as
     # a run's encodes follow one; the windows' warm-up, 2 latents and the longest (4 here); the
-    # decodes' warm-up and two lengths; none of them a unit of the job, which --plan leaves as a
-    # plan, nothing made.
+    # decodes' warm-up and two lengths; then, for deghost's time among the levels' (calibrate's
+    # `alone`), a frame alone through each pass, unmeasured, a window of one latent, and
+    # calibration.ALONE_FRAMES frames each encoded, sampled and decoded alone; none of them a unit
+    # of the job, which --plan leaves as a plan, nothing made.
     levels(caplog, logging.DEBUG)  # the calibration's figures: --verbose
     monkeypatch.setattr(calibration, "calibrate", CALIBRATE)
     source_path = job(tmp_path, monkeypatch)
@@ -700,6 +705,10 @@ def test_plan_runs_the_calibration_through_the_job_s_steps(
         *("encode -42", "window -42:0", "encode -42", "window -42:0", "encode -42"),
         *("window -42:0", "window -42:0", "window -42:0"),
         *("decode -42", "decode -42", "decode -42"),
+        *("encode -42", "window -42:0", "decode -42", "window -42:0"),
+        *["encode -42"] * calibration.ALONE_FRAMES,
+        *["window -42:0"] * calibration.ALONE_FRAMES,
+        *["decode -42"] * calibration.ALONE_FRAMES,
     ]
     # The encode's second length capped by the source's frames left after the first two encodes,
     # 25 - 13 - 5 = 7 (SHOTS), under the job's longest run, 21 frames, and under the thousands of

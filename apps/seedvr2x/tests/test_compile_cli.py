@@ -1602,6 +1602,7 @@ def test_compile_is_refused_on_windows_with_a_video_s_arguments(
         resolution=None,
         quality=None,
         min_segment=None,
+        window=None,
     )
     with monkeypatch.context() as windows:
         windows.setattr(sys, "platform", platform)

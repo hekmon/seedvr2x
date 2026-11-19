@@ -1448,3 +1448,141 @@ def test_the_calibration_takes_less_where_a_unit_is_long(monkeypatch: pytest.Mon
             steady.windowing(n) for n in kept
         ) == pytest.approx(saved)
         assert found.seconds == pytest.approx(steady.at - steady.start)
+
+
+# Each frame alone: --quality deghost (DESIGN.md, Each frame on its own, "The plan's time is off at
+# this level") ------------------------------------------------------------------------------------
+
+
+def test_units_of_each_frame_alone_take_the_kinds_of_frames_alone() -> None:
+    # A frame alone's encode, windows and decode are parts of their own kinds (timing.ALONE),
+    # each unit still of its pass's phase; the other levels' units keep the kinds they had.
+    units = units_of(SHOTS, SEGMENTS, 1, None, 100, start="decode", each_frame=True)
+    kinds = {kind for unit in units for kind, _ in unit.parts}
+    assert kinds == {"encode-alone", "window-alone", "decode-alone", "draw", "enter-dit",
+                     "enter-decode"}  # fmt: skip
+    assert {unit.phase for unit in units} == {"encode", "window", "decode"}
+    frames = sum(shot.frames for shot in SHOTS)
+    assert sum(unit.phase == "window" for unit in units) == frames
+    assert [unit.parts for unit in units if unit.key == ("encode", 0)] == [
+        (("encode-alone", SHOTS[0].frames),)
+    ]
+    packed = units_of(SHOTS, SEGMENTS, 1, 5, 100, start="decode")
+    assert not {kind for unit in packed for kind, _ in unit.parts} & set(timing.ALONE.values())
+
+
+def test_a_frame_alone_s_frames_are_not_padded() -> None:
+    # Each frame alone is a shot of one frame, which pads to none: N frames are N, where a shot's
+    # encode of N frames is padded to 4n + 1.
+    clock = Clock({"encode-alone": Model(1.0, 0.5), "encode": Model(1.0, 0.5)})
+    assert clock.estimate("encode-alone", 6) == pytest.approx(1.0 + 0.5 * 6)
+    assert clock.estimate("encode", 6) == pytest.approx(1.0 + 0.5 * 9)
+
+
+def test_the_calibration_times_frames_alone_through_each_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With `alone`, after the steps of before: a frame alone through each pass, unmeasured (the
+    # first call at a frame's shapes), then calibration.ALONE_FRAMES frames each encoded alone
+    # after a window of one latent, each sampled in a window of one latent, each decoded alone.
+    steady = Steady(monkeypatch)
+    plain = calibrate(steady.models, TARGET, Plan(9), 9).clock.record()
+    steady = Steady(monkeypatch)
+    found = calibrate(steady.models, TARGET, Plan(9), 9, alone=True)
+    count = calibration.ALONE_FRAMES
+    assert count == 3
+    decoding = {"tiles": None, "store": None, "tail_frames": False}
+    frame = ("encode", 1, TARGET, TARGET, untiled())
+    assert steady.called[12:] == [
+        # The warm-up: a frame alone through each pass.
+        frame,
+        ("window", [(0, 1)]),
+        ("decode", 1, 1, decoding),
+        # The window the measured encodes come after, as a run's encodes come after a window.
+        ("window", [(0, 1)]),
+        *[frame] * count,
+        *[("window", [(0, 1)])] * count,
+        *[("decode", 1, 1, decoding)] * count,
+    ]
+    record = found.clock.record()
+    # The steps of before give the models of before: every other level's estimate unchanged.
+    for kind in (*timing.KINDS, *timing.TERMS):
+        assert record[kind] == plain[kind], kind
+    # An encode of frames alone: the change into the encode's phase in its constant, as the
+    # encode's model holds it, each frame Steady's encode of one frame, 1.5 s. The change is the
+    # fifth into that phase (0.4 + 4 x 0.5 s), the measured encodes coming after the warm-up's.
+    assert steady.changes["encode"] == 5
+    assert record["encode-alone"] == {
+        "constant": pytest.approx(0.4 + 4 * 0.5),
+        "rate": pytest.approx(steady.encoding(1)),
+        "correction": 1.0,
+        "units": 0,
+    }
+    # A frame's window: Steady's window of one latent, its draw taken out, by the token.
+    assert record["window-alone"] == {
+        "constant": 0.0,
+        "rate": pytest.approx((1.0 + 0.0001 * PER_LATENT) / PER_LATENT),
+        "correction": 1.0,
+        "units": 0,
+    }
+    # A decode of frames alone: Steady's decode of one frame, 5 s, a frame.
+    assert record["decode-alone"] == {
+        "constant": pytest.approx(0.0),
+        "rate": pytest.approx(3.0 + 2.0),
+        "correction": 1.0,
+        "units": 0,
+    }
+    # The terms' medians are those of the steps of before: no change of phase of the frames
+    # alone counted among them.
+    assert steady.entered[-2:] == ["dit", "decode"]
+
+
+def test_without_alone_the_calibration_times_no_frame_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    steady = Steady(monkeypatch)
+    found = calibrate(steady.models, TARGET, Plan(9), 9)
+    assert len(steady.called) == 12
+    assert not set(found.clock.record()) & set(timing.ALONE.values())
+
+
+def test_the_level_s_units_are_priced_by_the_frames_alone_and_the_others_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The level's estimate is its frames alone's: each run's encode the constant plus a frame's
+    # rate a frame, each frame's window a window of one latent and its draw, each run's decode a
+    # frame's decode a frame; the other levels' are what a calibration without `alone` gives.
+    steady = Steady(monkeypatch)
+    plain = calibrate(steady.models, TARGET, Plan(9), 9).clock
+    steady = Steady(monkeypatch)
+    clock = calibrate(steady.models, TARGET, Plan(9), 9, alone=True).clock
+    for per_shot in (1, 2, 4):
+        units = units_of(SHOTS, SEGMENTS, per_shot, 5, PER_LATENT, start="decode")
+        assert job_times(clock, units) == job_times(plain, units)
+    units = units_of(SHOTS, SEGMENTS, 1, None, PER_LATENT, start="decode", each_frame=True)
+    times = job_times(clock, units)
+    assert times is not None
+    record = clock.record()
+
+    def model(kind: str) -> tuple[float, float]:
+        entry = record[kind]
+        assert isinstance(entry, dict)
+        return float(entry["constant"]), float(entry["rate"])
+
+    encoding, windowing, decoding = (model(kind) for kind in timing.ALONE.values())
+    frames = sum(shot.frames for shot in SHOTS)
+    assert times.encode == pytest.approx(len(SHOTS) * encoding[0] + frames * encoding[1])
+    entering = model("enter-dit")[0] * len(SHOTS)
+    drawn = model("draw")[1] * PER_LATENT * frames
+    assert times.windows == pytest.approx(frames * windowing[1] * PER_LATENT + drawn + entering)
+    decodes = model("enter-decode")[0] * len(SEGMENTS)
+    assert times.decode == pytest.approx(decodes + frames * decoding[1] + len(SHOTS) * decoding[0])
+
+
+def test_a_frame_alone_s_parts_correct_their_own_models() -> None:
+    # The run gives a frame alone's parts their own kinds (run._sample_frames, _decode_frames):
+    # they correct the frames alone's models, never the packed ones'.
+    clock = Clock({kind: Model(0.0, 1.0) for kind in (*timing.KINDS, *timing.ALONE.values())})
+    clock.observe("encode-alone", 10, 20.0)
+    assert clock.estimate("encode-alone", 10) == pytest.approx(15.0)  # median of 1 and 2
+    assert clock.estimate("encode", 9) == pytest.approx(9.0)

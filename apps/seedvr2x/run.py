@@ -39,7 +39,7 @@ from seedvr2x.shot_pass import decode_shot, encode_shot, finite, merge_windows, 
 from seedvr2x.shots import Shot
 from shot import CopyError, Correction
 from stop import Stop
-from timing import ENTER, Clock, Key, Kind, Progress, run_name, tokens, units_of
+from timing import ALONE, ENTER, Clock, Key, Kind, Progress, run_name, tokens, units_of
 from units import Units
 
 logger = logging.getLogger("cli.run")
@@ -499,7 +499,7 @@ def _sample_frames(
         units.frames_encoded(index)
         spent = _spent(models, started, f"{name}'s encode")
         left = _made(
-            *(progress, key, "encode", shot.frames, started, f"{name}'s encode", counted),
+            *(progress, key, ALONE["encode"], shot.frames, started, f"{name}'s encode", counted),
         )
         logger.info(
             "%s, frames %d to %d (%d), seed %d: each frame encoded alone in %s; %s",
@@ -529,7 +529,7 @@ def _sample_frames(
         units.drop_frame_latent(index, frame)
         spent = _spent(models, started, f"{name}: frame {frame + 1}/{frames}")
         left = _made(
-            *(progress, key, "window", per_latent, started, unit),
+            *(progress, key, ALONE["window"], per_latent, started, unit),
             entering=entering,
             term=term,
             drawn=per_latent,
@@ -646,8 +646,9 @@ def _decode(
 
 
 @dataclass(frozen=True)
-class _Following:
-    """The reference of a frame decoded alone (_decode_frames; shot_pass.Reference): the next
+class Following:
+    """The reference of a frame decoded alone (_decode_frames, and the calibration's frames alone;
+    shot_pass.Reference): the next
     frames of one reader of its shot's input copy, read in order across the shot's frames, so that
     the copy is decoded once a shot, not from its start for each frame."""
 
@@ -676,7 +677,7 @@ def _decode_frames(
     """_decode of run `index` of a job whose level takes each frame alone (DESIGN.md, Each frame on
     its own): each frame's window decoded alone, as a shot of that frame is, in order, its frame
     written as it comes; with copies, corrected against its own frame of the shot's input copy,
-    one reader of it giving the frames in turn (_Following). A part of unit `key`."""
+    one reader of it giving the frames in turn (Following). A part of unit `key`."""
     run = units.manifest.runs[index]
     frames = run.frames
     logger.debug("%s: decoding each frame alone", name)
@@ -689,7 +690,7 @@ def _decode_frames(
             merged = merge_windows([units.take_window(index, frame)], [(0, 1)])
             reference = None
             if copies is not None and follow is not None:
-                reference = _Following(follow, copies.width, copies.height)
+                reference = Following(follow, copies.width, copies.height)
             decode_shot(
                 *(models, merged, 1, target, write, name, run.start + frame, reference),
                 tiles=plan.decode_tiles,
@@ -714,7 +715,7 @@ def _decode_frames(
         raise
     spent = _spent(models, started, f"{name}'s decode")
     left = _made(
-        *(progress, key, "decode", frames, started, f"{name}'s decode"),
+        *(progress, key, ALONE["decode"], frames, started, f"{name}'s decode"),
         entering=entering,
         term=term,
     )

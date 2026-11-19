@@ -298,8 +298,10 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
 
 
 def stand_in_calibrate(*arguments: object, **options: object) -> calibration.Calibrated:
-    """A calibration whose every kind and term takes no time (timing.Model(0, 0))."""
-    models = dict.fromkeys((*timing.KINDS, *timing.TERMS), timing.Model(0.0, 0.0))
+    """A calibration whose every kind and term takes no time (timing.Model(0, 0)), a frame
+    alone's kinds too where asked (calibrate's `alone`)."""
+    alone = tuple(timing.ALONE.values()) if options.get("alone") else ()
+    models = dict.fromkeys((*timing.KINDS, *alone, *timing.TERMS), timing.Model(0.0, 0.0))
     return calibration.Calibrated(timing.Clock(models), 0.0)
 
 
@@ -790,9 +792,12 @@ JOB_SHOTS = [Shot(0, 3), Shot(3, 4), Shot(4, 25)]
 
 def untimed(recorded: dict[str, Any]) -> dict[str, Any]:
     """A plan's record without the timings the run's calibration adds, for information (every run
-    calibrates: DESIGN.md, Memory planner, Time estimates), which it holds for every kind."""
+    calibrates: DESIGN.md, Memory planner, Time estimates), which it holds for every kind, a frame
+    alone's too where the calibration timed them (--plan, which says each level's time)."""
     if "timings" in recorded:
-        assert sorted(recorded["timings"]) == sorted([*timing.KINDS, *timing.TERMS])
+        kinds = sorted(recorded["timings"])
+        plain = sorted([*timing.KINDS, *timing.TERMS])
+        assert kinds in (plain, sorted([*plain, *timing.ALONE.values()]))
     return {key: value for key, value in recorded.items() if key != "timings"}
 
 
@@ -1482,8 +1487,10 @@ def test_a_plan_on_a_driver_that_spills_is_held_for_its_calibration(
     planned_in = FREE - memory.HELD_BACK
     reading = memory.Reading(FREE, None, planned_in, True, memory.HELD_BACK_UNREAD)
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
-    # And the timings the calibration gave, for information (resume.UNCOMPARED).
-    assert sorted(content["plan"].pop("timings")) == sorted([*timing.KINDS, *timing.TERMS])
+    # And the timings the calibration gave, for information (resume.UNCOMPARED), a frame alone's
+    # too: --plan says each level's time, deghost's from frames timed alone.
+    kinds = [*timing.KINDS, *timing.ALONE.values(), *timing.TERMS]
+    assert sorted(content["plan"].pop("timings")) == sorted(kinds)
     assert content["plan"] == plan_record(
         *planner.plan(reading, TARGET, JOB_SHOTS, Pins(window=5), HOST)
     )

@@ -34,7 +34,7 @@ from seedvr2x.passes import Phase, Plan
 from seedvr2x.sampling import draw
 from seedvr2x.shot_pass import finite
 from shot import Correction
-from timing import ENTER, Clock, Kind, Model, tokens
+from timing import ALONE, ENTER, Clock, Kind, Model, tokens
 
 logger = logging.getLogger("cli.calibration")
 
@@ -78,6 +78,13 @@ SMALL = 0.05
 # shorter than this, or than the job's longest where that is fewer.
 ATTENTION = 30
 
+# The frames a calibration given `alone` takes each through the passes alone, after one alone
+# unmeasured (calibrate): a first, which pays its run's change into the encode's phase and its
+# input copy's start, as a run's first frame does, and two more for the rate. PROVISIONAL
+# (impl-anim-2, 2026-11-19): DESIGN.md says "a frame alone through each pass", not how many; how
+# many the rate needs is not measured.
+ALONE_FRAMES = 3
+
 # The rate its input copies are written at, which is no part of their frames.
 RATE = Fraction(25)
 
@@ -103,6 +110,7 @@ def calibrate(
     split: bool = False,
     writer: Callable[[Path], Writer] | None = None,
     directory: Path | None = None,
+    alone: bool = False,
 ) -> Calibrated:
     """A clock for a job whose frames are resized to target, (height, width), run by plan, whose
     longest window is `longest` latents (shots.shot_layout): the models of its three kinds of
@@ -154,7 +162,18 @@ def calibrate(
     DiT's phase or the decode's (Models.enter), a constant per phase, the median of those seen,
     three into the DiT's and two into the decode's, one made alone after the steps; the noise's
     draw (sampling.draw), a rate per token, timed alone on the longest window's latent, and taken
-    out of the windows' times. The models are left in the decode's phase."""
+    out of the windows' times. The models are left in the decode's phase.
+
+    With `alone`, the job's level takes each frame alone, or the times of every level are said
+    (--plan): the kinds of a frame alone too (timing.ALONE; DESIGN.md, Each frame on its own,
+    "The plan's time is off at this level": priced at a window's frames' rate, the level's encode
+    came out at 0.19 and 0.24 s a frame on the 96 GB card and the RTX 5090 against 0.37 and 0.52
+    run), after every step above: a frame alone through each pass, unmeasured, the first call at a
+    frame's shapes, then ALONE_FRAMES frames each through the passes alone as such a run makes
+    them (_alone). An encode of frames alone is a constant, the run's change of phase and its
+    first frame's start, and a rate a frame; a frame's window a rate by the token; a decode of
+    frames alone a constant, its reader's start, and a rate a frame. The other kinds' models are
+    those of before, so that no other level's estimate moves."""
     started = time.monotonic()
     height, width = target if source is None else source
     if frames is None:
@@ -271,6 +290,93 @@ def calibrate(
             )
             return time.monotonic() - begun
 
+        def _alone(
+            shot: int, count: int, write: Write, drawn: float, after: torch.Tensor | None
+        ) -> tuple[list[torch.Tensor], list[float], list[float], list[float]]:
+            """`count` frames of the source each through the passes alone, as a run whose level
+            takes each frame alone makes them (run._sample_frames, run._decode_frames): encoded
+            one at a time into one input copy, the change into the encode's phase timed with the
+            first, as such a run's encode holds it, after a window of one latent sampled from
+            `after`, unmeasured, where given; each latent then sampled in a window of its own,
+            less its noise's draw, `drawn` seconds; then each decoded, corrected against its own
+            frame of the copy through one reader of it (run.Following), and written, the first
+            timed from before the reader's start, as a run's decode is. The changes into the DiT's
+            phase and the decode's, a unit's terms, are not timed, nor counted among the terms
+            (enter's `counted`), whose medians stay those of the steps before. Returns the
+            latents, and the seconds of each frame's encode, window and decode."""
+            if after is not None:
+                enter("dit", counted=False)
+                finite(next(run.sample_windows(models, after, [(0, 1)], 0)), "the calibration")
+            where = scratch / f"shot_{shot}"
+            where.mkdir()
+            read = _reader(read_source)
+            latents: list[torch.Tensor] = []
+            encodes: list[float] = []
+            begun = [time.monotonic()]
+
+            def each(read: Callable[[int], npt.NDArray[np.float32]]) -> None:
+                for _ in range(count):
+                    latent = run.encode_shot(
+                        *(models, read, 1, target, 0),
+                        tiles=plan.encode_tiles,
+                        store=None
+                        if plan.encode_tiles is None
+                        else Scratch(where, plan.scratch_allowance),
+                    )
+                    finite(latent, "the calibration's encode of a frame alone")
+                    latents.append(latent.contiguous())
+                    ended = time.monotonic()
+                    encodes.append(ended - begun[0])
+                    begun[0] = ended
+
+            enter("encode")
+            if split:
+                with _copied(where, width, height) as copy:
+
+                    def read_and_copy(count: int) -> npt.NDArray[np.float32]:
+                        frames = read(count)
+                        copy.write(frames)
+                        return frames
+
+                    each(read_and_copy)
+                write_checksums(where / "input.crc32", copy.checksums)
+            else:
+                each(read)
+            sampled: list[float] = []
+            for latent in latents:
+                enter("dit", counted=False)
+                started = time.monotonic()
+                output = next(run.sample_windows(models, latent, [(0, 1)], 0))
+                finite(output, "the calibration's window of a frame alone")
+                del output
+                sampled.append(time.monotonic() - started - drawn)
+            enter("decode", counted=False)
+            decodes: list[float] = []
+            begun[0] = time.monotonic()
+
+            def decode_each(follow: Callable[[int], npt.NDArray[np.float32]] | None) -> None:
+                for latent in latents:
+                    reference = None if follow is None else run.Following(follow, width, height)
+                    run.decode_shot(
+                        *(models, latent, 1, target, write, "the calibration", 0, reference),
+                        tiles=plan.decode_tiles,
+                        store=None
+                        if plan.decode_tiles is None
+                        else Scratch(where, plan.scratch_allowance),
+                        tail_frames=plan.tail_frames,
+                    )
+                    ended = time.monotonic()
+                    decodes.append(ended - begun[0])
+                    begun[0] = ended
+
+            if split:
+                correction = Correction(where / "input.mkv", where / "input.crc32", width, height)
+                with correction.reader(count) as follow:
+                    decode_each(follow)
+            else:
+                decode_each(None)
+            return latents, encodes, sampled, decodes
+
         def measure(write: Write) -> dict[Kind, Model]:
             # The warm-up, at the largest shapes, so that no measured step is the first at its
             # size: on an RTX 5090 at 1080p (2026-10-21), a job's windows came out 10-15% under
@@ -357,6 +463,23 @@ def calibrate(
             # start.
             enter("dit", counted=False)
             enter("decode")
+            frames_alone: dict[Kind, Model] = {}
+            if alone:
+                # The first frame alone at its shapes unmeasured, then the frames measured, after
+                # the warm-up's window of one latent as a run's encodes come after a window. The
+                # models are left in the decode's phase, the last step's.
+                drawn = drawing * per_latent
+                [first_alone], _, _, _ = _alone(10, 1, write, drawn, None)
+                _, encodes, sampled, decodes = _alone(11, ALONE_FRAMES, write, drawn, first_alone)
+                frames_alone = {
+                    ALONE["encode"]: _fit(
+                        [(1, encodes[0]), (ALONE_FRAMES, sum(encodes))], "an encode of frames alone"
+                    ),
+                    ALONE["window"]: Model(0.0, sum(sampled) / (ALONE_FRAMES * per_latent)),
+                    ALONE["decode"]: _fit(
+                        [(1, decodes[0]), (ALONE_FRAMES, sum(decodes))], "a decode of frames alone"
+                    ),
+                }
             # A window less its own draw, which the units count apart.
             windows = [
                 (size * per_latent, seconds - drawing * size * per_latent)
@@ -370,6 +493,7 @@ def calibrate(
             }
             for phase, seconds in entered.items():
                 fitted[ENTER[phase]] = Model(statistics.median(seconds) if seconds else 0.0, 0.0)
+            fitted.update(frames_alone)
             return fitted
 
         if writer is None:
@@ -405,6 +529,17 @@ def calibrate(
         *(fitted[ENTER[phase]].constant for phase in ("dit", "decode")),
         fitted["draw"].rate * 1e6,
     )
+    if alone:
+        logger.debug(
+            "time estimates calibrated on %d frames alone: an encode %.2f s and %.3f s a frame; a"
+            " window %.3f ms a token; a decode %.2f s and %.3f s a frame",
+            ALONE_FRAMES,
+            fitted[ALONE["encode"]].constant,
+            fitted[ALONE["encode"]].rate,
+            fitted[ALONE["window"]].rate * 1000,
+            fitted[ALONE["decode"]].constant,
+            fitted[ALONE["decode"]].rate,
+        )
     return Calibrated(Clock(fitted), seconds)
 
 
