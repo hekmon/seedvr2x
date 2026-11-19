@@ -118,7 +118,7 @@ possible:
     one noise for the whole shot, so that drawings changing from frame to frame stay apart
     and the picture stays steady where it holds still.
   - **ComfyUI nodes,** built on the same library, for ComfyUI's own workflows: pictures, and
-    videos written to a file shot by shot.
+    videos written to a file shot by shot, installed from ComfyUI's registry.
   - **An image server:** pictures over HTTP, the models loaded once and kept on the GPU, in a
     container.
   - **The 7B in smaller files,** for smaller cards: int8, 8.3 GB, and the dynamic GGUF, 4.8 GB,
@@ -129,9 +129,8 @@ possible:
     model code changes wherever a measurement shows a gain.
 - **Next, after 0.1.0:**
   - **Version 0.2.0, macOS and every model file:** the `seedvr2x` command and the nodes on
-    macOS (Apple's M chips), the nodes in ComfyUI's registry; and the 7B's other smaller
-    files, already published: fp8, NVFP4 and the other GGUF types, 4.8 to 8.8 GB instead of
-    16.5.
+    macOS (Apple's M chips); and the 7B's other smaller files, already published: fp8, NVFP4
+    and the other GGUF types, 4.8 to 8.8 GB instead of 16.5.
 - **Later:**
   - **Several GPUs for one job,** one process per card, each taking its own shots.
   - **HDR sources,** their HDR10 metadata carried to the output.
