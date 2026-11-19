@@ -167,10 +167,9 @@ def test_the_units_the_record_and_the_plan(
     )
     assert (
         "plan: quality: deghost, each frame of a shot upscaled on its own, in a latent of its"
-        " own, from the shot's noise: about 1.8 times standard's time, a"
-        " frame's memory; for animation, where the model blends the drawings a latent packs,"
-        " nothing measured on live action; --quality standard, enhanced or maximum packs a shot's"
-        " frames in its latents"
+        " own, from the shot's noise, a frame's memory: for animation whose fast scenes ghost,"
+        " where the model blends the drawings a latent packs, nothing measured on live action;"
+        " --quality standard, enhanced or maximum packs a shot's frames in its latents"
     ) in lines
     assert not [line for line in lines if line.startswith("plan: deband:")]
     # The unit lines name each frame.
@@ -285,8 +284,11 @@ def test_the_help_says_what_deghost_does_and_for_what(
     text = _option_help(capsys.readouterr().out, "--quality")
     for said in (
         "deghost: each frame of a shot upscaled on its own, from the shot's noise,",
-        "about 1.8 times standard's time",
-        "for animation, where the model blends the drawings a group packs",
+        "about twice standard's time over an episode on a 96 GB card",
+        "for animation whose fast scenes still ghost, where the model blends the drawings a group"
+        " packs",
+        "fine details that hold still may change from frame to frame",
         "not measured on live action",
+        "--plan says each level's time on this GPU",
     ):
         assert said in text, said

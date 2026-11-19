@@ -53,6 +53,7 @@ What surprises a newcomer most:
 - [The model](#the-model)
 - [What the model does to a picture](#what-the-model-does-to-a-picture)
 - [Several runs of a shot: `--quality`](#several-runs-of-a-shot---quality)
+- [Animation](#animation)
 - [Lossless delivery](#lossless-delivery)
 - [The finished file](#the-finished-file)
 - [Still pictures](#still-pictures)
@@ -690,7 +691,7 @@ Measured ([numerics.md](../../research/docs/numerics.md)):
 There is no strength or detail option in version 1. What remains of the over-rendering goes
 both ways with the content, and the one global blend measured washes lines out to the eye.
 
-### Banded sources: the deband of `--quality deghost`
+### Banded sources: `--deband`
 
 An 8-bit source's smooth gradient comes in steps of one code, about 0.4% of the range, which no
 eye sees in the source. On a dark animated sky both 7B models drew them as contour lines across
@@ -698,9 +699,8 @@ the gradient, at `standard` and at `maximum`, which the eye sees: most likely wh
 source leaves the steps as wide flat plateaus with hard borders, the grain that would hide them
 taken off by its encoder.
 
-`--quality deghost` ([each frame on its own](#each-frame-on-its-own---quality-deghost))
-smooths the steps before the model sees them, as the option `--deband` did before it went into
-the level: ffmpeg's own `deband` without its blur and with its four thresholds at 0.012
+`--deband` smooths the steps before the model sees them, at any `--quality`: ffmpeg's own
+`deband` without its blur and with its four thresholds at 0.012
 (`deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0`), on every frame the job reads,
 brought to 16 bits first so that the values it puts between two codes are kept, then converted
 to RGB as any read is. On that sky it brought the terraces under a plain bicubic upscale's, where
@@ -712,19 +712,31 @@ to 8.2%, keeping the fine shadows of a painted short. The model's input keeps th
 through its own casts and resize, whole in the dark tones where the banding was found: 99 to
 101% of it on the study's scenes.
 
-- **For animation:** the eyes took it on animation with banded gradients, and found it changed
-  nothing on an animation that needed none. On live action its dark scenes lose detail to it,
-  which is one reason the level is for animation.
+- **Advised for:** animation, once a short clip of the source run without it shows terraces
+  ([animation](#animation)). The eyes took it on animation with banded gradients, and found it
+  changed nothing on an animation that needed none.
+- **What it costs:** some precision of the lines. At `deghost` the eyes saw it take from the
+  drawing on four scenes of six (less precise lines on dark shaded animation and on a cel film,
+  less precise small details on a painted short) and smooth only where the source was banded;
+  `deghost` itself draws fewer terraces than packed frames. On live action its dark scenes lose
+  detail to it. So it is never on by default.
+- **Where it helps:** eight sources were scanned as the study's 540p re-encodes of them, the
+  downscale and the encode making most of the bands, as they would in a low-resolution source:
+  the banding found was in dark shaded animation and near-black haze with smooth gradients, and
+  in some dark live action; not in bright animation with clean lines, nor in finely painted
+  gradients.
 - **What it touches:** the frames the model is given and the colour correction's reference, the
   input copies, which hold the frames the model saw; every read, a resume's too: a shot read from
   its first frame gives the frames a read from the start gives. The shot detector reads the
-  source as it is, so the cuts are the same at every level.
+  source as it is, so the cuts are the same with it or without.
 - **A setting of the job:** in its manifest, in the record of each output (`seedvr2x_deband`)
-  and on a line of the plan, at `--quality deghost` alone. A job begun with `--deband` at
-  another level is another job, refused naming it.
-- **What it doesn't do:** the other levels read the source as it is. `yuv411p`, `yuv410p` and
-  `yuv440p` sources are refused at `deghost`, a chroma subsampling ffmpeg has no 16-bit
-  format of.
+  and on a line of the plan. A resume with `--deband` given or left out otherwise than its job
+  began is another job, refused naming the option, once a unit is made; a plan that has made
+  none is planned again.
+- **What it doesn't do:** seedvr2x doesn't tell a banded source by itself, so the plan never
+  suggests `--deband`: the scores tried found the strongly banded scenes but missed the clip the
+  option was made for. A picture refuses it, being read without ffmpeg, and so do sources in
+  `yuv411p`, `yuv410p` or `yuv440p`, a chroma subsampling ffmpeg has no 16-bit format of.
 
 ## Several runs of a shot: `--quality`
 
@@ -732,8 +744,9 @@ through its own casts and resize, whole in the dark tones where the banding was 
 model once over each shot; `enhanced` runs it twice and `maximum` four times, each run with
 the shot's grid of latents shifted by a frame, and keeps each frame from the run that rebuilds
 it best. It costs 2
-or 4 times the GPU time, and no more memory. `deghost`, for animation, upscales each frame on
-its own ([below](#each-frame-on-its-own---quality-deghost)), at about 1.8 times the time.
+or 4 times the GPU time, and no more memory. `deghost` upscales each frame on its own
+([below](#each-frame-on-its-own---quality-deghost)), at about twice `standard`'s time, for
+animation whose fast scenes still ghost ([animation](#animation)).
 
 ### Why one run isn't the best the model can do
 
@@ -789,16 +802,21 @@ latent of its own, so that no drawing is packed with another:
 - **What it does:** each frame goes through the model as a shot of one frame would: its own
   encode, its own step of the DiT, its own decode and colour correction against its own source
   frame. Every frame of a shot takes the shot's noise, its seed the shot's, so that the noise
-  doesn't change from frame to frame where the picture holds still. Its source is read debanded
-  ([banded sources](#banded-sources-the-deband-of---quality-deghost)).
+  doesn't change from frame to frame where the picture holds still. Its source is read as it is;
+  `--deband` applies to it as to any level ([banded sources](#banded-sources---deband)).
 - **What it gave:** to the eyes, against `maximum`, sharper and firmer lines, better faces and
   no ghosting when played; a simpler, softer sky with fewer colour levels, a little noise in hair
   where `maximum`'s flat colours are clean, and a little flicker on a pan, less than
   `standard`'s.
-- **What it costs:** about 1.8 times `standard`'s time (6 min 47 s for a shot of 206 frames,
-  against 3 min 47 s at `standard` and 11 min 13 s at `maximum`), a frame's memory, and no frames
-  kept on disk between runs.
-- **For animation:** nothing was measured on live action.
+- **What it may change:** fine details that hold still may change from frame to frame. Each
+  frame is redrawn alone, so nothing ties one frame's small details to the next's: the small
+  text on a ticket a character holds changed at every frame, where at `maximum` it held still
+  about 90% of the time and the picture was clean.
+- **What it costs:** about twice `standard`'s time, measured over an episode on a 96 GB card, a
+  frame's memory, and no frames kept on disk between runs. `--plan` prints its time on your
+  card with every level's.
+- **For animation:** nothing was measured on live action. Which level an animated source wants,
+  and when to add `--deband`, is [animation](#animation)'s.
 
 ### An example: Sol Levante
 
@@ -837,7 +855,7 @@ Higher PSNR-Y and VMAF, and lower LPIPS and flicker, are closer to the original.
 
 - **GPU time:** 2 or 4 times `standard`'s. `--plan` prints the job's time at each level on your
   card before anything runs (`time at each --quality: standard about …, enhanced about …,
-  maximum about …`), and at 4K a 45-frame shot took about 63 minutes at `maximum` against 15 at
+  maximum about …, deghost about …`), and at 4K a 45-frame shot took about 63 minutes at `maximum` against 15 at
   `standard`, on a 96 GB card whose clock is capped.
 - **Memory:** none more. A run takes the memory one run takes, and the plan is the same.
 - **Disk:** the earlier runs' frames wait on disk until the last run's decode puts every frame
@@ -852,7 +870,7 @@ The bird's 73 frames at `maximum` on an RTX 5090: the plan's line, then each run
 by the frame it starts from.
 
 ```
-05:52:56 plan: quality: maximum, 4 runs a shot, 8 in all, each frame from its best run: about 4 times standard's GPU time, one run's memory; 0.56 GiB of frames on disk for the longest shot; --quality standard or enhanced: 1 or 2 runs; deghost takes each frame on its own, for animation, about 1.8 times standard's time
+05:52:56 plan: quality: maximum, 4 runs a shot, 8 in all, each frame from its best run: about 4 times standard's GPU time, one run's memory; 0.56 GiB of frames on disk for the longest shot; --quality standard or enhanced: 1 or 2 runs; deghost takes each frame on its own, for animation whose fast scenes ghost
 05:55:15 time: about 4 min 20 s on this GPU as it runs now: 1 min 4 s for 8 encodes, 53 s for 8 windows, 2 min 23 s for the decode and write of 1 segment
 05:55:58 shot 1/2, run 2/4 (from its frame 1), frames 1 to 62 (62), seed 42: encoded in 13.1 s, VRAM peak 19.88 GiB; about 3 min 48 s left, the job ending about 06:00
 05:56:13 shot 1/2, run 2/4 (from its frame 1): window 1/1, latents 0 to 16, in 11.6 s, VRAM peak 21.80 GiB; about 3 min 38 s left, the job ending about 06:00
@@ -874,6 +892,81 @@ A stream copy cuts at a keyframe, so the extract may start a little before 0:12:
 
 ```
 uv run seedvr2x film.mkv -o film.1080p.mkv --plan film.cuts.txt
+```
+
+## Animation
+
+An animated source meets three things the model does, and seedvr2x has an answer to each. A
+level and the deband apply to a whole job, so try them on short clips of your source first.
+
+### What the model does to it
+
+- **The pulse, at `standard`.** The VAE packs a shot's frames four to a latent and rebuilds the
+  last of each four closest to the original, so one frame in four comes out closer to the
+  original than the three before it, and looks sharper: played, the edges pulse, most on line
+  art, dark scenes and motion ([why one run isn't the best](#why-one-run-isnt-the-best-the-model-can-do)).
+- **Ghosts, in fast action.** Where nearly every frame is a new drawing, the model blends the
+  drawings a latent packs: on six shots of an animated episode at `standard`, a group's first
+  frame carried about a quarter of its later frames' lines. Played, lines show twice.
+- **Terraces, on smooth gradients.** An 8-bit source's smooth gradient comes in steps of one
+  code, which no eye sees in the source; the model draws them as contour lines across a dark sky
+  or a shadow ([banded sources](#banded-sources---deband)).
+
+### What each answer does, and costs
+
+- **`--quality maximum`** runs each shot four times, its grid of latents shifted a frame each
+  time, and takes every frame from the run where it is rebuilt best: the pulse gone, the picture
+  clean and steady. Four times `standard`'s GPU time, no more memory, and disk for the frames
+  waiting between the runs ([several runs of a shot](#several-runs-of-a-shot---quality)). The
+  eyes still saw ghosts at `maximum` in fast action, played.
+- **`--quality deghost`** upscales each frame on its own, in a latent of its own, from the shot's
+  noise: no drawing is packed with another, so no ghost ([each frame on its
+  own](#each-frame-on-its-own---quality-deghost)). About twice `standard`'s time, measured over
+  an episode on a 96 GB card, and a frame's memory. Against `maximum`, the eyes saw sharper,
+  firmer lines, better faces and no ghosting when played; a simpler, softer sky with fewer colour
+  levels, a little noise in hair where `maximum`'s flat colours are clean, and a little flicker on
+  a pan. Fine details that hold still may change from frame to frame: each frame is redrawn
+  alone, so nothing ties one frame's small details to the next's. The small text on a ticket a
+  character holds changed at every frame, where at `maximum` it held still about 90% of the time.
+- **`--deband`** smooths a smooth gradient's one-code steps before the model redraws them as
+  terraces, with either level. It costs some precision of the lines: at `deghost` the eyes saw it
+  take from the drawing on four scenes of six (less precise lines on dark shaded animation and on
+  a cel film, less precise small details on a painted short), and smooth only where the source
+  was banded. `deghost` itself draws fewer terraces than packed frames: on a dark sky, 0.52 by the
+  study's terrace measure against 0.61 at `maximum`. So it is off by default, and worth taking
+  only where a clip run without it shows terraces ([banded sources](#banded-sources---deband)).
+
+### Choosing, on short clips
+
+1. Cut a few seconds of each kind of scene the source has (below): a dark gradient, such as a
+   night sky or a shadow; a fast scene; and a held scene with fine details, such as small text
+   or thin lines.
+2. Run them at `--quality maximum`. Where the picture is clean, keep it.
+3. Where terraces show, add `--deband`.
+4. Where fast scenes still ghost, take `--quality deghost`, with `--deband` only if terraces
+   show there too.
+
+The level and the deband you settle on then run the whole job: `maximum` runs every shot four
+times and `deghost` takes about twice `standard`'s time, and `--plan` prints each level's time
+on your card before anything runs. `deghost` was not measured on live action and is for
+animation until it is; on live action, the eyes found that `--deband` took detail from dark
+scenes.
+
+### Cutting a clip and comparing two runs
+
+```
+ffmpeg -ss 0:04:10 -i episode.mkv -t 8 -map 0:v:0 -c copy sky.mkv
+uv run seedvr2x sky.mkv -o sky.maximum.mkv --quality maximum
+uv run seedvr2x sky.mkv -o sky.deband.mkv --quality maximum --deband
+```
+
+A stream copy cuts at a keyframe, so the clip may start a little before the time given. Look at
+the two in a player that steps frame by frame: paused on the gradient for terraces, played and
+stepped on the fast scene for ghosts, played on the held scene for details that change. Side by
+side in one lossless file, the first on the left:
+
+```
+ffmpeg -i sky.maximum.mkv -i sky.deband.mkv -filter_complex hstack -c:v ffv1 sky.side.mkv
 ```
 
 ## Lossless delivery
@@ -1133,7 +1226,7 @@ with their SHA-256, the seed, the colour correction, the tiles and the attention
 says what made it), and for
 a video its window cap, `--quality`, `--compile`, its cuts (the threshold they were detected
 at, or, for a list given with `--cuts`, the SHA-256 of its cuts written one frame number a line,
-not of the file) and, at `--quality deghost`, the deband its frames were read through. That
+not of the file) and, with `--deband`, the filter its frames were read through. That
 is what changes the output's bits, so an output can be made again from it, on the same GPU and
 libraries. It is always written, with no option to leave it out, and
 holds nothing personal: no path, no date, no machine. Beside it is the mark platforms read to
@@ -2418,7 +2511,7 @@ reserve in its place ([under WSL2](#under-wsl2)); the block waits for a run of t
 03:35:43 plan: frames: 1920x1080 padded to 1920x1104 for the model, 8,280 tokens a latent
 03:35:43 plan: shots: 3, the longest of 42 frames (12 latents)
 03:35:43 plan: windows: 7 latents at most (25 frames), the longest the budget holds: 2 of 3 shots in one window, 1 join; a longer window, fewer joins; --window N caps them
-03:35:43 plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs 2 or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU time; deghost takes each frame on its own, for animation, about 1.8 times standard's time
+03:35:43 plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs 2 or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU time; deghost takes each frame on its own, for animation whose fast scenes ghost
 03:35:43 plan: blocks swapped: 33 of the DiT's 36, the fewest that hold the window: slower, not worse; --swap-blocks N
 03:35:43 plan: the VAE: off the GPU in the DiT's phase, its 0.47 GiB given to the window
 03:35:43 plan: the DiT in the VAE's passes: which model stays on the GPU in which phase, as much of the DiT as fits beside each: in the encode, 1 of the DiT's blocks on the GPU; in the decode, the DiT off the GPU
@@ -2452,9 +2545,8 @@ why it was taken, what it costs, and the option that changes it ([GPU memory](#g
   The two short shots fit whole; the long one runs in two windows, 1 join.
 - **quality:** the level, and what the others would cost ([several runs of a
   shot](#several-runs-of-a-shot---quality)).
-- **deband:** at `--quality deghost` alone, after the quality line: the filter, where it runs,
-  and the shot detection reading the source as it is ([banded
-  sources](#banded-sources-the-deband-of---quality-deghost)).
+- **deband:** with `--deband` alone, after the quality line: the filter, where it runs, and the
+  shot detection reading the source as it is ([banded sources](#banded-sources---deband)).
 - **blocks swapped:** 33 of the DiT's 36 wait in system memory, so that the window gets their
   room. Slower, not worse: swapping changes no bit. A DiT file in float16 or int8 that swaps
   blocks may be followed by a line naming the smaller files that would plan the job better,
@@ -2624,8 +2716,9 @@ this manual is.
 | `--dit-model DIT_MODEL` | The DiT's file: `seedvr2x_ema_7b_sharp_fp16.safetensors` by default, or `seedvr2x_ema_7b_fp16.safetensors`, or the two in int8, `seedvr2x_ema_7b_sharp_int8_convrot.safetensors` and `seedvr2x_ema_7b_int8_convrot.safetensors`: half the DiT's weights, multiplied in 8 bits, or the two in the dynamic GGUF, `seedvr2x_ema_7b_sharp_dyn.gguf` and `seedvr2x_ema_7b_dyn.gguf`: under a third of float16's weights ([the model](#the-model)). |
 | `--vae-model VAE_MODEL` | The VAE's file, `seedvr2x_ema_vae_fp16.safetensors` by default. |
 | `--seed SEED` | The seed, 42 by default ([seeds](#seeds-and-reproducibility)). |
-| `--quality LEVEL` | `standard` (the default), `enhanced` or `maximum`: each shot run 1, 2 or 4 times ([several runs of a shot](#several-runs-of-a-shot---quality)); `deghost`: each frame on its own, its source debanded, for animation, about 1.8 times `standard`'s time ([each frame on its own](#each-frame-on-its-own---quality-deghost)). |
+| `--quality LEVEL` | `standard` (the default), `enhanced` or `maximum`: each shot run 1, 2 or 4 times ([several runs of a shot](#several-runs-of-a-shot---quality)); `deghost`: each frame on its own, about twice `standard`'s time, for animation whose fast scenes still ghost ([each frame on its own](#each-frame-on-its-own---quality-deghost), [animation](#animation)). |
 | `--color-correction {split,none}` | `split` by default ([colour correction](#colour-correction)). |
+| `--deband` | Smooth the source's banding before the model: ffmpeg's deband at 16 bits on every frame the job reads, at any level, the shots found on the source as it is; it costs some precision of the lines on animation and detail on live action, so it is never on by default; a setting of the job, refused for a picture ([banded sources](#banded-sources---deband), [animation](#animation)). |
 | `--compile` | Compile the VAE: about a tenth less time on a long job, minutes of compilation at every start, its frames not plain code's; a setting of the job ([compiling the VAE](#compiling-the-vae---compile)). |
 
 **What the source says of itself, when it is missing or wrong**

@@ -437,11 +437,6 @@ def _deband_said() -> str:
     )
 
 
-# The time each frame alone takes against standard's (DESIGN.md, Each frame on its own, Cost: 6
-# min 47 s for a shot of 206 frames against standard's 3 min 47 s, on the 96 GB card, 2026-11-17).
-ANIMATION_TIME = 1.8
-
-
 def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) -> str:
     """The plan's line of the --quality level (said), at every level, standard's too (DESIGN.md,
     Memory planner, Every choice of the plan is said): the runs a shot and in all, how a frame
@@ -449,20 +444,21 @@ def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) 
     kept between a shot's runs take, and the levels that give or cost more. The time here is a
     multiple of one run's, about runs_per_shot times, a later run being shorter by its first frame
     (DESIGN.md, Several runs of a shot: "4x the GPU time"): each level's time in seconds needs the
-    calibration, which comes after the plan's lines, the models loaded (main._say_times)."""
+    calibration, which comes after the plan's lines, the models loaded (main._say_times), and
+    the level that takes each frame alone says no multiple: over an episode it took about twice
+    standard's time on the 96 GB card, where one shot had taken 1.8 times, and on a card of 32 GB
+    the ratio is not measured (DESIGN.md, Each frame on its own, Cost); its time is the
+    calibration's too, from frames timed alone (calibration.calibrate's `alone`)."""
     runs_per_shot = QUALITY[quality]
-    # The level that takes each frame alone, said where another level is, and what it is for.
-    deghost = (
-        f"deghost takes each frame on its own, for animation, about {ANIMATION_TIME} times"
-        " standard's time"
-    )
+    # The level that takes each frame alone, said where another level is, and what it is for
+    # (DESIGN.md, Each frame on its own: the guidance takes it where fast scenes still ghost).
+    deghost = "deghost takes each frame on its own, for animation whose fast scenes ghost"
     if each_frame(quality):
         return (
             f"quality: {quality}, each frame of a shot upscaled on its own, in a latent of its own,"
-            f" from the shot's noise: about {ANIMATION_TIME} times standard's"
-            " time, a frame's memory; for animation, where the model blends the drawings a latent"
-            " packs, nothing measured on live action; --quality standard, enhanced or maximum"
-            " packs a shot's frames in its latents"
+            " from the shot's noise, a frame's memory: for animation whose fast scenes ghost, where"
+            " the model blends the drawings a latent packs, nothing measured on live action;"
+            " --quality standard, enhanced or maximum packs a shot's frames in its latents"
         )
     if runs_per_shot == 1:
         return (

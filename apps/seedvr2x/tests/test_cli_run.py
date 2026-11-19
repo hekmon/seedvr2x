@@ -2140,8 +2140,7 @@ def test_plan_said(
         " caps them",
         "plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs"
         " 2 or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU"
-        " time; deghost takes each frame on its own, for animation, about 1.8 times standard's"
-        " time",
+        " time; deghost takes each frame on its own, for animation whose fast scenes ghost",
         "plan: blocks swapped: none, the window fitting with the DiT whole on the GPU;"
         " --swap-blocks N swaps some",
         "plan: the VAE: on the GPU in the DiT's phase, the window fitting beside it",

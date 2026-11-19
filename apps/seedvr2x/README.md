@@ -169,19 +169,25 @@ Exit status 0 means finished. Run again then, the same command says
 beside the file, `film.1080p.mkv.manifest.json`, and another job to that name is refused.
 
 For crisper frames at 4 times the GPU time, `--quality maximum`; `enhanced` takes twice the
-time. For animation, `--quality deghost` upscales each frame on its own, from the shot's
-noise, its source debanded, at about 1.8 times `standard`'s time ([the
-manual](MANUAL.md#each-frame-on-its-own---quality-deghost)). On a long job, `--compile` saves
-about a tenth of the GPU time, for minutes of compilation at each start: a short job loses ([the
-manual](MANUAL.md#compiling-the-vae---compile) says where the line falls).
+time. On a long job, `--compile` saves about a tenth of the GPU time, for minutes of
+compilation at each start: a short job loses ([the manual](MANUAL.md#compiling-the-vae---compile)
+says where the line falls).
+
+For animation, try short clips of the source first (a dark gradient, a fast scene, a held scene
+with fine details): `--quality maximum` where the picture is clean; `--deband` where gradients
+come out in terraces; `--quality deghost` where fast scenes still ghost, each frame upscaled on
+its own at about twice `standard`'s time, its fine details that hold still free to change from
+frame to frame ([the manual's animation](MANUAL.md#animation) says why and how).
 
 A source whose smooth gradients come in fine steps, most often dark shaded animation and
 near-black haze, can come out with those steps drawn as contour lines across the sky or the
 shadows: the steps of an 8-bit source, invisible there, are what the model sharpens.
-`--quality deghost` smooths them first, with ffmpeg's deband (thresholds 0.012, no blur) at
-16 bits on every frame the job reads; the shots are still found on the source as it is. On live
-action its dark scenes lose detail to it, one reason the level is for animation ([the
-manual](MANUAL.md#banded-sources-the-deband-of---quality-deghost)).
+`--deband` smooths them first, with ffmpeg's deband (thresholds 0.012, no blur) at 16 bits on
+every frame the job reads, at any `--quality`; the shots are still found on the source as it is
+([the manual](MANUAL.md#banded-sources---deband)). It costs some precision of the lines on
+animation and detail on live action, so it is never on by default: advised for animation, once a
+short clip shows terraces without it. It is a setting of the job, which a resume repeats; a
+picture refuses it.
 
 Ctrl-C, once, also stops cleanly: it finishes the piece of work in progress first. The same
 command resumes.
@@ -438,7 +444,7 @@ the first pass and its shot detector, the pipeline per shot with its windows, `-
 colour correction, the memory planner with BlockSwap and VAE tiling, the time estimates and
 `--until`, resume and `--accept-env-change`, the lossless masters and their checksums, the
 finished file's assembly and its manifest beside it, `--segment-cmd`, `--compile` (the VAE
-alone), `seedvr2x verify`, still pictures (PNG or lossless WebP), the
+alone), `--deband` (a video's), `seedvr2x verify`, still pictures (PNG or lossless WebP), the
 int8 and dynamic GGUF files of both 7Bs, and seedvr2x's record in every output. The [image
 server](../imgserver/README.md) is built beside the command, on the same library.
 

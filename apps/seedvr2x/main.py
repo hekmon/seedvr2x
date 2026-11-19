@@ -609,9 +609,11 @@ def _parser() -> argparse.ArgumentParser:
         # clips by VMAF and LPIPS; looking sharper is the user's eye, 2026-11-08, which the
         # luma's Laplacian variance contradicts on 6 of 8): what was measured and what the eye
         # sees apart, neither from the other.
-        # deghost (DESIGN.md, Each frame on its own, decided on 2026-11-17): what it does, its
-        # time against standard's (6 min 47 s against 3 min 47 s for a shot of 206 frames on the
-        # 96 GB card) and for what, nothing measured on live action.
+        # deghost (DESIGN.md, Each frame on its own, decided on 2026-11-17, named on 2026-11-19):
+        # what it does, its time against standard's (about twice, over an episode on the 96 GB
+        # card, the first night of each), for what (where fast scenes still ghost, the guidance's
+        # last step), what it may change (fine details that hold still, a ticket's small text),
+        # nothing measured on live action.
         help="standard, enhanced or maximum: each shot run 1, 2 or 4 times, its latent grid shifted"
         " a frame each time, and each frame taken from the run that rebuilds it best. The model"
         " packs a shot's frames in groups of 4 and rebuilds the last of each group closest to the"
@@ -619,10 +621,11 @@ def _parser() -> argparse.ArgumentParser:
         " three before it, and looks sharper: edges that pulse, most on line art, dark scenes and"
         " motion; maximum takes every frame from a run where it is rebuilt closest. 2 or 4 times"
         " the GPU time, the same memory, and disk for the frames between the runs. deghost:"
-        " each frame of a shot upscaled on its own, from the shot's noise, about 1.8 times"
-        " standard's time: for animation, where the model blends the drawings a"
-        " group packs; not measured on live action. --plan says it before anything runs; see the"
-        " manual (default: standard)",
+        " each frame of a shot upscaled on its own, from the shot's noise, about twice standard's"
+        " time over an episode on a 96 GB card: for animation whose fast scenes still ghost, where"
+        " the model blends the drawings a group packs; fine details that hold still may change"
+        " from frame to frame; not measured on live action. --plan says each level's time on"
+        " this GPU before anything runs; see the manual (default: standard)",
     )
     # split, the colour study's winner, in place of numz's lab (DESIGN.md, Colour correction).
     parser.add_argument(
