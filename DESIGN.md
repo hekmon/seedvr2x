@@ -2709,8 +2709,16 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
 - **Fine details that hold still** may change from frame to frame: small text on a ticket a
   character holds, in a bright cartoon's scene, changed at every frame (the user's eyes,
   2026-11-19). Each frame is redrawn alone, so nothing ties one frame's small details to the
-  next's (inferred; the deband study's render of that scene at `maximum` to compare). The
-  users' documents say so.
+  next's: at `maximum`, the deband study's render of that scene, the ticket held still about
+  90% of the time and the picture was clean (the user's eyes, 2026-11-19). The users'
+  documents say so.
+- **The users' guidance for animation** (the user, 2026-11-19), in their documents: test the
+  source on short clips first (a dark gradient, a fast scene, a held scene with fine details);
+  start at `maximum` and keep it where the picture is clean; where terraces show, add
+  `--deband`; where fast scenes still ghost, take `--quality animation`, with `--deband` only
+  if terraces show there too. A level and the deband apply to a whole job: `maximum` runs a
+  shot four times, `animation` takes about twice `standard`'s time, and `--plan` prints each
+  level's time on the user's card.
 - **Not measured:** live action, so the level is advised for animation alone until it is;
   its sharpness by a number (the eyes judged it).
 - **Parked** (the user, 2026-11-17): a held drawing's frames packed into one latent (a cut at
