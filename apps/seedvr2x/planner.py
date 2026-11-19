@@ -453,8 +453,8 @@ def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) 
     calibration, which comes after the plan's lines, the models loaded (main._say_times)."""
     runs_per_shot = QUALITY[quality]
     # The level that takes each frame alone, said where another level is, and what it is for.
-    animation = (
-        f"animation takes each frame on its own, for animation, about {ANIMATION_TIME} times"
+    deghost = (
+        f"deghost takes each frame on its own, for animation, about {ANIMATION_TIME} times"
         " standard's time"
     )
     if each_frame(quality):
@@ -469,7 +469,7 @@ def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) 
         return (
             "quality: standard, the default, one run a shot; --quality enhanced or maximum runs 2"
             " or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the"
-            f" GPU time; {animation}"
+            f" GPU time; {deghost}"
         )
     runs = sum(len(shot_runs(shot, runs_per_shot)) for shot in shots)
     # The frames a shot's earlier runs give wait on disk, at 16 bits, in the shot's unit directory
@@ -489,7 +489,7 @@ def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) 
         f"quality: {quality}, {runs_per_shot} runs a shot, {runs} in all, each frame from its best"
         f" run: about {runs_per_shot} times standard's GPU time, one run's memory;"
         f" {kept / 2**30:.2f} GiB of frames on disk for the longest shot; --quality {others};"
-        f" {animation}"
+        f" {deghost}"
     )
 
 
@@ -693,7 +693,7 @@ def said(
         longest = max(shot.frames for shot in shots)
         lines.append(
             f"shots: {len(shots)}, the longest of {_count(longest, 'frame')}, each frame a latent"
-            " of its own (--quality animation)"
+            " of its own (--quality deghost)"
         )
         lines.append("windows: one a frame, of its one latent, the frame's own DiT step")
     else:

@@ -312,7 +312,7 @@ def frames_alone(
     corrected: bool,
     target: tuple[int, int] = TARGET,
 ) -> npt.NDArray[np.float32]:
-    """The clip at animation as the command line runs it (run.py's frames alone): the shot's pass
+    """The clip at deghost as the command line runs it (run.py's frames alone): the shot's pass
     over each frame alone (shots_pipeline), at the shot's `seed`, corrected against that frame,
     its copy's reader that frame alone (from_memory, replaced for each)."""
     made: list[npt.NDArray[np.float32]] = []
@@ -333,7 +333,7 @@ def frames_alone(
     [(SHORT, None, False), (SHORT, TILES, True), (MIDDLE, None, True)],
     ids=["5f", "5f-ed-corrected", "25f-corrected"],
 )
-def test_a_clip_at_animation_is_each_frame_as_a_shot_of_one_frame_as_the_command_line_runs_it(
+def test_a_clip_at_deghost_is_each_frame_as_a_shot_of_one_frame_as_the_command_line_runs_it(
     monkeypatch: pytest.MonkeyPatch,
     count: int,
     tiles: Tiles | None,
@@ -342,7 +342,7 @@ def test_a_clip_at_animation_is_each_frame_as_a_shot_of_one_frame_as_the_command
 ) -> None:
     # DESIGN.md, Each frame on its own: frame f is the shot's pass over that frame alone, a shot
     # of one frame at the clip's seed (its first frame's), corrected against that frame, as
-    # run.py's frames alone run it (tests/test_animation_cli.py holds the job to it).
+    # run.py's frames alone run it (tests/test_deghost_cli.py holds the job to it).
     frames = clip_of(count, 7)
     stand_in_dit(monkeypatch)
     models = pipeline_models(cpu_models)
@@ -356,7 +356,7 @@ def test_a_clip_at_animation_is_each_frame_as_a_shot_of_one_frame_as_the_command
         encode_tiles=tiles,
         decode_tiles=tiles,
         correct=correct,
-        quality="animation",
+        quality="deghost",
     )
     assert ours.tobytes() == expected.tobytes()
 
@@ -430,16 +430,16 @@ GPU_HELD_BACK = 3 * GIB
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not GPU_MODELS, reason="needs SEEDVR2X_MODEL_DIR")
-@pytest.mark.parametrize("level", ["standard", "maximum", "animation"])
+@pytest.mark.parametrize("level", ["standard", "maximum", "deghost"])
 def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(
     monkeypatch: pytest.MonkeyPatch, level: str
 ) -> None:
     """clip.upscale with the real models on CUDA, with the colour correction, in two windows,
     equals the shot of the command line bit for bit (float32 output), at standard's one run and at
-    maximum's four (runs_pipeline), and at animation each frame alone as a shot of one frame at
+    maximum's four (runs_pipeline), and at deghost each frame alone as a shot of one frame at
     the shot's seed (frames_alone), under the plan clip.plan gives at the level in the card's free
-    memory less GPU_SPARE. Not yet run at animation (impl-anim-1, 2026-11-17: written without a
-    card)."""
+    memory less GPU_SPARE. Passed at the level on the 96 GB card under Linux's driver and on the
+    RTX 5090 natively and under WSL2 (2026-11-18)."""
     import gc
     from fractions import Fraction
 
@@ -471,7 +471,7 @@ def test_a_clip_is_a_shot_at_frame_0_on_the_gpu(
         target,
         GPU_FRAMES,
         # A frame alone is one latent in the DiT: no window to pin (the command line refuses
-        # --window at animation).
+        # --window at deghost).
         Pins() if each_frame(level) else Pins(window=GPU_WINDOW),
         host,
         correct=True,

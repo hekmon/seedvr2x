@@ -1,4 +1,4 @@
-"""--quality animation on the command line (DESIGN.md, Each frame on its own: `--quality animation`)
+"""--quality deghost on the command line (DESIGN.md, Each frame on its own: `--quality deghost`)
 on the CPU, the model replaced by test_cli_run.py's stand-in: a job's frames those of jobs of a
 single frame each, on the source ffmpeg debanded, seeded by their shot's seed (the definition the
 library's tests/test_clip.py holds for clip.upscale); the units in their order, the shot's
@@ -39,9 +39,9 @@ FRAME_BYTES = 3 * 96 * 128 * 2
 # test_deband_cli.py's clip at 16 bits after ffmpeg's deband (yuv420p16le, 64x48), in bytes.
 DEBANDED_BYTES = 64 * 48 * 3 // 2 * 2
 # test_cli_run.py's JOB's cut list (cuts.txt: shots of 3, 1 and 21 frames) without its window:
-# a frame alone is one latent in the DiT, and --window is refused at animation.
+# a frame alone is one latent in the DiT, and --window is refused at deghost.
 SHOTS = ((0, 3), (3, 4), (4, 25))
-ANIMATION = ("--cuts", "cuts.txt", "--min-segment", "0.12", "--quality", "animation")
+DEGHOST = ("--cuts", "cuts.txt", "--min-segment", "0.12", "--quality", "deghost")
 
 
 def frames_of(path: Path) -> list[str]:
@@ -80,7 +80,7 @@ def test_each_frame_is_a_job_of_that_frame_alone_seeded_by_its_shot(
     monkeypatch.setattr(run, "encode_shot", reading)
     options = ("--color-correction", correction)
     dump = tmp_path / "dump"
-    assert upscale(tmp_path, banded, "job", *ANIMATION, *options, "--dump-frames", str(dump)) == 0
+    assert upscale(tmp_path, banded, "job", *DEGHOST, *options, "--dump-frames", str(dump)) == 0
     got, job_reads = masters(tmp_path / "job"), list(reads)
     assert len(got) == 25 and len(job_reads) == 25
     (tmp_path / "empty.txt").write_text("")
@@ -122,7 +122,7 @@ def test_the_units_the_record_and_the_plan(
 ) -> None:
     banded, _ = clips(tmp_path, monkeypatch)
     caplog.set_level("INFO")
-    assert upscale(tmp_path, banded, "out", *ANIMATION) == 0
+    assert upscale(tmp_path, banded, "out", *DEGHOST) == 0
     # Each shot: its frames' encodes, one a frame, then its frames' windows, one a frame, each
     # seeded by the shot (the stand-in names a call by its seed less the job's: the shot's first
     # frame); then each segment's decode, a frame at a time.
@@ -135,7 +135,7 @@ def test_the_units_the_record_and_the_plan(
     # The stand-in names a decode by the latent's first value, its shot's first frame.
     assert decodes == [f"decode {start}" for start, end in SHOTS for _ in range(start, end)]
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
-    assert content["settings"]["quality"] == "animation"
+    assert content["settings"]["quality"] == "deghost"
     assert content["settings"]["deband"] == DEBAND
     for (start, end), shot in zip(SHOTS, content["shots"], strict=True):
         # One run a shot, its latents its frames, no window listed: one a frame; done whole.
@@ -151,16 +151,16 @@ def test_the_units_the_record_and_the_plan(
     assert "plan: windows: one a frame, of its one latent, the frame's own DiT step" in lines
     assert (
         "plan: shots: 3, the longest of 21 frames, each frame a latent of its own (--quality"
-        " animation)" in lines
+        " deghost)" in lines
     )
     assert (
-        "plan: quality: animation, each frame of a shot upscaled on its own, in a latent of its"
+        "plan: quality: deghost, each frame of a shot upscaled on its own, in a latent of its"
         " own, from the shot's noise, its source debanded: about 1.8 times standard's time, a"
         " frame's memory; for animation, where the model blends the drawings a latent packs,"
         " nothing measured on live action; --quality standard, enhanced or maximum packs a shot's"
         " frames in its latents"
     ) in lines
-    assert any(line.endswith("(--quality animation); the shot detection reads the source as it is")
+    assert any(line.endswith("(--quality deghost); the shot detection reads the source as it is")
                for line in lines)  # fmt: skip
     # The unit lines name each frame.
     assert "shot 3/3's frame 21/21" in caplog.text or "shot 3/3: frame 21/21" in caplog.text
@@ -175,7 +175,7 @@ def test_a_stop_inside_a_shots_frames_resumes_as_the_uninterrupted_job(
     # resume samples on from that frame, from the latents kept, and the masters are the
     # uninterrupted job's; nothing of the run is left in the job's directory.
     banded, _ = clips(tmp_path, monkeypatch)
-    options = (*ANIMATION, "--color-correction", "split")
+    options = (*DEGHOST, "--color-correction", "split")
     assert upscale(tmp_path, banded, "whole", *options) == 0
     uninterrupted = masters(tmp_path / "whole")
     windows = steps.windows
@@ -210,7 +210,7 @@ def test_a_stop_inside_a_shots_frames_resumes_as_the_uninterrupted_job(
 
 @pytest.mark.usefixtures("stand_in")
 @pytest.mark.parametrize("plan", [False, True], ids=["run", "plan"])
-def test_window_is_refused_at_animation_before_anything_is_made(
+def test_window_is_refused_at_deghost_before_anything_is_made(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -223,9 +223,9 @@ def test_window_is_refused_at_animation_before_anything_is_made(
     banded, _ = clips(tmp_path, monkeypatch)
     before = sorted(path.name for path in tmp_path.iterdir())
     options = ("--plan", "plan.txt") if plan else ()
-    assert upscale(tmp_path, banded, "out", *ANIMATION, "--window", "5", *options) == 1
+    assert upscale(tmp_path, banded, "out", *DEGHOST, "--window", "5", *options) == 1
     assert (
-        "--window: at --quality animation each frame is one latent in the DiT, with no windows to"
+        "--window: at --quality deghost each frame is one latent in the DiT, with no windows to"
         " cap; run without --window" in caplog.text
     )
     assert "first pass" not in caplog.text and "plan: " not in caplog.text
@@ -236,19 +236,19 @@ def test_window_is_refused_at_animation_before_anything_is_made(
 
 
 @pytest.mark.usefixtures("stand_in")
-def test_a_plan_at_animation_says_every_levels_time(
+def test_a_plan_at_deghost_says_every_levels_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # --plan says each level's time (main._say_times): the plan at animation is a frame's, its
+    # --plan says each level's time (main._say_times): the plan at deghost is a frame's, its
     # window a latent, and the levels that pack a shot's frames are counted uncapped there
     # (main._level_units), not laid out by that window, which no shot of theirs takes.
     banded, _ = clips(tmp_path, monkeypatch)
     caplog.set_level("INFO")
-    assert upscale(tmp_path, banded, "out", *ANIMATION, "--plan", "plan.txt") == 0
+    assert upscale(tmp_path, banded, "out", *DEGHOST, "--plan", "plan.txt") == 0
     [line] = [message for message in caplog.messages if message.startswith("time at each")]
     for level in ("standard", "enhanced", "maximum"):
         assert f"{level} about " in line, line
-    assert "animation about " in line and "(this job's)" in line
+    assert "deghost about " in line and "(this job's)" in line
 
 
 def test_a_frames_window_files_are_named_past_9999() -> None:
@@ -262,7 +262,7 @@ def test_a_frames_window_files_are_named_past_9999() -> None:
     assert window_file(12345) == "window_12345.pt" and frame_latent(7) == "latent_000007.pt"
 
 
-def test_the_help_says_what_animation_does_and_for_what(
+def test_the_help_says_what_deghost_does_and_for_what(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from test_cli import _option_help  # pyright: ignore[reportPrivateUsage]
@@ -273,7 +273,7 @@ def test_the_help_says_what_animation_does_and_for_what(
         cli.main(["--help"])
     text = _option_help(capsys.readouterr().out, "--quality")
     for said in (
-        "animation: each frame of a shot upscaled on its own, from the shot's noise, its source"
+        "deghost: each frame of a shot upscaled on its own, from the shot's noise, its source"
         " debanded",
         "about 1.8 times standard's time",
         "for animation, where the model blends the drawings a group packs",

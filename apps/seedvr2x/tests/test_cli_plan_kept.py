@@ -452,7 +452,7 @@ def test_a_hand_edited_level_of_no_name_is_refused(
     [said] = errors(caplog)
     assert said == (
         f'{out / "manifest.json"}: quality ["maximum"], where seedvr2x has standard, enhanced,'
-        " maximum and animation"
+        " maximum and deghost"
     )
 
 

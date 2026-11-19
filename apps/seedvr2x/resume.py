@@ -120,7 +120,7 @@ INDUCTOR_PACKAGES = frozenset({"jinja2", "markupsafe", "networkx", "setuptools"}
 
 
 # The environment's record of the deband's chains (media/fingerprint.py, deband_fingerprint),
-# written by a job that debands alone (--quality animation; --deband's until 2026-11-17): counted,
+# written by a job that debands alone (--quality deghost; --deband's until 2026-11-17): counted,
 # as inductor's packages are, only between two jobs that both did (debands), so that a change in
 # ffmpeg's deband alone is no environment change of a job that never used it.
 DEBAND_KEY = "deband_conversions"
@@ -183,7 +183,7 @@ def compiles(content: dict[str, Any]) -> bool:
 
 def debands(content: dict[str, Any]) -> bool:
     """Whether a job's content, recorded or asked, debands (settings.deband, written only when on:
-    main._settings, by --quality animation, or by --deband before it went into the level)."""
+    main._settings, by --quality deghost, or by --deband before it went into the level)."""
     settings: Any = content.get("settings")
     return isinstance(settings, dict) and bool(cast(dict[str, Any], settings).get("deband"))
 

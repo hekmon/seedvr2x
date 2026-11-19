@@ -376,7 +376,7 @@ class Manifest:
     @property
     def each_frame(self) -> bool:
         """Whether the job's level takes each frame of a shot alone (shotruns.each_frame:
-        animation), its runs' windows one latent a frame."""
+        deghost), its runs' windows one latent a frame."""
         return each_frame(self.settings.get(LEVEL, "standard"))
 
     def shot_of(self, run: int) -> int:

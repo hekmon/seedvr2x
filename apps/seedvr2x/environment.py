@@ -109,7 +109,7 @@ def current(
     2026-10-29), so a plan switched to or from --compile needs no --accept-env-change.
 
     deband: the deband chains' fingerprint (media/fingerprint.py, deband_fingerprint), given by a
-    job that debands (the level's, --quality animation) and recorded under "deband_conversions"
+    job that debands (the level's, --quality deghost) and recorded under "deband_conversions"
     for it alone: it counts in a resume's comparison only between two jobs that both deband
     (resume.DEBAND_KEY), so that a change in ffmpeg's deband refuses no job that never used it."""
     from seedvr2x import model, record

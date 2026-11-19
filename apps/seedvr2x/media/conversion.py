@@ -24,7 +24,7 @@ from seedvr2x.yuv import reading, unsupported
 # full-reference run was fed sources read with bilinear.
 KERNEL = "f=bilinear"
 
-# The deband's filter (--quality animation's; --deband's until 2026-11-17), ffmpeg's own, its
+# The deband's filter (--quality deghost's; --deband's until 2026-11-17), ffmpeg's own, its
 # thresholds 0.012 on all four planes and its other parameters at their defaults (DESIGN.md, Input,
 # "Banded sources"): on the user's dark animation's sky, at 16 bits, it brought the terraces under
 # the plain bicubic's, where gradfun left lines by the edges and a stronger deband turned a dark
@@ -120,7 +120,7 @@ def conversion_for(
     stream: VideoStream, matrix: str | None = None, deband: bool = False
 ) -> Conversion:
     """The conversion of a stream, with `matrix` (ffprobe's name) for its matrix when given, and
-    the deband's filter in it when `deband` (--quality animation's).
+    the deband's filter in it when `deband` (--quality deghost's).
 
     Raises MediaError for what seedvr2x refuses to read: a pixel format with alpha, a palette,
     grey or otherwise not listed; a matrix not listed; RGB tagged limited range; JPEG-family YUV
@@ -132,7 +132,7 @@ def conversion_for(
         # yuv411p, yuv410p and yuv440p: ffmpeg has no 16-bit format of their subsampling, and
         # deband takes them at 8 bits alone, where its in-between values would be cut back.
         raise MediaError(
-            f"--quality animation reads the source debanded: pixel format {stream.pix_fmt}: ffmpeg"
+            f"--quality deghost reads the source debanded: pixel format {stream.pix_fmt}: ffmpeg"
             " has no 16-bit format of its chroma subsampling to deband it in, and at 8 bits the"
             " smoothing would be cut back to the steps it removes; take another --quality level"
         )

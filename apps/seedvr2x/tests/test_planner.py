@@ -1416,7 +1416,7 @@ def test_said() -> None:
         " in one window, 1 join; a longer window, fewer joins; --window N caps them",
         "plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs"
         " 2 or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU"
-        " time; animation takes each frame on its own, for animation, about 1.8 times standard's"
+        " time; deghost takes each frame on its own, for animation, about 1.8 times standard's"
         " time",
         "plan: blocks swapped: 32 of the DiT's 36, the fewest that hold the window: slower, not"
         " worse; --swap-blocks N",
@@ -1460,7 +1460,7 @@ def test_said() -> None:
         " caps them",
         "plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs"
         " 2 or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU"
-        " time; animation takes each frame on its own, for animation, about 1.8 times standard's"
+        " time; deghost takes each frame on its own, for animation, about 1.8 times standard's"
         " time",
         "plan: blocks swapped: none, pinned by --swap-blocks; --swap-blocks N swaps some",
         "plan: the VAE: on the GPU in the DiT's phase, the window fitting beside it",

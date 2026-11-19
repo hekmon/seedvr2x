@@ -118,7 +118,7 @@ def test_each_format_debands_in_its_16_bit_twin() -> None:
 @pytest.mark.parametrize("pix_fmt", ["yuv411p", "yuv410p", "yuv440p"])
 def test_a_format_with_no_16_bit_twin_is_refused_with_deband(pix_fmt: str) -> None:
     assert not conversion_for(stream(pix_fmt=pix_fmt)).deband
-    said = f"^--quality animation reads the source debanded: pixel format {pix_fmt}: ffmpeg has no"
+    said = f"^--quality deghost reads the source debanded: pixel format {pix_fmt}: ffmpeg has no"
     with pytest.raises(MediaError, match=said + " 16-bit"):
         conversion_for(stream(pix_fmt=pix_fmt), deband=True)
 

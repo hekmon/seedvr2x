@@ -5,7 +5,7 @@ conversions (zscale), is a library of its own, and an ffmpeg linked to the syste
 its upgrades without a new version string.
 
 Two digests, not one: the conversions every job runs (`fingerprint`), and the deband's chains
-(`deband_fingerprint`), which only a job that debands (--quality animation) runs and records,
+(`deband_fingerprint`), which only a job that debands (--quality deghost) runs and records,
 under a key of its own (environment.current), and which a resume compares only between two such
 jobs (resume.differences), as inductor's packages count only between two compiled jobs. One
 digest of both would refuse the resume of a job that never debanded when ffmpeg's deband alone

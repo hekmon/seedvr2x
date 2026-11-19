@@ -1,10 +1,10 @@
-"""The deband on the command line (DESIGN.md, Input, "Banded sources"), which --quality animation
+"""The deband on the command line (DESIGN.md, Input, "Banded sources"), which --quality deghost
 alone runs since --deband went into the level (DESIGN.md, Each frame on its own; "Dropped as an
 option", 2026-11-17): the setting in the job's settings only at that level, a job begun with
 --deband at another level another job, the record on the masters and the finished file, the
 plan's line, a plan taken up with the other level, a resume, the chains' digest, and the option
 gone from the parser and the help. That the model and the correction are given the source
-debanded by ffmpeg is tests/test_animation_cli.py's (a job's frames those of one-frame jobs on
+debanded by ffmpeg is tests/test_deghost_cli.py's (a job's frames those of one-frame jobs on
 the source ffmpeg debanded). The chain itself is test_deband.py's, whose banded clip this uses;
 the jobs run on test_cli_run.py's stand-ins and skip as it does without a build seedvr2x
 accepts."""
@@ -40,11 +40,11 @@ pytestmark = needs_ffmpeg
 # The plan's line of the deband (planner._deband_said), whole.
 LINE = (
     f"deband: on, ffmpeg's {DEBAND} on every frame the job reads, at 16 bits before"
-    " their conversion to RGB (--quality animation); the shot detection reads the source as it is"
+    " their conversion to RGB (--quality deghost); the shot detection reads the source as it is"
 )
 # The level that debands, as a job's options give it.
-ANIMATION = ("--quality", "animation")
-# test_cli_run.py's JOB without its window: --window is refused at animation (a frame alone is one
+DEGHOST = ("--quality", "deghost")
+# test_cli_run.py's JOB without its window: --window is refused at deghost (a frame alone is one
 # latent in the DiT), and the same options at every level keep a plan taken up comparable.
 JOB = ("--cuts", "cuts.txt", "--min-segment", "0.12")
 
@@ -76,17 +76,17 @@ def clips(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
 
 
 @pytest.mark.usefixtures("stand_in")
-def test_the_setting_the_record_and_the_plan_say_it_only_at_animation(
+def test_the_setting_the_record_and_the_plan_say_it_only_at_deghost(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The settings hold the filter as the reads ran it, the record on each master and on the
     # finished file says it (main._job_record), and the plan has its line, at --quality
-    # animation; a job at another level holds no key, no tag and no line, its record and plan
+    # deghost; a job at another level holds no key, no tag and no line, its record and plan
     # those of before the level.
     banded, _ = clips(tmp_path, monkeypatch)
     caplog.set_level(logging.INFO)
     options = (*JOB, "--format", "yuv420p10le")
-    assert upscale(tmp_path, banded, "out", *options, *ANIMATION) == 0
+    assert upscale(tmp_path, banded, "out", *options, *DEGHOST) == 0
     assert LINE in caplog.text
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     assert (
@@ -96,11 +96,11 @@ def test_the_setting_the_record_and_the_plan_say_it_only_at_animation(
     assert (
         expected["SEEDVR2X_DEBAND"] == "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0"
     )
-    assert expected["SEEDVR2X_QUALITY"] == "animation"
+    assert expected["SEEDVR2X_QUALITY"] == "deghost"
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
         tags = stream_tags_of(tmp_path / "out" / name)
         assert {key: tags.get(key) for key in expected} == expected, name
-    assert upscale(tmp_path, banded, "x.mkv", *options, *ANIMATION) == 0
+    assert upscale(tmp_path, banded, "x.mkv", *options, *DEGHOST) == 0
     beside = json.loads((tmp_path / "x.mkv.manifest.json").read_text())
     tags = stream_tags_of(tmp_path / "x.mkv")
     assert (
@@ -144,13 +144,13 @@ def test_a_job_begun_with_deband_at_another_level_is_another_job(
     text = refused(tmp_path, banded, caplog, *JOB)
     assert "another job than the one asked" in text
     assert (
-        f'settings.deband: "{DEBAND}" -> null (--deband, an option no more: --quality animation'
+        f'settings.deband: "{DEBAND}" -> null (--deband, an option no more: --quality deghost'
         " debands)" in text
     )
     assert contents(tmp_path / "out") == kept
 
 
-@pytest.mark.parametrize(("before", "after"), [((), ANIMATION), (ANIMATION, ())])
+@pytest.mark.parametrize(("before", "after"), [((), DEGHOST), (DEGHOST, ())])
 def test_a_resume_at_the_other_level_is_another_job_naming_both(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -159,7 +159,7 @@ def test_a_resume_at_the_other_level_is_another_job_naming_both(
     before: tuple[str, ...],
     after: tuple[str, ...],
 ) -> None:
-    # A job that has made units, resumed at animation or from it: refused, the level and the
+    # A job that has made units, resumed at deghost or from it: refused, the level and the
     # deband named, nothing touched; the same command as before then resumes it.
     banded, _ = clips(tmp_path, monkeypatch)
     steps.stop = "window 4:0"
@@ -175,24 +175,24 @@ def test_a_resume_at_the_other_level_is_another_job_naming_both(
     assert steps.calls and "encode 0" not in steps.calls
 
 
-@pytest.mark.parametrize("animation", [True, False])
+@pytest.mark.parametrize("deghost", [True, False])
 def test_a_plan_is_planned_again_at_the_other_level_its_first_pass_kept(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     steps: Steps,  # noqa: F811
     caplog: pytest.LogCaptureFixture,
-    animation: bool,
+    deghost: bool,
 ) -> None:
-    # A job that has made no unit (--plan) is taken up at animation or from it, planned again
+    # A job that has made no unit (--plan) is taken up at deghost or from it, planned again
     # from its record with no first pass, as any setting the first pass doesn't read
     # (resume.FIRST_PASS_SETTINGS): the cuts and the index are the source's either way. Its
     # masters then are those of the job run at that level from the start, the key written or
     # gone with it.
     banded, _ = clips(tmp_path, monkeypatch)
     split = ("--color-correction", "split")
-    level = ANIMATION if animation else ()
+    level = DEGHOST if deghost else ()
     assert upscale(tmp_path, banded, "reference", *JOB, *split, *level) == 0
-    other = () if animation else ANIMATION
+    other = () if deghost else DEGHOST
     assert upscale(tmp_path, banded, "out", *JOB, *split, *other, "--plan", "plan.txt") == 0
     caplog.set_level(logging.INFO)
     caplog.clear()
@@ -201,22 +201,22 @@ def test_a_plan_is_planned_again_at_the_other_level_its_first_pass_kept(
     assert "re-planned, its job having made no unit yet: " in caplog.text
     assert "settings.deband: " in caplog.text
     settings = json.loads((tmp_path / "out" / "manifest.json").read_text())["settings"]
-    assert settings.get("deband") == (DEBAND if animation else None)
+    assert settings.get("deband") == (DEBAND if deghost else None)
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
         assert decoded(tmp_path / "out" / name) == decoded(tmp_path / "reference" / name)
 
 
-def test_a_resume_at_animation_reads_on_as_the_uninterrupted_job(
+def test_a_resume_at_deghost_reads_on_as_the_uninterrupted_job(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     steps: Steps,  # noqa: F811
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Stopped inside its last shot's frames, its input copy then deleted, a job at animation
+    # Stopped inside its last shot's frames, its input copy then deleted, a job at deghost
     # resumed: the copy is made again from the input through the deband, and the masters,
     # corrected against it, are those of the job run uninterrupted.
     banded, _ = clips(tmp_path, monkeypatch)
-    options = (*JOB, "--color-correction", "split", *ANIMATION)
+    options = (*JOB, "--color-correction", "split", *DEGHOST)
     assert upscale(tmp_path, banded, "whole", *options) == 0
     steps.stop = "window 4:0"
     stopped(tmp_path, banded, "out", *options)
@@ -273,13 +273,13 @@ def test_ffmpegs_deband_changing_refuses_a_deband_resume_alone(
     steps: Steps,  # noqa: F811
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # A change in the deband chains' digest alone: the resume of a job at animation, which
+    # A change in the deband chains' digest alone: the resume of a job at deghost, which
     # debands, is refused as an environment change naming the key, that of a job at another level
     # resumes untouched.
     from media import fingerprint
 
     banded, _ = clips(tmp_path, monkeypatch)
-    for options, refusal in (((), False), (ANIMATION, True)):
+    for options, refusal in (((), False), (DEGHOST, True)):
         out = "deband" if options else "plain"
         steps.stop = "window 4:0"
         stopped(tmp_path, banded, out, *JOB, *options)
@@ -297,7 +297,7 @@ def test_ffmpegs_deband_changing_refuses_a_deband_resume_alone(
 def test_the_option_is_gone_from_the_parser_and_the_help(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # --deband went into --quality animation (DESIGN.md, Banded sources, "Dropped as an option"):
+    # --deband went into --quality deghost (DESIGN.md, Banded sources, "Dropped as an option"):
     # no option, refused by the parser as any unknown one; the help names it nowhere, and says
     # the level's deband in --quality's.
     with pytest.raises(SystemExit):

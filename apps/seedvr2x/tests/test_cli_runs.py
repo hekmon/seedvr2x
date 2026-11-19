@@ -60,14 +60,14 @@ SOURCE_BYTES = 64 * 48 * 3 // 2
 RUNS_SAID = (
     "plan: quality: {level}, {runs} runs a shot, {total} in all, each frame from its best run:"
     " about {runs} times standard's GPU time, one run's memory; {kept} GiB of frames on disk for"
-    " the longest shot; --quality {others}; animation takes each frame on its own, for animation,"
+    " the longest shot; --quality {others}; deghost takes each frame on its own, for animation,"
     " about 1.8 times standard's time"
 )
 # What it says at the default level (the line is there at every level).
 STANDARD_SAID = (
     "plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs 2"
     " or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU time;"
-    " animation takes each frame on its own, for animation, about 1.8 times standard's time"
+    " deghost takes each frame on its own, for animation, about 1.8 times standard's time"
 )
 
 
@@ -79,7 +79,7 @@ def quality_line(lines: list[str]) -> str:
 
 
 # The --quality levels by their runs a shot as the tests name them (job.QUALITY): those that pack
-# a shot's frames in its latents, not animation's, which takes each frame alone (one run too).
+# a shot's frames in its latents, not deghost's, which takes each frame alone (one run too).
 LEVEL = {
     str(runs): level
     for level, runs in runtime_job.QUALITY.items()

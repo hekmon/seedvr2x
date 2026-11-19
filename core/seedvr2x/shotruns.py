@@ -19,12 +19,12 @@ RUN_OFFSETS: dict[int, tuple[int, ...]] = {1: (0,), 2: (0, 2), 4: (0, 1, 2, 3)}
 # The levels of --quality, each with its runs a shot (DESIGN.md, Several runs of a shot: the user,
 # 2026-10-20, a name a user understands, the runs a shot being the code's): standard, the default,
 # one run; enhanced two, offered on the user's blind verdict (two runs beat one on 7 of 8 stills);
-# maximum four (four beat two on 7 of 8); animation one, each of its frames through the pass alone
+# maximum four (four beat two on 7 of 8); deghost one, each of its frames through the pass alone
 # (EACH_FRAME).
-QUALITY = {"standard": 1, "enhanced": 2, "maximum": 4, "animation": 1}
+QUALITY = {"standard": 1, "enhanced": 2, "maximum": 4, "deghost": 1}
 
 # The levels whose run takes each frame of its shot alone (DESIGN.md, Each frame on its own:
-# `--quality animation`, decided on 2026-11-17): a frame upscaled as a shot of one frame is, in a
+# `--quality deghost`, decided on 2026-11-17): a frame upscaled as a shot of one frame is, in a
 # latent of its own, its own encode, a window of one latent, its decode and its colour correction
 # against its own source frame, every frame with the shot's seed (Shot.seed), so that the noise
 # does not change from frame to frame inside a shot. On six shots of an animated episode the DiT
@@ -33,14 +33,14 @@ QUALITY = {"standard": 1, "enhanced": 2, "maximum": 4, "animation": 1}
 # brought it back to standard's level (impl-box-7). The output of a shot is bit for bit the shot's
 # pass run on each of its frames as a one-frame shot seeded by the shot's seed, frame after frame
 # (core/tests/test_clip.py; the command line's, apps/seedvr2x/tests/test_clip_cli.py).
-EACH_FRAME = frozenset({"animation"})
+EACH_FRAME = frozenset({"deghost"})
 
 # The levels that read their source debanded (DESIGN.md, Each frame on its own: "the source
 # debanded", the user, 2026-11-17): the command line through ffmpeg's deband in its reads, which
 # --deband ran until the option went into the level. The one place that says so: the night of
 # 2026-11-17 measures whether the level still needs it, and a level without it is one name less
 # here.
-DEBANDED = frozenset({"animation"})
+DEBANDED = frozenset({"deghost"})
 
 # A frame's places in a run, best first (DESIGN.md, Several runs of a shot): its first frame, a
 # latent of its own (-1), then the last of a group of 4 (3), the one a latent is stamped on in the

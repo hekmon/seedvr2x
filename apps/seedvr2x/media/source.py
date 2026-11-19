@@ -269,7 +269,7 @@ def examine(
     """Probe path, refuse what seedvr2x doesn't read (declare), then decode it once to count and
     time its frames (first_pass). `matrix` (ffprobe's name), `sample_aspect` and `frame_rate`
     (frames per second) override what the source declares; `deband`, the level's (--quality
-    animation), puts its filter in the frames' conversion (conversion_for).
+    deghost), puts its filter in the frames' conversion (conversion_for).
 
     Raises MediaError with the reason for a refusal."""
     declared = declare(path, matrix, sample_aspect, frame_rate, deband)

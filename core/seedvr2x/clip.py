@@ -8,7 +8,7 @@ A clip is a shot, Shot(0, T), seeded as such (shots.Shot.seed), and the pass is 
 (seedvr2x/shot_pass.py): encode_shot, sample_windows over the layout of shots.shot_layout,
 merge_windows, decode_shot with the colour correction read from the frames in memory. So the output
 is bit for bit what the command line gives the same frames as a shot of one run, at `quality`
-enhanced or maximum, as a shot of 2 or 4 runs, and at animation, as a shot each of whose frames goes
+enhanced or maximum, as a shot of 2 or 4 runs, and at deghost, as a shot each of whose frames goes
 alone (shotruns; apps/seedvr2x/tests/test_clip_cli.py holds them): the runs are made one after the
 other, each fed the shot from its first frame, whole, and each writes into the one output array only
 the frames shotruns.run_of takes from it. A clip cut into shots is one call a shot, `start` giving
@@ -18,7 +18,7 @@ the CPU as soon as it is made, as the command line writes it to a file (units.Un
 and is merged there; a tiled pass keeps its scratch in tiling.InMemory, whole, at 12.7 MB a 1080p
 frame; the output is one array, allocated once, nothing kept between a shot's runs but that array,
 and the host holds one run's latent and windows at a time, the first run's, the longest; at
-animation, one frame's. The plan counts them (plan), at every level."""
+deghost, one frame's. The plan counts them (plan), at every level."""
 
 import traceback
 from collections.abc import Callable, Generator, Iterator, Sequence
@@ -63,7 +63,7 @@ Stage = Literal["run", "frame", "encode", "window", "decode"]
 # With several runs (`quality` enhanced or maximum), ("run", n, runs) is told first, before the
 # n-th run's encode, and the steps after it are that run's, counted from its own first frame;
 # with one run, standard's, none is told, and the steps are as they were before runs existed.
-# With each frame alone (`quality` animation, shotruns.each_frame), ("frame", n, T) is told before
+# With each frame alone (`quality` deghost, shotruns.each_frame), ("frame", n, T) is told before
 # the n-th frame's encode, and the steps after it are that frame's: ("encode", 1, 1), ("window", 1,
 # 1) and ("decode", 1, 1).
 Step = Callable[[Stage, int, int], None]
@@ -111,7 +111,7 @@ def plan(
     `quality` level (upscale): the runs are made one after the other, the first run is the whole
     shot and the longest, and a later one is shorter, so that no run holds more than it, in
     system memory or on the card. At a level that takes each frame alone (shotruns.each_frame:
-    animation), the plan is a frame's, a shot of one frame (shotruns.planned_shots), each frame
+    deghost), the plan is a frame's, a shot of one frame (shotruns.planned_shots), each frame
     going alone through the passes, the output array still the clip's. ValueError for no frame."""
     cut = [Shot(0, shots)] if isinstance(shots, int) else list(shots)
     if not cut or any(each.frames < 1 for each in cut):
@@ -223,7 +223,7 @@ def upscale(
     and 2, or 0 to 3 (shotruns.shot_runs; a clip too short to have a run's first frame has no
     such run), each a whole run of its own with its windows and its correction against the same
     input frames from its first frame; the output's frames are those each run gives
-    (shotruns.run_of), written into the one array as each run decodes them. At animation
+    (shotruns.run_of), written into the one array as each run decodes them. At deghost
     (shotruns.each_frame), each frame of the clip goes alone, frame after frame, as a shot of one
     frame seeded by the clip's seed: its own encode, a window of one latent, its decode and its
     correction against its own frame, written into its place in the array. tail_frames is the

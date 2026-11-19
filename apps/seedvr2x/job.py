@@ -47,7 +47,7 @@ DEFAULT_RESOLUTION = 1080
 def layout_of(frames: int, window: int | None, quality: str) -> list[tuple[int, int]]:
     """The windows of a run of `frames` frames at the --quality level `quality`, in latents: laid
     out by the plan's cap, `window` (shots.shot_layout), or, where the level takes each frame
-    alone (shotruns.each_frame: animation), one window of one latent a frame, whatever the cap
+    alone (shotruns.each_frame: deghost), one window of one latent a frame, whatever the cap
     (shotruns.frame_layout; DESIGN.md, Each frame on its own)."""
     if each_frame(quality):
         return frame_layout(frames)

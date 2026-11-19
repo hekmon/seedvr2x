@@ -777,18 +777,18 @@ def test_a_cancel_between_runs_stops_the_clip_with_nothing_alive(
 
 def test_a_level_that_is_not_one_is_refused(models: model.Models) -> None:
     with pytest.raises(
-        ValueError, match="quality 'ultra', not one of standard, enhanced, maximum, animation"
+        ValueError, match="quality 'ultra', not one of standard, enhanced, maximum, deghost"
     ):
         upscale(models, clip_of(2), quality="ultra")
 
 
-# Each frame alone: --quality animation --------------------------------------------------------
+# Each frame alone: --quality deghost ----------------------------------------------------------
 
 
 @pytest.mark.parametrize("count", [1, 2, SHORT])
 @pytest.mark.parametrize("correct", [False, True])
 @pytest.mark.parametrize("tiled", [False, True])
-def test_animation_is_each_frame_as_a_clip_of_one_frame_seeded_by_the_clips_seed(
+def test_deghost_is_each_frame_as_a_clip_of_one_frame_seeded_by_the_clips_seed(
     models: model.Models,
     monkeypatch: pytest.MonkeyPatch,
     count: int,
@@ -808,7 +808,7 @@ def test_animation_is_each_frame_as_a_clip_of_one_frame_seeded_by_the_clips_seed
         "correct": correct,
         "start": 11,
     }
-    out = clip.upscale(models, frames, TARGET, SEED, window=5, quality="animation", **options)
+    out = clip.upscale(models, frames, TARGET, SEED, window=5, quality="deghost", **options)
     expected = np.concatenate(
         [
             clip.upscale(models, frames[f : f + 1], TARGET, SEED, window=None, **options)
@@ -827,7 +827,7 @@ def test_animation_is_each_frame_as_a_clip_of_one_frame_seeded_by_the_clips_seed
         assert out[1].tobytes() != alone[0].tobytes()
 
 
-def test_animation_seeds_each_frame_with_the_clips_seed_and_draws_a_latents_noise(
+def test_deghost_seeds_each_frame_with_the_clips_seed_and_draws_a_latents_noise(
     models: model.Models, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     stand_in_dit(monkeypatch)
@@ -847,7 +847,7 @@ def test_animation_seeds_each_frame_with_the_clips_seed_and_draws_a_latents_nois
     monkeypatch.setattr(sampling, "drawn", spy_drawn)
     clip.upscale(
         models, clip_of(3), TARGET, SEED, window=None, encode_tiles=None, decode_tiles=None,
-        correct=False, start=11, quality="animation",
+        correct=False, start=11, quality="deghost",
     )  # fmt: skip
     # Each frame: its encode seeded with the clip's encode seed, its noise with the clip's, a
     # latent's (the shot's seed, 11 more than the job's, whatever the frame).
@@ -856,7 +856,7 @@ def test_animation_seeds_each_frame_with_the_clips_seed_and_draws_a_latents_nois
     assert {shape for _, shape in drawn} == {drawn[0][1]} and drawn[0][1][0] == 1
 
 
-def test_animations_steps_and_phases_are_each_frames_in_turn(
+def test_deghost_steps_and_phases_are_each_frames_in_turn(
     models: model.Models, monkeypatch: pytest.MonkeyPatch, events: Events
 ) -> None:
     stand_in_dit(monkeypatch, events)
@@ -865,7 +865,7 @@ def test_animations_steps_and_phases_are_each_frames_in_turn(
     def record(stage: str, done: int, total: int) -> None:
         told.append((stage, done, total))
 
-    upscale(models, clip_of(3), window=5, quality="animation", step=record)
+    upscale(models, clip_of(3), window=5, quality="deghost", step=record)
     each = [("encode", 1, 1), ("window", 1, 1), ("decode", 1, 1)]
     assert told == [step for n in range(3) for step in [("frame", n + 1, 3), *each]]
     assert events == [("enter", "encode"), ("enter", "dit"), "sample", ("enter", "decode")] * 3
@@ -882,7 +882,7 @@ def test_a_cancel_between_frames_stops_the_clip_with_nothing_alive(
             raise Stop()
 
     with pytest.raises(Stop):
-        upscale(models, clip_of(SHORT), quality="animation", step=step, correct=True)
+        upscale(models, clip_of(SHORT), quality="deghost", step=step, correct=True)
     # The first frame was made whole, the second begun: told, not encoded.
     assert events.count(("enter", "encode")) == 1 and events.count(("enter", "decode")) == 1
     assert watched.closed()
@@ -906,7 +906,7 @@ def test_a_nan_in_a_frames_window_names_the_frame(
     with pytest.raises(clip.NonFinite, match=r"window 1/1 \(frames 12 to 12\)"):
         clip.upscale(
             models, clip_of(3), TARGET, SEED, window=None, encode_tiles=None, decode_tiles=None,
-            correct=False, start=11, quality="animation",
+            correct=False, start=11, quality="deghost",
         )  # fmt: skip
 
 
@@ -966,14 +966,14 @@ def test_a_clip_of_shots_is_planned_as_its_shots_with_the_whole_output_counted()
             clip.plan(FREE, UHD, none, Pins(), None, correct=True)
 
 
-def test_animation_is_planned_as_a_frame_with_the_whole_output_counted() -> None:
+def test_deghost_is_planned_as_a_frame_with_the_whole_output_counted() -> None:
     """Each frame alone: the plan is a shot of one frame's, whatever the shots, the output array
     of all of them taken off the host; the other levels plan their shots."""
     cuts = [Shot(0, 100), Shot(100, 400), Shot(400, 450)]
     host = 20 * GIB
     taken = clip.output_bytes(450, (1080, 1920))
     made = clip.plan(
-        FREE, (1080, 1920), cuts, Pins(), host, correct=True, held=True, quality="animation"
+        FREE, (1080, 1920), cuts, Pins(), host, correct=True, held=True, quality="deghost"
     )
     assert made == shot_plan.plan(
         FREE, (1080, 1920), [Shot(0, 1)], Pins(), host - taken,

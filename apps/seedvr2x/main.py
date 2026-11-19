@@ -610,7 +610,7 @@ def _parser() -> argparse.ArgumentParser:
         # clips by VMAF and LPIPS; looking sharper is the user's eye, 2026-11-08, which the
         # luma's Laplacian variance contradicts on 6 of 8): what was measured and what the eye
         # sees apart, neither from the other.
-        # animation (DESIGN.md, Each frame on its own, decided on 2026-11-17): what it does, its
+        # deghost (DESIGN.md, Each frame on its own, decided on 2026-11-17): what it does, its
         # time against standard's (6 min 47 s against 3 min 47 s for a shot of 206 frames on the
         # 96 GB card) and for what, nothing measured on live action.
         help="standard, enhanced or maximum: each shot run 1, 2 or 4 times, its latent grid shifted"
@@ -619,7 +619,7 @@ def _parser() -> argparse.ArgumentParser:
         " original, so at standard one frame in four comes out closer to the original than the"
         " three before it, and looks sharper: edges that pulse, most on line art, dark scenes and"
         " motion; maximum takes every frame from a run where it is rebuilt closest. 2 or 4 times"
-        " the GPU time, the same memory, and disk for the frames between the runs. animation:"
+        " the GPU time, the same memory, and disk for the frames between the runs. deghost:"
         " each frame of a shot upscaled on its own, from the shot's noise, its source debanded,"
         " about 1.8 times standard's time: for animation, where the model blends the drawings a"
         " group packs; not measured on live action. --plan says it before anything runs; see the"
@@ -986,7 +986,7 @@ def _video_arguments(args: argparse.Namespace) -> None:
     job's settings and record are unchanged (a picture takes --resolution's default in stills.py);
     --plan without a file, the picture's (stills.BARE_PLAN), and a PNG format for a picture alone
     or a .png or .webp name for the output are refused, as a video's; --window at a level that
-    takes each frame alone (animation); and --compile on Windows."""
+    takes each frame alone (deghost); and --compile on Windows."""
     from seedvr2x.errors import JobError
 
     if args.compile and sys.platform == "win32":
@@ -1033,7 +1033,7 @@ def _video_arguments(args: argparse.Namespace) -> None:
             " windows to cap; run without --window"
         )
     # The one place a job's deband is decided: the level that reads its source debanded
-    # (shotruns.debanded; DESIGN.md, Each frame on its own: animation), through the chain, the
+    # (shotruns.debanded; DESIGN.md, Each frame on its own: deghost), through the chain, the
     # setting and the record --deband had, which went into the level on 2026-11-17 (DESIGN.md,
     # Banded sources: "Dropped as an option").
     args.deband = debanded(args.quality)
@@ -3663,7 +3663,7 @@ def _early_memory(
     try:
         known = Plan.recorded(recorded.get("plan"))
         shots = [Shot(int(shot["start"]), int(shot["end"])) for shot in recorded["shots"]]
-        # The recorded job's level, which a resume is held to (a frame's plan at animation).
+        # The recorded job's level, which a resume is held to (a frame's plan at deghost).
         settings: dict[str, Any] = recorded.get("settings") or {}
         shots = planned_shots(shots, str(settings.get("quality", "standard")))
         planner.check_recorded(known, shots, target)
@@ -3989,7 +3989,7 @@ def _settings(
         "frame_rate": None if args.frame_rate is None else str(args.frame_rate),
         # The deband's filter as the reads run it (media/conversion.py, DEBAND), which changes
         # every frame the model is given, written by the level that debands alone (_video_arguments:
-        # --quality animation), so that a job begun with --deband at another level, which the
+        # --quality deghost), so that a job begun with --deband at another level, which the
         # option wrote, is another job. A job without it records the settings of before.
         **({"deband": DEBAND} if args.deband else {}),
     }
@@ -4168,7 +4168,7 @@ def _identity(
 
 def _deband_fingerprint(args: argparse.Namespace) -> str | None:
     """The deband chains' fingerprint (media/fingerprint.py) for a job that debands (the level's,
-    --quality animation; --deband's until 2026-11-17), which runs and records it; None for any
+    --quality deghost; --deband's until 2026-11-17), which runs and records it; None for any
     other, whose start then runs no deband chain and whose record has no such key
     (resume.DEBAND_KEY)."""
     if not args.deband:
@@ -5203,10 +5203,10 @@ def _replan(record: "Manifest", prior: _Prior, shape: list[str]) -> None:
 # The option a setting's difference names beside its key, where the key alone would not say
 # which option to give or leave out: the deband's is written only when on (_settings), its line
 # `settings.deband: null -> "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0"`, by
-# --quality animation alone since --deband went into the level (DESIGN.md, Banded sources,
+# --quality deghost alone since --deband went into the level (DESIGN.md, Banded sources,
 # "Dropped as an option", 2026-11-17): a job begun with --deband at another level is another job,
 # named so, as the retired test modes are.
-SETTING_OPTIONS = {"deband": "--deband, an option no more: --quality animation debands"}
+SETTING_OPTIONS = {"deband": "--deband, an option no more: --quality deghost debands"}
 
 
 def _another_job(
