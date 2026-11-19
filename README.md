@@ -114,9 +114,9 @@ possible:
   - **The `seedvr2x` command** for long videos and for still pictures
     (`uv run seedvr2x photo.png --resolution 2160 -o photo.2160p.png`), through the same
     models, tiling and colour correction.
-  - **A quality for animation,** `--quality animation`: each frame upscaled on its own, from
-    one noise for the whole shot, so that drawings changing from frame to frame stay apart
-    and the picture stays steady where it holds still.
+  - **A quality against ghosts,** `--quality deghost`: each frame upscaled on its own, from
+    one noise for the whole shot, so that the drawings of fast animation stay apart rather
+    than blend into ghosts.
   - **ComfyUI nodes,** built on the same library, for ComfyUI's own workflows: pictures, and
     videos written to a file shot by shot, installed from ComfyUI's registry.
   - **An image server:** pictures over HTTP, the models loaded once and kept on the GPU, in a
