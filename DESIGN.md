@@ -2229,7 +2229,8 @@ Decided by the user on 2026-11-09, on impl-win-4's renders of the user's dark an
   chain of before, byte for byte. Every read takes it: the model's frames, the input copies
   and a copy made again, the calibration, a resume; the first pass doesn't, so the cuts are
   the source's. `yuv411p`, `yuv410p` and `yuv440p` are refused with it, ffmpeg having no
-  16-bit format of their subsampling, and a picture refuses it until the deband in torch.
+  16-bit format of their subsampling, and a picture refuses it, its frames read without ffmpeg
+  (a deband in torch for it, once planned, is not since 2026-11-19).
   The settings' key, the record's field (`deband`) and the plan's line are there only when it
   is on, a job without it as before; a resume with the other value is another job, and a
   plan with no unit made is planned again. Every start checks ffmpeg for `deband`, and two
@@ -2242,7 +2243,8 @@ Decided by the user on 2026-11-09, on impl-win-4's renders of the user's dark an
   run and recorded by a `--deband` job alone, `deband` still required of every build). The
   nodes
   and pictures after: their frames never pass through ffmpeg, so a deband in torch, written
-  from the algorithm's description, never from ffmpeg's code (LGPL).
+  from the algorithm's description, never from ffmpeg's code (LGPL). None is planned since
+  2026-11-19 (below).
 - **The model's input precision.** The encoder's input is cast to bfloat16 (from float16 on
   the host), 8 significant bits, in [0, 1], and the resize and the normalisation to [-1, 1]
   after it run in bfloat16 too: about one 8-bit code in the bright half and half a code
@@ -2258,13 +2260,19 @@ Decided by the user on 2026-11-09, on impl-win-4's renders of the user's dark an
   frame, keep 55 and 61% of it, lost by the resize itself (the float32 resize alone keeps
   50 to 54%), not by the casts. `gradfun`'s dither reaches it at about half its amplitude,
   as texture, the resize halving it (84% of it in the bright cartoon's flat fields).
-- **Dropped as an option** (the user, 2026-11-17): `--deband` goes, and the deband runs
+- **Dropped as an option** (the user, 2026-11-17; reversed on 2026-11-19, below): `--deband`
+  goes, and the deband runs
   inside `--quality animation`
   ([Each frame on its own](#each-frame-on-its-own---quality-animation)). The eyes found it a
   gain on animation (two dark shaded animations and the user's dark animation) and a loss of
   detail on live action (two films, 2026-11-11), and on an animation that needed none it
   changed nothing (2026-11-16). Its chain, its fingerprint, the settings' key and the record's
   field stay, the level taking them.
+- **A switch again** (the user, 2026-11-19), off by default, at every level, the level reading
+  its source as it is ([Each frame on its own](#each-frame-on-its-own---quality-animation)): at
+  the level the eyes saw it take from the drawing on four scenes of six and smooth only where
+  a source is banded, and the level alone draws far fewer terraces than packed frames. The
+  users' documents advise it for animation alone, once a short clip shows terraces without it.
 
 ## Pipeline, per shot
 
@@ -2605,10 +2613,10 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
 
 Decided on 2026-11-17 (the user, on impl-box-7's renders of six shots of an animated episode
 against impl-box-6's): a fourth level, which upscales each frame of a shot on its own, in a
-latent of its own, every frame from the shot's noise, the source debanded. Built before
-v0.1.0, in the command line and in the nodes.
+latent of its own, every frame from the shot's noise (its source debanded from 2026-11-17 to
+2026-11-19: below). Built before v0.1.0, in the command line and in the nodes.
 - **Built** in the library and the command line (impl-anim-1, 2026-11-17; the nodes refuse it
-  until their deband is built) **and run on both cards** (2026-11-18): its GPU test passed on
+  until they offer it, below) **and run on both cards** (2026-11-18): its GPU test passed on
   the 96 GB card under Linux's driver and on the RTX 5090 natively and under WSL2; on the six
   shots below, its frames were the research renders' bit for bit (673 of 673, each shot at its
   seed, impl-box-9), a second run of one shot the same. `--window` is refused at the level, as
@@ -2669,24 +2677,40 @@ v0.1.0, in the command line and in the nodes.
     level's time on the card it runs on, right once the calibration is; the documents say
     about twice `standard`'s time, as measured on the 96 GB card. On a card of 32 GB the
     ratio is to measure: `standard` on the RTX 5090, on the frames the level made there.
-- **The source debanded** (the user, 2026-11-17): the level takes `--deband`'s place
-  ([Banded sources](#banded-sources---deband)): ffmpeg's `deband` in the command line's reads,
-  as `--deband` ran it, and in the nodes a deband in torch, written from the algorithm's
-  description, held to ffmpeg's by a test within a measured margin (the nodes' conversion is
-  held to zscale's so). Kept (the user, 2026-11-18). An episode that gains little from a
-  deband (the user's eyes at `standard`, 2026-11-16) shows its cost alone: on six of its shots
-  the level with it and without could hardly be told apart played; paused, without it the
-  colours and lines a little more vivid and more noise in the textures, maybe the source's own
-  grain, with it a very little paler and less noise (the user's eyes, 2026-11-18, on
-  impl-box-8's renders against impl-box-7's). Where the picture holds
-  still, it lowered the flicker on all six shots, by 0.04 to 0.15 8-bit codes, under
-  `standard`'s on four; where it moves, the same within 0.12 but on one shot, 0.33 steadier.
-  The scenes that need it gain a lot (a dark sky and a face: the user's eyes at `maximum` on
-  2026-11-11, recalled on 2026-11-18): at the level,
-  the three banded scenes' terraces fell 7 to 10% with it, CAMBI's
-  maximum on all three and its mean on two, the dark sky's mean rising across its frames
-  (0.67 to 1.09; the terraces read from the eyes' 10-bit copies cut to 8 bits, CAMBI at 10;
-  impl-wsl2-6, 2026-11-18).
+- **Its source as it is, the deband a switch again** (the user, 2026-11-19). From 2026-11-17
+  the level debanded its source, taking `--deband`'s place
+  ([Banded sources](#banded-sources---deband)), and the nodes were to get a deband in torch.
+  Kept on 2026-11-18, on an episode that gains little from a deband: on six of its shots the
+  level with it and without could hardly be told apart played; paused, without it the colours
+  and lines a little more vivid and more noise in the textures, maybe the source's own grain,
+  with it a very little paler and less noise (the user's eyes, 2026-11-18, on impl-box-8's
+  renders against impl-box-7's); where the picture holds still, it lowered the flicker on all
+  six shots, by 0.04 to 0.15 8-bit codes, under `standard`'s on four; where it moves, the
+  same within 0.12 but on one shot, 0.33 steadier. Then the level's renders of the deband
+  study's scenes, with it and without (impl-wsl2-6, 2026-11-18; the user's eyes, 2026-11-19):
+  - where the source is banded, it smooths what is left: a lit face's terraces gone, a dark
+    sky and a mountain's shadow smoother; the three banded scenes' terraces 7 to 10% lower
+    with it, CAMBI's maximum lower on all three and its mean on two, the dark sky's mean
+    rising across its frames (0.67 to 1.09; the terraces read from the eyes' 10-bit copies
+    cut to 8 bits, CAMBI at 10);
+  - on four scenes of six, it takes from the drawing: less precise lines on two dark shaded
+    animations and a cel film (an eye's drawing among them), less precise small details on a
+    painted short (seen paused); nothing changed on a bright cartoon;
+  - and the level alone draws far fewer terraces than packed frames: on the dark sky "way less
+    obvious" than with packed frames (the user); the terrace measure 0.52 at the level against
+    0.61 at `maximum` on the dark sky's scene, 0.33 against 0.38 on the lit face's, 0.34
+    against 0.35 on the third (the deband study's `maximum` on the 96 GB card, the level on
+    the RTX 5090, from the same 540p inputs).
+  So the level reads its source as it is, and `--deband` is a switch again, off by default, at
+  every level, as decided on 2026-11-09. The users' documents advise it for animation alone,
+  and only once a short clip of the source, run without it, shows terraces: no need to soften
+  the drawing where there are none (the user, 2026-11-19); they say what it costs. The nodes
+  will offer the level with no deband (none is planned for them), their refusal of it gone.
+- **Fine details that hold still** may change from frame to frame: small text on a ticket a
+  character holds, in a bright cartoon's scene, changed at every frame (the user's eyes,
+  2026-11-19). Each frame is redrawn alone, so nothing ties one frame's small details to the
+  next's (inferred; the deband study's render of that scene at `maximum` to compare). The
+  users' documents say so.
 - **Not measured:** live action, so the level is advised for animation alone until it is;
   its sharpness by a number (the eyes judged it).
 - **Parked** (the user, 2026-11-17): a held drawing's frames packed into one latent (a cut at
