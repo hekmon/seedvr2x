@@ -37,16 +37,16 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
                          master, 16-bit 4:4:4 YCbCr, BT.709, limited range
     clip.py              a clip's frames in memory, a call a shot (its seed by the shot's first
                          frame, the clip's one output array written into), upscaled on models
-                         already loaded, at animation each frame alone as a clip of one frame at
+                         already loaded, at deghost each frame alone as a clip of one frame at
                          the clip's seed, its plan for the clip's shots (shot_plan's, the output
-                         and the windows and scratch kept in system memory counted; at animation
-                         a frame's)
+                         and the windows and scratch kept in system memory counted; at deghost a
+                         frame's)
     shotruns.py          the runs of a shot (the four levels of `--quality`, standard, enhanced,
-                         maximum and animation, and the nodes' quality, each run's first frame,
+                         maximum and deghost, and the nodes' quality, each run's first frame,
                          the run each frame is taken from, the frames kept between runs; the
-                         levels that take each frame alone, `EACH_FRAME`, and that read their
-                         source debanded, `DEBANDED`, animation each; a frame alone's windows,
-                         `frame_layout`, and the shots a plan is made for, `planned_shots`),
+                         level that takes each frame alone, `EACH_FRAME`, deghost; a frame
+                         alone's windows, `frame_layout`, and the shots a plan is made for,
+                         `planned_shots`),
                          plain Python; the CLI's job.py imports it, clip.py runs a clip by it
     shotcuts.py          the cuts drawn from the shot detector's probabilities (Cut, detections,
                          detected, possible, the default and the possible cuts' thresholds) and a
@@ -868,8 +868,8 @@ marker. The image server, Linux's alone by its lock, has no such line.
   frames), in 1 to 3 windows, each tiled pass alone and both, corrected and not, and under
   `-m gpu` on CUDA with the sharp 7B in two windows. The runs of a shot (`seedvr2x/shotruns.py`;
   `quality` of `clip.upscale`, the nodes' `quality`): `core/tests/test_shotruns.py` holds the levels
-  (standard 1 run, enhanced 2 from frames 0 and 2, maximum 4 from 0 to 3, animation 1, each frame
-  alone and its source debanded), the run each frame is
+  (standard 1 run, enhanced 2 from frames 0 and 2, maximum 4 from 0 to 3, deghost 1, each frame
+  alone, its source read as it is), the run each frame is
   taken from against the closed forms written out apart, a short shot having fewer runs, the
   frames kept between runs and their bytes, and the module importing no torch (the rule held to
   measurement's composer stays the CLI's `tests/test_runs.py`, through `job`'s re-exports, which
@@ -889,32 +889,57 @@ marker. The image server, Linux's alone by its lock, has no such line.
   impl-wsl2-4, 2026-11-17), so both sides compared come after it, and an allocation refused while
   they run fails the test as a refusal, not as other bits. The plan is the same at every level
   (the runs one after the other, the first the longest): the plan matrix's both halves unmoved by
-  the move of the choice to the library. Each frame alone, `--quality animation` (DESIGN.md, Each
+  the move of the choice to the library. Each frame alone, `--quality deghost` (DESIGN.md, Each
   frame on its own: one run a shot, each frame through the pass as a shot of one frame, at the
-  shot's seed): `test_shotruns.py` holds its flags (`each_frame`, `debanded`), `frame_layout` and
-  `planned_shots`; `test_clip.py` its output equal bit for bit to clips of each frame alone at the
+  shot's seed; named `animation` until 2026-11-19, an option named by its goal, not its
+  technique): `test_shotruns.py` holds its flag (`each_frame`, no level debanding),
+  `frame_layout` and `planned_shots`; `test_clip.py` its output equal bit for bit to clips of each frame alone at the
   clip's seed, 1, 2 and 5 frames, tiled and not, corrected and not, each frame's encode and noise
   seeded by the clip's seed and its draw a latent's, the steps and phases frame by frame ("frame"
   first), a Cancel between frames leaving nothing alive, a NaN naming its frame, and the plan a
   frame's (`planned_shots`), the whole output taken off the host, the other levels' plans as
-  before; `test_clip_cli.py` the clip at animation bit for bit to the shot's pass over each frame
-  alone (`frames_alone`), and its GPU case at animation too, after a pass of the library's own at
-  the level, not yet run (written without a card, impl-anim-1, 2026-11-17).
-- A job at `--quality animation` (`run.py`'s `_sample_frames` and `_decode_frames`): one run a
+  before; `test_clip_cli.py` the clip at deghost bit for bit to the shot's pass over each frame
+  alone (`frames_alone`), and its GPU case at deghost too, after a pass of the library's own at
+  the level, passed on the 96 GB card under Linux's driver and on the RTX 5090 natively and under
+  WSL2 (2026-11-18).
+- A job at `--quality deghost` (`run.py`'s `_sample_frames` and `_decode_frames`): one run a
   shot; its encode one unit of the shot's frames, each frame's latent in a file of its own
   (`units.frame_latent`, `latent_NNNNNN.pt`), recorded once all are; a unit a frame for the DiT
   (`units.window_file`, `window_NNNN.pt`, the frame's latent given up once its window is kept);
   the segment's decode a frame at a time, one reader of the shot's input copy feeding the
-  corrections in turn (`run._Following`). A frame-alone run's record lists no windows
+  corrections in turn (`run.Following`, the calibration's frames alone's too). A frame-alone
+  run's record lists no windows
   (`manifest.recorded_layout` reads one latent a window from its `latents`); a resume's unit
   files are `window_\d{4,}` and `latent_\d{6,}` (`resume.UNIT_FILE`). The plan is a frame's
   (`shotruns.planned_shots`), and `--window` is refused at the start, nothing made.
-  `tests/test_animation_cli.py` holds a job at animation, split and none, equal frame for frame
-  (masters and `--dump-frames`) to 25 jobs of one frame each on the source ffmpeg debanded
-  (`test_deband_cli.py`'s), seeded by their shot's first frame, the encodes reading the same
-  frames; the units in order, the record, the plan's lines; `--window` refused for a run and for
-  `--plan`, nothing made; a stop inside a shot's frames and its resume, the files kept named and
-  the masters the uninterrupted job's; the unit files past 9,999 windows; the help.
+  Its source is read as it is, `--deband` a switch at every level (2026-11-19).
+  `tests/test_deghost_cli.py` holds a job at deghost, split and none, equal frame for frame
+  (masters and `--dump-frames`) to 25 jobs of one frame each on the banded source as it is
+  (`test_deband_cli.py`'s), and with `--deband` (split) to such jobs on the source ffmpeg
+  debanded, seeded by their shot's first frame, the encodes reading the same frames; the units in
+  order, the record (no deband key), the plan's lines (no deband line); `--window` refused for a
+  run and for `--plan`, nothing made; a stop inside a shot's frames and its resume, the files kept
+  named and the masters the uninterrupted job's; every level's time in its `--plan`; the unit
+  files past 9,999 windows; the help.
+- The time of a job at deghost (DESIGN.md, Each frame on its own, "The plan's time is off at this
+  level": priced at a window's frames' rate, the plan said 10 h 8 min for an episode that took
+  15 h 26 min on the 96 GB card, 25 h for one that took 21.8 h on the RTX 5090): a frame alone's
+  units are parts of kinds of their own (`timing.ALONE`: `encode-alone`, `window-alone`,
+  `decode-alone`, each unit still of its pass's phase, `timing.OF`), which the run's frames alone
+  correct (`run._sample_frames`, `_decode_frames`), and the calibration times them where asked
+  (`calibrate`'s `alone`, given by a job at deghost and by every `--plan` that says each level's
+  time; `main._calibrated`): after its other steps, a frame alone through each pass unmeasured,
+  then `calibration.ALONE_FRAMES` (3, PROVISIONAL: how many the rate needs is not measured)
+  frames each encoded alone into one input copy after a window of one latent, each sampled in a
+  window of one latent less its draw, each decoded through one reader of the copy; an encode of
+  frames alone a constant (the run's change of phase, its copy's start) and a rate a frame, a
+  frame's window a rate by the token, a decode of frames alone a constant (its reader's start)
+  and a rate a frame; no change of phase of theirs counted among the terms. `tests/test_timing.py`
+  holds the units' kinds, a frame alone's frames unpadded, the calibration's steps and models on
+  `Steady`, the other kinds' and terms' models the same with it and without (no other level's
+  estimate moved), the level's estimate by those models, and the frames alone's parts correcting
+  their own models; `tests/test_cli_run.py`'s stand-in calibration has every kind. Unmeasured on
+  a card: how close the plan's time at the level now comes to a run's.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
   `test_pull_cli.py` holds what the command line does over it. `tests/test_pull_lines.py` holds a
@@ -1025,17 +1050,16 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `tests/test_seek_sources.py` holds the index and its reads to measurement's real sources, on the
   CPU: opt-in, it reads the list of sources named by `SEEDVR2X_SEEK_SOURCES`, each with
   `seek_test.py`'s outputs for it (its docstring says the list's format), and skips without it.
-- The deband of `--quality animation` (DESIGN.md, Input, "Banded sources", and Each frame on its
-  own: `--deband`, built on 2026-11-11, went into the level on 2026-11-17; `media/conversion.py`'s
-  `DEBAND`, `DEEP` and `Conversion.deband`; the one place a job's deband is decided,
-  `main._video_arguments`'s `args.deband = debanded(args.quality)`, the levels in
-  `shotruns.DEBANDED`): the reads' chain brings the frames to their 16-bit format by zscale (a
+- `--deband` (DESIGN.md, Input, "Banded sources": built on 2026-11-11, inside `--quality
+  animation` from 2026-11-17, a switch again on 2026-11-19, off by default at every level;
+  `media/conversion.py`'s `DEBAND`, `DEEP` and `Conversion.deband`): the reads' chain brings the
+  frames to their 16-bit format by zscale (a
   limited range shifted, a full range scaled, exactly: swscale's full-range expansion is not),
   runs `deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0` there (thresholds 0.012 on
   all four, decided on 2026-11-11) and converts to RGB from that format; a conversion without it
   is the chain of before, byte for byte. `tests/test_deband.py` holds the filter strings with and
   without it against main's literals, every planar format's 16-bit twin (yuv411p, yuv410p and
-  yuv440p, which have none, refused naming `--quality animation`), the 16 bits exact (a full
+  yuv440p, which have none, refused naming `--deband`), the 16 bits exact (a full
   range's chroma centred, v * 257 - 128), a read with it equal
   frame for frame (MD5 of the reader's RGB) to the source debanded by ffmpeg alone (the format
   filter, deband on one thread, into a 16-bit FFV1 file) and read without it, the first pass's
@@ -1043,17 +1067,15 @@ marker. The image server, Linux's alone by its lock, has no such line.
   takes no conversion), and a shot read by the reader's
   seek inside a GOP of an x264 source (B-frames) equal to a read from the start, with it;
   `tests/test_zscale.py` its chain on one slice and its bytes the same on 1 and 16 filter
-  threads. `tests/test_deband_cli.py`: the settings' key, the record's `seedvr2x_deband` (masters
-  and finished file) and the plan's line at animation alone, none at the other levels; a job
-  begun with `--deband` at another level (its manifest given the key) refused as another job,
-  the line naming the option gone and the level (`main.SETTING_OPTIONS`); a resume at animation
-  or from it another job naming both settings; a plan with no unit made planned again at the
-  other level from its first pass's record; a resume at animation, its input copy deleted and
-  made again, giving the uninterrupted job's masters; the option gone from the parser and the
-  help. That the model and the correction are given the source debanded by ffmpeg is
-  `tests/test_animation_cli.py`'s (a job's frames those of one-frame jobs on that source). A
-  picture has no level: `--deband` is refused for it as for any video, by the parser;
-  `core/tests/test_record.py` the field. deband
+  threads. `tests/test_deband_cli.py`: the frames the model is given and the correction's
+  reference those of the source debanded by ffmpeg; the settings' key, the record's
+  `seedvr2x_deband` (masters and finished file) and the plan's line only when on, at standard and
+  at deghost alike, none without it at either; a resume with the other value another job naming
+  the option (`main.SETTING_OPTIONS`); a plan with no unit made planned again with the other value
+  from its first pass's record; a resume with it, its input copy deleted and made again, giving
+  the uninterrupted job's masters, at standard and at deghost; the help, no figure in it. A job at
+  deghost under `--deband` is also `tests/test_deghost_cli.py`'s. A picture refuses it
+  (`stills.REFUSED`, `tests/test_still_cli.py`); `core/tests/test_record.py` the field. deband
   is among `ffmpeg.FILTERS`, so a build without it is refused. Its two chains, a limited and a
   full range, are a digest of their own (`media/fingerprint.py`'s `deband_fingerprint`, run on a
   gradient frame that deband changes 67% and 80% of the samples of, where the noise frame the
@@ -1065,13 +1087,13 @@ marker. The image server, Linux's alone by its lock, has no such line.
   decodes and the writers' alone. `tests/test_fingerprint.py` holds the two digests apart, the
   deband one moving with the chain alone, and the gradient's share of changed samples;
   `tests/test_deband_cli.py` the comparison and the resume of each kind of job. No line
-  suggests the level for a banded source: CAMBI found the strongly banded scenes and missed the
-  clip `--deband` was made for (impl-box-1), so no detection is built.
+  suggests `--deband` for a banded source: CAMBI found the strongly banded scenes and missed the
+  clip it was made for (impl-box-1), so no detection is built.
 - A source's planes to RGB in torch (`seedvr2x/yuv.py`; DESIGN.md, Repository and apps, the
   nodes' VIDEO path), where zscale is not to be had: the CLI's table of pixel formats, matrices and
   chroma sitings, its guesses for an untagged stream and its refusals are the library's
   (`yuv.reading`, refusing as `SourceRefused` with a kind of `yuv.KINDS`), which
-  `media/conversion.py` takes, its own words kept for `--input-matrix` and the level's deband.
+  `media/conversion.py` takes, its own words kept for `--input-matrix` and `--deband`.
   A source whose sides its chroma subsampling doesn't divide (zimg refuses them) is refused
   at the start by the same rule (`yuv.check_size`, which `to_rgb` applies; `media/source.py`'s
   `_sides_refusal` in `declare`), naming its size, format and subsampling and giving the lossless
@@ -1554,7 +1576,8 @@ marker. The image server, Linux's alone by its lock, has no such line.
   longest, and the warm-up counted as a sample where its first call is small against it. The
   calibration's decodes take the latent in the DiT's layout, `(T', h, w, 16)` dense, whatever the
   encode gave (`Steady` hands on the encode's channel-major view) and a dense one uncopied: a
-  compiled decoder's guards read the strides.
+  compiled decoder's guards read the strides. The frames alone it times for deghost are the
+  passage on a job's time at deghost's, above.
 - The writers: `tests/test_writer.py` holds the stale checksums, removed only once the new file
   is safe, and relative names holding `": "` or a leading `-` never taken by ffmpeg for a
   protocol or an option (`media/ffmpeg.argument`), for FFV1 and PNG; `tests/test_segment_cmd.py`
@@ -1983,9 +2006,9 @@ marker. The image server, Linux's alone by its lock, has no such line.
   value node gives refused at the upscale node's start; every input and output with a
   label and a tooltip, none in the library's terms; the colour correction a BOOLEAN, split or
   none, `quality` a combo of the library's three levels that pack a shot's frames in its latents
-  (`plans.LEVELS`: standard, enhanced, maximum; animation, which reads its source debanded, not
-  offered until the nodes' own deband in torch, and refused in their words where a link gives it,
-  before anything loads, `words.level_refused`: `tests/test_nodes.py`) on Upscale Video alone, its
+  (`plans.LEVELS`: standard, enhanced, maximum; deghost not offered yet, and refused in their
+  words where a link gives it, before anything loads, saying that seedvr2x's command line has it,
+  `words.level_refused`: `tests/test_nodes.py`) on Upscale Video alone, its
   tooltip's
   points (among them the pulse at standard, one frame in four closer to the original than the
   three before it and looking sharper, the measure and the eye said apart, never "is sharper",
