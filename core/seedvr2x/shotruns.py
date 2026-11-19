@@ -35,13 +35,6 @@ QUALITY = {"standard": 1, "enhanced": 2, "maximum": 4, "deghost": 1}
 # (core/tests/test_clip.py; the command line's, apps/seedvr2x/tests/test_clip_cli.py).
 EACH_FRAME = frozenset({"deghost"})
 
-# The levels that read their source debanded (DESIGN.md, Each frame on its own: "the source
-# debanded", the user, 2026-11-17): the command line through ffmpeg's deband in its reads, which
-# --deband ran until the option went into the level. The one place that says so: the night of
-# 2026-11-17 measures whether the level still needs it, and a level without it is one name less
-# here.
-DEBANDED = frozenset({"deghost"})
-
 # A frame's places in a run, best first (DESIGN.md, Several runs of a shot): its first frame, a
 # latent of its own (-1), then the last of a group of 4 (3), the one a latent is stamped on in the
 # VAE's causal wiring, then 2 and 0, then 1. Measurement's order (the grid study's compose.py,
@@ -125,11 +118,6 @@ def each_frame(level: str) -> bool:
     return level in EACH_FRAME
 
 
-def debanded(level: str) -> bool:
-    """Whether `level`, a level of QUALITY, reads its source debanded (DEBANDED)."""
-    return level in DEBANDED
-
-
 def frame_layout(frames: int) -> list[tuple[int, int]]:
     """The windows of a shot of `frames` frames whose frames are each taken alone (each_frame), in
     latents: one latent a frame, each a window of its own, [(0, 1), (1, 2), ...]."""
@@ -168,14 +156,12 @@ def kept_bytes(shot: Shot, runs: int, size: tuple[int, int]) -> int:
 
 
 __all__ = [
-    "DEBANDED",
     "EACH_FRAME",
     "KEPT_SAMPLE_BYTES",
     "PLACES_BEST_FIRST",
     "QUALITY",
     "RUN_OFFSETS",
     "Run",
-    "debanded",
     "each_frame",
     "frame_layout",
     "kept_bytes",

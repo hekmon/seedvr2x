@@ -127,9 +127,8 @@ WINDOW_FRAMES_STEP = 4
 # shot once, as the command line's --quality does.
 QUALITY_DEFAULT = "standard"
 # The levels the nodes offer: the library's that pack a shot's frames in its latents. Deghost,
-# each frame alone, reads its source debanded (shotruns.debanded), which the nodes do not yet:
-# their deband in torch comes with it (DESIGN.md, Each frame on its own: "in the nodes a deband
-# in torch, written from the algorithm's description").
+# each frame alone, is not offered yet (DESIGN.md, Each frame on its own: the nodes will offer it,
+# with no deband, their refusal of it gone).
 LEVELS = tuple(level for level in shotruns.QUALITY if not shotruns.each_frame(level))
 # The colour correction, a BOOLEAN: on is split, off none (the user, 2026-11-05).
 CORRECTIONS = ("split", "none")

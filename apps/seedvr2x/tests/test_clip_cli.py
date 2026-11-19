@@ -375,7 +375,6 @@ def test_the_library_chooses_the_runs_the_command_line_does() -> None:
         "kept_frames",
         "kept_bytes",
         "each_frame",
-        "debanded",
     ):
         assert getattr(job, name) is getattr(shotruns, name), name
 

@@ -21,12 +21,13 @@ def test_the_levels_and_their_runs() -> None:
     assert set(RUN_OFFSETS) == set(QUALITY.values())
 
 
-def test_deghost_takes_each_frame_alone_and_reads_its_source_debanded() -> None:
+def test_deghost_takes_each_frame_alone_and_reads_its_source_as_it_is() -> None:
     # One run a shot, whole, each of its frames through the pass alone (DESIGN.md, Each frame on
-    # its own), and the one level that reads its source debanded.
-    assert shotruns.EACH_FRAME == {"deghost"} and shotruns.DEBANDED == {"deghost"}
+    # its own); no level reads its source debanded, the deband being a switch of the command
+    # line's again (2026-11-19).
+    assert shotruns.EACH_FRAME == {"deghost"}
     assert [level for level in QUALITY if shotruns.each_frame(level)] == ["deghost"]
-    assert [level for level in QUALITY if shotruns.debanded(level)] == ["deghost"]
+    assert not hasattr(shotruns, "DEBANDED") and not hasattr(shotruns, "debanded")
     shot = Shot(30, 90)
     assert shot_runs(shot, QUALITY["deghost"]) == [Run(shot, 0)]
     assert kept_frames(shot, QUALITY["deghost"]) == 0

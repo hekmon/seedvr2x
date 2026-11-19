@@ -436,8 +436,7 @@ def test_quality_is_a_combo_of_the_levels_on_upscale_video_alone_in_a_users_word
     assert "quality" not in schema_inputs(nodes.UpscaleImage)
     quality = schema_inputs(nodes.UpscaleVideo)["quality"]
     assert quality.io_type == "COMBO" and quality.display_name == "quality"
-    # The library's levels but deghost, which the nodes don't offer until their deband in torch
-    # (plans.LEVELS).
+    # The library's levels but deghost, which the nodes don't offer yet (plans.LEVELS).
     assert quality.options == list(plans.LEVELS) == ["standard", "enhanced", "maximum"]
     assert [level for level in QUALITY if level not in plans.LEVELS] == ["deghost"]
     assert quality.default == "standard" and not quality.optional

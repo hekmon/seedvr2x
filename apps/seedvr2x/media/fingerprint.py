@@ -4,12 +4,11 @@ it with the job's record, as it does the rest of the environment: zimg, which do
 conversions (zscale), is a library of its own, and an ffmpeg linked to the system's libzimg takes
 its upgrades without a new version string.
 
-Two digests, not one: the conversions every job runs (`fingerprint`), and the deband's chains
-(`deband_fingerprint`), which only a job that debands (--quality deghost) runs and records,
-under a key of its own (environment.current), and which a resume compares only between two such
-jobs (resume.differences), as inductor's packages count only between two compiled jobs. One
-digest of both would refuse the resume of a job that never debanded when ffmpeg's deband alone
-changed."""
+Two digests, not one: the conversions every job runs (`fingerprint`), and --deband's chains
+(`deband_fingerprint`), which only a job that took --deband runs and records, under a key of its
+own (environment.current), and which a resume compares only between two such jobs
+(resume.differences), as inductor's packages count only between two compiled jobs. One digest of
+both would refuse the resume of a job that never debanded when ffmpeg's deband alone changed."""
 
 import hashlib
 import re

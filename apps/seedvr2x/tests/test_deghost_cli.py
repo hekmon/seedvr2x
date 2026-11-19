@@ -1,10 +1,11 @@
 """--quality deghost on the command line (DESIGN.md, Each frame on its own: `--quality deghost`)
 on the CPU, the model replaced by test_cli_run.py's stand-in: a job's frames those of jobs of a
-single frame each, on the source ffmpeg debanded, seeded by their shot's seed (the definition the
-library's tests/test_clip.py holds for clip.upscale); the units in their order, the shot's
-encode, a unit a frame for the DiT, the segment's decode; the manifest's record of a run that
-takes each frame alone; a stop inside a shot's frames and its resume, as the uninterrupted job.
-The banded clip and its reference debanded by ffmpeg are test_deband_cli.py's."""
+single frame each, on the source as it is, and with --deband on the source ffmpeg debanded,
+seeded by their shot's seed (the definition the library's tests/test_clip.py holds for
+clip.upscale); the units in their order, the shot's encode, a unit a frame for the DiT, the
+segment's decode; the manifest's record of a run that takes each frame alone; a stop inside a
+shot's frames and its resume, as the uninterrupted job. The banded clip and its reference
+debanded by ffmpeg are test_deband_cli.py's."""
 
 import hashlib
 import json
@@ -29,15 +30,15 @@ from test_deband import needs_ffmpeg
 from test_deband_cli import clips, run_ffmpeg
 
 import run
-from media.conversion import DEBAND
 from seedvr2x import pull
 
 pytestmark = needs_ffmpeg
 
 # The stand-in's master frames (gbrp16le, 128x96), in bytes.
 FRAME_BYTES = 3 * 96 * 128 * 2
-# test_deband_cli.py's clip at 16 bits after ffmpeg's deband (yuv420p16le, 64x48), in bytes.
-DEBANDED_BYTES = 64 * 48 * 3 // 2 * 2
+# test_deband_cli.py's clip (yuv420p, 64x48) as it is and at 16 bits after ffmpeg's deband
+# (yuv420p16le), a frame in bytes.
+SOURCE_BYTES = {False: 64 * 48 * 3 // 2, True: 64 * 48 * 3 // 2 * 2}
 # test_cli_run.py's JOB's cut list (cuts.txt: shots of 3, 1 and 21 frames) without its window:
 # a frame alone is one latent in the DiT, and --window is refused at deghost.
 SHOTS = ((0, 3), (3, 4), (4, 25))
@@ -57,18 +58,25 @@ def masters(directory: Path) -> list[str]:
     return [frame for path in sorted(directory.glob("seg_*.mkv")) for frame in frames_of(path)]
 
 
-@pytest.mark.parametrize("correction", ["split", "none"])
+@pytest.mark.parametrize(
+    ("correction", "deband"),
+    [("split", False), ("none", False), ("split", True)],
+    ids=["split", "none", "split-deband"],
+)
 def test_each_frame_is_a_job_of_that_frame_alone_seeded_by_its_shot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     steps: Steps,  # noqa: F811
     correction: str,
+    deband: bool,
 ) -> None:
-    # Frame f of a shot starting at s is a job of that frame alone, on the source ffmpeg debanded
-    # (test_deband_cli.py's reference), trimmed to the frame, seeded 42 + s, so that its one shot
-    # is seeded as the shot is: bit for bit as stored, and its dumped float32 frame. Each encode
-    # reads its frame alone, the same frames the single jobs read.
+    # Frame f of a shot starting at s is a job of that frame alone, on the source as it is (the
+    # level reads it so: DESIGN.md, Each frame on its own, 2026-11-19), or with --deband on the
+    # source ffmpeg debanded (test_deband_cli.py's reference), trimmed to the frame, seeded 42 +
+    # s, so that its one shot is seeded as the shot is: bit for bit as stored, and its dumped
+    # float32 frame. Each encode reads its frame alone, the same frames the single jobs read.
     banded, prefiltered = clips(tmp_path, monkeypatch)
+    source, frame_bytes = (prefiltered if deband else banded), SOURCE_BYTES[deband]
     reads: list[str] = []
     encode = steps.encode
 
@@ -79,8 +87,11 @@ def test_each_frame_is_a_job_of_that_frame_alone_seeded_by_its_shot(
 
     monkeypatch.setattr(run, "encode_shot", reading)
     options = ("--color-correction", correction)
+    flag = ("--deband",) if deband else ()
     dump = tmp_path / "dump"
-    assert upscale(tmp_path, banded, "job", *DEGHOST, *options, "--dump-frames", str(dump)) == 0
+    assert (
+        upscale(tmp_path, banded, "job", *DEGHOST, *flag, *options, "--dump-frames", str(dump)) == 0
+    )
     got, job_reads = masters(tmp_path / "job"), list(reads)
     assert len(got) == 25 and len(job_reads) == 25
     (tmp_path / "empty.txt").write_text("")
@@ -90,12 +101,12 @@ def test_each_frame_is_a_job_of_that_frame_alone_seeded_by_its_shot(
         for frame in range(start, end):
             alone = tmp_path / f"frame_{frame}.mkv"
             run_ffmpeg(
-                *("-i", str(prefiltered), "-vf"),
+                *("-i", str(source), "-vf"),
                 f"trim=start_frame={frame}:end_frame={frame + 1},setpts=PTS-STARTPTS",
                 *("-c:v", "ffv1", str(alone)),
             )
-            whole = decoded(prefiltered)
-            assert decoded(alone) == whole[frame * DEBANDED_BYTES : (frame + 1) * DEBANDED_BYTES]
+            whole = decoded(source)
+            assert decoded(alone) == whole[frame * frame_bytes : (frame + 1) * frame_bytes]
             reads.clear()
             name, dumped = f"single_{frame}", tmp_path / f"dump_{frame}"
             assert (
@@ -136,7 +147,8 @@ def test_the_units_the_record_and_the_plan(
     assert decodes == [f"decode {start}" for start, end in SHOTS for _ in range(start, end)]
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     assert content["settings"]["quality"] == "deghost"
-    assert content["settings"]["deband"] == DEBAND
+    # The source read as it is: no deband in the settings, nor its line in the plan.
+    assert "deband" not in content["settings"]
     for (start, end), shot in zip(SHOTS, content["shots"], strict=True):
         # One run a shot, its latents its frames, no window listed: one a frame; done whole.
         assert shot == {
@@ -155,13 +167,12 @@ def test_the_units_the_record_and_the_plan(
     )
     assert (
         "plan: quality: deghost, each frame of a shot upscaled on its own, in a latent of its"
-        " own, from the shot's noise, its source debanded: about 1.8 times standard's time, a"
+        " own, from the shot's noise: about 1.8 times standard's time, a"
         " frame's memory; for animation, where the model blends the drawings a latent packs,"
         " nothing measured on live action; --quality standard, enhanced or maximum packs a shot's"
         " frames in its latents"
     ) in lines
-    assert any(line.endswith("(--quality deghost); the shot detection reads the source as it is")
-               for line in lines)  # fmt: skip
+    assert not [line for line in lines if line.startswith("plan: deband:")]
     # The unit lines name each frame.
     assert "shot 3/3's frame 21/21" in caplog.text or "shot 3/3: frame 21/21" in caplog.text
 
@@ -273,8 +284,7 @@ def test_the_help_says_what_deghost_does_and_for_what(
         cli.main(["--help"])
     text = _option_help(capsys.readouterr().out, "--quality")
     for said in (
-        "deghost: each frame of a shot upscaled on its own, from the shot's noise, its source"
-        " debanded",
+        "deghost: each frame of a shot upscaled on its own, from the shot's noise,",
         "about 1.8 times standard's time",
         "for animation, where the model blends the drawings a group packs",
         "not measured on live action",

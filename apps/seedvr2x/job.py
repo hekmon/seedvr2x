@@ -18,7 +18,6 @@ from seedvr2x.shotruns import PLACES_BEST_FIRST as PLACES_BEST_FIRST
 from seedvr2x.shotruns import QUALITY as QUALITY
 from seedvr2x.shotruns import RUN_OFFSETS as RUN_OFFSETS
 from seedvr2x.shotruns import Run as Run
-from seedvr2x.shotruns import debanded as debanded
 from seedvr2x.shotruns import each_frame as each_frame
 from seedvr2x.shotruns import frame_layout
 from seedvr2x.shotruns import kept_bytes as kept_bytes

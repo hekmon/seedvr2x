@@ -495,9 +495,8 @@ def test_a_level_the_node_does_not_have_is_refused_before_anything_loads(
             handle(tmp_path), plans.Settings(window=5), frames, RESOLUTION, quality="deghost"
         )
     assert str(caught.value) == (
-        "quality 'deghost', each frame upscaled on its own, isn't in these nodes yet: it reads"
-        " the video debanded, which they don't do yet; seedvr2x's command line has it. Here,"
-        " choose standard, enhanced or maximum."
+        "quality 'deghost', each frame upscaled on its own, isn't in these nodes yet;"
+        " seedvr2x's command line has it. Here, choose standard, enhanced or maximum."
     )
     assert "--" not in str(caught.value)
     assert len(machine.loads) == loads
