@@ -2263,13 +2263,13 @@ Decided by the user on 2026-11-09, on impl-win-4's renders of the user's dark an
 - **Dropped as an option** (the user, 2026-11-17; reversed on 2026-11-19, below): `--deband`
   goes, and the deband runs
   inside `--quality animation`
-  ([Each frame on its own](#each-frame-on-its-own---quality-animation)). The eyes found it a
+  ([Each frame on its own](#each-frame-on-its-own---quality-deghost)). The eyes found it a
   gain on animation (two dark shaded animations and the user's dark animation) and a loss of
   detail on live action (two films, 2026-11-11), and on an animation that needed none it
   changed nothing (2026-11-16). Its chain, its fingerprint, the settings' key and the record's
   field stay, the level taking them.
 - **A switch again** (the user, 2026-11-19), off by default, at every level, the level reading
-  its source as it is ([Each frame on its own](#each-frame-on-its-own---quality-animation)): at
+  its source as it is ([Each frame on its own](#each-frame-on-its-own---quality-deghost)): at
   the level the eyes saw it take from the drawing on four scenes of six and smooth only where
   a source is banded, and the level alone draws far fewer terraces than packed frames. The
   users' documents advise it for animation alone, once a short clip shows terraces without it.
@@ -2597,8 +2597,8 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   in 1 of 2 loops, the other the same.
 - **The option:** `--quality standard|enhanced|maximum` (the user, 2026-10-20: a name a user
   understands, the runs a shot being the code's): `standard` by default, one run a shot;
-  `enhanced`, 2 runs; `maximum`, 4 runs; and since 2026-11-17 `animation`, each frame on its
-  own ([below](#each-frame-on-its-own---quality-animation)).
+  `enhanced`, 2 runs; `maximum`, 4 runs; and since 2026-11-17 `deghost` (named `animation`
+  until 2026-11-19), each frame on its own ([below](#each-frame-on-its-own---quality-deghost)).
 - **Validated** on 2026-10-21. On the 96 GB card, `maximum` gave measurement's 4-run
   composite and `enhanced` its 2-run composite, 45 of 45 frames each, bit for bit
   (cartoon-bright at 1080p, untiled, numz's draw and padding, no correction). On an RTX 5090,
@@ -2609,7 +2609,7 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   against the frames kept in float). Milestone 7's long runs were `standard` alone
   (2026-10-28): left, the user's eyes on a long run at a level above it.
 
-### Each frame on its own: `--quality animation`
+### Each frame on its own: `--quality deghost`
 
 Decided on 2026-11-17 (the user, on impl-box-7's renders of six shots of an animated episode
 against impl-box-6's): a fourth level, which upscales each frame of a shot on its own, in a
@@ -2715,10 +2715,10 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
 - **The users' guidance for animation** (the user, 2026-11-19), in their documents: test the
   source on short clips first (a dark gradient, a fast scene, a held scene with fine details);
   start at `maximum` and keep it where the picture is clean; where terraces show, add
-  `--deband`; where fast scenes still ghost, take `--quality animation`, with `--deband` only
-  if terraces show there too. A level and the deband apply to a whole job: `maximum` runs a
-  shot four times, `animation` takes about twice `standard`'s time, and `--plan` prints each
-  level's time on the user's card.
+  `--deband`; where fast scenes still ghost, take `--quality deghost`, with `--deband` only if
+  terraces show there too. A level and the deband apply to a whole job: `maximum` runs a shot
+  four times, `deghost` takes about twice `standard`'s time, and `--plan` prints each level's
+  time on the user's card.
 - **Not measured:** live action, so the level is advised for animation alone until it is;
   its sharpness by a number (the eyes judged it).
 - **Parked** (the user, 2026-11-17): a held drawing's frames packed into one latent (a cut at
@@ -2726,9 +2726,12 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
   animated on threes and a little steadier there (0.64 against 0.74), the same in fast
   action, where every frame is a new drawing; a change of drawing the rule misses would be
   packed and blended, on content not tested.
-- **The option:** `--quality animation`, and the nodes' quality widget (the user, 2026-11-17:
+- **The option:** `--quality deghost`, and the nodes' quality widget (the user, 2026-11-17:
   a level, since a frame on its own leaves `maximum`'s runs nothing to choose; its name says
-  when to take it).
+  when to take it). Named `animation` until 2026-11-19, then `deghost` (the user: an option is
+  named by its goal, not by its technique; named for animation, it would be taken for every
+  animated source, where the guidance above starts at `maximum` and takes this level only
+  where fast scenes still ghost).
 
 ## Colour correction
 
