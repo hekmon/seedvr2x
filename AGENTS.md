@@ -102,7 +102,9 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          takes a VIDEO and gives a VIDEO of its own file (stream.py), and
                          takes the Cuts node's cut list, an optional input of its own type (the
                          first of its optional sockets; unwired, the video is one shot), and
-                         a quality widget: the model's runs over each shot; the settings are the
+                         a quality widget: the library's four levels, the model's runs over each
+                         shot or, at deghost, each frame on its own, a Window Length linked
+                         there refused (`words.window_alone`); the settings are the
                          upscale nodes' widgets, the plan's numbers their optional sockets of
                          seedvr2x's own types, no Tuning node; the Cuts node takes the VIDEO and
                          the Models node's output, which also provides the shot detector's file,
@@ -118,11 +120,16 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
   models.py plans.py     the files, the models kept in pinned memory and the one registration
                          with ComfyUI's model manager, a run's room and placement, keep in RAM
                          auto/on/off against ComfyUI's cap; the inputs' values as pins and
-                         the plan in the nodes' words
+                         the plan in the nodes' words (`LEVELS`, the library's four; at
+                         deghost a frame's plan, each frame upscaled on its own said where the
+                         windows are)
   progress.py            what the nodes show while they run: the upscale's bar as its expected
                          time, the text on the node (TWO lines at most: where the run is and
                          what it does, never trimmed, over the time, at most 40 characters,
-                         `LIMIT`; `status`, `times`; one line at the end, for a refusal and the
+                         `LIMIT`; `status`, `times`; at deghost the frame and its count where a
+                         run would be, a shot's frames one pass of a frame's units made once a
+                         frame, `Pass.alone`, the sums kept as units are made, its first rates a
+                         picture's, `ALONE`; one line at the end, for a refusal and the
                          card's states), the previews, the download and the reading of the files
                          on one bar (the Models node's downloads on a bar of their own), their
                          bytes over the time left at their rate, the Cuts
@@ -156,8 +163,11 @@ apps/comfyui/            seedvr2x's ComfyUI nodes: not a uv project, they run in
                          order (`upscale_shot`), what it keeps in files in a run directory of
                          ComfyUI's temp folder (`Workspace`: the scratch beyond the plan's
                          allowance, the shot's input copy, the windows, the earlier runs'
-                         frames), each frame's planes to a writer thread (`Writer`, a queue of
-                         `QUEUED`), the frames on their way counted for the plan (`held_bytes`)
+                         frames), at deghost each frame alone through the three passes, held in
+                         memory for its correction and no copy made (`_frames_alone`), each
+                         frame's planes to a writer thread (`Writer`, a queue of `QUEUED`), the
+                         frames on their way counted for the plan (`held_bytes`, at deghost a
+                         frame's)
   workflows/ README.md   the two example workflows (picture.json, clip.json: ComfyUI's UI format,
                          Models wired in), and the nodes' README, for users
   ruff.toml pyrightconfig.json pytest.ini     the checks' settings, the CLI's
@@ -1141,20 +1151,24 @@ marker. The image server, Linux's alone by its lock, has no such line.
   x264, with a FLAC track) and holds the planes of the node's file bit for bit to
   `yuv.master_planes` of the library's pass (`clip.upscale`, shot by shot, the shot's seed) on the
   frames the node reads (`video.probe`, `Decoded`), for 1, 2 and 3 shots at each quality, tiled
-  corrected and not, from a path and from bytes in memory; the audio's packets copied byte for
+  corrected and not, from a path and from bytes in memory, at deghost too (each frame alone at
+  the shot's seed, no copy of the shot's frames made, a window file a frame: `held_bytes` and
+  `disk_bytes` a frame's); the audio's packets copied byte for
   byte at their times; a trimmed VIDEO's frames those of ComfyUI's window and its audio the
   packets overlapping it, whole; Crop Video's crop as ComfyUI resolves it (`crop_rect`), and a
   VIDEO whose crop can't be read refused; seedvr2x's record as the stream's tags (app
   `seedvr2x-comfyui`, the SHA-256 the stand-in's load proves); the VIDEO given keeping the
   source's rate where Matroska reads 60000/1001 and 120000/1001 back otherwise; each pixel format
-  through `yuv.to_rgb` (nv12 repacked); a plan only writing nothing; a Cancel and a writer that
-  fails leaving no file in the temp folder and no writer thread; and the memory of a clip ten
-  times as long the same within a shot's frames (glibc's bytes in use, mallinfo2, at each shot's
+  through `yuv.to_rgb` (nv12 repacked); a plan only writing nothing; a Cancel (between frames at
+  deghost too) and a writer that fails leaving no file in the temp folder and no writer thread;
+  and the memory of a clip ten times as long the same within a shot's frames, at standard and at
+  deghost (glibc's bytes in use, mallinfo2, at each shot's
   end, the stand-ins keeping nothing a shot: the resident pages counted what glibc gave back and
   took again, and a run's largest moment counted a leak only from where it fell).
   `tests/test_nodes.py` holds frames given as Create Video gives them (VideoFromComponents) the
-  same way, through the same pass; `tests/test_cuts_node.py` the detector's probabilities of a
-  file streamed a few frames at a time equal bit for bit to `detector.probabilities` on its
+  same way, through the same pass, at deghost too; `tests/test_cuts_node.py` the detector's
+  probabilities of a file streamed a few frames at a time equal bit for bit to
+  `detector.probabilities` on its
   frames whole. The stand-in VIDEO classes are `tests/comfy_stand_in/comfy_api/latest/
   _input_impl.py` (0.45.3's behaviour, described), and ComfyUI's temp folder the test's own
   (`folder_paths`, conftest's `comfy_temp`).
@@ -1896,16 +1910,26 @@ marker. The image server, Linux's alone by its lock, has no such line.
   equal to `clip.upscale` of the whole clip with its INFO line once, a level that is no option
   refused at the node's start, the runs writing into the one output array, the bar over the
   runs' units moving forward and ending full, a Cancel between runs (`test_release.py`) freeing
-  the card with no later run made; `apps/comfyui/tests/test_progress.py` what the nodes show
+  the card with no later run made; a clip at deghost equal to `clip.upscale` at the level shot by
+  shot (a shot of one frame among them), its plan a frame's whatever the shots' lengths and its
+  lines (each frame upscaled on its own, the window length none, the quality line), a Window
+  Length linked at the level refused before anything loads, plan only too, and a Cancel between
+  frames (`test_release.py`) freeing the card with no later frame made;
+  `apps/comfyui/tests/test_progress.py` what the nodes show
   (`progress.py`) on a fake clock and the stand-in bar and text box: the bar the upscale's
   expected time (each tile, window and decode tile of every run of every shot, or picture, by its
-  size, a run being a pass over the shot from its first frame with its own windows and tiles; a
+  size, a run being a pass over the shot from its first frame with its own windows and tiles; at
+  deghost a shot one pass of a frame's units made once a frame, `Pass.alone`, a clip of 100,000
+  frames holding one frame's units a shot, the sums kept as the units are made, its first rates
+  `progress.ALONE`, a picture's; a
   kind's cost the card's figure until its first unit is made, then the run's own, the rest spread
   again over what remains, monotone, full at the last unit only, an untiled decode moving it by
   its frames written), the status of each form, two lines with no name, the first where the run
   is and what it does ("shot 2/4 · tile 3/6 · encoding", "shot 2/4 · window 2/3 · upscaling",
   "run 3/4 · window 2/3 · upscaling" (a run part at enhanced and maximum only, a shot part for a
-  clip of several shots only), "shot 2/4 · frames 60/118 · decoding", "picture 3/8 · tile 2/4 ·
+  clip of several shots only), "shot 2/4 · frame 12/118 · decoding" (a frame part at deghost
+  only, a frame's decode one frame, with no frames part), "shot 2/4 · frames 60/118 · decoding",
+  "picture 3/8 · tile 2/4 ·
   decoding", "decoding" for one picture), the second its time ("1 min elapsed · estimating time
   left", and "~3 min left" only once a window is measured); "480 frames in 4 min 32 s" at the end,
   one line with no plan before it; the box replaced and not appended to), the previews (one
@@ -1915,7 +1939,8 @@ marker. The image server, Linux's alone by its lock, has no such line.
   thread and, from another thread, left pending under the flag's lock with the bar and text
   untouched, the Cuts node's scan, and the nodes' runs over the stand-in models with 4 tiles to
   each VAE pass: the bits the library's, the bar, text and previews through the tiles (at
-  maximum too, each preview a frame the output then holds, the slice's newest that its run keeps),
+  maximum too, each preview a frame the output then holds, the slice's newest that its run keeps;
+  at deghost each frame's tiles in turn, one preview a frame),
   Cancel after a tile freeing the card, the load told on a bar of its own before the upscale's
   (Cancel between runs is `test_release.py`'s, on the run's text); the time said between events
   (`Progress.running`, `Ticker`: a daemon thread, joined at the end with no time cap (it ends at
@@ -2006,17 +2031,19 @@ marker. The image server, Linux's alone by its lock, has no such line.
   model's grid and given in latents, a number off the grid refused queued or linked, a value no
   value node gives refused at the upscale node's start; every input and output with a
   label and a tooltip, none in the library's terms; the colour correction a BOOLEAN, split or
-  none, `quality` a combo of the library's three levels that pack a shot's frames in its latents
-  (`plans.LEVELS`: standard, enhanced, maximum; deghost not offered yet, and refused in their
-  words where a link gives it, before anything loads, saying that seedvr2x's command line has it,
-  `words.level_refused`: `tests/test_nodes.py`) on Upscale Video alone, its
+  none, `quality` a combo of the library's four levels (`plans.LEVELS`: standard, enhanced,
+  maximum and deghost, with no deband; a level a link gives that is none of them refused in
+  their words, `words.level_refused`: `tests/test_nodes.py`) on Upscale Video alone, its
   tooltip's
   points (among them the pulse at standard, one frame in four closer to the original than the
   three before it and looking sharper, the measure and the eye said apart, never "is sharper",
   and maximum's every frame from a run where it is rebuilt closest; nothing said of enhanced's,
-  unmeasured) and the plan's quality line (the level and its runs, a short shot's missing runs not
-  counted), the seed's fixed control; the Models node's model, folder (an optional input: no
-  default, no widget) and RAM tooltips; a value the
+  unmeasured; deghost's: each frame redrawn on its own so that fast scenes don't ghost, about
+  twice standard's time, fine details that stay still changing from frame to frame, for
+  animation once a short clip at maximum still ghosts, not measured on live action, no figure
+  DESIGN.md lacks and no deband) and the plan's quality line (the level and its runs, a short
+  shot's missing runs not counted), the seed's fixed control; the Models node's model, folder (an
+  optional input: no default, no widget) and RAM tooltips; a value the
   prompt holds or a link gives refused in the nodes' words at queue time and at the node's
   start, an unwired one not given), the settings' pins
   reaching the plan exactly, the text's lines, the V3 registration (the entrypoint, the seven
@@ -2030,10 +2057,12 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `tests/test_plan_only.py` the plan alone (the headers read and nothing loaded, registered or
   freed, an execution blocker for the pictures and nothing else, the plan in the console and the
   node's "plan: window 17 frames · decode whole · encode whole" over "whole plan in the
-  console"); `tests/test_lines.py` every text the nodes can send (the table of states: each
+  console", at deghost "plan: each frame alone · decode whole · encode whole");
+  `tests/test_lines.py` every text the nodes can send (the table of states: each
   upscale node's steps, end, "planning…", the files, the scan, plan only, the Cuts node, the
   card's states, a wait that lasts, a refusal's `Refused.line`) in its exact form with ordinary
-  numbers, and with shots 1234/5678, run 4/4, window 123/456, frames 12345/23456, hours left, days
+  numbers, and with shots 1234/5678, run 4/4, window 123/456, frames 12345/23456, deghost's
+  frame 12345/23456, hours left, days
   so far and byte counts of 16 digits: a running node's two lines, the first whole however long
   (never trimmed), the second within 40 characters (the time so far in one whole unit, minutes
   past a minute, hours past 1,000 minutes, days past 1,000 hours: "14 min elapsed · estimating
