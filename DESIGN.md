@@ -2656,7 +2656,31 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
     with a 120-latent window cap (impl-box-3, 2026-11-11), and 2.2 times by the plan's own
     estimate at `standard` on today's code (7 h 0 min, against 15 h 26 min);
   - on the RTX 5090, about 2.1 s a frame (7,289 of 37,393 frames, impl-wsl2-6), where
-    `standard` wasn't run: its plan's estimate, 19 h 24 min, is 1.87 s a frame.
+    `standard` wasn't run then: its plan's estimate, 19 h 24 min, is 1.87 s a frame.
+  Measured against `standard` the next night (2026-11-19/20), the same code (2c22b10), card
+  and frames: `standard` run on each episode for about 43 and 72 minutes, both jobs cutting
+  the same segments, the time from the first unit to each segment's last decode on both
+  sides:
+  - on the 96 GB card, **2.17 times**: 1.61 s a frame against 0.74, over the first 12
+    segments (3,109 frames, each segment 2.14 to 2.21; impl-box-10). `standard` ran nearer
+    the card's 600 W limit, 531 W on average against the level's 481, its clock 3% lower, as
+    it runs there;
+  - on the RTX 5090 under WSL2, **1.81 times**: 2.07 s a frame against 1.14, over the first
+    16 segments (3,412 frames; impl-wsl2-7). There `standard` swaps all 36 of the DiT's
+    blocks and decodes in tiles, where the level holds the whole DiT for its window of one
+    latent: `standard` takes 1.54 times its time a frame on the 96 GB card, the level 1.29.
+    The two ran 5.7% apart in core clock (the level at 3,067 MHz, `standard` at 2,891, the
+    card set to another clock curve the second night: the user, 2026-11-20): 1.92 at the
+    most had `standard`'s time followed the clock, where the level's did not (its units
+    within 0 to 7% across the two). By segment it ran 1.66 to 1.87, lower where the shots
+    are short (18 to 24 frames against about 86), the level's time a frame the same on
+    every segment: `standard` pays its windows' fixed costs over fewer frames (inferred).
+  At that code the level read its source debanded: the deband's read costs 5 ms a frame on
+  the RTX 5090's episode (2,000 frames, ffmpeg alone, the read alone; the other episode not
+  read), under 0.4% of the level's time a frame on either card, whether or not the reads
+  overlap the GPU's work: the ratios stand for the level as it is. The plan's time at
+  `standard` held on both cards, against the frames made on those first segments:
+  7 h 22 min against 7 h 7 min, and 11 h 52 min against 11.9 h.
   The DiT runs a latent for every frame where `standard` runs one for four, and on the 96 GB
   card the VAE's passes cost more a frame too: 0.37 s a frame to encode and 0.72 to decode and
   write, against the 0.19 and 0.41 the calibration takes from a window's frames (about
@@ -2670,13 +2694,15 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
     frame on the two cards against 0.37 and 0.52 run; to decode and write, 0.41 and 1.43
     against 0.72 and 0.79, the cause of each gap not isolated; its DiT within 13% (0.44 s a
     frame against 0.50 on the 96 GB card). To fix: the calibration times the level's own
-    units, a frame alone through each pass.
+    units, a frame alone through each pass. Built on 2026-11-19 (impl-anim-2: three frames,
+    `calibration.ALONE_FRAMES`, provisional); how close its time comes to a run's is to
+    measure, by `--plan` on each card against the frames run there.
     `--until` held all the same, the run's own clock taking over as
     its units are made: the runs stopped at 05:57 and 06:00.
   - **The users' documents and the plan's line** lose "about 1.8 times": the plan prints each
     level's time on the card it runs on, right once the calibration is; the documents say
-    about twice `standard`'s time, as measured on the 96 GB card. On a card of 32 GB the
-    ratio is to measure: `standard` on the RTX 5090, on the frames the level made there.
+    about twice `standard`'s time, as measured on the 96 GB card and on the RTX 5090
+    (above), with no card's figure: the ratio moves with the card and with the shots.
 - **Its source as it is, the deband a switch again** (the user, 2026-11-19). From 2026-11-17
   the level debanded its source, taking `--deband`'s place
   ([Banded sources](#banded-sources---deband)), and the nodes were to get a deband in torch.
@@ -5575,6 +5601,15 @@ explanation.
 - under WSL2: the Windows driver gives memory the card doesn't have, so seedvr2x holds itself
   to the card: why the plan counts on less than is shown free, what stops a run there and
   how it resumes, and one seedvr2x per card
+- under WSL2, where a job's work goes: Linux's own disk stays the advice, and where the room
+  inside WSL2's disk is short a job on a Windows drive costs little a frame wherever its
+  tiled passes keep their scratch in memory, as the level's units keep each frame's. On the
+  RTX 5090 (impl-wsl2-7, 2026-11-19, one run of 300 frames at `--quality deghost` each way)
+  its units took 2.160 s a frame with the job on a Windows drive and 2.165 on Linux's disk;
+  its fixed steps about 40 s longer there: the calibration 26 s of it, whose tiled decodes
+  of 13 and 5 frames kept their scratch in files of 64 to 165 MB beside the job (the cause
+  inferred), the assembly 5 s. The models, read from a Windows drive in both runs, loaded
+  in 75 and 78 s (9.3 s natively, perhaps from Windows' file cache)
 - why zscale is required, and how to get an ffmpeg build that has it
 - the refused sources (VFR, HDR, interlaced, telecined, rotated, cropped, unusual pixel
   formats or matrices, timestamps that jump, tags that contradict each other),
