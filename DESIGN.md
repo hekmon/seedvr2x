@@ -405,12 +405,15 @@ seedvr2x/                the repository
       shot having frames mixed across them; the user: no node to add for a one-shot clip, and
       no detection folded into the upscale), one plan for the shots, each shot seeded by the
       seed and its first frame
-      as the CLI seeds it. Upscale Video's quality (standard, enhanced, maximum) is the CLI's
-      `--quality` (the user, 2026-11-06: quality isn't the CLI's alone): the model runs once,
-      twice or 4 times over each shot, each frame kept from the run that rebuilds it best, at 2
-      or 4 times the time and no more memory, each run writing only the frames it keeps into
-      the clip's one output; none on Upscale Image, a picture being one frame in a latent of
-      its own. The levels and their runs moved from the CLI to the library (`shotruns.py`). On
+      as the CLI seeds it. Upscale Video's quality (standard, enhanced, maximum and, since
+      2026-11-20, deghost) is the CLI's `--quality` (the user, 2026-11-06: quality isn't the
+      CLI's alone): the model runs once, twice or 4 times over each shot, each frame kept from
+      the run that rebuilds it best, at 2 or 4 times the time and no more memory, each run
+      writing only the frames it keeps into the clip's one output, or at deghost over each
+      frame of a shot on its own, its plan a frame's
+      ([Each frame on its own](#each-frame-on-its-own---quality-deghost)); none on Upscale
+      Image, a picture being one frame in a latent of its own. The levels and their runs moved
+      from the CLI to the library (`shotruns.py`). On
       the RTX 5090 a clip of three shots, and a 35-frame shot at maximum, gave the CLI's frames
       bit for bit (impl-nodes, 2026-11-06).
     - Each upscale node shows as widgets the choices a user keeps at their default: the
@@ -419,7 +422,8 @@ seedvr2x/                the repository
       forwarded them; the attention kernel's widget went on 2026-11-08 with FlashAttention 2).
       The plan's numbers are optional inputs of
       seedvr2x's own types, with no widget: each pass's tile, the blocks swapped, a clip's
-      window length. Unconnected, the plan chooses, and its text says what it chose;
+      window length (none at deghost, where a linked one is refused). Unconnected, the plan
+      chooses, and its text says what it chose;
       connected, the value is pinned (the user's review of the nodes in ComfyUI Desktop,
       2026-11-05: an INT widget with a value standing for "auto" offered tiles of 64 px). A
       value node gives each, in the node library's `seedvr2x/plan settings`, with its range,
@@ -450,16 +454,18 @@ seedvr2x/                the repository
     - Progress (the user, 2026-11-06): ComfyUI gives a node one bar, one text box replaced at
       each message, and one preview. The bar is the upscale's expected time, never a count by
       phase: its units are the plan's (each encode tile, DiT window and decode tile of every run
-      and shot), weighted by their size, each kind's rate the card's measured figure until a
-      unit of that kind is measured in the run, then the run's own, the rest spread again and
-      the bar never going back. The text is a progress hint and never a log (the user,
+      and shot; at deghost a frame's, made again for each frame), weighted by their size, each
+      kind's rate the card's measured figure (at deghost a picture's) until a unit of that kind
+      is measured in the run, then the run's own, the rest spread again and the bar never going
+      back. The text is a progress hint and never a log (the user,
       2026-11-08: ComfyUI squeezes the text box, a preview below it for one, and a longer text
       must then be scrolled): two lines at most, which ComfyUI's box always holds (it keeps 58
       px, frontend 1.57.6; two lines take 48). Line 1 is where the run is and what it does,
       never trimmed, a user wanting it whole widening the node (the user, the same day): the
-      shot (several only), the run (several only), the unit and its count, then the action in
-      it ("shot 2/4 · run 3/4 · window 2/3 · upscaling", "tile 2/4 · decoding", "frames 60/118
-      · decoding"; a phase in one piece the action alone). Line 2 is the global progress, the
+      shot (several only), the run (several only) or at deghost the frame and its count, the
+      unit and its count, then the action in it ("shot 2/4 · run 3/4 · window 2/3 · upscaling",
+      "shot 2/4 · frame 12/118 · decoding", "tile 2/4 · decoding", "frames 60/118 · decoding";
+      a phase in one piece the action alone). Line 2 is the global progress, the
       time, within 40 characters: "6 s elapsed · estimating time left" until a unit is
       measured, then "~38 min left"; a wait on the GPU past its bound keeps line 1 and puts
       "GPU not answering for 3 min" on line 2. The end, a refusal and the card's states are one
@@ -599,12 +605,16 @@ seedvr2x/                the repository
         runs' frames in files of a run directory in ComfyUI's temp folder, removed at the run's
         end however it ends, a removal Windows refuses retried as the command line retries it;
         the output's planes made and encoded on the CPU by a writer thread, two slices behind
-        the decode. The file's planes are bit for bit `yuv.master_planes` of the library's pass
-        in memory on the same frames, at every quality, tiled and not, corrected and not, on the
-        CPU's stand-ins.
+        the decode. At deghost each frame takes its three passes before the next, as
+        `clip.upscale` runs them (the command line makes a shot's encodes, then its windows,
+        then its decodes), corrected against the frame itself, which stays in memory: no input
+        copy, one window file a frame, a tiled pass's scratch a frame's (2026-11-20). The file's
+        planes are bit for bit `yuv.master_planes` of the library's pass in memory on the same
+        frames, at every quality, tiled and not, corrected and not, on the CPU's stand-ins.
       - The RAM is the plan's, plus the frames on their way (5 read and 5 for the correction,
-        the decode's slice, the writer's 2 queued and the one it encodes, a preview): 0.78 GiB
-        from 1080p to 1080p, 2.41 from 1080p to 4K, 3.11 at 4K, whatever the length; on the
+        the decode's slice, the writer's 2 queued and the one it encodes, a preview; at deghost
+        a frame read and the next, and slices of one frame): 0.78 GiB from 1080p to 1080p, 2.41
+        from 1080p to 4K, 3.11 at 4K at the other levels, whatever the length; on the
         stand-ins, a clip ten times as long held within 2 MiB of the shorter one at each shot's
         end, 0.10 to 0.19 MiB more in 20 runs alone (glibc's bytes in use, impl-tests-2,
         2026-11-15). In no plan: the source frame's conversion on the card, about 50 MB at
@@ -2615,12 +2625,31 @@ Decided on 2026-11-17 (the user, on impl-box-7's renders of six shots of an anim
 against impl-box-6's): a fourth level, which upscales each frame of a shot on its own, in a
 latent of its own, every frame from the shot's noise (its source debanded from 2026-11-17 to
 2026-11-19: below). Built before v0.1.0, in the command line and in the nodes.
-- **Built** in the library and the command line (impl-anim-1, 2026-11-17; the nodes refuse it
-  until they offer it, below) **and run on both cards** (2026-11-18): its GPU test passed on
-  the 96 GB card under Linux's driver and on the RTX 5090 natively and under WSL2; on the six
-  shots below, its frames were the research renders' bit for bit (673 of 673, each shot at its
-  seed, impl-box-9), a second run of one shot the same. `--window` is refused at the level, as
-  a picture refuses it: each frame is one latent in the DiT, with no windows to cap.
+- **Built** in the library and the command line (impl-anim-1, 2026-11-17) **and run on both
+  cards** (2026-11-18): its GPU test passed on the 96 GB card under Linux's driver and on the
+  RTX 5090 natively and under WSL2; on the six shots below, its frames were the research
+  renders' bit for bit (673 of 673, each shot at its seed, impl-box-9), a second run of one
+  shot the same. `--window` is refused at the level, as a picture refuses it: each frame is one
+  latent in the DiT, with no windows to cap.
+- **In the nodes** since 2026-11-20 (impl-anim-3, built and tested on the CPU): Upscale
+  Video's quality offers the four levels, `standard` by default; its tooltip and the nodes'
+  README say when to take `deghost` and what it costs, as the command line's documents do (the
+  guidance below), the README pointing to their section on animation and saying that
+  `--deband` has no node. Each frame of a shot goes through the streamed pass alone, as a shot
+  of one frame at the shot's seed, corrected against the frame itself, which stays in memory:
+  no copy of the shot's frames, one window file a frame, a tiled pass's scratch a frame's
+  ([Repository and apps](#repository-and-apps), the nodes' VIDEO path). The plan is a frame's,
+  as `clip.plan` makes it, and a Window Length linked there is refused before anything is
+  read, planned or loaded, as `--window` is. The bar counts a shot's frames as one pass of a
+  frame's units, made again for each frame, its sums kept as the units are made, so that
+  moving the bar costs the same however long the clip; it prices them at a picture's rates
+  until the run has measured its own, a frame alone sharing no causal memory with other
+  frames, as a picture shares none. The nodes run a frame's three passes (encode, DiT, decode)
+  before the next frame, as `clip.upscale` does, where the command line makes all of a shot's
+  encodes, then all its windows, then all its decodes. So the nodes change phase three times a
+  frame: that moves nothing where the plan keeps both models on the card, and moves weights
+  where it swaps blocks or sends the VAE away during the DiT, at a cost not measured
+  ([To measure](#to-measure), the nodes' VIDEO path on the GPU).
 - **Why.** The packing that makes `maximum` worth its runs (above) also blends drawings. On
   six shots of an animated episode, 720p to 1080p with the sharp 7B (impl-box-7, 2026-11-17),
   every frame was a new drawing in 132 of the 170 groups (some 16-px block changing its mean
@@ -2731,7 +2760,7 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
   every level, as decided on 2026-11-09. The users' documents advise it for animation alone,
   and only once a short clip of the source, run without it, shows terraces: no need to soften
   the drawing where there are none (the user, 2026-11-19); they say what it costs. The nodes
-  will offer the level with no deband (none is planned for them), their refusal of it gone.
+  offer the level with no deband since 2026-11-20 (none is planned for them).
 - **Fine details that hold still** may change from frame to frame: small text on a ticket a
   character holds, in a bright cartoon's scene, changed at every frame (the user's eyes,
   2026-11-19). Each frame is redrawn alone, so nothing ties one frame's small details to the
@@ -6181,7 +6210,9 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   under WSL2, no line of the log inside it (not isolated).
 - **The nodes' VIDEO path on the GPU** (see [Repository and apps](#repository-and-apps), the
   nodes' VIDEO path, built on the CPU on 2026-11-13): the streamed pass's file against
-  `clip.upscale` on the card, at standard and maximum; `yuv.to_rgb`'s division there (CUDA
+  `clip.upscale` on the card, at standard, maximum and deghost; at deghost what a frame's three
+  changes of phase cost where the plan swaps blocks or sends the VAE away during the DiT, and
+  the bar's first rates, a picture's, against a run's own; `yuv.to_rgb`'s division there (CUDA
   divides by a number from the host as a product with its reciprocal, 512 of the 65,536
   16-bit codes an ulp off in float32: divided by a tensor on the card since, unrun there); the
   source frame's conversion on the card, in no plan; the file's bytes a pixel on real content
