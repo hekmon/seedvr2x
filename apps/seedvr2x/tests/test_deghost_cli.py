@@ -284,7 +284,7 @@ def test_the_help_says_what_deghost_does_and_for_what(
     text = _option_help(capsys.readouterr().out, "--quality")
     for said in (
         "deghost: each frame of a shot upscaled on its own, from the shot's noise,",
-        "about twice standard's time over an episode on a 96 GB card",
+        "about twice standard's time over an episode on a 96 GB card and on an RTX 5090",
         "for animation whose fast scenes still ghost, where the model blends the drawings a group"
         " packs",
         "fine details that hold still may change from frame to frame",

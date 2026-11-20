@@ -445,10 +445,10 @@ def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) 
     multiple of one run's, about runs_per_shot times, a later run being shorter by its first frame
     (DESIGN.md, Several runs of a shot: "4x the GPU time"): each level's time in seconds needs the
     calibration, which comes after the plan's lines, the models loaded (main._say_times), and
-    the level that takes each frame alone says no multiple: over an episode it took about twice
-    standard's time on the 96 GB card, where one shot had taken 1.8 times, and on a card of 32 GB
-    the ratio is not measured (DESIGN.md, Each frame on its own, Cost); its time is the
-    calibration's too, from frames timed alone (calibration.calibrate's `alone`)."""
+    the level that takes each frame alone says no multiple: about twice standard's time over an
+    episode's first segments on the 96 GB card and on the RTX 5090 (DESIGN.md, Each frame on its
+    own, Cost); its time is the calibration's too, from frames timed alone (calibration.calibrate's
+    `alone`)."""
     runs_per_shot = QUALITY[quality]
     # The level that takes each frame alone, said where another level is, and what it is for
     # (DESIGN.md, Each frame on its own: the guidance takes it where fast scenes still ghost).

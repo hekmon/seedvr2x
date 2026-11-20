@@ -812,9 +812,9 @@ latent of its own, so that no drawing is packed with another:
   frame is redrawn alone, so nothing ties one frame's small details to the next's: the small
   text on a ticket a character holds changed at every frame, where at `maximum` it held still
   about 90% of the time and the picture was clean.
-- **What it costs:** about twice `standard`'s time, measured over an episode on a 96 GB card, a
-  frame's memory, and no frames kept on disk between runs. `--plan` prints its time on your
-  card with every level's.
+- **What it costs:** about twice `standard`'s time, measured over an episode on a 96 GB card and
+  on an RTX 5090, a frame's memory, and no frames kept on disk between runs. `--plan` prints its
+  time on your card with every level's.
 - **For animation:** nothing was measured on live action. Which level an animated source wants,
   and when to add `--deband`, is [animation](#animation)'s.
 
@@ -855,8 +855,8 @@ Higher PSNR-Y and VMAF, and lower LPIPS and flicker, are closer to the original.
 
 - **GPU time:** 2 or 4 times `standard`'s. `--plan` prints the job's time at each level on your
   card before anything runs (`time at each --quality: standard about …, enhanced about …,
-  maximum about …, deghost about …`), and at 4K a 45-frame shot took about 63 minutes at `maximum` against 15 at
-  `standard`, on a 96 GB card whose clock is capped.
+  maximum about …, deghost about …`), and at 4K a 45-frame shot took about 63 minutes at
+  `maximum` against 15 at `standard`, on a 96 GB card whose clock is capped.
 - **Memory:** none more. A run takes the memory one run takes, and the plan is the same.
 - **Disk:** the earlier runs' frames wait on disk until the last run's decode puts every frame
   in order, at 16 bits so that no byte of the master changes: up to half of the longest shot at
@@ -922,12 +922,12 @@ level and the deband apply to a whole job, so try them on short clips of your so
 - **`--quality deghost`** upscales each frame on its own, in a latent of its own, from the shot's
   noise: no drawing is packed with another, so no ghost ([each frame on its
   own](#each-frame-on-its-own---quality-deghost)). About twice `standard`'s time, measured over
-  an episode on a 96 GB card, and a frame's memory. Against `maximum`, the eyes saw sharper,
-  firmer lines, better faces and no ghosting when played; a simpler, softer sky with fewer colour
-  levels, a little noise in hair where `maximum`'s flat colours are clean, and a little flicker on
-  a pan. Fine details that hold still may change from frame to frame: each frame is redrawn
-  alone, so nothing ties one frame's small details to the next's. The small text on a ticket a
-  character holds changed at every frame, where at `maximum` it held still about 90% of the time.
+  an episode on a 96 GB card and on an RTX 5090, and a frame's memory. Against `maximum`, the eyes
+  saw sharper, firmer lines, better faces and no ghosting when played; a simpler, softer sky with
+  fewer colour levels, a little noise in hair where `maximum`'s flat colours are clean, and a little
+  flicker on a pan. Fine details that hold still may change from frame to frame: each frame is
+  redrawn alone, so nothing ties one frame's small details to the next's. The small text on a ticket
+  a character holds changed at every frame, where at `maximum` it held still about 90% of the time.
 - **`--deband`** smooths a smooth gradient's one-code steps before the model redraws them as
   terraces, with either level. It costs some precision of the lines: at `deghost` the eyes saw it
   take from the drawing on four scenes of six (less precise lines on dark shaded animation and on

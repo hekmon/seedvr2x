@@ -893,8 +893,9 @@ marker. The image server, Linux's alone by its lock, has no such line.
   frame on its own: one run a shot, each frame through the pass as a shot of one frame, at the
   shot's seed; named `animation` until 2026-11-19, an option named by its goal, not its
   technique): `test_shotruns.py` holds its flag (`each_frame`, no level debanding),
-  `frame_layout` and `planned_shots`; `test_clip.py` its output equal bit for bit to clips of each frame alone at the
-  clip's seed, 1, 2 and 5 frames, tiled and not, corrected and not, each frame's encode and noise
+  `frame_layout` and `planned_shots`; `test_clip.py` its output equal bit for bit to clips of
+  each frame alone at the clip's seed, 1, 2 and 5 frames, tiled and not, corrected and not, each
+  frame's encode and noise
   seeded by the clip's seed and its draw a latent's, the steps and phases frame by frame ("frame"
   first), a Cancel between frames leaving nothing alive, a NaN naming its frame, and the plan a
   frame's (`planned_shots`), the whole output taken off the host, the other levels' plans as
