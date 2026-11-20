@@ -54,7 +54,7 @@ first, then `models`, and gives `video`. The settings are widgets, each at its d
 | Widget | Default | Notes |
 | --- | --- | --- |
 | resolution | `1080` | The output's short side, in pixels. |
-| quality (Upscale Video only) | `standard` | How many times the model runs over each shot: `standard` once, `enhanced` twice, `maximum` four times, each run starting a frame or two further into the shot, each frame kept from the run that rebuilds it best. At `standard` one frame in four comes out closer to the original than the three before it, and looks sharper: edges that pulse ([below](#edges-that-pulse-at-standard)); `maximum` takes every frame from a run where it is rebuilt closest to the original. Sharper lines and less flicker where there is motion, little change on a still shot; 2 or 4 times as long as `standard`, and no more memory. A picture is one frame, so Upscale Image has no quality. |
+| quality (Upscale Video only) | `standard` | How many times the model runs over each shot: `standard` once, `enhanced` twice, `maximum` four times, each run starting a frame or two further into the shot, each frame kept from the run that rebuilds it best. At `standard` one frame in four comes out closer to the original than the three before it, and looks sharper: edges that pulse ([below](#edges-that-pulse-at-standard)); `maximum` takes every frame from a run where it is rebuilt closest to the original. Sharper lines and less flicker where there is motion, little change on a still shot; 2 or 4 times as long as `standard`, and no more memory. `deghost` upscales each frame on its own, so that fast scenes of an animation don't ghost, at about twice `standard`'s time ([below](#deghost-each-frame-on-its-own)). A picture is one frame, so Upscale Image has no quality. |
 | colour correction | on (`split`) | On, `split`, keeps the input's overall colours and brightness with the model's fine detail; off, `none`, leaves the model's own colours, which can drift. |
 | seed | `42` | ComfyUI's seed with its control after generate, `fixed`. Any whole number is taken: outside 0 to 4,293,967,295, it is taken modulo 4,293,967,296, and the plan in the console says the seed used. |
 | plan only | off | Make the plan, say it in the console, and stop: the model's weights are not read into memory (seedvr2x Models finds the files; the upscale node reads them when it runs, after its plan), ComfyUI's loaded models stay, and the nodes after its output do not run. |
@@ -71,6 +71,27 @@ shot 4 times, each run from a frame further in, and takes every frame from a run
 rebuilt closest to the original, at 4 times the GPU time. `enhanced` runs it twice, at twice the
 time. The command line's [manual](../seedvr2x/MANUAL.md#several-runs-of-a-shot---quality) shows
 the levels side by side.
+
+### `deghost`: each frame on its own
+
+The same packing blends drawings: where every frame of an animation is a new drawing, at
+`standard` a group's first frame carried about a quarter of the later frames' lines, a ghost
+that `maximum` lessens and the eyes still saw played. `deghost` upscales each frame on its own,
+in a latent of its own, every frame of a shot from the shot's noise, so that no drawing is
+blended with another:
+
+- **When:** for animation whose fast scenes still ghost at `maximum`. Try a short clip at
+  `maximum` first, and keep it where the picture is clean.
+- **What it costs:** about twice `standard`'s time over an episode, and a frame's memory; the
+  plan in the console is a frame's.
+- **What it may change:** fine details that stay still, such as small text, may change from frame
+  to frame, each frame being redrawn alone. Nothing was measured on live action.
+- **The window length** has no meaning there: a `window length` connected at `deghost` is refused
+  before anything loads.
+
+The command line's [manual](../seedvr2x/MANUAL.md#animation) has the guidance for animation, step
+by step, and what each level does to it. The command line's `--deband`, for a source whose
+gradients come out in terraces, has no node.
 
 There is no attention widget. seedvr2x runs PyTorch's own SDPA, which ComfyUI's PyTorch has, with
 nothing to install. At SeedVR2's window lengths attention is 4 to 9% of the DiT's time, so no
@@ -181,7 +202,7 @@ setting `Comfy.LinkRelease.Action` swaps the two). The node library lists them u
 | --- | --- | --- |
 | seedvr2x Tile | tile size (px): 512 to 2048 in steps of 64, 1024 by default; whole image at once: off by default | a tile for encode tile or decode tile, or no tiles where whole image at once is on |
 | seedvr2x Blocks Swapped | blocks swapped: 0 to 36, 0 by default | the model's blocks that wait in RAM and pass through the card in turn |
-| seedvr2x Window Length | window length (frames): 17 to 509 in steps of 4, 41 by default | the longest stretch of a clip the model works on at once |
+| seedvr2x Window Length | window length (frames): 17 to 509 in steps of 4, 41 by default | the longest stretch of a clip the model works on at once (none at `deghost`, where each frame is on its own) |
 
 A value connected is taken exactly and the plan is built around it, or the run is refused before
 anything loads. Each widget keeps ComfyUI's input socket, so an `Int` node, or any node that gives
