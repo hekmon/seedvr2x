@@ -323,6 +323,121 @@ def test_every_run_of_a_shot_is_a_pass_of_its_own_with_its_own_units() -> None:
     assert [each.label for each in one] == ["Frames 1 to 1"]
 
 
+# ---- Each frame alone (deghost) -----------------------------------------------------------------
+
+
+def play_frames(p: progress.Progress, clock: Clock, index: int, seconds: float) -> None:
+    """Every frame of pass `index`, a shot whose frames go alone, as the library tells them:
+    each frame's start, its encode's tiles and end, its window, its decode's tiles and end, each
+    unit taking `seconds`."""
+    current = p.passes[index]
+    for frame in range(1, current.frames + 1):
+        p.frame(current.shot - 1, frame)
+        for kind, units in (("encode", current.encode), ("decode", current.decode)):
+            if kind == "decode":
+                clock.t += seconds
+                p.window(1)
+            if len(units) > 1:
+                for done in range(len(units)):
+                    p.tile(kind, done, len(units))  # type: ignore[arg-type]
+                    clock.t += seconds
+                p.tile(kind, len(units), len(units))  # type: ignore[arg-type]
+            else:
+                clock.t += seconds
+            if kind == "encode":
+                p.encoded()
+            else:
+                p.decoded(1, 1)
+
+
+def test_a_shot_whose_frames_go_alone_is_one_pass_of_a_frames_units() -> None:
+    passes = progress.clip_passes(shots_of(2, 33), TARGET, 5, TILES, TILES, alone=True)
+    frame = progress.make_pass("frame", 1, TARGET, None, TILES, TILES)
+    assert len(passes) == 2
+    for number, each in enumerate(passes, 1):
+        assert each.alone and each.frames == 33 and each.copies == 33 and each.decoded == 1
+        assert (each.shot, each.of, each.run, each.runs) == (number, 2, 1, 1)
+        # A frame's units: its tiles, one window of one frame, as the library runs a frame.
+        assert [unit.weight for unit in each.units] == [unit.weight for unit in frame.units]
+        assert len(each.windows) == 1 and len(each.encode) == 4
+    assert [each.label for each in passes] == [
+        "Shot 1 of 2 (frames 1 to 33)",
+        "Shot 2 of 2 (frames 34 to 66)",
+    ]
+    (one,) = progress.clip_passes([Shot(0, 480)], TARGET, 5, None, None, alone=True)
+    assert one.label == "Frames 1 to 480" and one.of == 1
+    # Its first rates a frame alone's: a picture's (progress.ALONE).
+    assert progress.ALONE is progress.PICTURE
+
+
+def test_the_status_of_a_frame_alone_and_the_unit_its_waits_are_named_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    named: list[str] = []
+    monkeypatch.setattr(progress.waiting, "unit", lambda name, *_: named.append(name))
+    passes = progress.clip_passes(shots_of(4), TARGET, 5, None, TILES, alone=True)
+    p, _, shown, _ = make(passes, progress.ALONE)
+    p.frame(1, 12)
+    assert where(shown[-1]) == "shot 2/4 \u00b7 frame 12/120 \u00b7 encoding"
+    assert named[-1] == "Shot 2 of 4 (frames 121 to 240), frame 12 of 120: encoding"
+    p.encoded()
+    assert where(shown[-1]) == "shot 2/4 \u00b7 frame 12/120 \u00b7 upscaling"
+    p.window(1)
+    assert where(shown[-1]) == "shot 2/4 \u00b7 frame 12/120 \u00b7 tile 1/4 \u00b7 decoding"
+    p.tile("decode", 2, 4)
+    assert where(shown[-1]) == "shot 2/4 \u00b7 frame 12/120 \u00b7 tile 3/4 \u00b7 decoding"
+    (alone,) = progress.clip_passes([Shot(0, 480)], TARGET, 5, None, None, alone=True)
+    p, _, shown, _ = make([alone], progress.ALONE)
+    p.frame(0, 480)
+    p.encoded()
+    p.window(1)
+    # A frame's decode is one frame: no frames part.
+    assert where(shown[-1]) == "frame 480/480 \u00b7 decoding"
+    with pytest.raises(ValueError, match="no shot 2 whose frames go alone"):
+        p.frame(1, 1)
+    p, _, _, _ = make(progress.clip_passes([Shot(0, 9)], TARGET, 5, None, None))
+    with pytest.raises(ValueError, match="no shot 1 whose frames go alone"):
+        p.frame(0, 1)
+
+
+def test_the_bar_counts_every_frames_units_and_is_full_at_the_last_frame_only() -> None:
+    passes = progress.clip_passes(shots_of(2, 9), TARGET, 5, TILES, TILES, alone=True)
+    p, clock, _, bar = make(passes, progress.ALONE)
+    assert p.count == 2 * 9 * (4 + 1 + 4)
+    halfway = 0
+    for index in range(2):
+        play_frames(p, clock, index, 1.0)
+        if index == 0:
+            halfway = bar.updates[-1]
+    assert bar.updates == sorted(bar.updates) and bar.updates[-1] == progress.BAR
+    assert all(each < progress.BAR for each in bar.updates[:-1])
+    # Two shots of the same frames: the first ends at half the bar.
+    assert abs(halfway - progress.BAR // 2) <= 1
+    assert p.count_made == p.count
+
+
+def test_a_long_clips_frames_alone_keep_one_frames_units_a_shot() -> None:
+    """The units of a shot whose frames go alone are one frame's, made once a frame: a clip of
+    100,000 frames holds a frame's units for each shot, never one a frame, and its sums are kept
+    as they are made, so that an event costs the same at any length."""
+    passes = progress.clip_passes([Shot(0, 100_000)], TARGET, 5, None, None, alone=True)
+    p, clock, _, bar = make(passes, progress.ALONE)
+    assert len(p.passes) == 1 and len(p.passes[0].units) == 3 and p.count == 300_000
+    frame = progress.make_pass("frame", 1, TARGET, None, None, None)
+    for kind in ("encode", "window", "decode"):
+        weights = sum(unit.weight for unit in frame.units if unit.kind == kind)
+        assert p.total[kind] == 100_000 * weights  # type: ignore[index]
+    p.frame(0, 1)
+    clock.t += 1.0
+    p.encoded()
+    clock.t += 1.0
+    p.window(1)
+    clock.t += 1.0
+    p.decoded(1, 1)
+    # One frame of 100,000 made, at the rates it measured: a bar of a thousandth is 100 frames.
+    assert bar.updates[-1] == 0 and p.left() == pytest.approx(99_999 * 3.0)
+
+
 def test_the_status_of_a_run_of_a_shot_and_of_a_clip_of_one_shot() -> None:
     passes = progress.clip_passes(shots_of(4), TARGET, 5, None, None, runs=4)
     p, _, shown, _ = make(passes)
@@ -899,6 +1014,56 @@ def test_a_tiled_clips_bar_text_and_previews_and_the_bits_of_the_library(
     # The first message is "planning\u2026", the last the result alone.
     texts = node_texts("4")
     assert texts[0] == "planning\u2026" and texts[-1].startswith("33 frames in ")
+
+
+def test_a_tiled_clip_at_deghost_tells_each_frame_and_the_bits_are_the_librarys(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tiled_plans(monkeypatch)
+    frames = pictures(5)
+    cuts = (Shot(0, 2), Shot(2, 5))
+    out, _ = run_video(
+        handle(tmp_path), plans.Settings(), frames, RESOLUTION, "4", cuts=cuts, quality="deghost"
+    )
+    expected = np.concatenate(
+        [
+            clip.upscale(
+                fresh(machine),
+                frames.numpy()[each.start : each.end],
+                TARGET,
+                plans.SEED + each.start,
+                window=None,
+                encode_tiles=TILES,
+                decode_tiles=TILES,
+                correct=True,
+                quality="deghost",
+            )
+            for each in cuts
+        ]
+    )
+    assert out.tobytes() == master_of(expected).tobytes(), "the callbacks only observe"
+    (bar,) = ProgressBar.created
+    # Full at the last frame's decode, and again at the end.
+    assert bar.updates == sorted(bar.updates) and bar.updates[-1] == progress.BAR
+    assert all(each < progress.BAR for each in bar.updates[:-2])
+    said = status(node_texts("4"))
+    # Each frame of each shot in turn, its encode's tiles, its window and its decode's tiles.
+    for shot, count in ((1, 2), (2, 3)):
+        for frame in range(1, count + 1):
+            where_ = f"shot {shot}/2 \u00b7 frame {frame}/{count}"
+            mine = [each for each in said if each.startswith(where_ + " \u00b7 ")]
+            assert mine[0] == f"{where_} \u00b7 encoding"
+            assert f"{where_} \u00b7 tile 4/4 \u00b7 encoding" in mine
+            assert f"{where_} \u00b7 upscaling" in mine
+            assert mine[-1] == f"{where_} \u00b7 decoding"
+    assert not [each for each in said if "frames " in each or "window" in each]
+    # One preview a frame, at ComfyUI's size.
+    assert len(bar.previews) == 5 and all(
+        preview[2] == args.preview_size and preview[1].size == (80, 48)  # type: ignore[index]
+        for _, preview in bar.previews
+    )
+    texts = node_texts("4")
+    assert texts[0] == "planning\u2026" and texts[-1].startswith("5 frames in ")
 
 
 def test_each_picture_of_a_tiled_batch_is_a_preview_and_the_bits_are_the_librarys(

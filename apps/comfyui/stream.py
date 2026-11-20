@@ -6,16 +6,19 @@ enhanced and maximum the same; what the command line keeps in files the nodes ke
 in a directory of the run's own in ComfyUI's temp folder (Workspace), removed at the run's end
 however it ends: a tiled pass's scratch beyond the plan's allowance (FileScratch), the shot's
 input as the encode read it, for the colour correction and the later runs (Copy), the windows,
-and the frames of the earlier runs that wait for the frames before them (Order). Each frame
-decoded is written to the node's file as it comes, its planes made on the card
-(yuv.master_planes) and its FFV1 encode in a thread of its own (Writer), beside the card's work.
+and the frames of the earlier runs that wait for the frames before them (Order). At deghost
+(shotruns.each_frame) each frame of a shot goes alone through the three passes, frame after frame,
+as clip.upscale runs it: the frame is all it keeps for its correction, in memory, and its files are
+a frame's (its window, a tiled pass's scratch). Each frame decoded is written to the node's file as
+it comes, its planes made on the card (yuv.master_planes) and its FFV1 encode in a thread of its own
+(Writer), beside the card's work.
 
 So the plan is the command line's (shot_plan.plan, its windows in files, in_memory False), and
 the host holds at a time a slice of the source's frames, a window's output on its way to its file,
-the writer's queue and what the command line's run holds of a shot (shot_plan.host_moments):
-`held_bytes` counts the frames, which the plan takes off the memory the host has available. The
-output's bits are the library's pass on the same RGB frames (clip.upscale), held by the nodes'
-tests/test_stream.py."""
+the writer's queue and what the command line's run holds of a shot (shot_plan.host_moments; at
+deghost a frame's, shotruns.planned_shots): `held_bytes` counts the frames, which the plan takes
+off the memory the host has available. The output's bits are the library's pass on the same RGB
+frames (clip.upscale), held by the nodes' tests/test_stream.py."""
 
 import gc
 import logging
@@ -30,11 +33,11 @@ import traceback
 import uuid
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from types import TracebackType
-from typing import Literal, Protocol, Self, cast
+from typing import BinaryIO, Literal, Protocol, Self, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -44,7 +47,7 @@ from seedvr2x import model, sampling, yuv
 from seedvr2x.model import COMPUTE_DTYPE, Models
 from seedvr2x.passes import Tiles
 from seedvr2x.shot_pass import decode_shot, encode_shot, finite, merge_windows, sample_windows
-from seedvr2x.shotruns import QUALITY, kept_bytes, shot_runs, taken_from
+from seedvr2x.shotruns import QUALITY, each_frame, kept_bytes, shot_runs, taken_from
 from seedvr2x.shots import Shot, shot_layout
 from seedvr2x.tilegrid import CHANNELS, scratch_bytes
 
@@ -64,17 +67,22 @@ SLICE_FRAMES = 5
 READ_FRAMES = 5
 
 
-def held_bytes(source: tuple[int, int], output: tuple[int, int]) -> int:
+def held_bytes(source: tuple[int, int], output: tuple[int, int], quality: str = "standard") -> int:
     """The bytes of frames the streamed pass holds in system memory at the most, beside what the
     plan counts of a shot (shot_plan.host_moments), for a source of (width, height) and an output
     of (width, height): a read's frames, float32 (READ_FRAMES), and the colour correction's
     slice of the shot's input read again beside it; a decode's slice, float32, the writer's queue
     and the slice it writes, float32, with that slice's planes (2 bytes a sample), and the
-    preview's frame."""
+    preview's frame. At a `quality` that takes each frame alone (shotruns.each_frame: deghost), a
+    frame's: the frame read, which its correction reads too, and the next one read while it is
+    let go; a decode's slice of one frame, the writer's queue of such slices and the one it
+    writes."""
     source_frame = source[0] * source[1] * 3
     output_frame = output[0] * output[1] * 3
-    reading = 2 * READ_FRAMES * source_frame * 4
-    writing = (QUEUED + 2) * SLICE_FRAMES * output_frame * 4 + SLICE_FRAMES * output_frame * 2
+    alone = each_frame(quality)
+    reading = 2 * (1 if alone else READ_FRAMES) * source_frame * 4
+    slice_ = 1 if alone else SLICE_FRAMES
+    writing = (QUEUED + 2) * slice_ * output_frame * 4 + slice_ * output_frame * 2
     return reading + writing + output_frame * 4
 
 
@@ -100,16 +108,20 @@ def disk_bytes(
     command line's figure), and a tiled pass's scratch beyond the plan's allowance, one pass's at
     a time), for shots of a source of (width, height) to an output of (width, height), the
     output's frames padded to (height, width). The windows' files, half a byte a padded pixel and
-    a latent, are left out: under a hundredth of the rest."""
+    a latent, are left out: under a hundredth of the rest. At a `quality` that takes each frame
+    alone (shotruns.each_frame: deghost) the working files are a frame's: no copy and no frame
+    kept (the frame is in memory for its correction), a tiled pass's scratch of one frame."""
     frames = sum(each.frames for each in shots)
     file = round(frames * output[0] * output[1] * FILE_BYTES_PER_PIXEL)
     level = QUALITY[quality]
+    alone = each_frame(quality)
     working = 0
     for each in shots:
-        copy = each.frames * source[0] * source[1] * 3 * 2 if again else 0
+        copy = each.frames * source[0] * source[1] * 3 * 2 if again and not alone else 0
         kept = kept_bytes(each, level, (output[1], output[0]))
         tiled = passes.encode_tiles is not None or passes.decode_tiles is not None
-        scratch = max(0, scratch_bytes(each.frames, padded) - passes.allowance) if tiled else 0
+        passed = 1 if alone else each.frames
+        scratch = max(0, scratch_bytes(passed, padded) - passes.allowance) if tiled else 0
         working = max(working, copy + kept + scratch)
     return file, working
 
@@ -458,7 +470,8 @@ class Order:
     being decoded gives is put to the writer at once where every frame before it is; else it
     waits, as its planes (planes: 2 bytes a sample, where the frame is 4), in a file of the run's
     directory until those are, written there through the file. One frame a slot, the shot's at the
-    most; the file removed by close."""
+    most; the file made by the first frame that waits (none at one run, nor at deghost, whose frames
+    come in their order) and removed by close."""
 
     def __init__(self, path: Path, count: int, size: tuple[int, int], writer: "Writer") -> None:
         self.path, self.count, self.writer = path, count, writer
@@ -466,7 +479,7 @@ class Order:
         self.shape = (3, size[1], size[0])
         self.next: int = 0
         self._waiting: set[int] = set()
-        self._file = None if count < 2 else path.open("x+b")
+        self._file: BinaryIO | None = None
 
     def give(self, first: int, frames: npt.NDArray[np.float32]) -> None:
         """Frames (n, H', W', 3) float32, the shot's `first` and those after it, one after the
@@ -477,7 +490,8 @@ class Order:
             self._flush()
             return
         made = planes(frames)
-        assert self._file is not None
+        if self._file is None:
+            self._file = self.path.open("x+b")
         for index, values in enumerate(made):
             self._file.seek((first + index) * self.frame_bytes)
             self._file.write(values.tobytes())
@@ -500,7 +514,7 @@ class Order:
 
 # ---- A shot's pass -------------------------------------------------------------------------------
 
-Stage = Literal["run", "encode", "window", "decode"]
+Stage = Literal["run", "frame", "encode", "window", "decode"]
 Step = Callable[[Stage, int, int], None]
 Tile = Callable[[Literal["encode", "decode"], int, int], None]
 Preview = Callable[[int, int, npt.NDArray[np.float32] | None], None]
@@ -538,11 +552,15 @@ def upscale_shot(
     """Shot `shot` of the clip (its frames in the clip, which seed it as the command line seeds a
     shot: shots.Shot.seed) through the library's pass at `quality`, as clip.upscale runs it, with
     the plan's `passes`: the frames given to `writer` in their order (Order), a run's as its decode
-    gives them, a later run's taken from it (shotruns.taken_from). `frames` gives the shot's frames
-    (ShotFrames). `step` is told as clip.upscale tells it, `tile` each tile of a tiled pass, and
-    `preview` (done, count, the newest frame the run keeps so far, (H', W', 3) float32: its first is
-    its own) after each slice decoded; each may raise, BaseException included, to stop the shot,
-    which leaves nothing on the device but what the models hold."""
+    gives them, a later run's taken from it (shotruns.taken_from). At a level that takes each frame
+    alone (shotruns.each_frame: deghost), each frame read from `frames` goes through the three
+    passes alone, frame after frame, as a shot of one frame with the shot's seed (clip.upscale's
+    frames alone), its correction against itself, held in memory: `frames` is read once, never
+    again. `frames` gives the shot's frames (ShotFrames). `step` is told as clip.upscale tells it
+    (each frame's start, "frame", before its encode at deghost), `tile` each tile of a tiled pass,
+    and `preview` (done, count, the newest frame the run keeps so far, (H', W', 3) float32: its
+    first is its own) after each slice decoded; each may raise, BaseException included, to stop the
+    shot, which leaves nothing on the device but what the models hold."""
     count = shot.frames
     level = QUALITY[quality]
     runs = shot_runs(Shot(0, count), level)
@@ -551,16 +569,22 @@ def upscale_shot(
     order = Order(workspace.path(f"order-{shot.start}"), count, _output(target), writer)
     try:
         with model.marking(models.device):
-            for number, each in enumerate(runs, 1):
-                if step is not None and len(runs) > 1:
-                    step("run", number, len(runs))
-                read = frames.first() if number == 1 else frames.again(each.offset)
-                _run(
-                    *(models, read, frames, each.offset, count, target, shot_seed, passes),
-                    *(correct, workspace, step, tile, preview, shot.start),
-                    taken,
-                    order,
+            if each_frame(quality):
+                _frames_alone(
+                    *(models, frames, count, target, shot_seed, passes, correct),
+                    *(workspace, step, tile, preview, shot.start, order),
                 )
+            else:
+                for number, each in enumerate(runs, 1):
+                    if step is not None and len(runs) > 1:
+                        step("run", number, len(runs))
+                    read = frames.first() if number == 1 else frames.again(each.offset)
+                    _run(
+                        *(models, read, frames, each.offset, count, target, shot_seed, passes),
+                        *(correct, workspace, step, tile, preview, shot.start),
+                        taken,
+                        order.give,
+                    )
     except BaseException as error:
         traceback_ = error.__traceback__
         model.unless_failed(models.device, lambda: traceback.clear_frames(traceback_))
@@ -570,6 +594,43 @@ def upscale_shot(
         remove_pending()
     if order.next != count:
         raise RuntimeError(f"{count - order.next} frames of the shot never written")
+
+
+def _frames_alone(
+    models: Models,
+    frames: ShotFrames,
+    count: int,
+    target: tuple[int, int],
+    seed: int,
+    passes: Passes,
+    correct: bool,
+    workspace: Workspace,
+    step: Step | None,
+    tile: Tile | None,
+    preview: Preview | None,
+    start: int,
+    order: Order,
+) -> None:
+    """Each of the shot's `count` frames alone (clip._frames_alone, the same steps): frame f read
+    from `frames`, then through the pass as a shot of that one frame with the shot's `seed`, its
+    latent of its own, a window of one latent (no window to cap), its correction against itself,
+    held in memory (InMemory), and given to `order` at its place in the shot. `start` is the
+    shot's first frame in the clip."""
+    read = frames.first()
+    alone = replace(passes, window=None)
+    for frame in range(count):
+        if step is not None:
+            step("frame", frame + 1, count)
+        current = InMemory(read(1))
+
+        def give(first: int, part: npt.NDArray[np.float32], frame: int = frame) -> None:
+            order.give(frame + first, part)
+
+        _run(
+            *(models, current.first(), current, 0, 1, target, seed, alone, correct, workspace),
+            *(step, tile, preview, start + frame, [0], give),
+        )
+        del current  # let go before the next frame is read
 
 
 def _output(target: tuple[int, int]) -> tuple[int, int]:
@@ -595,10 +656,11 @@ def _run(
     preview: Preview | None,
     start: int,
     taken: list[int],
-    order: Order,
+    give: Callable[[int, npt.NDArray[np.float32]], None],
 ) -> None:
     """The shot's run from its frame `offset` (clip._run's steps, the windows in files as the
-    command line keeps them)."""
+    command line keeps them), the frames it keeps given to `give` (Order.give: the shot's frame
+    first, then the frames from it)."""
     count = shot_frames - offset
     layout = shot_layout(count, passes.window)
     reference = Reference(frames, offset) if correct else None
@@ -643,7 +705,7 @@ def _run(
             end = index
             while end < part.shape[0] and mine[end]:
                 end += 1
-            order.give(place + index, part[index:end])
+            give(place + index, part[index:end])
             newest = part[end - 1].copy()  # a copy: the slice itself goes once written
             index = end
         written += part.shape[0]

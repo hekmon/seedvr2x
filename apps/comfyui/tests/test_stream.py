@@ -1,10 +1,11 @@
 """Upscale Video on a VIDEO read from its file (stream.py, video.py; DESIGN.md, Repository and apps,
 the nodes' VIDEO path), on the CPU with the stand-in models: the file's frames, as the node reads
 them, through the library's pass (clip.upscale), shot by shot, are the planes of the node's file
-bit for bit, at every quality, tiled and not, corrected and not; the source's audio copied packet
-for packet; the trim, the crop and the rate as ComfyUI gives them; seedvr2x's record in the file;
-the memory the run holds the same for a clip ten times as long; nothing left by a Cancel or an
-error. Skipped without PyAV, which ComfyUI ships."""
+bit for bit, at every quality, deghost's each frame alone included, tiled and not, corrected and
+not; the source's audio copied packet for packet; the trim, the crop and the rate as ComfyUI gives
+them; seedvr2x's record in the file; the memory the run holds the same for a clip ten times as
+long, at deghost too; nothing left by a Cancel or an error. Skipped without PyAV, which ComfyUI
+ships."""
 
 import ctypes
 import gc
@@ -24,7 +25,7 @@ import pytest
 import torch
 from comfy.utils import ProgressBar
 from comfy_api.latest import InputImpl
-from comfyui import nodes, plans, stream, video, words
+from comfyui import nodes, plans, progress, stream, video, words
 from standins import (
     RESOLUTION,
     TORCH_CUDA_AVAILABLE,
@@ -40,7 +41,7 @@ from test_nodes import TARGET, fresh, planned_clip
 from test_progress import stop_at, tiled_plans
 from test_still import TILES, stand_in_dit
 
-from seedvr2x import clip, record
+from seedvr2x import clip, record, tilegrid
 from seedvr2x import frames as sizes
 from seedvr2x.shots import Shot
 
@@ -136,7 +137,7 @@ def libraries(
 ) -> npt.NDArray[np.uint16]:
     """The master's planes of the library's pass over each shot of `frames` (clip.upscale, the
     shot's seed), the plan the node makes for them."""
-    made = planned_clip(machine, settings, cuts)
+    made = planned_clip(machine, settings, cuts, quality)
     alone = fresh(machine)
     parts = [
         clip.upscale(
@@ -162,7 +163,9 @@ def run(
     return out, text
 
 
-def run_video(tmp_path: Path, given: Any, settings: plans.Settings, **kwargs: Any) -> Any:
+def run_video(
+    tmp_path: Path, given: Any, settings: plans.Settings, quality: str = "standard", **kwargs: Any
+) -> Any:
     """The VIDEO the node gives."""
     inputs: dict[str, Any] = {"color_correction": settings.split, "seed": settings.seed}
     if settings.window is not None:
@@ -174,7 +177,7 @@ def run_video(tmp_path: Path, given: Any, settings: plans.Settings, **kwargs: An
         models=handle(tmp_path),
         resolution=RESOLUTION,
         plan_only=False,
-        quality="standard",
+        quality=quality,
         **inputs,
         **kwargs,
     )[0]
@@ -217,6 +220,86 @@ def test_a_tiled_files_video_is_the_librarys_tiled_pass(
     assert made.encode_tiles == TILES and made.decode_tiles == TILES
     expected = libraries(machine, read_frames(path), cuts, settings, quality)
     assert out.tobytes() == expected.tobytes()
+
+
+@pytest.mark.parametrize("correct", [True, False], ids=["corrected", "uncorrected"])
+@pytest.mark.parametrize("tiled", [False, True], ids=["untiled", "tiled"])
+@pytest.mark.parametrize("cuts", list(CUTS), ids=list(CUTS))
+def test_a_files_video_at_deghost_is_the_librarys_pass_each_frame_alone(
+    machine: StandIn,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cuts: str,
+    tiled: bool,
+    correct: bool,
+) -> None:
+    """Each frame of a shot alone through the three passes at the shot's seed, its correction
+    against its own frame (clip.upscale at deghost, shot by shot): no copy of a shot's frames is
+    made, the frame being held for its correction, and a window's file is a frame's alone."""
+    if tiled:
+        tiled_plans(monkeypatch)
+    names: list[str] = []
+    real = stream.Workspace.path
+
+    def path(self: stream.Workspace, name: str) -> Path:
+        names.append(name)
+        return real(self, name)
+
+    monkeypatch.setattr(stream.Workspace, "path", path)
+    path_ = source(tmp_path / "in.mkv", 21)
+    settings = plans.Settings(seed=4, color_correction="split" if correct else "none")
+    out, text = run(
+        tmp_path, InputImpl.VideoFromFile(str(path_)), settings, cuts=CUTS[cuts], quality="deghost"
+    )
+    made = planned_clip(machine, settings, CUTS[cuts], "deghost")
+    assert (made.encode_tiles == TILES) is tiled and (made.decode_tiles == TILES) is tiled
+    frames_ = read_frames(path_)
+    expected = libraries(machine, frames_, CUTS[cuts], settings, "deghost")
+    assert out.shape == (21, 3, 48, 80)
+    assert out.tobytes() == expected.tobytes()
+    assert not [each for each in names if each.startswith("copy-")], names
+    assert len([each for each in names if each.startswith("window-")]) == 21
+    assert "quality: deghost, each frame of a shot upscaled on its own" in text
+    if not tiled and correct:
+        # Not the shot's pass: the level reached it.
+        standard = libraries(machine, frames_, CUTS[cuts], settings)
+        assert out.tobytes() != standard.tobytes()
+
+
+def test_a_video_of_bytes_in_memory_at_deghost_is_read_as_its_file(
+    machine: StandIn, tmp_path: Path
+) -> None:
+    path = source(tmp_path / "in.mkv", 9)
+    settings = plans.Settings(seed=3)
+    cuts = (Shot(0, 4), Shot(4, 9))
+    given = InputImpl.VideoFromFile(BytesIO(path.read_bytes()))
+    out, _ = run(tmp_path, given, settings, cuts=cuts, quality="deghost")
+    expected = libraries(machine, read_frames(path), cuts, settings, "deghost")
+    assert out.tobytes() == expected.tobytes()
+
+
+def test_the_frames_held_and_the_working_files_at_deghost_are_a_frames() -> None:
+    """At deghost a read is one frame, which its correction reads too, the next read while it is
+    let go; a decode's slice one frame, the writer's queue of such slices; no copy of a shot's
+    frames and no frame kept between runs, a tiled pass's scratch a frame's (stream.held_bytes,
+    disk_bytes)."""
+    source_, output = (1280, 720), (1920, 1080)
+    frame_in, frame_out = 1280 * 720 * 3, 1920 * 1080 * 3
+    alone = 2 * frame_in * 4 + (stream.QUEUED + 2) * frame_out * 4 + frame_out * 2 + frame_out * 4
+    assert stream.held_bytes(source_, output, "deghost") == alone
+    assert stream.held_bytes(source_, output) == stream.held_bytes(source_, output, "maximum")
+    assert stream.held_bytes(source_, output) > 4 * alone
+    shots = [Shot(0, 100), Shot(100, 150)]
+    padded = sizes.padded_size((1080, 1920))
+    untiled = stream.Passes(None, None, None, False, 0)
+    file, working = stream.disk_bytes(shots, source_, output, padded, "deghost", True, untiled)
+    assert file == round(150 * 1920 * 1080 * stream.FILE_BYTES_PER_PIXEL) and working == 0
+    _, copy = stream.disk_bytes(shots, source_, output, padded, "standard", True, untiled)
+    assert copy == 100 * frame_in * 2
+    tiled = stream.Passes(None, TILES, TILES, False, 0)
+    _, scratch = stream.disk_bytes(shots, source_, output, padded, "deghost", True, tiled)
+    _, shot = stream.disk_bytes(shots, source_, output, padded, "standard", False, tiled)
+    assert scratch == tilegrid.scratch_bytes(1, padded) and shot > 50 * scratch
 
 
 def test_a_visible_card_leaves_the_files_video_on_the_cpu(
@@ -514,6 +597,29 @@ def test_cancel_leaves_no_file_and_no_writer(
     ProgressBar.on_update = None
 
 
+@pytest.mark.parametrize("update", [4, 5, 12])
+def test_cancel_between_frames_at_deghost_leaves_no_file_and_no_writer(
+    machine: StandIn, tmp_path: Path, comfy_temp: Path, update: int
+) -> None:
+    """A frame alone moves the bar four times untiled (its start, its encode, its window, its
+    decode): the 4th update is the first frame's end, the 5th the second's start, the 12th the
+    third's end, a Cancel there between two frames."""
+    path = source(tmp_path / "in.mkv", 9)
+    stop_at(update)
+    with pytest.raises(management.InterruptProcessingException):
+        run(
+            tmp_path,
+            InputImpl.VideoFromFile(str(path)),
+            plans.Settings(),
+            cuts=(Shot(0, 4), Shot(4, 9)),
+            quality="deghost",
+        )
+    (bar,) = [each for each in ProgressBar.created if each.total == progress.BAR]
+    assert len(bar.updates) == update
+    assert left(comfy_temp) == [] and writers() == []
+    ProgressBar.on_update = None
+
+
 def test_a_writer_that_fails_ends_the_run_leaving_nothing(
     machine: StandIn, tmp_path: Path, comfy_temp: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -574,8 +680,9 @@ def in_use() -> int:
 
 
 @pytest.mark.skipif(MALLINFO2 is None, reason="reads glibc's mallinfo2")
+@pytest.mark.parametrize("quality", ["standard", "deghost"])
 def test_a_clip_ten_times_as_long_holds_no_more_memory(
-    machine: StandIn, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    machine: StandIn, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quality: str
 ) -> None:
     """The run holds a slice of the source's frames, a shot's windows and the writer's queue,
     never the clip: a clip of 900 frames (100 shots of 9) holds what one of 90 (10 shots) does,
@@ -585,7 +692,7 @@ def test_a_clip_ten_times_as_long_holds_no_more_memory(
     from where that moment fell (a frame kept a shot read as little as 2.07 MiB over for 3.95
     kept, in three runs, impl-tests-1). The stand-ins keep nothing a shot, as ComfyUI's bar keeps
     no preview and the DiT no noise: kept to the test's end, their images and noise were 3.1 MiB
-    more over the longer clip."""
+    more over the longer clip. At deghost, each frame alone, the same."""
     monkeypatch.setattr(ProgressBar, "keep_previews", False)
     stand_in_dit(monkeypatch, keep=False)
     readings: list[int] = []
@@ -599,12 +706,13 @@ def test_a_clip_ten_times_as_long_holds_no_more_memory(
     shots = 10
     short = source(tmp_path / "short.mkv", 9 * shots, audio=False)
     long = source(tmp_path / "long.mkv", 9 * shots * 10, audio=False)
-    settings = plans.Settings(window=5)
+    # A window is refused at deghost: each frame is one piece of the model's work.
+    settings = plans.Settings(window=None if quality == "deghost" else 5)
 
     def most(path: Path, count: int) -> int:
         readings.clear()
         cuts = tuple(Shot(start, start + 9) for start in range(0, count, 9))
-        run_video(tmp_path, InputImpl.VideoFromFile(str(path)), settings, cuts=cuts)
+        run_video(tmp_path, InputImpl.VideoFromFile(str(path)), settings, quality, cuts=cuts)
         assert len(readings) == count // 9
         return max(readings)
 

@@ -19,13 +19,15 @@ ComfyUI v0.44.0 (frontend 1.57.6) gives a node, read in its sources:
   (comfy.cli_args, 512 by default): the limit is kept, never lifted.
 (Described, not copied: ComfyUI is GPL-3.0.)
 
-The status (Progress): "shot 2/4 · window 2/3 · upscaling" over "~3 min left" (status, times).
+The status (Progress): "shot 2/4 · window 2/3 · upscaling" over "~3 min left" (status, times);
+at deghost, each frame alone, "shot 2/4 · frame 12/118 · decoding".
 
 The bar is the upscale's expected time, not a count of steps (Progress): the units of the plan,
 every tile of the encode, every window of the DiT and every tile of the decode of every shot or
-picture, each weighing what it should take by its size. Before the upscale, the download of
-seedvr2x's files and their reading into memory share a bar of their own, in bytes (Preparing), and
-the Cuts node's by frames scanned (Preparing for the detector's file, then a ProgressBar by frame).
+picture, and at deghost of every frame, each weighing what it should take by its size. Before the
+upscale, the download of seedvr2x's files and their reading into memory share a bar of their own,
+in bytes (Preparing), and the Cuts node's by frames scanned (Preparing for the detector's file,
+then a ProgressBar by frame).
 
 Everything here observes the library's callbacks and says what they tell: it moves no value of the
 upscale. The things it does besides are ComfyUI's Cancel, checked at each event and at each poll of
@@ -197,6 +199,15 @@ PICTURE = Costs(
     window=2.60 / ((2192 // TOKEN) * (3840 // TOKEN)),
     decode=3.10 / (2192 * 3840),
 )
+# A frame alone, at deghost (shotruns.each_frame), starts at a picture's figures: a frame alone in a
+# latent of its own has no causal memory to share, as a picture has none, and the level's own
+# passes measured so (DESIGN.md, Each frame on its own, Cost): at 1080p, 0.17 and 0.34
+# microseconds a pixel of the padded 1104 x 1920 frame to encode and to decode and write on the
+# 96 GB card (0.37 and 0.72 s a frame), 0.25 and 0.37 on the RTX 5090 (0.52 and 0.79), against
+# PICTURE's 0.18 and 0.37 and CLIP's 0.10 and 0.21, both the RTX 5090's; its DiT on the 96 GB card
+# 0.50 s a frame, 0.060 ms a token of its 69 x 120, against PICTURE's 0.079 and CLIP's 0.083. Each
+# run then measures its own.
+ALONE = PICTURE
 
 
 @dataclass
@@ -229,10 +240,25 @@ class Pass:
     of: int = 1
     runs: int = 1
     noun: str = "shot"
+    # A shot whose frames each go alone (deghost: shotruns.each_frame): its units are one frame's,
+    # made again for each of its `frames` frames, which the status counts.
+    alone: bool = False
 
     @property
     def units(self) -> list[Unit]:
         return [*self.encode, *self.windows, *self.decode]
+
+    @property
+    def copies(self) -> int:
+        """The times its units are made: once, or once a frame for a shot whose frames go
+        alone."""
+        return self.frames if self.alone else 1
+
+    @property
+    def decoded(self) -> int:
+        """The frames a decode of it gives: its frames, or one for a shot whose frames go
+        alone."""
+        return 1 if self.alone else self.frames
 
 
 def _vae_units(kind: Kind, tiles: Tiles | None, padded: tuple[int, int], frames: int) -> list[Unit]:
@@ -275,6 +301,7 @@ def clip_passes(
     encode_tiles: Tiles | None,
     decode_tiles: Tiles | None,
     runs: int = 1,
+    alone: bool = False,
 ) -> list[Pass]:
     """The passes of a clip cut into `shots`, a pass a run of a shot (`runs` a shot, shotruns:
     1, 2 or 4; a shot too short for a run has no such run): a run is a pass over the shot from its
@@ -282,8 +309,22 @@ def clip_passes(
     Labelled "Shot 2 of 4 (frames 121 to 240)", the frames counted from 1 as a user counts them,
     or "Frames 1 to 480" for a clip of one shot; with several runs the frames are the run's own,
     from its first: "Shot 2 of 4, run 3 of 4 (frames 123 to 240)" and "Frames 3 to 480, run 2 of
-    2". A shot of one run has no run part."""
+    2". A shot of one run has no run part. With `alone` (deghost: shotruns.each_frame), a pass a
+    shot whose units are one frame's (one window, its tiles), made for each of its frames (Pass.
+    alone), labelled as a shot of one run."""
     passes: list[Pass] = []
+    if alone:
+        for number, shot in enumerate(shots, 1):
+            label = (
+                f"Shot {number} of {len(shots)} (frames {shot.start + 1} to {shot.end})"
+                if len(shots) > 1
+                else f"Frames {shot.start + 1} to {shot.end}"
+            )
+            made = make_pass(label, 1, target, None, encode_tiles, decode_tiles)
+            made.frames, made.alone = shot.frames, True
+            made.shot, made.of = number, len(shots)
+            passes.append(made)
+        return passes
     for number, shot in enumerate(shots, 1):
         each_run = shot_runs(Shot(0, shot.frames), runs)
         for index, each in enumerate(each_run, 1):
@@ -370,10 +411,14 @@ class Progress:
 
     A tiled pass tells its tiles (done of total); the last tile is made when the pass is: the
     pass's tail (the sums divided, the slices written and corrected) belongs to it. An untiled
-    decode moves the bar by the frames written, the others by their unit.
+    decode moves the bar by the frames written, the others by their unit. A shot whose frames go
+    alone (Pass.alone) makes its units once a frame (`frame`), each frame begun as a pass is.
+    The sums are kept as the units are made, so that an event costs the same however many frames
+    the clip has.
 
     The text, replaced at each message: two lines (`_text`), the first saying which shot (or
-    picture) and run, the unit and its count and what it does ("shot 2/4 · tile 3/6 · encoding"),
+    picture) and run, or which frame of a shot whose frames go alone, the unit and its count and
+    what it does ("shot 2/4 · tile 3/6 · encoding", "shot 2/4 · frame 12/118 · decoding"),
     the second the time: so far, and the time left once the first window has been measured,
     which says the DiT's rate too. The plan is in the console, not here. The preview: the newest
     frame decoded, once per slice (`decoded`).
@@ -413,9 +458,19 @@ class Progress:
         self.step = ""
         # The untiled decode's frames written, as a share of its unit.
         self.partial = 0.0
-        self.units = [unit for each in self.passes for unit in each.units]
-        # (seconds, weight) of the units made, by kind.
+        # The frame of a shot whose frames go alone (Pass.alone), from 1.
+        self.frame_number = 1
+        # The weight of every unit the run makes, by kind, and their count: a shot whose frames go
+        # alone makes its units once a frame (Pass.copies).
+        self.total: dict[Kind, float] = {"encode": 0, "window": 0, "decode": 0}
+        self.count = 0
+        for each in self.passes:
+            for unit in each.units:
+                self.total[unit.kind] += unit.weight * each.copies
+            self.count += len(each.units) * each.copies
+        # (seconds, weight) of the units made, by kind, and their count.
         self.made: dict[Kind, list[float]] = {"encode": [0, 0], "window": [0, 0], "decode": [0, 0]}
+        self.count_made = 0
         self.mismatch = False
         # Held by an event and by a tick: the units' times and rates, the pass and the words are
         # read by the ticker's thread while the node's moves them.
@@ -435,11 +490,10 @@ class Progress:
 
     def left(self) -> float:
         """The expected seconds of the units not made yet, the untiled decode's frames written
-        taken off."""
+        taken off: each kind's weight not made at its rate."""
         total = 0.0
-        for each in self.units:
-            if each.seconds is None:
-                total += each.weight * self.rate(each.kind)
+        for kind, weight in self.total.items():
+            total += (weight - self.made[kind][1]) * self.rate(kind)
         return total - self._partial_seconds()
 
     def _partial_seconds(self) -> float:
@@ -454,12 +508,12 @@ class Progress:
         return decode[0] if len(decode) == 1 and decode[0].seconds is None else None
 
     def done(self) -> float:
-        return sum(each.seconds or 0.0 for each in self.units) + self._partial_seconds()
+        return sum(seconds for seconds, _ in self.made.values()) + self._partial_seconds()
 
     def position(self) -> int:
         """The bar's value, thousandths of BAR: never less than it was, BAR only when every unit
         is made."""
-        if all(each.seconds is not None for each in self.units):
+        if self.count_made >= self.count:
             self.value = BAR
             return BAR
         done, left = self.done(), self.left()
@@ -484,6 +538,19 @@ class Progress:
                 self.begin(index)
                 return
         raise ValueError(f"no run {run} of shot {shot + 1} in the progress's passes")
+
+    def frame(self, shot: int, frame: int) -> None:
+        """Frame `frame` (1-based) of shot `shot` (0-based), a shot whose frames go alone, starts:
+        its encode, its units one frame's not made yet."""
+        for index, each in enumerate(self.passes):
+            if each.shot == shot + 1 and each.alone:
+                with self._lock:
+                    for unit in each.units:
+                        unit.seconds = None
+                    self.frame_number = frame
+                    self.begin(index)
+                return
+        raise ValueError(f"no shot {shot + 1} whose frames go alone in the progress's passes")
 
     def tile(self, pass_: Literal["encode", "decode"], done: int, total: int) -> None:
         """A tiled pass has made `done` of its `total` tiles (0 before the first). The last is
@@ -530,7 +597,7 @@ class Progress:
                 line(f"tile 1/{len(decode)}", "decoding"), f"decoding, tile 1 of {len(decode)}"
             )
         else:
-            self._say(*self._decoding(0, current.frames))
+            self._say(*self._decoding(0, current.decoded))
 
     def decoded(
         self, written: int, total: int, frame: npt.NDArray[np.float32] | None = None
@@ -596,6 +663,7 @@ class Progress:
             made = self.made[each.kind]
             made[0] += each.seconds
             made[1] += each.weight
+        self.count_made += len(pending)
         self.mark = moment
 
     def _say(self, step: str, what: str, frame: npt.NDArray[np.float32] | None = None) -> None:
@@ -610,12 +678,15 @@ class Progress:
 
     def _text(self) -> str:
         """The node's two lines: where the run is, its shot (or picture) where there are several,
-        its run where there are several, the unit and what it does, never trimmed; then the time,
+        its run where there are several, or its frame and their count where its frames go alone
+        ("frame 12/118"), the unit and what it does, never trimmed; then the time,
         or, while a wait on the GPU is past its bound, that the GPU is not answering and for how
         long (the console has the library's own line and the way out)."""
         current = self.passes[self.pass_]
         place = f"{current.noun} {current.shot}/{current.of}" if current.of > 1 else None
         run = f"run {current.run}/{current.runs}" if current.runs > 1 else None
+        if current.alone:
+            run = f"frame {self.frame_number}/{current.frames}"
         lasted = waiting.longest() if waiting.stalled() else None
         if lasted is not None:
             second = f"GPU not answering for {max(1, int(wall(lasted) // 60))} min"
@@ -638,7 +709,10 @@ class Progress:
         with no estimate says nothing. The unit is a tile, a window or an untiled decode, the
         wait a part of it (waiting.py)."""
         current = self.passes[self.pass_]
-        name = f"{current.label}: {self.what}"
+        label = current.label
+        if current.alone:
+            label += f", frame {self.frame_number} of {current.frames}"
+        name = f"{label}: {self.what}"
         coming = next((each for each in current.units if each.seconds is None), None)
         estimate = None
         if coming is not None and self.made[coming.kind][1] > 0:

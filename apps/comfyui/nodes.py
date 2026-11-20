@@ -83,7 +83,7 @@ from seedvr2x.passes import Plan
 from seedvr2x.shot_pass import NonFinite
 from seedvr2x.shot_plan import HOST_RESIDENT, PHASES, Peaks
 from seedvr2x.shot_plan import plan as shot_plan
-from seedvr2x.shotruns import QUALITY, shot_runs
+from seedvr2x.shotruns import QUALITY, each_frame, planned_shots, shot_runs
 from seedvr2x.shots import Shot
 from seedvr2x.weights import Architecture
 
@@ -379,7 +379,8 @@ def _window_input() -> Any:
         optional=True,
         tooltip="Optional: connect a seedvr2x Window Length node to set the longest stretch of"
         " the clip the model works on at once. Unconnected, the plan chooses the longest that"
-        " fits the card.",
+        " fits the card. Leave it unconnected at quality deghost, where each frame is upscaled on"
+        " its own.",
     )
 
 
@@ -427,6 +428,12 @@ def _quality_input() -> Any:
         # 6 of 8, a measure the user's eyes contradict), so what was measured (closer) and what
         # the eye sees (sharper: the user, stepping a dark animation, 2026-11-08) are said apart,
         # neither from the other; what enhanced does to it is unmeasured, so it is not said.
+        # deghost (DESIGN.md, Each frame on its own): each frame alone in a latent of its own, every
+        # frame from the shot's noise; no ghosts where the model blends the drawings a latent packs
+        # (at standard a group's first frame carried about a quarter of the later frames' lines, on
+        # six shots of an animated episode), about twice standard's time over an episode, small
+        # details held still redrawn at every frame (a ticket's text), the users' guidance taking
+        # it where a clip at maximum still ghosts, nothing measured on live action.
         tooltip="How many times the model runs over each shot. standard: once. The model packs a"
         " shot's frames in groups of 4 and rebuilds the last of each group closest to the"
         " original, so at standard one frame in four comes out closer to the original than the"
@@ -436,7 +443,11 @@ def _quality_input() -> Any:
         " a run where it is rebuilt closest to the original."
         " The result has sharper lines and less flicker where there is motion, and changes little"
         " on a still shot. It takes 2 (enhanced) or 4 (maximum) times as long as standard, and no"
-        " more memory.",
+        " more memory."
+        " deghost: each frame redrawn on its own, so that fast scenes don't ghost (at the other"
+        " levels the model blends the drawings a group of 4 frames packs). It takes about twice"
+        " as long as standard, and fine details that stay still may change from frame to frame."
+        " For animation, once a short clip at maximum still ghosts; not measured on live action.",
     )
 
 
@@ -728,20 +739,27 @@ CutsType = io.Custom("SEEDVR2X_CUTS")
 
 
 def clip_planner(
-    settings: plans.Settings, target: tuple[int, int], cuts: Sequence[Shot], held_frames: int
+    settings: plans.Settings,
+    target: tuple[int, int],
+    cuts: Sequence[Shot],
+    held_frames: int,
+    quality: str = plans.QUALITY_DEFAULT,
 ) -> models_module.Planner[ClipPlan]:
     """The planner of a clip cut into `cuts` and resized to `target`, streamed (stream.py): the
     command line's plan (shot_plan.plan, its windows in files and a tiled pass's scratch beyond the
     plan's allowance in a file) with the settings' pins and colour correction, the plan made once
     for the longest shot's windows, `held_frames` (the bytes of frames the pass holds on their way:
     stream.held_bytes) taken off the memory the host has available first; and what it asks of the
-    card, its largest phase (Peaks.need: a VAE pass with the room it is held to)."""
+    card, its largest phase (Peaks.need: a VAE pass with the room it is held to). At a `quality`
+    that takes each frame alone (deghost), the plan is a frame's (shotruns.planned_shots), as
+    clip.plan makes it."""
+    planned = planned_shots(cuts, quality)
 
     def planner(
         reading: Reading, host: int | None, architecture: Architecture, held: bool
     ) -> models_module.Planned[ClipPlan]:
         made, expected = _stream_plan(
-            reading, target, cuts, settings, host, architecture, held, held_frames
+            reading, target, planned, settings, host, architecture, held, held_frames
         )
         peak = max(expected.need(phase) for phase in PHASES)
         needs = models_module.Needs(peak, expected.free - expected.budget, expected.reading)
@@ -783,6 +801,13 @@ def _stream_plan(
         dit_model=architecture,
         held=held,
     )
+
+
+def _again(settings: plans.Settings, quality: str) -> bool:
+    """Whether a shot's frames are read again, from a copy of them where they come from a file: for
+    the colour correction and the later runs; never where each frame goes alone (deghost), whose
+    frame is held in memory for its correction (stream.upscale_shot)."""
+    return not each_frame(quality) and (settings.split or QUALITY[quality] > 1)
 
 
 def _cut_list(cuts: object, frames_: int) -> tuple[Shot, ...]:
@@ -907,6 +932,10 @@ class UpscaleVideo(io.ComfyNode):
             if quality not in plans.LEVELS:
                 # A combo is held to its options at queue time; a link may carry anything.
                 raise words.Refused(words.level_refused(quality, plans.LEVELS))
+            if window is not None and each_frame(quality):
+                # A frame alone is one latent (DESIGN.md, Each frame on its own), as the command
+                # line refuses --window at the level, before anything is read or loaded.
+                raise words.Refused(words.window_alone(quality))
             settings = _settings(
                 window=window,
                 encode_tile=encode_tile,
@@ -932,8 +961,8 @@ class UpscaleVideo(io.ComfyNode):
             _check_seed(settings, shot_list)
             target = _target(width, height, resolution, picture=False, aspect=source.aspect)
             out_height, out_width = frames.output_size(target)
-            held = stream.held_bytes((width, height), (out_width, out_height))
-            planner = clip_planner(settings, target, shot_list, held)
+            held = stream.held_bytes((width, height), (out_width, out_height), quality)
+            planner = clip_planner(settings, target, shot_list, held, quality)
             size = words.ClipSize(count, held, streamed=source.file)
 
             started = time.monotonic()
@@ -972,12 +1001,12 @@ class UpscaleVideo(io.ComfyNode):
                     (out_width, out_height),
                     frames.padded_size(target),
                     quality,
-                    settings.split or QUALITY[quality] > 1,
+                    _again(settings, quality),
                     made,
                     source.file,
                 )
                 if plan_only:
-                    show(progress.status(plans.clip_line(made), progress.IN_THE_CONSOLE))
+                    show(progress.status(plans.clip_line(made, quality), progress.IN_THE_CONSOLE))
                     return _plan_only()
                 moving = progress.Progress(
                     progress.clip_passes(
@@ -987,8 +1016,9 @@ class UpscaleVideo(io.ComfyNode):
                         made.encode_tiles,
                         made.decode_tiles,
                         QUALITY[quality],
+                        alone=each_frame(quality),
                     ),
-                    progress.CLIP,
+                    progress.ALONE if each_frame(quality) else progress.CLIP,
                     ProgressBar(progress.BAR),
                     show,
                 )
@@ -1074,14 +1104,16 @@ class UpscaleVideo(io.ComfyNode):
         the plan's windows and tiles, its frames written to the file. The bar, the text, the
         preview (the newest frame a run keeps) and ComfyUI's Cancel follow the pass's steps and its
         tiles, and each run's start (several at enhanced and maximum; the shot is its number
-        `number`, from 1): what is told the library only observes."""
+        `number`, from 1), or each frame's at deghost: what is told the library only observes."""
         level = QUALITY[quality]
-        if len(shot_runs(Shot(0, shot.frames), level)) == 1:
+        if len(shot_runs(Shot(0, shot.frames), level)) == 1 and not each_frame(quality):
             moving.run(number - 1, 1)
 
         def step(stage: stream.Stage, done: int, count: int) -> None:
             if stage == "run":
                 moving.run(number - 1, done)
+            elif stage == "frame":
+                moving.frame(number - 1, done)
             elif stage == "encode":
                 moving.encoded()
             elif stage == "window":
@@ -1098,7 +1130,7 @@ class UpscaleVideo(io.ComfyNode):
             made.scratch_allowance,
         )
         try:
-            with opened.shot(shot, settings.split or level > 1, workspace) as shot_frames:
+            with opened.shot(shot, _again(settings, quality), workspace) as shot_frames:
                 stream.upscale_shot(
                     loaded,
                     shot_frames,

@@ -493,6 +493,8 @@ def test_what_the_nodes_refuse_themselves() -> None:
         words.cuts_wrong(100, 120),
         words.crop_unread(),
         words.stream_unholdable("subtitle stream 2 (hdmv_pgs_subtitle)", "no Matroska mapping"),
+        words.Refused(words.level_refused("ultra", plans.LEVELS)),
+        words.Refused(words.window_alone("deghost")),
     ):
         assert isinstance(refused, words.Refused) and "--" not in str(refused)
     assert "the 2.00 GiB that ComfyUI's models still use" in str(
@@ -519,6 +521,16 @@ def test_what_the_nodes_refuse_themselves() -> None:
         unholdable
     )
     assert "(no Matroska mapping)" in unholdable and "load that file instead" in unholdable
+    # A level a link brings that the widget doesn't offer: the four the nodes have, deghost among
+    # them, with no word of a level kept from them.
+    assert words.level_refused("ultra", plans.LEVELS) == (
+        "quality 'ultra': must be one of standard, enhanced, maximum, deghost."
+    )
+    # A window length linked at deghost: there is none to set, each frame being upscaled on its
+    # own, as the command line refuses its --window there; the way out, in the node's terms.
+    alone = words.window_alone("deghost")
+    assert "each frame is upscaled on its own, so there is no window to set" in alone
+    assert alone.endswith("Unwire the window length input.") and "latent" not in alone
 
 
 # ---- The library's own refusals, from its real code paths ----------------------------------------

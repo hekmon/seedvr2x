@@ -46,10 +46,15 @@ def fresh(machine: StandIn) -> models.Models:  # type: ignore[name-defined]
     return standin_models(machine.vae_models, [], held=False)  # type: ignore[return-value]
 
 
-def planned_clip(machine: StandIn, settings: plans.Settings, cuts: tuple[Shot, ...] | int):  # type: ignore[no-untyped-def]
+def planned_clip(  # type: ignore[no-untyped-def]
+    machine: StandIn,
+    settings: plans.Settings,
+    cuts: tuple[Shot, ...] | int,
+    quality: str = "standard",
+):
     reading = Reading(32 * GIB, None, 32 * GIB, False)
     shot_list = [Shot(0, cuts)] if isinstance(cuts, int) else cuts
-    made = nodes.clip_planner(settings, TARGET, shot_list, 0)(
+    made = nodes.clip_planner(settings, TARGET, shot_list, 0, quality)(
         reading, machine.host_bytes, machine.dit_format, True
     )
     return made.plan[0]
@@ -410,7 +415,7 @@ def libraries_clip(
     """What the library gives each shot alone (clip.upscale, its seed the shot's by shots.Shot),
     the shots' frames one after the other."""
     settings = plans.Settings(seed=seed, **plan)
-    made = planned_clip(machine, settings, cuts)
+    made = planned_clip(machine, settings, cuts, quality)
     alone = fresh(machine)
     parts = [
         clip.upscale(
@@ -488,17 +493,83 @@ def test_a_level_the_node_does_not_have_is_refused_before_anything_loads(
             handle(tmp_path), plans.Settings(window=5), frames, RESOLUTION, quality="ultra"
         )
     assert len(machine.loads) == loads
-    # The library's deghost, which the nodes don't offer yet (plans.LEVELS): refused in the
-    # nodes' words, the levels they have named, before anything loads.
+
+
+@pytest.mark.parametrize(
+    "cuts",
+    [(Shot(0, 9),), (Shot(0, 4), Shot(4, 9)), (Shot(0, 1), Shot(1, 6), Shot(6, 9))],
+    ids=["1 shot", "2 shots", "a shot of 1 frame"],
+)
+def test_create_videos_frames_at_deghost_are_the_librarys_clip_each_frame_alone(
+    machine: StandIn, tmp_path, cuts: tuple[Shot, ...]
+) -> None:
+    frames = pictures(9)
+    out, text = upscale_video(
+        handle(tmp_path),
+        plans.Settings(seed=4),
+        frames,
+        RESOLUTION,
+        "1",
+        cuts=cuts,
+        quality="deghost",
+    )
+    expected = libraries_clip(machine, frames, cuts, 4, "deghost")
+    assert out.tobytes() == master_of(expected).tobytes()
+    # Not the shot's pass: the level reached it.
+    standard, _ = run_shots(machine, tmp_path, frames, cuts, seed=4)
+    assert out.tobytes() != standard.tobytes()
+    lines = text.splitlines()
+    assert (
+        "quality: deghost, each frame of a shot upscaled on its own, from the shot's noise, so"
+        " that fast scenes don't ghost: about twice standard's time, and a frame's memory"
+    ) in lines
+    assert "window length: none, each frame upscaled on its own" in lines
+    if len(cuts) == 1:
+        assert lines[0].endswith(": each frame upscaled on its own")
+    else:
+        assert lines[1] == f"shot 1: frames 0 to {cuts[0].end - 1} ({cuts[0].frames} frames):" + (
+            " each frame upscaled on its own"
+        )
+    assert "window of the model" not in text and "windows of the model" not in text
+
+
+def test_the_plan_at_deghost_is_a_frames(machine: StandIn, tmp_path) -> None:
+    """The plan of a frame (shotruns.planned_shots, as clip.plan makes it), whatever the shots'
+    lengths: its passes and pins are a frame's, so that a long shot plans as a short one."""
+    settings = plans.Settings()
+    one = planned_clip(machine, settings, (Shot(0, 1),))
+    for cuts in ((Shot(0, 400),), (Shot(0, 9), Shot(9, 400))):
+        alone = planned_clip(machine, settings, cuts, "deghost")
+        assert alone == one
+        assert planned_clip(machine, settings, cuts) != one
+
+
+def test_a_window_length_linked_at_deghost_is_refused_before_anything_loads(
+    machine: StandIn, tmp_path
+) -> None:
+    frames = pictures(9)
+    upscale_video(handle(tmp_path), plans.Settings(window=5), frames, RESOLUTION)
+    loads = len(machine.loads)
     with pytest.raises(words.Refused) as caught:
         upscale_video(
             handle(tmp_path), plans.Settings(window=5), frames, RESOLUTION, quality="deghost"
         )
     assert str(caught.value) == (
-        "quality 'deghost', each frame upscaled on its own, isn't in these nodes yet;"
-        " seedvr2x's command line has it. Here, choose standard, enhanced or maximum."
+        "window length: at quality deghost each frame is upscaled on its own, so there is no"
+        " window to set. Unwire the window length input."
     )
     assert "--" not in str(caught.value)
+    assert len(machine.loads) == loads
+    # Plan only too: nothing is planned.
+    with pytest.raises(words.Refused, match="no window to set"):
+        upscale_video(
+            handle(tmp_path),
+            plans.Settings(window=5),
+            frames,
+            RESOLUTION,
+            plan_only=True,
+            quality="deghost",
+        )
     assert len(machine.loads) == loads
 
 

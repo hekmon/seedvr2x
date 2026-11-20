@@ -129,6 +129,39 @@ def test_cancel_between_a_clips_runs_frees_the_card_and_makes_no_run_after(
     assert out.shape == (5, 3, 48, 80)
 
 
+def test_cancel_between_a_clips_frames_at_deghost_frees_the_card_and_makes_no_frame_after(
+    machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = handle(tmp_path)
+    windows: list[int] = []
+    sample = model.sample
+
+    def counting(*args, **kwargs):  # type: ignore[no-untyped-def]
+        windows.append(1)
+        return sample(*args, **kwargs)
+
+    monkeypatch.setattr(model, "sample", counting)
+
+    # The node's text as the third frame starts ("frame 3/9 · encoding"), said before the bar is
+    # moved for it: Cancel as that update is made, between the second frame and the third.
+    def hook(value: float) -> None:
+        instance = server.PromptServer.instance
+        assert instance is not None
+        if "frame 3/9" in instance.texts[-1][0]:
+            management.interrupt_current_processing()
+
+    ProgressBar.on_update = hook
+    with pytest.raises(management.InterruptProcessingException):
+        upscale_video(h, plans.Settings(), clip_frames(9), RESOLUTION, "1", quality="deghost")
+    freed(machine, h)
+    # The first two frames' windows, a window of one frame each: none of the third's.
+    assert len(windows) == 2
+    # The flag was cleared as it raised: the next run goes through.
+    ProgressBar.on_update = None
+    out, _ = upscale_video(h, plans.Settings(), clip_frames(3), RESOLUTION, "1", quality="deghost")
+    assert out.shape == (3, 3, 48, 80)
+
+
 def test_an_error_in_the_pass_frees_the_card_and_is_not_swallowed(
     machine: StandIn, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

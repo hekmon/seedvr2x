@@ -126,10 +126,10 @@ WINDOW_FRAMES_STEP = 4
 # Upscale Video's quality, the library's levels (shotruns.QUALITY): standard, the default, runs each
 # shot once, as the command line's --quality does.
 QUALITY_DEFAULT = "standard"
-# The levels the nodes offer: the library's that pack a shot's frames in its latents. Deghost,
-# each frame alone, is not offered yet (DESIGN.md, Each frame on its own: the nodes will offer it,
-# with no deband, their refusal of it gone).
-LEVELS = tuple(level for level in shotruns.QUALITY if not shotruns.each_frame(level))
+# The levels the nodes offer, the library's four: standard, enhanced and maximum, which pack a
+# shot's frames in its latents, and deghost, each frame alone, with no deband (DESIGN.md, Each frame
+# on its own: none is planned for the nodes).
+LEVELS = tuple(shotruns.QUALITY)
 # The colour correction, a BOOLEAN: on is split, off none (the user, 2026-11-05).
 CORRECTIONS = ("split", "none")
 # The command line's default seed, and the highest seed it takes for a shot at frame 0, which a
@@ -605,17 +605,25 @@ def picture_text(
     return "\n".join(lines)
 
 
-def _shot_line(number: int, shot: shots.Shot, window: int | None) -> str:
+# What the plan says of the windows where each frame goes alone (shotruns.each_frame: deghost).
+EACH_ALONE = "each frame upscaled on its own"
+
+
+def _shot_line(number: int, shot: shots.Shot, window: int | None, alone: bool = False) -> str:
     """One shot of a clip in the plan's text: where it is in the clip (frames counted from 0, the
     first and the last of it) and its windows of the model, by the layout the pass runs
-    (shots.shot_layout, in frames as seedvr2x Window Length sets them)."""
-    layout = shots.shot_layout(shot.frames, window)
-    longest = max(end - start for start, end in layout)
-    how = (
-        "the whole shot in one window of the model"
-        if len(layout) == 1
-        else f"{len(layout)} windows of the model, the longest {_frames(longest)}"
-    )
+    (shots.shot_layout, in frames as seedvr2x Window Length sets them), or, where each frame goes
+    alone (`alone`), that: the plan is then a frame's, its window one piece of the model's work."""
+    if alone:
+        how = EACH_ALONE
+    else:
+        layout = shots.shot_layout(shot.frames, window)
+        longest = max(end - start for start, end in layout)
+        how = (
+            "the whole shot in one window of the model"
+            if len(layout) == 1
+            else f"{len(layout)} windows of the model, the longest {_frames(longest)}"
+        )
     return f"shot {number}: frames {shot.start} to {shot.end - 1} ({shot.frames} frames): {how}"
 
 
@@ -623,9 +631,16 @@ def _quality(cuts: Sequence[shots.Shot], quality: str) -> str:
     """The quality level's line in a clip's plan: the level, the runs of each shot and in all (a
     shot too short for a run's first frame has no such run, shotruns.shot_runs), and what they
     cost, which is time alone (the runs are made one after the other, the plan the same:
-    clip.plan)."""
+    clip.plan). At deghost, each frame alone (shotruns.each_frame), what it is for and costs
+    (DESIGN.md, Each frame on its own): about twice standard's time over an episode, the plan a
+    frame's."""
     label = LABELS["quality"]
     per_shot = shotruns.QUALITY[quality]
+    if shotruns.each_frame(quality):
+        return (
+            f"{label}: {quality}, each frame of a shot upscaled on its own, from the shot's noise,"
+            " so that fast scenes don't ghost: about twice standard's time, and a frame's memory"
+        )
     if per_shot == 1:
         return f"{label}: {quality}, the model runs once over each shot"
     runs = sum(len(shotruns.shot_runs(each, per_shot)) for each in cuts)
@@ -657,11 +672,13 @@ def clip_text(
     """The plan of a clip, the frames of its shots each in sliding windows, in the same words: a
     clip of one shot says its windows in its first line, a clip of several a line for each shot.
     `cuts` are the shots, frames [start, end) covering the clip; `quality` the level
-    (shotruns.QUALITY), said with the runs it makes. The clip is streamed (stream.py): `streamed`
-    the bytes of frames the pass holds on their way (stream.held_bytes), `from_file` whether it
-    is read from its file or from frames ComfyUI holds whole."""
+    (shotruns.QUALITY), said with the runs it makes; at deghost (shotruns.each_frame), each frame
+    upscaled on its own said where the windows are, the plan being a frame's. The clip is streamed
+    (stream.py): `streamed` the bytes of frames the pass holds on their way (stream.held_bytes),
+    `from_file` whether it is read from its file or from frames ComfyUI holds whole."""
     frames = sum(each.frames for each in cuts)
     inputs = frames * source[0] * source[1] * 3 * 4
+    alone = shotruns.each_frame(quality)
     counts = [
         f"this run needs about {gib(expected.host + streamed)}, whatever the video's length:"
         f" {gib(streamed)} for the frames on their way, read, decoded and written, and"
@@ -680,24 +697,30 @@ def clip_text(
     first = f"plan{' (plan only)' if room.plan_only else ''}: a clip of {frames} frames"
     first += f" {source[0]}x{source[1]} to {output[0]}x{output[1]}"
     first += f" ({frames_.factor_said(source, output)}, resolution {resolution})"
-    if len(cuts) == 1:
+    per_shot: list[str] = []
+    if len(cuts) == 1 and alone:
+        first += f": {EACH_ALONE}"
+    elif len(cuts) == 1:
         windows = len(shots.shot_layout(cuts[0].frames, plan.window))
         first += ": " + (
             "the whole clip in one window of the model"
             if windows == 1
             else f"{windows} windows of the model, the longest {_frames(expected.window)}"
         )
-        per_shot: list[str] = []
     else:
         first += f", in {len(cuts)} shots, each upscaled on its own"
-        per_shot = [_shot_line(number, each, plan.window) for number, each in enumerate(cuts, 1)]
+        per_shot = [
+            _shot_line(number, each, plan.window, alone) for number, each in enumerate(cuts, 1)
+        ]
     lines = [
         first,
         *per_shot,
         *notes,
         *_room(room, expected.reading, expected.reserve_taken()),
         *_common(dit, plan.swapped, settings),
-        _became(
+        f"{LABELS['window']}: none, {EACH_ALONE}"
+        if alone
+        else _became(
             "window",
             settings.window is not None,
             "the whole clip in one window"
@@ -882,10 +905,13 @@ def picture_line(tiles: PictureTiles, swapped: int) -> str:
     )
 
 
-def clip_line(plan: Plan) -> str:
+def clip_line(plan: Plan, quality: str = QUALITY_DEFAULT) -> str:
     """The first line a clip node with plan only shows: "plan: window 41 frames \u00b7 decode
-    1088 px \u00b7 encode 1024 px" (progress.IN_THE_CONSOLE under it)."""
+    1088 px \u00b7 encode 1024 px" (progress.IN_THE_CONSOLE under it); at deghost, each frame
+    alone, "plan: each frame alone \u00b7 decode whole \u00b7 encode whole"."""
     window = "one window" if plan.window is None else f"window {_frames(plan.window)}"
+    if shotruns.each_frame(quality):
+        window = "each frame alone"
     return _plan_line(
         [
             window,

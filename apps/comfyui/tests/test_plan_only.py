@@ -88,6 +88,25 @@ def test_a_clip_plan_only_says_the_plan_and_blocks_the_frames(machine: StandIn, 
     nothing_was_done(machine)
 
 
+def test_a_clip_plan_only_at_deghost_says_each_frame_alone(machine: StandIn, tmp_path) -> None:
+    blocked, text = upscale_video(
+        handle(tmp_path), SETTINGS, pictures(33), RESOLUTION, "3", plan_only=True, quality="deghost"
+    )
+    assert isinstance(blocked, ExecutionBlocker) and blocked.message is None
+    assert "(plan only): a clip of 33 frames" in text
+    assert text.splitlines()[0].endswith(": each frame upscaled on its own")
+    assert "quality: deghost, each frame of a shot upscaled on its own" in text
+    assert "window length: none, each frame upscaled on its own" in text
+    instance = server.PromptServer.instance
+    assert instance is not None
+    assert [each for each, _ in instance.texts] == [
+        "planning\u2026",
+        "plan: each frame alone \u00b7 decode whole \u00b7 encode whole\n"
+        + progress.IN_THE_CONSOLE,
+    ]
+    nothing_was_done(machine)
+
+
 def test_the_plan_only_text_is_the_text_of_the_run(machine: StandIn, tmp_path) -> None:
     """The plan a run says is the plan only's, but for the header and the room's line: the
     settings and what they came to are the same."""

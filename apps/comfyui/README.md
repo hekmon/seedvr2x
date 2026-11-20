@@ -212,13 +212,15 @@ The node shows how far it has got, in what ComfyUI gives a node:
   | a clip, the model | `shot 2/4 · window 2/3 · upscaling` (one window: `shot 2/4 · upscaling`) | `~38 min left` |
   | a clip, decoding | `shot 2/4 · frames 60/118 · decoding`, `shot 2/4 · tile 2/4 · decoding` | `~12 min left` |
   | enhanced or maximum | `run 3/4 · window 2/3 · upscaling`, and with several shots `shot 2/4 · run 3/4 · window 2/3 · upscaling` | `~3 min left` |
+  | deghost, each frame on its own | `frame 12/118 · upscaling`, and with several shots `shot 2/4 · frame 12/118 · decoding`, `shot 2/4 · frame 12/118 · tile 3/6 · encoding` | `~1 h 7 min left` |
   | a picture of a batch | `picture 3/8 · tile 2/4 · encoding`, `picture 3/8 · upscaling`, `picture 3/8 · tile 1/4 · decoding` | `~45 s left` |
   | the GPU does not answer | the line it was on | `GPU not answering for 3 min` |
-  | plan only | `plan: window 41 frames · decode 1088 px · encode 1024 px`, `plan: encode 1024 px · decode 1088 px` | `whole plan in the console` |
+  | plan only | `plan: window 41 frames · decode 1088 px · encode 1024 px`, `plan: each frame alone · decode whole · encode whole`, `plan: encode 1024 px · decode 1088 px` | `whole plan in the console` |
   | finished | `480 frames in 4 min 32 s`, `8 pictures in 41 s` | |
   | seedvr2x Cuts | `scanning 64/120 frames`, `2 shots · 1 possible cut below 0.30`, `1 shot · no possible cut` | |
 
-  A clip of one shot has no shot part, and a run part is there only at enhanced and maximum. The
+  A clip of one shot has no shot part, a run part is there only at enhanced and maximum, and a
+  frame part only at deghost, where a frame's decode is one frame, with no frames part. The
   time is rough: the time so far in seconds under a minute, then in whole minutes (whole hours
   past 1,000 minutes, whole days past 1,000 hours); the time left in seconds under a minute,
   whole minutes under an hour, then hours and minutes. A download's or a reading's time left is

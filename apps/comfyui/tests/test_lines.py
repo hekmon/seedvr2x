@@ -52,9 +52,11 @@ def run(
     windows: int = 3,
     decode: int = 4,
     frames: int = 118,
+    alone: bool = False,
 ) -> tuple[progress.Progress, Clock, list[str]]:
     """A progress over one pass the line counts as given, its units unweighted: the shot (or
-    picture) `shot` of `of`, the run `run_` of `runs`, with `encode` and `decode` tiles."""
+    picture) `shot` of `of`, the run `run_` of `runs`, with `encode` and `decode` tiles; with
+    `alone`, a shot of `frames` frames each upscaled on its own (deghost), begun at its frame 1."""
     unit = progress.Unit
     one = progress.Pass(
         "label",
@@ -67,11 +69,15 @@ def run(
         of=of,
         runs=runs,
         noun=noun,
+        alone=alone,
     )
     clock, shown = Clock(), []
     bar = ProgressBar(progress.BAR)
     p = progress.Progress([one], progress.CLIP, bar, shown.append, clock)
-    p.begin(0)
+    if alone:
+        p.frame(shot - 1, 1)
+    else:
+        p.begin(0)
     return p, clock, shown
 
 
@@ -136,6 +142,36 @@ def test_a_clip_of_one_shot_has_no_shot_part_and_several_runs_have_a_run_part() 
     assert shown[-1] == f"shot 2/4{DOT}run 3/4{DOT}window 1/3{DOT}upscaling\n~3 min left"
     p.tile("decode", 0, 456)
     assert shown[-1] == f"shot 2/4{DOT}run 3/4{DOT}tile 1/456{DOT}decoding\n~3 min left"
+
+
+def test_upscale_video_at_deghost_shows_the_shot_the_frame_and_the_action_over_the_time() -> None:
+    """Each frame alone (deghost): the frame and its count where a run would be, then the unit
+    and the action; a frame's decode is one frame, so no frames part."""
+    p, clock, shown = run(alone=True, windows=1, decode=1)
+    assert shown[-1] == (f"shot 2/4{DOT}frame 1/118{DOT}encoding\n0 s {ESTIMATING}")
+    p.tile("encode", 2, 6)
+    assert shown[-1] == f"shot 2/4{DOT}frame 1/118{DOT}tile 3/6{DOT}encoding\n0 s {ESTIMATING}"
+    clock.t += 65.0
+    p.encoded()
+    assert shown[-1] == f"shot 2/4{DOT}frame 1/118{DOT}upscaling\n1 min {ESTIMATING}"
+    left_in(p, 38 * 60.0)
+    p.window(1)
+    assert shown[-1] == f"shot 2/4{DOT}frame 1/118{DOT}decoding\n~38 min left"
+    p.decoded(1, 1)
+    assert shown[-1] == f"shot 2/4{DOT}frame 1/118{DOT}decoding\n~38 min left"
+    p.frame(1, 12)
+    assert where(shown[-1]) == f"shot 2/4{DOT}frame 12/118{DOT}encoding"
+    p.encoded()
+    assert where(shown[-1]) == f"shot 2/4{DOT}frame 12/118{DOT}upscaling"
+    # A clip of one shot has no shot part, and a tiled decode tells its tiles.
+    one, _, shown = run(alone=True, shot=1, of=1, windows=1, decode=4)
+    one.encoded()
+    one.window(1)
+    assert where(shown[-1]) == f"frame 1/118{DOT}tile 1/4{DOT}decoding"
+    one.tile("decode", 1, 4)
+    assert where(shown[-1]) == f"frame 1/118{DOT}tile 2/4{DOT}decoding"
+    for text in shown:
+        two_lines(text)
 
 
 def test_the_end_of_a_clip_and_of_a_batch_is_one_line() -> None:
@@ -383,6 +419,29 @@ def test_no_status_of_a_run_passes_two_lines_whatever_the_numbers() -> None:
         first, second = two_lines(shown_big[-2])
         assert first == f"{noun} 1234/5678{DOT}run 4/4{DOT}frames 23456/23456{DOT}decoding"
         assert second == "~10 h 7 min left"
+    # Each frame alone (deghost): thousands of shots and tens of thousands of frames.
+    deghost, clock, shown = run(
+        shot=1234, of=5678, alone=True, encode=456, windows=1, decode=456, frames=23_456
+    )
+    clock.t += 4 * 86_400.0
+    left_in(deghost, 10 * 3600.0 + 7 * 60)
+    deghost.frame(1233, 12_345)
+    deghost.tile("encode", 122, 456)
+    deghost.encoded()
+    deghost.window(1)
+    deghost.tile("decode", 455, 456)
+    deghost.decoded(1, 1)
+    deghost.frame(1233, 23_456)
+    deghost.finish("23456 frames")
+    for text in shown[:-1]:
+        two_lines(text)
+    assert where(shown[-2]) == f"shot 1234/5678{DOT}frame 23456/23456{DOT}encoding"
+    first, second = two_lines(shown[-4])
+    assert first == f"shot 1234/5678{DOT}frame 12345/23456{DOT}tile 456/456{DOT}decoding"
+    assert second == "~10 h 7 min left"
+    # The frame's decode made: one frame, no frames part.
+    assert where(shown[-3]) == f"shot 1234/5678{DOT}frame 12345/23456{DOT}decoding"
+    one_line(shown[-1])
     # Days so far, before a window is measured, are said in one whole unit.
     early, clock, shown_early = run(shot=1, of=1)
     clock.t += 4 * 86_400.0

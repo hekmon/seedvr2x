@@ -436,9 +436,9 @@ def test_quality_is_a_combo_of_the_levels_on_upscale_video_alone_in_a_users_word
     assert "quality" not in schema_inputs(nodes.UpscaleImage)
     quality = schema_inputs(nodes.UpscaleVideo)["quality"]
     assert quality.io_type == "COMBO" and quality.display_name == "quality"
-    # The library's levels but deghost, which the nodes don't offer yet (plans.LEVELS).
-    assert quality.options == list(plans.LEVELS) == ["standard", "enhanced", "maximum"]
-    assert [level for level in QUALITY if level not in plans.LEVELS] == ["deghost"]
+    # The library's four levels (plans.LEVELS), deghost with no deband.
+    assert quality.options == list(plans.LEVELS) == list(QUALITY)
+    assert quality.options == ["standard", "enhanced", "maximum", "deghost"]
     assert quality.default == "standard" and not quality.optional
     # MANUAL.md's section, in a ComfyUI user's words: the runs, each frame from the run that
     # rebuilds it best, the gain where there is motion, none on a still shot, the cost in time;
@@ -456,8 +456,18 @@ def test_quality_is_a_combo_of_the_levels_on_upscale_video_alone_in_a_users_word
         "sharper lines and less flicker where there is motion",
         "changes little on a still shot",
         "2 (enhanced) or 4 (maximum) times as long as standard, and no more memory",
+        # deghost (DESIGN.md, Each frame on its own): what it does and why, its time, what it
+        # changes, when to take it, what was not measured.
+        "deghost: each frame redrawn on its own, so that fast scenes don't ghost",
+        "at the other levels the model blends the drawings a group of 4 frames packs",
+        "about twice as long as standard",
+        "fine details that stay still may change from frame to frame",
+        "For animation, once a short clip at maximum still ghosts",
+        "not measured on live action",
     ):
         assert point in said, point
+    # No figure DESIGN.md doesn't hold, and no deband: none is planned for the nodes.
+    assert "1.8" not in said and "deband" not in said.lower()
     assert plain(said) and "--" not in said
     # What enhanced does to the pulse is unmeasured: nothing said of it.
     assert said.count("pulse") == 1
