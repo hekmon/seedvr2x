@@ -515,7 +515,9 @@ seedvr2x/                the repository
       alone). Finished, the release is completed then, in the same poll and Cancel check (the
       models held freed), the mark cleared and the run goes on; not finished, the run is
       refused with nothing read, saying that the card is still busy with an earlier run's
-      last work, to wait and run again, or to restart ComfyUI if it doesn't finish. A Cancel
+      last work, to wait and run again, or to restart ComfyUI if it doesn't finish. The Cuts
+      node is to settle and refuse the same way (decided on 2026-11-22: Allocator, A stall at
+      `deghost`). A Cancel
       during that release keeps the mark; a release on that card whose waits all completed,
       or a new process, clears it too. A card a CUDA error failed is never asked and never
       cleared: ComfyUI is restarted ([Allocator](#allocator), Windows itself). While one card
@@ -2754,7 +2756,12 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
     where the job's plan is a frame's, the calibration's passes over 5 and 13 frames keep
     their scratch in system memory (0.15 GiB at 13 frames of 1080p, four times that at 4K,
     given back with the calibration), as a packed level's plan keeps a short shot's, so that
-    each level is timed as its own plan would run it.
+    each level is timed as its own plan would run it. Built on 2026-11-22 (impl-fix-5):
+    `calibrate`'s `frame_plan`, set by `main._calibrated` where the job's level takes each
+    frame alone, allows those passes at least 13 padded frames' scratch (165,335,040 bytes
+    at 1080p, 656,547,840 at 4K), the frames alone keeping the plan's; no plan moves. What
+    it gives on a Windows drive under WSL2 is to measure, by a `--plan` at `deghost` on the
+    RTX 5090.
   - **The users' documents and the plan's line** lose "about 1.8 times": the plan prints each
     level's time on the card it runs on, right once the calibration is; the documents say
     about twice `standard`'s time, as measured on the 96 GB card and on the RTX 5090
@@ -4885,7 +4892,9 @@ run in one line, before the models load as after.
     kernel's "CUDA error: out of memory" among them (the context is lost: ComfyUI met it
     again), marks its card failed, per card and never cleared; every free on an error's way
     out asks the card first and frees nothing on a failed card, an interrupt during that
-    question still freeing. The nodes keep the error and the models, say that the graphics
+    question still freeing (since 2026-11-22 it neither asks nor frees on a card whose wait
+    was abandoned, and an interrupt of that question past its bound frees nothing: A stall
+    at `deghost`). The nodes keep the error and the models, say that the graphics
     card failed, with CUDA's line and the restart, on the node, at ERROR in ComfyUI's console
     and in its error, and refuse every later run, the Cuts node's too, with nothing read.
     The CLI and the server end their process on it, as before.
@@ -5041,7 +5050,8 @@ run in one line, before the models load as after.
   - The detector's close waited on the card outside the poll (`torch.cuda.synchronize`), and
     nothing tested its close on a failed card: mended on 2026-11-08 (impl-nodes-5), its wait
     through the poll, the Cuts node's Cancel its check; a wait an exception ends, or a failed
-    card, keeps its model (its weights, about 30 MB) for the process's life.
+    card, keeps its model (its weights, about 30 MB) for the process's life, and so, since
+    2026-11-22, does an error on a card whose wait was abandoned (A stall at `deghost`).
 - **The vendored RoPE's tables** (`vendor/models/dit_7b/rope.py:44`, an `lru_cache` of 128
   keyed by each block's rotary module and the window's shape, float16, 60 values a
   position), live since numz's wrapper went
@@ -5052,7 +5062,9 @@ run in one line, before the models load as after.
   `shot_pass.sample_windows` and `still.sampled`: 80 shots of many lengths held one shot's
   tables at most, the same bits) and where the DiT's work on a shot ends, a raise included
   (decided and built on 2026-11-07, impl-place-2: a 16 GB card's clip decode had found the
-  128 beside it, 11.27 MB kept into the VAE's phases, its 1.1 MiB over). A shot's windows
+  128 beside it, 11.27 MB kept into the VAE's phases, its 1.1 MiB over); a raise on a
+  failed card, or on one whose wait was abandoned, keeps them until the process ends or the
+  nodes' next run completes its release (A stall at `deghost`, below). A shot's windows
   share their shapes, and a table is made again from the same numbers. No VAE pass holds or
   counts one now: at every VAE phase's entry, after windows of 19 and of 7 latents, the card
   held the VAE's weights and 59,613,696 bytes beside them, under `peaks.DIT_BUFFERS`,
@@ -5205,8 +5217,9 @@ run in one line, before the models load as after.
     with the window), so the fit is kept for both.
   - The watcher's open points stay so: a main thread that answered the first stop and then
     hangs in that stop's own cleaning is not covered (the signals are ignored from the stop's
-    line on); the frame named is the innermost Python one; its NVML reading is card 0's
-    until GPU selection.
+    line on), though since 2026-11-22 its frees on the way out wait on no card whose wait was
+    abandoned (below); the frame named is the innermost Python one; its NVML reading is
+    card 0's until GPU selection.
 - **A stall at `deghost`, and the stop's cleaning** (impl-wsl2-8, 2026-11-22, the RTX 5090
   under WSL2, the episode on 2c22b10's code, whose waits and frees are main's): about 50
   minutes into the night's run, a wait in the DiT's poll never ended, the card at P8, 5% busy,
@@ -5225,6 +5238,17 @@ run in one line, before the models load as after.
   stall in a window once its wait has passed its bound, at every level; its test, a window
   whose wait never ends. A stall stopped before its wait passed its bound, or in a wait with
   none (the calibration's), leaves no card abandoned and takes a second stop, as before.
+  Built on 2026-11-22 (impl-fix-5): `model.unless_failed` became `model.unless_abandoned`,
+  which reads the abandoned mark a failed card carries too, and an interrupt of its own
+  question past its bound frees nothing; the detector's `__exit__` and
+  `compiling._on_the_device` on an error, and the Cuts node's emptying of torch's cache,
+  follow the same mark. A window whose wait never ends, at `standard` and at `deghost`, was
+  ended by one SIGTERM, or by Ctrl-C twice, with 143 or 130 (`tests/test_stop.py`'s modes
+  `window-stall` and `frame-stall`); on the code before, the process was still there 30 s
+  after the signal, in a second wait. The Cuts node still ran on a card whose wait was
+  abandoned, where the upscale nodes refuse a run until the card's work has finished
+  ([Repository and apps](#repository-and-apps), the nodes). Decided: it settles and refuses
+  as they do, to build with the nodes' next pass.
 
 ## Pause and resume
 
