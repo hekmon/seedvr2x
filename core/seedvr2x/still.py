@@ -106,9 +106,9 @@ def sampled(models: Models, latent: Tensor, seed: int) -> Tensor:
             out = sampling.window(models, noise, latent)
             del noise, latent
     finally:
-        # Never on a failed card: the tables' free would report the error again
-        # (model.unless_failed).
-        model.unless_failed(models.device, model.forget_rope_tables)
+        # Never on an abandoned card: its poll would wait on a card that has not answered, a
+        # failed one's free report the error again (model.unless_abandoned).
+        model.unless_abandoned(models.device, model.forget_rope_tables)
     # decode_shot's start: the window's output leaves the device for system memory, and is
     # decoded from there (shot_pass._slices). Here before the decode's phase is entered, so that a
     # picture waiting for the VAE holds nothing on the device.
@@ -148,9 +148,10 @@ def decoded(
                 raise RuntimeError(f"{chunk.shape[0]} frames decoded for a picture of one")
     finally:
         # A generator, as both decodes are; closing it clears the VAE's causal memory and the
-        # tiles' scratch at once (shot_pass._slices). Never on a failed card (model.unless_failed).
+        # tiles' scratch at once (shot_pass._slices). Never on an abandoned card
+        # (model.unless_abandoned).
         if isinstance(slices, Generator):
-            model.unless_failed(models.device, slices.close)
+            model.unless_abandoned(models.device, slices.close)
     # As shot_pass.finite checks it, before the correction and the post-processing; the picture's
     # frame is the one part. Polled first, as finite is: the check's copy to the CPU would wait in
     # C for the whole decode, out of a stop's reach (waiting.py).

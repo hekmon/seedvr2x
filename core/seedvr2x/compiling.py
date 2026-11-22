@@ -216,19 +216,28 @@ def _on_the_device(models: Models) -> Generator[None]:
     """The VAE's weights on the device for the block, where the plan has them away from it in
     some phase (Models.vae, a part loaded in its pinned copy): brought as Models.enter brings
     them, and sent away after the device's work, as it sends them (DESIGN.md, BlockSwap,
-    rewritten). Nothing to do where they never leave."""
+    rewritten). Nothing to do where they never leave. On an error's way out from a card a wait
+    was abandoned on (waiting.abandoned), nothing is waited for or sent away: the weights stay
+    with the process, as model.unless_abandoned leaves a pass's memory (decided on 2026-11-22)."""
     part = models.vae
     if part is None or part.device is not None or models.device.type != "cuda":
         yield
         return
     backend = blockswap.Cuda(models.device)
     part.enter(backend)
-    try:
-        yield
-    finally:
+
+    def away() -> None:
         backend.wait(backend.compute())
         part.leave()
         backend.trim()
+
+    try:
+        yield
+    except BaseException:
+        if not waiting.abandoned(model.card_index(models.device)):
+            away()
+        raise
+    away()
 
 
 def compile_vae(models: Models, compilation: Compilation) -> None:

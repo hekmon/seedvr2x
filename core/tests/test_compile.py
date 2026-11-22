@@ -512,3 +512,54 @@ def test_the_vae_leaving_the_card_comes_for_the_warm_calls_and_goes(
     with compiling._on_the_device(models):  # pyright: ignore[reportPrivateUsage]
         events.append("work")
     assert events == ["work"]
+
+
+class Halt(BaseException):
+    """A stop, ending the block."""
+
+
+@pytest.mark.parametrize("abandoned", [False, True])
+def test_the_vae_on_an_errors_way_out_is_sent_away_unless_its_card_was_abandoned(
+    monkeypatch: pytest.MonkeyPatch, abandoned: bool
+) -> None:
+    # A stop ending the warm calls: on a card answering, the device's work waited for and the
+    # weights sent away as at a normal end; on a card a wait was abandoned on
+    # (waiting.abandoned), nothing waited for or sent away, as model.unless_abandoned leaves a
+    # pass's memory (DESIGN.md, Allocator, decided on 2026-11-22).
+    events: list[str] = []
+
+    class Part:
+        device = None
+
+        def enter(self, backend: Any) -> None:
+            events.append("enter")
+            self.device = "on"
+
+        def leave(self) -> None:
+            events.append("leave")
+            self.device = None
+
+    class Backend:
+        def __init__(self, device: Any) -> None:
+            pass
+
+        def compute(self) -> str:
+            return "stream"
+
+        def wait(self, *streams: Any) -> None:
+            events.append("wait")
+
+        def trim(self) -> None:
+            events.append("trim")
+
+    monkeypatch.setattr(compiling.blockswap, "Cuda", Backend)
+    monkeypatch.setattr(compiling.waiting, "_abandoned", {0} if abandoned else set())
+    models = fake_models()
+    models.vae = Part()  # pyright: ignore[reportAttributeAccessIssue]
+    models.device = SimpleNamespace(type="cuda", index=0)  # pyright: ignore[reportAttributeAccessIssue]
+    with pytest.raises(Halt), compiling._on_the_device(models):  # pyright: ignore[reportPrivateUsage]
+        events.append("work")
+        raise Halt
+    assert events == (
+        ["enter", "work"] if abandoned else ["enter", "work", "wait", "leave", "trim"]
+    )

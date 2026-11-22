@@ -668,23 +668,39 @@ def failed(device: torch.device) -> bool:
     return waiting.failed(card_index(device)) is not None
 
 
-def unless_failed(device: torch.device, free: Callable[[], None]) -> None:
+def unless_abandoned(device: torch.device, free: Callable[[], None]) -> None:
     """Call `free` (a decode's memory cleared, a generator closed, a traceback's frames cleared)
-    unless the card `device` is failed: found so (failed), or by the poll that comes first
-    (synchronize), where a pending CUDA error other than out of memory comes back and marks it.
-    For the frees on an error's way out: a generator's own `finally` runs as the error unwinds
-    through its consumer, before any block outside has seen the error, so each free asks the card
-    itself. Another exception from the poll (a Ctrl-C, an app's check: a second Cancel) frees as
-    before, then goes on."""
-    if failed(device):
+    unless the card `device` is abandoned (waiting.abandoned: a wait on it past its bound, or
+    inside a release, that an exception ended, or a CUDA error other than out of memory that
+    failed it), found so, or by the poll that comes first (synchronize), where a pending CUDA
+    error comes back and marks it failed, and a wait past its bound that a stop or an app's check
+    ends marks it abandoned. For the frees on an error's way out: a generator's own `finally` runs
+    as the error unwinds through its consumer, before any block outside has seen the error, so
+    each free asks the card itself.
+
+    On an abandoned card neither the poll nor the free (DESIGN.md, Allocator, "A stall at
+    `deghost`, and the stop's cleaning", decided on 2026-11-22): the poll would wait on a card that
+    has not answered, as the free of the RoPE tables did after a SIGTERM had ended a stalled
+    window's wait (the RTX 5090 under WSL2, 2026-11-22: until a second SIGTERM a minute later);
+    on a failed card a free reports the error again (waiting.py's docstring). What `free` would
+    give back goes with the process (the command line, the image server), or with the release
+    the nodes complete at the next run (Models.release's forget). A card is abandoned only by an
+    exception that ended a wait on it, and the apps start no run on such a card (the nodes settle
+    it first), so a call that finds the mark is on that exception's way out, even from a
+    generator's `finally` that a normal end runs too. Another exception from the poll (a Ctrl-C,
+    an app's check: a second Cancel) frees as before, then goes on, unless its wait was past its
+    bound, which leaves the card abandoned: then it goes on alone."""
+    index = card_index(device)
+    if waiting.abandoned(index):
         return
     try:
         synchronize(device)
     except BaseException as error:
         if waiting.cuda_failed(error):
-            waiting.fail(card_index(device), error)
+            waiting.fail(index, error)
             return
-        free()
+        if not waiting.abandoned(index):
+            free()
         raise
     free()
 
@@ -776,7 +792,8 @@ def encode_sliced(models: Models, slices: Iterable[Tensor], frames: int) -> Iter
 
     One pass of the causal encoder, with a memory of its own from its first slice to its last,
     cleared whatever ends it but a CUDA error other than out of memory, which marks the card failed
-    and leaves the memory as it is (marking, failed): a tiled encode makes one such pass per tile,
+    and leaves the memory as it is (marking, failed), or a wait past its bound that an exception
+    ended, the card abandoned (unless_abandoned): a tiled encode makes one such pass per tile,
     over the tile's crop of every slice (seedvr2x/tiling.py)."""
     vae = models.runner.vae
     sizes = encode_slices(models, frames)
@@ -784,8 +801,9 @@ def encode_sliced(models: Models, slices: Iterable[Tensor], frames: int) -> Iter
         with marking(models.device):
             yield from _encoded(vae, slices, sizes)
     finally:
-        # Never on a failed card: the memory's free would report the error again (unless_failed).
-        unless_failed(models.device, lambda: _forget(vae))
+        # Never on an abandoned card: the poll would wait on it, a failed one's free report the
+        # error again (unless_abandoned).
+        unless_abandoned(models.device, lambda: _forget(vae))
 
 
 def _encoded(vae: Any, slices: Iterable[Tensor], sizes: list[int]) -> Iterator[Tensor]:
@@ -1140,8 +1158,9 @@ def decode_sliced(
     One pass of the causal decoder, with a memory of its own from its first slice to its last,
     cleared when the generator ends, is closed or fails, the card polled first where it ends
     (synchronize); a CUDA error other than out of memory, there or in a slice, marks the card
-    failed and leaves the memory as it is (marking, failed). A tiled decode makes one such pass per
-    tile, over the tile's crop of the latent (seedvr2x/tiling.py)."""
+    failed and leaves the memory as it is (marking, failed), as a wait past its bound that an
+    exception ended does, the card abandoned (unless_abandoned). A tiled decode makes one such pass
+    per tile, over the tile's crop of the latent (seedvr2x/tiling.py)."""
     vae = models.runner.vae
     decodable(models, latent)
     sizes = latent_slices(models, latent.shape[0])
@@ -1168,8 +1187,9 @@ def decode_sliced(
             # free, where under cudaMallocAsync it aborts the process (waiting.py's docstring).
             synchronize(models.device)
     finally:
-        # Never on a failed card: the memory's free would report the error again (unless_failed).
-        unless_failed(models.device, lambda: _forget(vae))
+        # Never on an abandoned card: the poll would wait on it, a failed one's free report the
+        # error again (unless_abandoned).
+        unless_abandoned(models.device, lambda: _forget(vae))
 
 
 def _slice_input(models: Models, latents: Tensor) -> Tensor:

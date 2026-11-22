@@ -20,7 +20,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
-from typing import Self, cast
+from typing import Any, Self, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -207,7 +207,8 @@ class Detector:
         (ComfyUI's Cancel, set by the nodes as the wait's check), reaches it between two polls.
         An exception that ends the wait and is no CUDA failure (that stop or Cancel) keeps the
         model the same way: freeing it would wait on a card that may not answer. The exception goes
-        through."""
+        through. On an error's way out of the with block (__exit__), a card a wait was abandoned on
+        (waiting.abandoned) is not polled either, as model.unless_abandoned leaves it."""
         if self._model is None:
             return
         if self._device.type == "cuda":
@@ -269,7 +270,21 @@ class Detector:
         error: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
+        if error is not None and self._model is not None and self._abandoned():
+            # On an error's way out, a card whose wait was abandoned neither polled nor freed on
+            # (model.unless_abandoned; DESIGN.md, Allocator, decided on 2026-11-22): the model
+            # kept, as a stop in close's own poll keeps it.
+            self._keep()
+            return
         self.close()
+
+    def _abandoned(self) -> bool:
+        """Whether the detector's card is abandoned (waiting.abandoned, by CUDA's index): never a
+        device that is no card."""
+        if self._device.type != "cuda":
+            return False
+        named: Any = self._device.index  # None for a bare "cuda", whatever the stubs say
+        return waiting.abandoned(torch.cuda.current_device() if named is None else named)
 
     def _live(self) -> torch.nn.Module:
         """The model, ValueError once closed."""

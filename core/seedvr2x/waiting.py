@@ -34,8 +34,11 @@ cudaMallocAsync a tensor's free is itself a call to CUDA, which reports the erro
 torch's deleter, where it cannot raise and so aborts the process (the nodes on Windows,
 2026-11-07: "Fatal Python error: Aborted" at a free of the VAE's causal memory, no message before
 it). So whoever would free on that card leaves it as it is, as far as seedvr2x's code goes: the
-library's passes keep what they hold (model.unless_failed), and an app keeps the error, whose frames
-hold the rest, for the process's life; the process is for restarting.
+library's passes keep what they hold (model.unless_abandoned), and an app keeps the error, whose
+frames hold the rest, for the process's life; the process is for restarting. The frees on an
+error's way out leave an abandoned card alone the same way, neither polling it nor freeing on it
+(decided on 2026-11-22): what they hold goes with the process, or with the release an app
+completes once settle says the card's work has finished.
 
 Importing it imports no torch."""
 

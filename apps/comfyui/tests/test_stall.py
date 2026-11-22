@@ -627,3 +627,69 @@ def test_an_error_before_any_progress_event_leaves_no_freeing_text_after_a_healt
     texts = node_texts("9")
     assert progress.FREEING in texts and texts[-1] != progress.FREEING
     assert not waiting.abandoned()
+
+
+# ---- A frame's window at deghost ------------------------------------------------------------
+
+
+def test_a_cancel_past_the_bound_in_a_frames_window_at_deghost_frees_nothing_that_waits(
+    machine: StandIn,
+    tmp_path,
+    world: WaitClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The night's stall (DESIGN.md, Allocator, "A stall at `deghost`, and the stop's cleaning",
+    # 2026-11-22), on the nodes: the third frame's window waits past its bound and ComfyUI's
+    # Cancel leaves it, the card abandoned. Nothing seedvr2x frees on the way out polls the card
+    # (the windows' RoPE tables, the frames' clearing: model.unless_abandoned), the models are
+    # held, and the next run is refused while the work the wait was for is pending; once it has
+    # finished, the next run settles the card and goes on.
+    finished: list[bool] = []
+    after: list[str] = []
+    real_sample, real_synchronize = model.sample, model.synchronize
+    real_forget = model.forget_rope_tables
+    calls: list[int] = []
+
+    def synchronize(device: Any) -> None:
+        if waiting.abandoned():
+            after.append("poll")
+        real_synchronize(device)
+
+    def forget() -> None:
+        if waiting.abandoned():
+            after.append("tables")
+        real_forget()
+
+    def on_sleep() -> None:
+        if world.now == 80.0:
+            management.interrupt_current_processing()
+
+    def sample(*args: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 3:
+            world.on_sleep = on_sleep
+            waiting.wait(lambda: bool(finished), 10.0)
+        return real_sample(*args)
+
+    monkeypatch.setattr(model, "sample", sample)
+    monkeypatch.setattr(model, "synchronize", synchronize)
+    monkeypatch.setattr(model, "forget_rope_tables", forget)
+    monkeypatch.setattr(progress, "_wait", Cue().pause)
+    h = handle(tmp_path)
+    with pytest.raises(management.InterruptProcessingException):
+        run_video(h, plans.Settings(), pictures(5), RESOLUTION, "9", quality="deghost")
+    assert waiting.abandoned() and len(calls) == 3
+    assert after == [], "a free on the way out polled the card or freed on it"
+    # The models held, not given back, and the next run refused with nothing placed.
+    assert len(models._left_on_card) == 1  # pyright: ignore[reportPrivateUsage]
+    placed = len(machine.made[0].placed)  # type: ignore[attr-defined]
+    with pytest.raises(words.Refused, match="still busy with the last work"):
+        run_video(h, plans.Settings(), pictures(5), RESOLUTION, "9", quality="deghost")
+    assert len(machine.made[0].placed) == placed  # type: ignore[attr-defined]
+    # The card finishes the work: the next run settles it, gives the models back and runs.
+    finished.append(True)
+    world.on_sleep = None
+    out, _ = run_video(h, plans.Settings(), pictures(5), RESOLUTION, "9", quality="deghost")
+    assert out.shape[0] == 5 and not waiting.abandoned()
+    assert models._left_on_card == []  # pyright: ignore[reportPrivateUsage]
+    assert ticker_threads() == []

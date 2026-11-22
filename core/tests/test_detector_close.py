@@ -167,3 +167,40 @@ def test_the_cpu_close_makes_no_wait_on_a_card(tmp_path: Path, card: Card) -> No
     found = Detector(untrained_weights(tmp_path), torch.device("cpu"))
     found.close()
     assert card.called == [] and kept() == []
+
+
+def test_an_errors_way_out_of_a_card_a_wait_was_abandoned_on_neither_polls_nor_frees(
+    closing: Detector, card: Card
+) -> None:
+    # A stop past a wait's bound marks the card abandoned (waiting.abandoned): leaving the with
+    # block on that exception, the detector neither polls the card nor gives its memory back, the
+    # model kept for the process (model.unless_abandoned; DESIGN.md, Allocator, decided on
+    # 2026-11-22).
+    model = closing._model  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(Stop), closing:
+        waiting._abandoned.add(0)  # pyright: ignore[reportPrivateUsage]
+        raise Stop
+    assert card.called == [] and kept() == [model]
+    closing.close()  # closed: nothing more
+    assert card.called == [] and kept() == [model]
+
+
+def test_an_errors_way_out_of_a_card_answering_waits_and_frees_as_before(
+    closing: Detector, card: Card
+) -> None:
+    # The same exception on a card no wait was abandoned on: the close's poll, then the memory
+    # given back; another card's mark is no matter.
+    waiting._abandoned.add(1)  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(Stop), closing:
+        raise Stop
+    assert card.called == ["record", "query", "peak", "cublas", "empty_cache", "reserved"]
+    assert kept() == []
+
+
+def test_a_normal_end_on_an_abandoned_card_closes_as_before(closing: Detector, card: Card) -> None:
+    # The rule is the error's way out's: a with block that ends normally closes through the poll
+    # as close() does, whatever the mark (no app starts work on such a card).
+    waiting._abandoned.add(0)  # pyright: ignore[reportPrivateUsage]
+    with closing:
+        pass
+    assert card.called == ["record", "query", "peak", "cublas", "empty_cache", "reserved"]

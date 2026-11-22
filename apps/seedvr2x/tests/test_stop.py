@@ -73,6 +73,16 @@ TESTS = Path(__file__).resolve().parent
 #   stalled card holds the main thread: only stop.Watch's thread can answer. Its unit is named
 #   with an estimate of 0.01 s and waiting.FLOOR lowered to 1 s, so that the stall's line comes
 #   after a second.
+# - window-stall and frame-stall: the night's stall in a window (DESIGN.md, Allocator, "A stall at
+#   `deghost`, and the stop's cleaning", 2026-11-22), at `standard` and at `deghost`: the windows
+#   are the library's own (shot_pass.sample_windows, the noise's draw and the DiT's window stood
+#   in by the stand-in's arithmetic, latent[s:e] + 0), so that a window's way out is its
+#   generator's own `finally`; the step named (`#N` after it: its Nth call, a frame's window at
+#   deghost being named by its shot alone) waits on an event that never completes, its unit named
+#   with an estimate of 0.01 s and waiting.FLOOR lowered to 1 s, and the card's poll
+#   (model.synchronize) is from then on a wait on such an event too, each said on stderr ("POLL"),
+#   as on a card that stopped answering: a stop past the bound leaves the card abandoned, and a
+#   free on the way out that polled it would wait until a second stop.
 DRIVER = r"""
 import atexit, ctypes, os, sys, time, weakref
 sys.path.insert(0, sys.argv[1])
@@ -80,13 +90,15 @@ import test_cli_run as t
 import main as cli
 import run
 
-slow = sys.argv[2]
+slow, _, nth = sys.argv[2].partition("#")
+nth = int(nth or 1)
 mode = os.environ.get("STOP_MODE", "")
 # The C library on POSIX; on Windows the interpreter's own DLL, which held() alone needs there.
 libc = ctypes.CDLL(None) if os.name == "posix" else ctypes.CDLL("python", handle=sys.dllhandle)
 
 HANGS = ("stall", "atexit", "finalizer", "cuda-error", "type-error", "wait")
-if mode in HANGS:
+WINDOWS = ("window-stall", "frame-stall")
+if mode in (*HANGS, *WINDOWS):
     from seedvr2x import waiting
     waiting.cuda_used = lambda: True
 
@@ -130,7 +142,7 @@ def held():
     libc.PyThread_acquire_lock(lock, 1)
 
 def hang():
-    if mode == "wait":
+    if mode in ("wait", *WINDOWS):
         waiting.FLOOR = 1.0
         waiting.unit(slow, 0.01)
     said = []
@@ -141,11 +153,39 @@ def hang():
         return False
     waiting.wait(never, 0.01)
 
+def stalled_card():
+    from seedvr2x import model
+
+    def poll(device):
+        print("POLL", file=sys.stderr, flush=True)
+        waiting.wait(lambda: False, 0.01)
+
+    model.synchronize = poll
+
 class Slow(t.Steps):
     def _call(self, name):
         super()._call(name)
         print(f"CALL {name}", file=sys.stderr, flush=True)
         inside(name)
+
+    def windows(self, models, latent, layout, seed, start=0):
+        if mode not in WINDOWS:
+            return super().windows(models, latent, layout, seed, start)
+        from seedvr2x import sampling, shot_pass
+        numbers = iter(range(start, len(layout)))
+
+        def window(models, noise, part):
+            name = f"window {seed - t.SEED}:{next(numbers)}"
+            self.calls.append(name)
+            print(f"CALL {name}", file=sys.stderr, flush=True)
+            if name == slow and self.calls.count(name) == nth:
+                stalled_card()
+                hang()
+            return part + 0
+
+        sampling.drawn = lambda models, latent, seed: (latent, latent)
+        sampling.window = window
+        return shot_pass.sample_windows(models, latent, layout, seed, start)
 
     def decode(self, models, merged, count, target, write, *names, **tiled):
         name = f"decode {int(merged[0, 0, 0, 0])}"
@@ -290,19 +330,22 @@ def upscale(
     after: str | None = None,
     delay: float = 0.0,
     form: str = "gbrp16le",
+    quality: str = "standard",
 ) -> tuple[int, list[str], str]:
     """Run the job into output, the signals sent to its process group from inside the step slow
     (DRIVER, hanging as `mode` says), 0.3 s apart; its status, the steps it called, its stderr.
     With `within`, the process is killed that many seconds after the last signal (the step
     itself, with none) if it has not ended, and the test fails saying so. With `after`, the
     signals wait for the first line containing it (the stall's line of a held step) instead of
-    the step's own, and `delay` seconds more. `form` is --format."""
+    the step's own, and `delay` seconds more; they are sent once. `form` is --format, `quality`
+    --quality: at deghost without --window, which it refuses."""
     process = subprocess.Popen(
         [
             *(sys.executable, "-c", DRIVER, str(TESTS), slow),
             *("in.mkv", "-o", output, "--model-dir", ".", "--dit-model", "w.safetensors"),
             *("--vae-model", "w.safetensors", "--resolution", "96", "--seed", "42"),
-            *("--cuts", "cuts.txt", "--window", "5", "--min-segment", "0.12"),
+            *("--cuts", "cuts.txt", "--min-segment", "0.12"),
+            *(("--quality", quality) if quality == "deghost" else ("--window", "5")),
             # The stand-in's frames say which they are (test_cli_run.py), read back as the RGB
             # planes written (indexes).
             *("--color-correction", "none", "--format", form),
@@ -323,12 +366,17 @@ def upscale(
             posix_os.killpg(process.pid, posix_signal.SIGKILL)
 
     watchdog: threading.Timer | None = None
+    sent = False
     try:
         for line in process.stderr:
             lines.append(line)
-            if (line.startswith(f"IN {slow}") and after is None) or (
-                after is not None and after in line
+            # Once, at the first such line: a later one (a second wait's, said as the first was)
+            # sends nothing more.
+            if not sent and (
+                (line.startswith(f"IN {slow}") and after is None)
+                or (after is not None and after in line)
             ):
+                sent = True
                 time.sleep(delay)
                 for number in signals:
                     # SIGUSR1 to seedvr2x alone: ffmpeg's default for it is to end.
@@ -368,12 +416,17 @@ def indexes(path: Path) -> list[int]:
     return [round(int(v) / 65535 * 1000) for v in values[:, 0]]
 
 
-def resumed_as_uninterrupted(directory: Path, resumed: list[str]) -> None:
-    status, calls, text = upscale(directory, "out")
+def resumed_as_uninterrupted(
+    directory: Path, resumed: list[str], quality: str = "standard"
+) -> None:
+    status, calls, text = upscale(directory, "out", quality=quality)
     assert status == 0, text
     assert calls == resumed
     out = directory / "out"
-    assert indexes(out / "seg_000000.mkv") + indexes(out / "seg_000001.mkv") == list(range(25))
+    # The stand-in's frames say their index; at deghost each frame is a shot of its own from its
+    # shot's first frame, which they say (test_cli_run.py's stand-in, its latent's first value).
+    frames = list(range(25)) if quality == "standard" else [0, 0, 0, 3, *[4] * 21]
+    assert indexes(out / "seg_000000.mkv") + indexes(out / "seg_000001.mkv") == frames
     assert sorted(p.name for p in (directory / "out").iterdir()) == [
         "checksums",
         "frame_index.bin",
@@ -860,6 +913,84 @@ def test_a_main_thread_in_a_wait_says_its_own_line_not_the_watchers(job: Path) -
     assert found == 143, text
     assert "a wait on the GPU has lasted" in text
     assert "the main thread has been held" not in text
+
+
+# The night's stall in a window (DESIGN.md, Allocator, "A stall at `deghost`, and the stop's
+# cleaning", the RTX 5090 under WSL2, 2026-11-22): a window's wait in the DiT's poll never ends,
+# past its bound; one SIGTERM, or Ctrl-C twice, ends it, and the way out through the windows'
+# generator (shot_pass.sample_windows' `finally`, its RoPE tables) waits on no card that wait was
+# abandoned on (model.unless_abandoned): the process ends with the stop's status, the job's files
+# and its resume as for a stop at once in a decode. Before, that `finally` polled the card again
+# and waited until a second stop. At deghost, a frame's window (run._sample_frames): shot 4's
+# fifth frame of 21, its first four kept. Each frame a unit of its own, its decode too (the
+# stand-in names a decode by its shot's first frame).
+DEGHOST_UNINTERRUPTED = [
+    *(["encode 0"] * 3 + ["window 0:0"] * 3 + ["encode 3", "window 3:0"]),
+    *(["decode 0"] * 3 + ["decode 3"]),
+    *(["encode 4"] * 21 + ["window 4:0"] * 21 + ["decode 4"] * 21),
+]
+
+
+@pytest.mark.parametrize(
+    ("quality", "slow", "done", "windows", "resumed"),
+    [
+        ("standard", "window 4:1", UNINTERRUPTED[:9], [1, 1, 1], UNINTERRUPTED[8:]),
+        (
+            "deghost",
+            "window 4:0#5",
+            DEGHOST_UNINTERRUPTED[:38],
+            [3, 1, 4],
+            DEGHOST_UNINTERRUPTED[37:],
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("signals", "status", "how"),
+    [
+        ((signal.SIGTERM,), 143, "SIGTERM"),
+        ((signal.SIGINT, signal.SIGINT), 130, "Ctrl-C"),
+    ],
+)
+@SIGNALS
+def test_one_stop_ends_a_window_stalled_past_its_bound(
+    job: Path,
+    quality: str,
+    slow: str,
+    done: list[str],
+    windows: list[int],
+    resumed: list[str],
+    signals: tuple[int, ...],
+    status: int,
+    how: str,
+) -> None:
+    mode = "frame-stall" if quality == "deghost" else "window-stall"
+    found, calls, text = upscale(
+        *(job, "out", slow, signals),
+        mode=mode,
+        within=ENDS_WITHIN,
+        after="a wait on the GPU has lasted",
+        quality=quality,
+    )
+    assert found == status, text
+    assert re.search(
+        rf"stopped at once \({re.escape(how)}\), {SPOKEN} into a wait on the GPU; the process"
+        r" ends without waiting for it$",
+        text,
+        re.MULTILINE,
+    ), text
+    # Nothing on the way out polled the card the stall had left.
+    assert "POLL" not in text, text
+    assert calls == done
+    # The first segment's shots decoded, its file finished; the stalled window not kept.
+    assert progress(job) == ([True, False], windows)
+    assert sorted(p.name for p in (job / "out").iterdir()) == [
+        "checksums",
+        "frame_index.bin",
+        "manifest.json",
+        "resume",
+        "seg_000000.mkv",
+    ]
+    resumed_as_uninterrupted(job, resumed, quality)
 
 
 class Leaving:

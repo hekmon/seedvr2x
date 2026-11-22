@@ -284,10 +284,11 @@ def upscale(
         # Whatever stopped the clip, a step's cancel included: the frames of the calls it passed
         # through hold the slice being corrected on the device, and would keep it for as long as
         # the exception is kept (decode_shot's slices are closed already, shot_pass._slices). Not
-        # on a failed card: what they hold stays with the error, whose holder keeps it, since a
-        # free there would report the error again (model.unless_failed).
+        # on an abandoned card: what they hold stays with the error, whose holder keeps it, since
+        # a free there would wait on a card that has not answered, or report a failed one's error
+        # again (model.unless_abandoned).
         traceback_ = error.__traceback__
-        model.unless_failed(models.device, lambda: traceback.clear_frames(traceback_))
+        model.unless_abandoned(models.device, lambda: traceback.clear_frames(traceback_))
         raise
     return output
 
@@ -433,5 +434,5 @@ def _merged(
     finally:
         # The generator holds the noise and the latent: closed at once, a step's stop included.
         if isinstance(sampled, Generator):
-            model.unless_failed(models.device, sampled.close)
+            model.unless_abandoned(models.device, sampled.close)
     return merge_windows(windows, layout)

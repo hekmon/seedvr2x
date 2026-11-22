@@ -292,7 +292,8 @@ def sample_windows(
     one window) or left by a raise. A shot's windows share their shapes, and a run of many shot
     lengths would otherwise hold a table for each; no VAE pass after the windows finds one. A
     CUDA error other than out of memory marks the card failed and leaves the tables as they are
-    (model.marking, model.unless_failed)."""
+    (model.marking, model.unless_abandoned), and so does a wait past its bound that a stop or a
+    Cancel ended, the card abandoned: the tables' free waits on no card that has not answered."""
     if layout[-1][1] != latent.shape[0]:
         raise ValueError(f"windows {layout} over a latent of {latent.shape[0]}")
     model.forget_rope_tables()
@@ -302,9 +303,9 @@ def sample_windows(
             for s, e in layout[start:]:
                 yield sampling.window(models, noise[s:e], latent[s:e])
     finally:
-        # Never on a failed card: the tables' free would report the error again
-        # (model.unless_failed).
-        model.unless_failed(models.device, model.forget_rope_tables)
+        # Never on an abandoned card: its poll would wait on a card that has not answered, a
+        # failed one's free report the error again (model.unless_abandoned).
+        model.unless_abandoned(models.device, model.forget_rope_tables)
 
 
 def merge_windows(sampled: list[Tensor], layout: Sequence[tuple[int, int]]) -> Tensor:
@@ -405,7 +406,8 @@ def _slices(
     their own layout, as units' files keep them; the device's stay their holder's to free. A
     CUDA error other than out of memory in the block, the decode's or its consumer's, marks the
     card failed and leaves the decode open, holding what it holds (model.marking,
-    model.unless_failed)."""
+    model.unless_abandoned), as a wait past its bound that a stop or a Cancel ended does, the card
+    abandoned."""
     model.synchronize(merged.device)
     latent = merged.to("cpu")
     if tiles is None:
@@ -418,10 +420,11 @@ def _slices(
             yield slices
     finally:
         # A generator, as both decodes are; a plain iterator in their place has nothing to close.
-        # Never on a failed card: closing frees the decode's memory, whose free would report the
-        # error again (model.unless_failed).
+        # Never on an abandoned card: closing polls the card and frees the decode's memory, a
+        # wait on a card that has not answered, a failed one's free reporting the error again
+        # (model.unless_abandoned).
         if isinstance(slices, Generator):
-            model.unless_failed(models.device, slices.close)
+            model.unless_abandoned(models.device, slices.close)
 
 
 def _decoded(

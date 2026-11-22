@@ -587,7 +587,7 @@ def upscale_shot(
                     )
     except BaseException as error:
         traceback_ = error.__traceback__
-        model.unless_failed(models.device, lambda: traceback.clear_frames(traceback_))
+        model.unless_abandoned(models.device, lambda: traceback.clear_frames(traceback_))
         raise
     finally:
         order.close()
@@ -763,7 +763,7 @@ def _windows(
                 step("window", number + 1, len(layout))
     finally:
         if isinstance(sampled, Generator):
-            model.unless_failed(models.device, sampled.close)
+            model.unless_abandoned(models.device, sampled.close)
     return paths
 
 

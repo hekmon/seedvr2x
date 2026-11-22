@@ -559,8 +559,8 @@ def test_the_decode_polls_the_card_before_it_frees_its_memory(
     stand_in: model.Models, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # After the last frames are written, the card is polled with the decode's causal memory still
-    # held (model.decode_sliced's own poll, then model.unless_failed's), so that a kernel's failure
-    # comes back as an exception before any free.
+    # held (model.decode_sliced's own poll, then model.unless_abandoned's), so that a kernel's
+    # failure comes back as an exception before any free.
     count = 13
     latent, vae = shot_latent(count), cast(Any, stand_in).runner.vae
     events: list[tuple[str, bool]] = []
@@ -586,9 +586,9 @@ def test_a_cuda_error_marks_the_card_and_leaves_the_decodes_memory_held(
     # Under cudaMallocAsync a free on a card a kernel failed reports the error again inside
     # torch's deleter and aborts the process: the card is marked, and what the decode holds when
     # the error comes stays held, the decode left open and the error's frames holding it all
-    # (waiting.fail, model.unless_failed). The poll is the first made while a pass holds its causal
-    # memory: inside a tile's pass where the decode is tiled (whose own `finally` runs as the
-    # error unwinds, before any outer block sees it), the consumer's otherwise.
+    # (waiting.fail, model.unless_abandoned). The poll is the first made while a pass holds its
+    # causal memory: inside a tile's pass where the decode is tiled (whose own `finally` runs as
+    # the error unwinds, before any outer block sees it), the consumer's otherwise.
     count = 13
     latent, vae = shot_latent(count), cast(Any, stand_in).runner.vae
     held: list[bool] = []

@@ -1561,7 +1561,7 @@ class Cuts(io.ComfyNode):
         channels of the images: an alpha is of no use to it. On a card a CUDA error failed
         (waiting.fail) it is refused at its start, as the upscale nodes are; one it meets marks the
         card, and nothing is emptied from torch's cache after it (the detector keeps its model:
-        detector.Detector.close)."""
+        detector.Detector.close), nor after a run on a card a wait was abandoned on."""
         device = management.get_torch_device()
         card = (device.index or 0) if getattr(device, "type", "") == "cuda" else 0
         failed = waiting.failed(card)
@@ -1616,7 +1616,9 @@ class Cuts(io.ComfyNode):
             models_module._failures.append(error)  # pyright: ignore[reportPrivateUsage]
             raise words.card_failed(waiting.failed(card) or str(error)) from error
         finally:
-            if waiting.failed(card) is None:
+            # Not on a card a wait was abandoned on, a failed one among them: torch's cache emptied
+            # synchronises in C (models.session's end leaves it alike; decided on 2026-11-22).
+            if not waiting.abandoned(card):
                 management.soft_empty_cache()
 
 
