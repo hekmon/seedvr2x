@@ -1028,7 +1028,10 @@ under `--verbose`, and the plan's lines stay, in plain words:
 - a duration said before the run has measured its clock's ratio comes from the wall clock, as
   the lines' times do: "models loaded in 88.2 s" was said for 79 s. Built so: such a span is
   the wall clock's, held to 0.8 to 1.25 times the run's own seconds, else the run's own; on
-  2026-10-30, "models loaded in 80.3 s" for 80 s by the lines' times.
+  2026-10-30, "models loaded in 80.3 s" for 80 s by the lines' times. Under WSL2 the run's
+  own clock ran 1.06 to 1.08 times the wall's on the night of 2026-11-22 (1.010 on
+  2026-11-20), the wall, stepped back by about 1.8 s some 530 times through the night,
+  keeping Windows' time.
 
 ### Language: all Python
 Every layer is Python, in one process per job. seedvr2x stands alone; with sptenc, the two
@@ -2704,6 +2707,10 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
     within 0 to 7% across the two). By segment it ran 1.66 to 1.87, lower where the shots
     are short (18 to 24 frames against about 86), the level's time a frame the same on
     every segment: `standard` pays its windows' fixed costs over fewer frames (inferred).
+  The whole episode at the level on the 96 GB card, finished on 2026-11-22 (impl-box-11):
+  15 h 21 min over three nights from each night's first unit to its last, 1.600 s a frame
+  (each night 1.590 to 1.605), 2.16 times `standard`'s 0.741 over its 12 segments; 15 h 24
+  min with the three starts and the join, 56 s: 34,548 frames in 167 segments, 43.07 GiB.
   At that code the level read its source debanded: the deband's read costs 5 ms a frame on
   the RTX 5090's episode (2,000 frames, ffmpeg alone, the read alone; the other episode not
   read), under 0.4% of the level's time a frame on either card, whether or not the reads
@@ -2724,10 +2731,30 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
     against 0.72 and 0.79, the cause of each gap not isolated; its DiT within 13% (0.44 s a
     frame against 0.50 on the 96 GB card). To fix: the calibration times the level's own
     units, a frame alone through each pass. Built on 2026-11-19 (impl-anim-2: three frames,
-    `calibration.ALONE_FRAMES`, provisional); how close its time comes to a run's is to
-    measure, by `--plan` on each card against the frames run there.
+    `calibration.ALONE_FRAMES`) and measured on 2026-11-22, by main's `--plan` on each card
+    against the frames run there: 6% short on the 96 GB card (1.501 s a frame against the
+    episode's 1.600: to encode 0.337 against 0.364, the DiT 0.448 against 0.500, to decode
+    and write 0.716 against 0.721; impl-box-11), within 2% on the RTX 5090 (2.142 against
+    2.10 to 2.17, each pass within 4%; impl-wsl2-8). Three frames are enough: the constant is
+    no longer provisional. The RTX 5090's 1.43 to decode was the cost of the calibration's
+    own files: its decodes of 13 and 5 frames kept their scratch beside the job, there on a
+    Windows drive under WSL2 (below).
     `--until` held all the same, the run's own clock taking over as
     its units are made: the runs stopped at 05:57 and 06:00.
+  - **The other levels' times in its plan** were off where the job is on a Windows drive
+    under WSL2. The plan at `deghost` prices the packed levels by the calibration's encodes
+    and decodes of 5 and 13 frames, made on the frame's plan, whose scratch allowance is a
+    frame's: their tiled passes kept their scratch in files beside the job. `standard`'s time
+    came out 77% long on the RTX 5090 (21 h 1 min, against 11.9 h), its decode timed at
+    1.608 s a frame against 0.599 in `standard`'s own plan (5.70 GiB of scratch allowed, in
+    system memory) and 0.641 run (impl-wsl2-8, 2026-11-22); the same frame plan's 13-frame
+    decode took 0.654 s a frame with the job on WSL's own disk, 1.498 on a Windows drive
+    under WSL2 and 0.533 natively on one (impl-wsl2-7, 2026-11-19). On the 96 GB card, the
+    job on Linux's disk, `standard`'s time held (6 h 58 min, against 7 h 7 min). Decided:
+    where the job's plan is a frame's, the calibration's passes over 5 and 13 frames keep
+    their scratch in system memory (0.15 GiB at 13 frames of 1080p, four times that at 4K,
+    given back with the calibration), as a packed level's plan keeps a short shot's, so that
+    each level is timed as its own plan would run it.
   - **The users' documents and the plan's line** lose "about 1.8 times": the plan prints each
     level's time on the card it runs on, right once the calibration is; the documents say
     about twice `standard`'s time, as measured on the 96 GB card and on the RTX 5090
@@ -5180,6 +5207,24 @@ run in one line, before the models load as after.
     hangs in that stop's own cleaning is not covered (the signals are ignored from the stop's
     line on); the frame named is the innermost Python one; its NVML reading is card 0's
     until GPU selection.
+- **A stall at `deghost`, and the stop's cleaning** (impl-wsl2-8, 2026-11-22, the RTX 5090
+  under WSL2, the episode on 2c22b10's code, whose waits and frees are main's): about 50
+  minutes into the night's run, a wait in the DiT's poll never ended, the card at P8, 5% busy,
+  19.74 GiB held, and no CUDA error. Windows' System log holds an NVIDIA driver error
+  (nvlddmkm, event 153) at 04:53:07, the second the stall began, the night's only one, as on
+  2026-11-06. The line came at 56 s, as built. The night's guard asked a stop 50 minutes
+  later: its Ctrl-C waited for the unit, as built, and its SIGTERM ended the wait, but on the
+  way out the shot's windows cleared the RoPE tables behind a poll of the card
+  (`shot_pass.sample_windows`'s `finally`, through `model.unless_failed`), which waited on
+  the same card until a second SIGTERM a minute later: the open point above, met. A change of
+  phase and a release wait on no card a wait was abandoned on (`Models.enter`,
+  `Models.release`); the frees on an error's way out did. Decided: they don't either. On a
+  card whose wait was abandoned, a free on an error's way out neither waits nor frees, as on
+  a failed card: what it held goes with the process (the command line, the server), or with
+  the release the nodes complete at the next run. So one SIGTERM, or Ctrl-C twice, ends a
+  stall in a window once its wait has passed its bound, at every level; its test, a window
+  whose wait never ends. A stall stopped before its wait passed its bound, or in a wait with
+  none (the calibration's), leaves no card abandoned and takes a second stop, as before.
 
 ## Pause and resume
 
@@ -5636,9 +5681,10 @@ explanation.
   RTX 5090 (impl-wsl2-7, 2026-11-19, one run of 300 frames at `--quality deghost` each way)
   its units took 2.160 s a frame with the job on a Windows drive and 2.165 on Linux's disk;
   its fixed steps about 40 s longer there: the calibration 26 s of it, whose tiled decodes
-  of 13 and 5 frames kept their scratch in files of 64 to 165 MB beside the job (the cause
-  inferred), the assembly 5 s. The models, read from a Windows drive in both runs, loaded
-  in 75 and 78 s (9.3 s natively, perhaps from Windows' file cache)
+  of 13 and 5 frames kept their scratch in files of 64 to 165 MB beside the job (2.3 times
+  slower to decode there; to stay in memory, decided on 2026-11-22: Each frame on its own),
+  the assembly 5 s. The models, read from a Windows drive in both runs, loaded in 75 and
+  78 s (9.3 s natively, perhaps from Windows' file cache)
 - why zscale is required, and how to get an ffmpeg build that has it
 - the refused sources (VFR, HDR, interlaced, telecined, rotated, cropped, unusual pixel
   formats or matrices, timestamps that jump, tags that contradict each other),
