@@ -2485,8 +2485,10 @@ def _calibrated(
     kill would leave them there, where a resume refuses what its manifest doesn't name); None once
     a failure is logged, with what is kept (`kept`); with `alone`, frames alone timed through each
     pass too (calibrate's `alone`), for a level that takes each frame alone, the job's or one whose
-    time --plan says. SIGTERM unwinds it, as it does the model files' fetch: its scratch removed,
-    its ffmpeg processes stopped."""
+    time --plan says; where the job's level takes each frame alone, its plan a frame's, the passes
+    that time the other levels keep their scratch in system memory (calibrate's `frame_plan`).
+    SIGTERM unwinds it, as it does the model files' fetch: its scratch removed, its ffmpeg
+    processes stopped."""
     import numpy as np
     import numpy.typing as npt
     import torch
@@ -2542,6 +2544,9 @@ def _calibrated(
                 writer=writer,
                 directory=directory.parent,
                 alone=alone,
+                # The job's own level, not `alone`, which every --plan sets: where its plan is a
+                # frame's, the passes that time the other levels keep their scratch in memory.
+                frame_plan=each_frame(args.quality),
             )
     except (MediaError, NonFinite) as error:
         logger.error("%s, in the time estimates' calibration: %s", error, kept)

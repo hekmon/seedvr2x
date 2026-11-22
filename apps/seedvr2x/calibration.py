@@ -80,9 +80,10 @@ ATTENTION = 30
 
 # The frames a calibration given `alone` takes each through the passes alone, after one alone
 # unmeasured (calibrate): a first, which pays its run's change into the encode's phase and its
-# input copy's start, as a run's first frame does, and two more for the rate. PROVISIONAL
-# (impl-anim-2, 2026-11-19): DESIGN.md says "a frame alone through each pass", not how many; how
-# many the rate needs is not measured.
+# input copy's start, as a run's first frame does, and two more for the rate. Three are enough
+# (DESIGN.md, Each frame on its own, measured on 2026-11-22 by --plan against the frames run on
+# each card): the level's time came within 6% on the 96 GB card (1.501 s a frame against the
+# episode's 1.600) and within 2% on the RTX 5090 (2.142 against 2.10 to 2.17).
 ALONE_FRAMES = 3
 
 # The rate its input copies are written at, which is no part of their frames.
@@ -111,6 +112,7 @@ def calibrate(
     writer: Callable[[Path], Writer] | None = None,
     directory: Path | None = None,
     alone: bool = False,
+    frame_plan: bool = False,
 ) -> Calibrated:
     """A clock for a job whose frames are resized to target, (height, width), run by plan, whose
     longest window is `longest` latents (shots.shot_layout): the models of its three kinds of
@@ -173,7 +175,17 @@ def calibrate(
     them (_alone). An encode of frames alone is a constant, the run's change of phase and its
     first frame's start, and a rate a frame; a frame's window a rate by the token; a decode of
     frames alone a constant, its reader's start, and a rate a frame. The other kinds' models are
-    those of before, so that no other level's estimate moves."""
+    those of before, so that no other level's estimate moves.
+
+    With `frame_plan`, the job's own plan is a frame's (its level takes each frame alone): its
+    scratch allowance is a frame's, and the passes over FIRST and FRAMES frames, which time the
+    other levels' kinds, keep their scratch in system memory up to at least FRAMES padded frames'
+    (0.15 GiB at 1080p, four times that at 4K, given back with the calibration), as a plan that
+    packs a shot's frames keeps a short shot's (DESIGN.md, Each frame on its own, "The other
+    levels' times in its plan", decided on 2026-11-22): in files beside the job, on a Windows
+    drive under WSL2, their decode took 1.608 s a frame against 0.599 in `standard`'s own plan
+    and `standard`'s time came out 77% long (the RTX 5090, 2026-11-22). The frames alone keep the
+    plan's allowance, as the level's run does."""
     started = time.monotonic()
     height, width = target if source is None else source
     if frames is None:
@@ -184,15 +196,20 @@ def calibrate(
         frames = blank
     read_source = frames
     per_latent = tokens(target, 1)
+    # The scratch the passes over FIRST and FRAMES frames keep in system memory (scratch.Scratch):
+    # the plan's, or, where the plan is a frame's, at least FRAMES padded frames' (frame_plan).
+    allowance = plan.scratch_allowance
+    if frame_plan:
+        allowance = max(allowance, peaks.scratch(padded_size(target), FRAMES))
 
     def fits(count: int) -> bool:
-        """Whether a tiled encode's scratch of `count` frames stays in the plan's system memory,
-        as the run's does up to its allowance (scratch.Scratch); an untiled encode keeps nothing
-        of its frames."""
+        """Whether a tiled encode's scratch of `count` frames stays in system memory, as the
+        run's does up to its allowance (scratch.Scratch; `allowance` here); an untiled encode
+        keeps nothing of its frames."""
         if plan.encode_tiles is None:
             return True
         padded = padded_size(target)
-        return peaks.scratch(padded, count) <= plan.scratch_allowance
+        return peaks.scratch(padded, count) <= allowance
 
     with tempfile.TemporaryDirectory(prefix=".seedvr2x-calibration-", dir=directory) as made:
         scratch = Path(made)
@@ -230,9 +247,7 @@ def calibrate(
                     *(models, read, count, target, 0),
                     tiles=plan.encode_tiles,
                     # The run's: a tiled pass's alone (run._scratch).
-                    store=None
-                    if plan.encode_tiles is None
-                    else Scratch(where, plan.scratch_allowance),
+                    store=None if plan.encode_tiles is None else Scratch(where, allowance),
                 )
 
             if split:
@@ -285,7 +300,7 @@ def calibrate(
             run.decode_shot(
                 *(models, latent, count, target, write, "the calibration", 0, correction),
                 tiles=plan.decode_tiles,
-                store=None if plan.decode_tiles is None else Scratch(where, plan.scratch_allowance),
+                store=None if plan.decode_tiles is None else Scratch(where, allowance),
                 tail_frames=plan.tail_frames,
             )
             return time.monotonic() - begun

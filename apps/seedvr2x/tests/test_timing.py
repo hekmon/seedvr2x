@@ -32,6 +32,7 @@ from seedvr2x import peaks
 from seedvr2x.frames import padded_size
 from seedvr2x.passes import Plan, Tiles
 from seedvr2x.shots import Shot, shot_layout
+from seedvr2x.tilegrid import SCRATCH
 from shot import Correction
 from timing import (
     RATIOS,
@@ -1183,6 +1184,115 @@ def test_calibration_passes_a_tiled_plans_scratch(
     decodes = [call[3] for call in steady.called if call[0] == "decode"]
     assert all(o["tiles"] == Tiles(256) and isinstance(o["store"], Scratch) for o in decodes)
     assert all(isinstance(o["store"].directory, Path) for o in decodes)
+
+
+class AtSize(Steady):
+    """A Steady whose decode takes any target: a job's size, its latents the stand-in's, so that
+    the calibration's choices at 1080p and 4K are held without a pass of that size."""
+
+    def decode(
+        self, models: Any, latent: torch.Tensor, count: int, target: Any, *rest: Any, **o: Any
+    ) -> None:
+        super().decode(models, latent, count, TARGET, *rest, **o)
+
+
+def stores(steady: Steady, packed: bool) -> list[tuple[int, Scratch]]:
+    """The frames and the scratch of each tiled pass the calibration made: those over several
+    frames (FIRST, FRAMES and the encode's second length), or a frame alone's."""
+    found: list[tuple[int, Scratch]] = []
+    for call in steady.called:
+        if call[0] in ("encode", "decode"):
+            count, options = (call[1], call[4]) if call[0] == "encode" else (call[2], call[3])
+            if options["store"] is not None and (count > 1) == packed:
+                found.append((count, options["store"]))
+    return found
+
+
+# A frame's scratch at a job's size, a plan at deghost's allowance (shot_plan's for a frame alone).
+def frame_allowance(target: tuple[int, int]) -> int:
+    return peaks.scratch(padded_size(target), 1)
+
+
+@pytest.mark.parametrize(
+    ("target", "thirteen"), [((1080, 1920), 165_335_040), ((2160, 3840), 656_547_840)]
+)
+def test_a_frame_plans_calibration_keeps_the_other_levels_scratch_in_memory(
+    monkeypatch: pytest.MonkeyPatch, target: tuple[int, int], thirteen: int
+) -> None:
+    # Where the job's plan is a frame's (frame_plan: its level takes each frame alone), the
+    # passes over 5 and 13 frames that time the other levels keep their scratch in system memory,
+    # their allowance 13 padded frames' (0.15 GiB at 1080p, four times that at 4K; DESIGN.md,
+    # Each frame on its own, decided on 2026-11-22), not the frame's, where a Windows drive under
+    # WSL2 made standard's decode 2.7 times as long; the frames alone keep the plan's.
+    padded = padded_size(target)
+    assert peaks.scratch(padded, FRAMES) == thirteen and thirteen / 2**30 < (
+        0.16 if target[0] == 1080 else 0.62
+    )
+    frame = frame_allowance(target)
+    steady = AtSize(monkeypatch)
+    plan = Plan(9, encode_tiles=Tiles(512), decode_tiles=Tiles(256), scratch_allowance=frame)
+    calibrate(steady.models, target, plan, 9, source=(24, 32), alone=True, frame_plan=True)
+    packed = stores(steady, packed=True)
+    assert sorted({count for count, _ in packed}) == [FIRST, FRAMES]
+    for count, store in packed:
+        assert store.allowance == thirteen
+        assert store.where(count, padded) == "system memory"
+    alone = stores(steady, packed=False)
+    assert alone and all(store.allowance == frame for _, store in alone)
+    assert all(store.where(1, padded) == "system memory" for _, store in alone)
+
+
+def test_a_frame_plans_calibration_holds_its_tiled_encode_to_13_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The encode's second length within the allowance (fits): 61 frames at Quick's rate in a plan
+    # that holds them, 13 where the allowance given the frame plan's passes is 13 frames'.
+    plan = Plan(9, encode_tiles=Tiles(512), scratch_allowance=frame_allowance(TARGET))
+    steady = Quick(monkeypatch)
+    calibrate(steady.models, TARGET, plan, 9, frame_plan=True)
+    assert encode_counts(steady) == [13, 5, 13]
+    roomy = Plan(
+        9, encode_tiles=Tiles(512), scratch_allowance=peaks.scratch(padded_size(TARGET), 61)
+    )
+    steady = Quick(monkeypatch)
+    calibrate(steady.models, TARGET, roomy, 9, frame_plan=True)
+    assert encode_counts(steady) == [13, 5, 61]
+
+
+def test_a_packed_plans_calibration_keeps_its_scratch_where_its_allowance_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Without frame_plan, as before: a plan whose allowance is short of 13 frames keeps their
+    # scratch in a file beside the job, the calibration's directory on its disk.
+    frame = frame_allowance(TARGET)
+    padded = padded_size(TARGET)
+    steady = Steady(monkeypatch)
+    plan = Plan(9, encode_tiles=Tiles(512), decode_tiles=Tiles(256), scratch_allowance=frame)
+    calibrate(steady.models, TARGET, plan, 9, directory=tmp_path, alone=True)
+    packed = stores(steady, packed=True)
+    assert packed and all(store.allowance == frame for _, store in packed)
+    for count, store in packed:
+        assert store.directory is not None and store.directory.parent.parent == tmp_path
+        assert store.where(count, padded) == str(store.directory / SCRATCH)
+
+
+def test_the_times_are_the_same_whatever_the_scratchs_place(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # On the stand-ins, whose passes take the same time wherever their scratch is, the models
+    # calibrated with frame_plan are those without, every kind and term, a frame alone's too.
+    plan = Plan(
+        9,
+        encode_tiles=Tiles(512),
+        decode_tiles=Tiles(256),
+        scratch_allowance=frame_allowance(TARGET),
+    )
+    records = []
+    for frame_plan in (False, True):
+        steady = Steady(monkeypatch)
+        found = calibrate(steady.models, TARGET, plan, 9, alone=True, frame_plan=frame_plan)
+        records.append(found.clock.record())
+    assert records[0] == records[1]
 
 
 class FakeCopy:

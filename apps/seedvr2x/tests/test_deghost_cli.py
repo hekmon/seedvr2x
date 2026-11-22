@@ -261,6 +261,38 @@ def test_a_plan_at_deghost_says_every_levels_time(
     assert "deghost about " in line and "(this job's)" in line
 
 
+@pytest.mark.usefixtures("stand_in")
+@pytest.mark.parametrize(
+    ("level", "plan"),
+    [("deghost", True), ("deghost", False), ("standard", True), ("standard", False)],
+)
+def test_the_calibration_is_told_where_the_jobs_plan_is_a_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, level: str, plan: bool
+) -> None:
+    # The switch of the calibration's scratch (calibrate's frame_plan) is the job's level, not
+    # `alone`, which every --plan sets: at deghost, its plan a frame's, the passes that time the
+    # other levels keep their scratch in memory (tests/test_timing.py holds where), whether the
+    # job runs or plans (every run calibrates); a job at standard's, its plan packing a shot's
+    # frames, as before.
+    import calibration
+
+    banded, _ = clips(tmp_path, monkeypatch)
+    told: list[dict[str, Any]] = []
+    calibrate = calibration.calibrate
+
+    def recorded(*arguments: Any, **options: Any) -> Any:
+        told.append(options)
+        return calibrate(*arguments, **options)
+
+    monkeypatch.setattr(calibration, "calibrate", recorded)
+    options = DEGHOST if level == "deghost" else (*DEGHOST[:-2], "--window", "5")
+    if plan:
+        options = (*options, "--plan", "plan.txt")
+    assert upscale(tmp_path, banded, "out", *options) == 0
+    assert [each["frame_plan"] for each in told] == [level == "deghost"]
+    assert [each["alone"] for each in told] == [plan or level == "deghost"]
+
+
 def test_a_frames_window_files_are_named_past_9999() -> None:
     # A shot of each frame alone has a window a frame: past 9,999 frames, 5 digits, a unit file
     # still (resume.UNIT_FILE), as the latents of 6 digits and more are.
