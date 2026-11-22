@@ -22,6 +22,7 @@ import comfy.model_management as management
 import numpy as np
 import numpy.typing as npt
 import pytest
+import server
 import torch
 from comfy.utils import ProgressBar
 from comfy_api.latest import InputImpl
@@ -37,11 +38,13 @@ from standins import (
     master_of,
     upscale_video,
 )
+from test_held import strays
 from test_nodes import TARGET, fresh, planned_clip
 from test_progress import stop_at, tiled_plans
+from test_release import freed
 from test_still import TILES, stand_in_dit
 
-from seedvr2x import clip, record, tilegrid
+from seedvr2x import clip, model, record, tilegrid, waiting
 from seedvr2x import frames as sizes
 from seedvr2x.shots import Shot
 
@@ -618,6 +621,70 @@ def test_cancel_between_frames_at_deghost_leaves_no_file_and_no_writer(
     assert len(bar.updates) == update
     assert left(comfy_temp) == [] and writers() == []
     ProgressBar.on_update = None
+
+
+@pytest.mark.parametrize("where", ["encode", "window", "decode"])
+def test_cancel_inside_a_frames_pass_at_deghost_frees_the_card_and_leaves_nothing(
+    machine: StandIn,
+    tmp_path: Path,
+    comfy_temp: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+) -> None:
+    """ComfyUI's Cancel inside one of the second frame's three passes, not between frames: its
+    tiled encode after its first tile (the stand-in bar's 17th update, a frame moving it 14 times
+    in 4 tiles a pass), its window from inside the DiT's poll (model.sample's wait, ComfyUI's
+    Cancel its check), its tiled decode after its second tile (the 24th). The card freed with
+    nothing of the models left (test_held.strays), no later frame made, no file in the temp
+    folder and no writer thread; the next run goes through."""
+    tiled_plans(monkeypatch)
+    windows: list[int] = []
+    sample = model.sample
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        windows.append(1)
+        if where == "window" and len(windows) == 2:
+            management.interrupt_current_processing()
+            # The DiT's poll, its check ComfyUI's Cancel (progress.Progress.running).
+            waiting.wait(lambda: False, 0.001)
+        return sample(*args, **kwargs)
+
+    monkeypatch.setattr(model, "sample", counting)
+    if where != "window":
+        stop_at(17 if where == "encode" else 24)
+    path = source(tmp_path / "in.mkv", 3)
+    h = handle(tmp_path)
+    with pytest.raises(management.InterruptProcessingException):
+        upscale_video(
+            h,
+            plans.Settings(),
+            InputImpl.VideoFromFile(str(path)),
+            RESOLUTION,
+            "1",
+            cuts=(Shot(0, 3),),
+            quality="deghost",
+        )
+    ProgressBar.on_update = None
+    instance = server.PromptServer.instance
+    assert instance is not None
+    texts = [each for each in instance.texts if each[0].startswith("frame")]
+    said = texts[-1][0]
+    assert said.startswith("frame 2/3 \u00b7 "), said
+    assert {"encode": "encoding", "window": "upscaling", "decode": "decoding"}[where] in said
+    # No later frame made: the first frame's window, and the second's where it was reached.
+    assert len(windows) == (1 if where == "encode" else 2)
+    assert not any(each[0].startswith("frame 3/3") for each in texts)
+    freed(machine, h)
+    assert strays(machine.made[0]) == [] and not waiting.abandoned()
+    assert left(comfy_temp) == [] and writers() == []
+    out, _ = run(
+        tmp_path,
+        InputImpl.VideoFromFile(str(path)),
+        plans.Settings(),
+        cuts=(Shot(0, 3),),
+        quality="deghost",
+    )
+    assert out.shape[0] == 3
 
 
 def test_a_writer_that_fails_ends_the_run_leaving_nothing(
