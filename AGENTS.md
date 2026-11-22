@@ -940,17 +940,31 @@ marker. The image server, Linux's alone by its lock, has no such line.
   correct (`run._sample_frames`, `_decode_frames`), and the calibration times them where asked
   (`calibrate`'s `alone`, given by a job at deghost and by every `--plan` that says each level's
   time; `main._calibrated`): after its other steps, a frame alone through each pass unmeasured,
-  then `calibration.ALONE_FRAMES` (3, PROVISIONAL: how many the rate needs is not measured)
-  frames each encoded alone into one input copy after a window of one latent, each sampled in a
-  window of one latent less its draw, each decoded through one reader of the copy; an encode of
+  then `calibration.ALONE_FRAMES` (3: by `--plan` against the frames run, the level's time 6%
+  short on the 96 GB card and within 2% on the RTX 5090, 2026-11-22) frames each encoded alone
+  into one input copy after a window of one latent, each sampled in a window of one latent less
+  its draw, each decoded through one reader of the copy; an encode of
   frames alone a constant (the run's change of phase, its copy's start) and a rate a frame, a
   frame's window a rate by the token, a decode of frames alone a constant (its reader's start)
   and a rate a frame; no change of phase of theirs counted among the terms. `tests/test_timing.py`
   holds the units' kinds, a frame alone's frames unpadded, the calibration's steps and models on
   `Steady`, the other kinds' and terms' models the same with it and without (no other level's
   estimate moved), the level's estimate by those models, and the frames alone's parts correcting
-  their own models; `tests/test_cli_run.py`'s stand-in calibration has every kind. Unmeasured on
-  a card: how close the plan's time at the level now comes to a run's.
+  their own models; `tests/test_cli_run.py`'s stand-in calibration has every kind. Where the
+  job's own plan is a frame's (`calibrate`'s `frame_plan`, the job's level, given by
+  `main._calibrated` as `each_frame(args.quality)`, not `alone`, which every `--plan` sets), the
+  passes over 5 and 13 frames that time the other levels keep their scratch in system memory,
+  their allowance at least 13 padded frames' (`peaks.scratch`: 0.15 GiB at 1080p, 0.61 at 4K),
+  the encode's second length within it (`fits`), as a packed level's plan keeps a short shot's:
+  with the frame's allowance their tiled decodes kept their scratch in files beside the job, on
+  a Windows drive under WSL2 1.608 s a frame against 0.599, and `standard`'s time came out 77%
+  long (DESIGN.md, Each frame on its own, "The other levels' times in its plan", RTX 5090,
+  2026-11-22); the frames alone keep the plan's allowance. `tests/test_timing.py` holds the
+  allowance and each store's place at 1080p and 4K (13 frames' 165,335,040 and 656,547,840 bytes,
+  in memory) without a pass of that size, the frames alone's the frame's, a packed plan's short
+  allowance still a file in the calibration's directory, the encode's second length within it,
+  and the models the same either way on `Steady`; `tests/test_deghost_cli.py` the switch told
+  by a run and a `--plan` at deghost and not at standard.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
   `test_pull_cli.py` holds what the command line does over it. `tests/test_pull_lines.py` holds a
@@ -1160,7 +1174,11 @@ marker. The image server, Linux's alone by its lock, has no such line.
   `seedvr2x-comfyui`, the SHA-256 the stand-in's load proves); the VIDEO given keeping the
   source's rate where Matroska reads 60000/1001 and 120000/1001 back otherwise; each pixel format
   through `yuv.to_rgb` (nv12 repacked); a plan only writing nothing; a Cancel (between frames at
-  deghost too) and a writer that fails leaving no file in the temp folder and no writer thread;
+  deghost too, and inside each of a frame's three passes there: its tiled encode after a tile and
+  its tiled decode after its second, from the stand-in bar, and its window from the DiT's poll,
+  ComfyUI's Cancel its check, the card then freed with nothing of the models left,
+  `test_held.strays`, no later frame made, and the next run made: nothing to fix, 2026-11-22) and
+  a writer that fails leaving no file in the temp folder and no writer thread;
   and the memory of a clip ten times as long the same within a shot's frames, at standard and at
   deghost (glibc's bytes in use, mallinfo2, at each shot's
   end, the stand-ins keeping nothing a shot: the resident pages counted what glibc gave back and
@@ -1315,7 +1333,17 @@ marker. The image server, Linux's alone by its lock, has no such line.
   GPU`, the CUDA error keeping its own line) and `_end(1)`; the command's expected refusals
   return their status from `_run` and never get there; mode `type-error` (a TypeError with the
   blocked finalizer: exit 1 within 30 s, the resume as if uninterrupted) and `type-error-plain`
-  (no CUDA: Python's traceback and status as before). Ctrl-C and
+  (no CUDA: Python's traceback and status as before). Modes `window-stall` and `frame-stall`, the
+  stall of 2026-11-22 in a window (DESIGN.md, Allocator, "A stall at `deghost`, and the stop's
+  cleaning"): the windows the library's own (`shot_pass.sample_windows`, the noise's draw and
+  `sampling.window` the stand-in's arithmetic), the step named (`#N`: its Nth call, a frame's
+  window at deghost named by its shot) waiting on an event that never completes with its unit
+  named at 0.01 s and `waiting.FLOOR` at 1 s, and `model.synchronize` from then on such a wait,
+  said on stderr (`POLL`): one SIGTERM, or Ctrl-C twice, sent once at the wait's line, ends the
+  process with 143 or 130 within 30 s, its line, no poll on the way out, the job's files and the
+  resume as if uninterrupted, at `standard` (window 4:1) and at `deghost` (shot 4's fifth
+  frame: `run._sample_frames`); on the code before, all four stayed 30 s after the signal, in a
+  second wait (`POLL`). `upscale` sends its signals once, at the first matching line. Ctrl-C and
   SIGTERM are ignored from the line to the exit; a CUDA error in `--compile`'s warm-up is the
   card's, not a CompileError (`seedvr2x/compiling.py`). The image
   server's `command` ends the process the same way once `serve` has returned
@@ -1400,14 +1428,14 @@ marker. The image server, Linux's alone by its lock, has no such line.
   (503, a ready server only, ready again after) and the gauge of the longest wait,
   `tests/test_metrics.py` its family.
 - A card a CUDA error failed (`waiting.fail`, `waiting.failed`, `model.marking`,
-  `model.unless_failed`; the nodes on Windows, 2026-11-07: "Fatal Python error: Aborted" at a free,
-  where under cudaMallocAsync a tensor's free reports a pending error inside torch's deleter, which
-  aborts: shown alone on the RTX 5090, a device-side assert then a `del`, exit code 3; torch's own
-  allocator frees silently and the error comes at the next synchronise): a CUDA error other than
-  torch's `OutOfMemoryError` (`waiting.cuda_failed`: a "CUDA error: out of memory" a kernel met is
-  one) marks its card, abandoned too and never cleared. From then on nothing seedvr2x controls
-  frees, closes or waits on that card: each free on an error's way out first asks the card
-  (`model.unless_failed`: the poll, where a pending error comes back and marks it), since a
+  `model.unless_abandoned`; the nodes on Windows, 2026-11-07: "Fatal Python error: Aborted" at a
+  free, where under cudaMallocAsync a tensor's free reports a pending error inside torch's
+  deleter, which aborts: shown alone on the RTX 5090, a device-side assert then a `del`, exit code
+  3; torch's own allocator frees silently and the error comes at the next synchronise): a CUDA error
+  other than torch's `OutOfMemoryError` (`waiting.cuda_failed`: a "CUDA error: out of memory" a
+  kernel met is one) marks its card, abandoned too and never cleared. From then on nothing seedvr2x
+  controls frees, closes or waits on that card: each free on an error's way out first asks the card
+  (`model.unless_abandoned`: the poll, where a pending error comes back and marks it), since a
   generator's own `finally` runs as the error unwinds through its consumer, before any outer block
   has seen it. Frees inside a forward pass before the error surfaces, ComfyUI's own clean-up and the
   interpreter's exit are not seedvr2x's. A decode's normal end polls the card before its causal
@@ -1435,6 +1463,33 @@ marker. The image server, Linux's alone by its lock, has no such line.
   read, a CUDA error at a run's end poll holding models not kept, out of memory freeing as before;
   the Cuts node refused on a failed card and marking one (`tests/test_cuts_node.py`). The CLI's and
   the server's CUDA errors still end their process (`main.py`, `service.py`).
+- A card a wait was abandoned on (`waiting.abandoned`: past its bound, or inside a release, ended
+  by an exception; DESIGN.md, Allocator, "A stall at `deghost`, and the stop's cleaning", decided
+  on 2026-11-22: on the RTX 5090 under WSL2 a SIGTERM ended a window's stalled wait and the RoPE
+  tables' free on the way out polled the same card until a second SIGTERM a minute later): every
+  free on an error's way out leaves it as a failed card, neither polling nor freeing
+  (`model.unless_abandoned`, named `unless_failed` until then: the mark it reads is
+  `waiting.abandoned`, which a failed card carries too; another exception from its own poll frees
+  as before unless that poll's wait was past its bound). The sites: `shot_pass.sample_windows`'
+  and `still.sampled`'s RoPE tables, `model.encode_sliced`'s and `decode_sliced`'s causal memory
+  (through `tiling`'s `closing` of a tile's pass too), `shot_pass._slices`' and `still.decoded`'s
+  decode, `clip.upscale`'s and the nodes' `stream.upscale_shot`'s frames cleared and windows
+  closed (`clip._merged`, `stream._windows`), the detector's `__exit__` on an exception (the
+  model kept, unpolled; `close()` itself as before), `compiling._on_the_device` on an exception
+  (nothing waited for or sent away), and the Cuts node's torch cache emptied only on a card not
+  abandoned (`nodes.py`, as `models.session`'s end). What they held goes with the process (the
+  command line, the image server) or with the release the nodes complete at the next run
+  (`models._settle`, `Models.release`'s `forget`). A card is abandoned only by an exception, so the
+  normal path's waits are as they were. `core/tests/test_abandoned.py` holds each site on a stand-in
+  poll (a wait on an event that never completes, its unit named, on a clock whose sleep raises the
+  stop before the bound or past it, or a CUDA error): past the bound and failed, no poll after the
+  stall and what the pass held kept (the RoPE tables cleared once, at the shot's start; the
+  untiled decode open, the causal memory of a decode or an encode, untiled and in a tile's pass,
+  the traceback's locals), before the bound as before (polled, closed, cleared), and a clip's bits
+  the same with the polls stood in; on the code before, its 9 abandoned cases fail.
+  `test_detector_close.py` the exit on an abandoned card (nothing called, the model kept), on a
+  card answering and at a normal end as before; `test_compile.py` the warm-up's VAE on an
+  exception, sent away on a card answering and left on an abandoned one.
 - The card read on Windows itself (`seedvr2x/memory.py`: `NVML_WINDOWS`, `CUDA_WINDOWS`,
   `_libraries`, `_unread`): NVML through `nvml.dll` (System32, or NVSMI's directory) and the
   driver through `nvcuda.dll`, the probe's too; a reading NVML can't make said at INFO the first
@@ -1975,12 +2030,15 @@ marker. The image server, Linux's alone by its lock, has no such line.
   a Cancel during that release leaving the mark kept: `tests/test_release.py`), models not kept
   waiting for the device in the poll first (`model.synchronize`) under the same text and second
   Cancel, a healthy release putting the text back (none said before: cleared) and marking nothing,
-  and one after a normal end with no check and no text; `tests/test_cuts_node.py` seedvr2x Cuts (on
-  a temporary HF_HOME, an autouse fixture, `hugging_faces_cache`, offline: none reads the process's
-  own Hugging Face cache, which natively on Windows was one WSL had written, its links unreadable
-  there) over the untrained detector's weights and scripted probabilities (the cut list, and the
-  console's text of the cuts with their probabilities and the possible cuts, without a lead; the
-  node's line "scanning 64/120 frames",
+  and one after a normal end with no check and no text, and a Cancel past the bound in a frame's
+  window at deghost (the third frame's) with no poll or RoPE tables' free made on the way out
+  (`model.unless_abandoned`), the models held, the next run refused while the wait's work is
+  pending and settled once it has finished, its frames made; `tests/test_cuts_node.py` seedvr2x
+  Cuts (on a temporary HF_HOME, an autouse fixture, `hugging_faces_cache`, offline: none reads the
+  process's own Hugging Face cache, which natively on Windows was one WSL had written, its links
+  unreadable there) over the untrained detector's weights and scripted probabilities (the cut list,
+  and the console's text of the cuts with their probabilities and the possible cuts, without a lead;
+  the node's line "scanning 64/120 frames",
   "2 shots · 1 possible cut below 0.30"; no text output; no mode and no folder input, the
   models handle required and refused if it is none (naming the node), the threshold, the file the
   handle's folder's alone where a folder is given (the user, 2026-11-08: a folder is the choice of
