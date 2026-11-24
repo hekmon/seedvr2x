@@ -619,6 +619,79 @@ kind of picture (an old grainy film, a grainy cel scan, a digital film, a painte
 kind's verdict may be its film's. Grain alone doesn't decide it: on the grainy cel scan `maximum`
 won the fast shot, and on the grainy film it won where `standard` made structures wobble.
 
+#### `deghost` and `maximum` at three seeds
+
+Measured on 2026-11-22 to 24 on the 96 GB card (impl-box-12, impl-box-13): seedvr2x at 5c21219
+with its defaults (the sharp 7B, `split`), ×2 from the d1 input, at seeds 42, 43 and 1234: the
+8 [clips](#clips) of 1080p at `standard`, `deghost` and `maximum`, the 17 of 4K at `standard`
+and `deghost`. Each level is paired with `standard` at the same seed, frame by frame, the three
+seeds' differences in one interval ([Metrics and verdicts](#metrics-and-verdicts)), better or
+worse beyond `standard`'s own spread between its three seeds on the clip. Each clip is scored
+whole, its bars included. The verdicts, + better, − worse, = within, in the order PSNR-Y,
+SSIM-Y, LPIPS, DISTS, VMAF, ΔE00 lf, T-err lf, T-err:
+
+| Clip | `deghost` | `maximum` |
+|---|---|---|
+| anime-bright | + + + + + + + + | + + + + + + + + |
+| anime-clean | = − − − = + + = | = = = = + + + = |
+| anime-dark | + − = − + + + + | + + + + + + + + |
+| anime-grain | + = = + + + + + | + = + + + + + + |
+| anime-sky | − − = + − − + − | = = = + + = + + |
+| cartoon-bright | + + + + + + + + | + + + + + + + + |
+| live-slow | = − + + + + + + | + + + + + + + + |
+| live-vfx | = − + + + + + + | + + + + + + + + |
+| sollevante-painted | = + = − + + + + | |
+| sollevante-line | + + + + + + + + | |
+| sollevante-action | + + + − + + + + | |
+| sollevante-dark | − − − − − = + + | |
+| cel4k-detail | + − − − + + + + | |
+| cel4k-motion | + + = − + + + + | |
+| cel4k-night | + + − − + + + + | |
+| cel4k-flat | − − − − − = + = | |
+| ouatia-face | − − − = − − − − | |
+| ouatia-dark | + − − + + + + + | |
+| ouatia-street | = − − + = − = − | |
+| ouatia-motion | − − + + + = + − | |
+| digital-sunrise | − − = + + − + − | |
+| digital-cockpit | − − − − + + + + | |
+| digital-space | − − − − − − − − | |
+| digital-jet | + − + + + + + + | |
+| digital-dogfight | = − − = + + + + | |
+
+Clips better / within / worse:
+
+| Level and clips | PSNR-Y | SSIM-Y | LPIPS | DISTS | VMAF | ΔE00 lf | T-err lf | T-err |
+|---|---|---|---|---|---|---|---|---|
+| `deghost`, 1080p animation (6) | 4/1/1 | 2/1/3 | 2/3/1 | 4/0/2 | 4/1/1 | 5/0/1 | 6/0/0 | 4/1/1 |
+| `deghost`, 4K animation (8) | 5/1/2 | 5/0/3 | 2/2/4 | 1/0/7 | 6/0/2 | 6/2/0 | 8/0/0 | 7/1/0 |
+| `deghost`, 1080p live action (2) | 0/2/0 | 0/0/2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+| `deghost`, 4K live action (9) | 2/2/5 | 0/0/9 | 2/1/6 | 5/2/2 | 6/1/2 | 4/1/4 | 6/1/2 | 4/0/5 |
+| `maximum`, 1080p animation (6) | 4/2/0 | 3/3/0 | 4/2/0 | 5/1/0 | 6/0/0 | 5/1/0 | 6/0/0 | 5/1/0 |
+| `maximum`, 1080p live action (2) | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+
+- **`deghost` follows the ground truth from frame to frame:** its low-frequency temporal error
+  is lower than `standard`'s on all 14 animation clips and on 8 of the 11 live-action ones, the
+  plain one on 11 animation clips (higher on one, the bright sky's slow pan). On animation it is
+  closer by VMAF on 10 clips and by PSNR-Y on 9, further on 3 each.
+- **What it loses:** by DISTS on 9 animation clips, 7 of the 8 at 4K, by SSIM-Y on 6 and by
+  LPIPS on 5; on live action by SSIM-Y on all 11 and by PSNR-Y on 5 (closer on 2), where VMAF
+  is closer on 8 and DISTS on 7. Further on 5 or more of the 8: the darkest 4K shot (space and
+  a planet's lit edge, closer by the two temporal errors alone), the cel scan's flat wall, the
+  bright sky's slow pan at 1080p, and on live action the grainy film's close-up (on 7) and the
+  earth from near space (on all 8). Closer on all 8: the bright cartoon and the bright anime at
+  1080p, the line art over flat colour at 4K. The causes are not isolated.
+- **`maximum`** at 1080p is closer than `standard` on 3 to 6 of the 6 animation clips by each
+  measure and on both live-action clips by all 8, further on none: the composite's gain
+  measured on numz ([above](#four-runs-with-the-grid-shifted)) holds on seedvr2x itself. At 4K
+  it is to run.
+- **Time**, the units alone: `deghost` about 2.1 times `standard`'s at both sizes, `maximum` 3.9
+  times at 1080p.
+
+What these can't show: they score shots of 45 frames at most, a frame and a pair of frames at
+a time, and the ghosts the eyes saw at `maximum` on an episode's fast shots played, which a
+measure of the blend put within 0.011 (DESIGN.md, Each frame on its own), are beyond them; no
+eyes judged these runs.
+
 ## Seed bands
 
 Spread (max − min) of the default's 3 per-seed means, `none` (`lab` within ±0.15 dB and ±0.4
