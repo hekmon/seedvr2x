@@ -1019,7 +1019,11 @@ under `--verbose`, and the plan's lines stay, in plain words:
   copied once ahead, so that one the finished file can't take is found then, not after the
   night's work;
 - the assembly's time: about how long joining the segments will take, its rate and its count
-  of the masters under `--verbose`;
+  of the masters under `--verbose`; before any master is written, the masters counted by the
+  format's figure, as the plan's disk line counts them (decided on 2026-11-24, to build:
+  counted at their raw size, the plan of an animated episode on the RTX 5090 said 1 h 28 min
+  to join it, 216.6 GiB of masters, where the join took 17 min 32 s on the 42.16 GiB its FFV1
+  made; the run's own estimate, from the masters written, 15 min 31 s);
 - the memory line: what the run holds to and why, what is free less the margin, the driver's
   own figure under `--verbose` (its warnings already say what it lends), as on the plan's card
   line since 2026-10-31;
@@ -2554,6 +2558,10 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   level on average in every version: no eye sees it. The user's eyes, blind: the
   several runs' frames on 8 of 8 stills ("the sharpest, the cleanest; the other is way more
   blurry") and on 4 of 4 loops, 2 of them hard to tell in motion.
+  On seedvr2x itself at three seeds (2026-11-22, impl-box-12, the 8 clips at 1080p;
+  [numerics.md](research/docs/numerics.md#deghost-and-maximum-at-three-seeds)): `maximum`
+  closer than `standard` on 3 to 6 of the 6 animation clips by each measure, and on both
+  live-action clips by every one, further on none.
 - **At 4K** (2026-10-21, ×2 from 1080p, the 96 GB card, seed 42, 4 shots of a grainy
   live-action film and a painted animation shot;
   [numerics.md](research/docs/numerics.md#in-seedvr2x---quality-at-4k-and-in-the-manuals-example)):
@@ -2680,7 +2688,22 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
   softer sky with fewer colour levels, a little noise in hair where `maximum`'s flat colours
   are clean, and a little flicker on the pan, less than `standard`'s. The user: "If I had to
   choose, oneframe" (impl-box-7's name for it), and the episode as `standard` leaves it is not
-  shippable.
+  shippable. That episode whole at the level (impl-box-11, its source debanded as the level
+  then read it, which changed little there: below), by the user's eyes on 2026-11-22: one of
+  the cleanest outputs of its series so far, its few artefacts the source's and upscaling's;
+  no ghosting at all; the columns still faint on a grey sky, far less visible; and small
+  details changing from frame to frame (below).
+- **Against the ground truth** (the full-reference protocol on seedvr2x at 5c21219, three
+  seeds, the 8 clips of 1080p and the 17 of 4K, the 96 GB card; impl-box-12 and impl-box-13,
+  2026-11-22 to 24; [numerics.md](research/docs/numerics.md#deghost-and-maximum-at-three-seeds)):
+  against `standard` at the same seeds, on animation (6 clips at 1080p, 8 at 4K) the level
+  follows the ground truth from frame to frame more closely, its low-frequency temporal error
+  lower on all 14 and the plain one on 11, and is closer by VMAF on 10 and by PSNR-Y on 9; it
+  is further by DISTS on 9 (7 of the 8 at 4K), by SSIM-Y on 6 and by LPIPS on 5. On live
+  action (2 clips at 1080p, 9 at 4K), mixed: further by SSIM-Y on all 11 and by PSNR-Y on 5,
+  closer by VMAF on 8 and by DISTS on 7. `maximum`, beside it at 1080p, was further on none
+  ([Several runs of a shot](#several-runs-of-a-shot-an-option-for-quality)). The causes of
+  the losses are not isolated.
 - **Cost.** On one shot of 206 frames, by research means (a cut at every frame), 1.8 times
   `standard`'s time: 6 min 47 s against 3 min 47 s and `maximum`'s 11 min 13 s, on the 96 GB
   card; the level as built, 5 min 59 s (impl-box-9, 2026-11-18). Over an episode it costs more
@@ -2713,6 +2736,12 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
   15 h 21 min over three nights from each night's first unit to its last, 1.600 s a frame
   (each night 1.590 to 1.605), 2.16 times `standard`'s 0.741 over its 12 segments; 15 h 24
   min with the three starts and the join, 56 s: 34,548 frames in 167 segments, 43.07 GiB.
+  On the RTX 5090 under WSL2, another animated episode finished on 2026-11-24 (impl-wsl2-6 to
+  impl-wsl2-10, five nights): 20 h 59 min from each night's first unit to its last, 2.021 s a
+  frame (each night 1.972 to 2.167), 1.26 times the 96 GB card's on its own episode; 37,393
+  frames in 180 segments, 42.16 GiB, joined in 17 min 32 s with the source's audio and
+  subtitles. Its one stall, at 04:53 on 2026-11-22 after that night's last unit made, is
+  outside those spans (Allocator, "A stall at `deghost`").
   At that code the level read its source debanded: the deband's read costs 5 ms a frame on
   the RTX 5090's episode (2,000 frames, ffmpeg alone, the read alone; the other episode not
   read), under 0.4% of the level's time a frame on either card, whether or not the reads
@@ -2743,6 +2772,12 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
     Windows drive under WSL2 (below).
     `--until` held all the same, the run's own clock taking over as
     its units are made: the runs stopped at 05:57 and 06:00.
+    On the RTX 5090's whole episode, main's `--plan` there (impl-wsl2-10, 2026-11-24, the job
+    on a Windows drive) said 19 h 27 min against the 21.0 h it took (2.021 s a frame; the
+    first nights' 2.10 gave 21.8 h, above), 7% short, its DiT 0.706 s a frame against 0.775
+    run; its calibration's rate a token, 0.092 ms, was among the lowest of five on that card
+    (0.086 to 0.106, 2026-11-22 to 24), so a plan's times there move by about a tenth from one
+    calibration to the next.
   - **The other levels' times in its plan** were off where the job is on a Windows drive
     under WSL2. The plan at `deghost` prices the packed levels by the calibration's encodes
     and decodes of 5 and 13 frames, made on the frame's plan, whose scratch allowance is a
@@ -2759,9 +2794,12 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
     each level is timed as its own plan would run it. Built on 2026-11-22 (impl-fix-5):
     `calibrate`'s `frame_plan`, set by `main._calibrated` where the job's level takes each
     frame alone, allows those passes at least 13 padded frames' scratch (165,335,040 bytes
-    at 1080p, 656,547,840 at 4K), the frames alone keeping the plan's; no plan moves. What
-    it gives on a Windows drive under WSL2 is to measure, by a `--plan` at `deghost` on the
-    RTX 5090.
+    at 1080p, 656,547,840 at 4K), the frames alone keeping the plan's; no plan moves.
+    Measured on 2026-11-24 (impl-wsl2-10, main's `--plan` at `deghost` on the RTX 5090, the
+    job on a Windows drive): every tiled decode of the calibration in system memory, its 13
+    frames' at 0.576 s a frame (0.599 in `standard`'s own plan, 0.641 run), and `standard`'s
+    time 10 h 20 min against the 11.9 h its first 16 segments' rate gives, 13% short where it
+    was 77% long, by the same calibration's rates as the level's (above).
   - **The users' documents and the plan's line** lose "about 1.8 times": the plan prints each
     level's time on the card it runs on, right once the calibration is; the documents say
     about twice `standard`'s time, as measured on the 96 GB card and on the RTX 5090
@@ -2800,7 +2838,11 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
   2026-11-19). Each frame is redrawn alone, so nothing ties one frame's small details to the
   next's: at `maximum`, the deband study's render of that scene, the ticket held still about
   90% of the time and the picture was clean (the user's eyes, 2026-11-19). The users'
-  documents say so.
+  documents say so. On the whole episode at the level (the user, 2026-11-22): distant
+  characters' eyes, too small for their drawing, changed a little from frame to frame, as did
+  the unreadable content of barrels in one scene, and kanji as they moved, as expected. What
+  would hold them still is not for v0.1.0: a held drawing's frames packed into one latent
+  (parked, below), or the level chosen shot by shot (an idea, not studied).
 - **The users' guidance for animation** (the user, 2026-11-19), in their documents: test the
   source on short clips first (a dark gradient, a fast scene, a held scene with fine details);
   start at `maximum` and keep it where the picture is clean; where terraces show, add
@@ -2808,8 +2850,10 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
   terraces show there too. A level and the deband apply to a whole job: `maximum` runs a shot
   four times, `deghost` takes about twice `standard`'s time, and `--plan` prints each level's
   time on the user's card.
-- **Not measured:** live action, so the level is advised for animation alone until it is;
-  its sharpness by a number (the eyes judged it).
+- **Live action,** by the measures alone (above): mixed, further from the ground truth than
+  `standard` by SSIM-Y on all 11 clips and closer by VMAF on 8. The level is for animation's
+  ghosts, and no eyes have judged it on live action: it stays advised for animation alone.
+  **Not measured:** its sharpness by a number (the eyes judged it).
 - **Parked** (the user, 2026-11-17): a held drawing's frames packed into one latent (a cut at
   each new drawing, impl-box-7's `drawings`): 16% faster than each frame on its own on a shot
   animated on threes and a little steadier there (0.64 against 0.74), the same in fast
@@ -6201,7 +6245,12 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   `--window 120` (3 shots in two windows each, none swapped, both passes untiled), it took
   7 h 12 min, 1.6% over its estimate, the VAE 84% of the GPU's time, every step under its
   plan. The user's eyes on it, beside the disc's own 1080p (an upscale of the same 720p
-  master), are to come.
+  master), on 2026-11-15: sharper and cleaner than the disc's, the lines, text and focus
+  better, but ghosts on moving parts, faint vertical lines across a cloudy sky, noise added
+  everywhere, most in dark scenes, and a canvas-like texture on flat hair and skin. The study
+  of a latent's frames followed ([Each frame on its own](#each-frame-on-its-own---quality-deghost)),
+  and the same episode at `deghost`, on 2026-11-22: one of the cleanest outputs of its series
+  so far.
   Under WSL2, measured on 2026-11-11 (impl-wsl2-1: the RTX 5090 with the user's desktop on it,
   the same jobs, the sizes emulated by the same ballast with room kept for the desktop's
   growth, and the whole card): every run held itself (the lending driver's two warnings, torch
