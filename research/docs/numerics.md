@@ -275,10 +275,17 @@ the 1080p display's below (until 2026-10-06 by the height alone: see the 4K sect
 after a 4 px Gaussian blur (low-frequency colour and brightness), the temporal error |Δout − ΔGT|
 between consecutive frames (and on 16×16 block means: low-frequency flicker), and PSNR-Y of the
 bottom 16 rows and of the rest. A variant's figure is its paired difference to the default at
-the same seed, frame by frame, with a 95% interval from a block bootstrap (blocks of 8 frames).
+the same seed, frame by frame, with a 95% interval from a circular block bootstrap (blocks of 8
+frames wrapping round the clip, so that every frame is drawn as often).
 **Better / worse** means the interval excludes 0 *and* the difference exceeds the clip's seed
 spread (max − min of the default's 3 per-seed means); anything else is **within**. Each
-variant is scored twice, as rendered (`none`) and after `lab`.
+variant is scored twice, as rendered (`none`) and after `lab`. Until 2026-11-23 the blocks
+didn't wrap: started anywhere but in the clip's last 7 frames, their run cut to its length,
+they drew a 45-frame clip's first and last frames 7.5 and 9 times less often than its middle
+ones. Of impl-box-12's 264 paired means (`deghost` and `maximum` against `standard`, below), 9
+lay outside their own interval and 5 on its edge at the figures printed; made again with the
+blocks wrapped, none outside and 2 on an edge at the figures printed alone, every mean the same
+and no verdict moved (impl-box-13, 2026-11-24). The other sections' verdicts were made before.
 
 ### Validation
 

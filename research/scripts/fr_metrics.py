@@ -489,7 +489,14 @@ def fmt(v, f):
 
 
 def block_bootstrap(diffs, block, n_boot, rng):
-    """95% CI of the pooled mean of several per-frame difference series (one per seed)."""
+    """95% CI of the pooled mean of several per-frame difference series (one per seed).
+
+    The blocks wrap round the series (a circular block bootstrap), so that every frame is drawn
+    equally often and the resampled means centre on the series' own. Until 2026-11-23 they did not
+    (numerics.md, the full-reference protocol): with blocks of 8, a 45-frame series' first and last
+    frames were drawn 7.5 and 9 times less often than its middle ones, and a cell's mean could lie
+    outside its own interval.
+    """
     stats = np.empty(n_boot)
     for b in range(n_boot):
         tot = cnt = 0.0
@@ -497,8 +504,8 @@ def block_bootstrap(diffs, block, n_boot, rng):
             n = len(d)
             L = min(block, n)
             k = -(-n // L)
-            starts = rng.integers(0, n - L + 1, size=k)
-            s = np.concatenate([d[i:i + L] for i in starts])[:n]
+            starts = rng.integers(0, n, size=k)
+            s = d[(starts[:, None] + np.arange(L)) % n].ravel()[:n]
             tot += s.sum()
             cnt += n
         stats[b] = tot / cnt
