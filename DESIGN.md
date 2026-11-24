@@ -1666,8 +1666,10 @@ model's work so the planner knows every shot (time estimate, `--until`, manifest
 from a cut list.
 - The cut list format: one frame number per line, the first frame of each shot except the
   first, `#` comments, no timestamps. Frame numbers are exact on the frame grid.
-- Fields after the frame number are ignored, so an export carrying scores (sptenc's, once it
-  has one) stays readable.
+- Numbers and times after the frame number are ignored, so an export carrying scores
+  (sptenc's, once it has one) stays readable. A level's name there runs the shot from that cut
+  at that level, and any other word is refused (decided on 2026-11-24, to build:
+  [a level per shot](#a-level-per-shot-marked-in-the-cut-list)).
 - A directory of segments is no input (the user's decision, 2026-10-05). The source is the only
   gateway, so every cut and every output segment comes from seedvr2x's own detection and
   rules, never from an outside splitter's joins: of an earlier split's 411 joins, 63 scored
@@ -2622,6 +2624,8 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   understands, the runs a shot being the code's): `standard` by default, one run a shot;
   `enhanced`, 2 runs; `maximum`, 4 runs; and since 2026-11-17 `deghost` (named `animation`
   until 2026-11-19), each frame on its own ([below](#each-frame-on-its-own---quality-deghost)).
+  A shot's own level may be marked in the cut list, `--quality` being every other shot's
+  (decided on 2026-11-24, to build: [a level per shot](#a-level-per-shot-marked-in-the-cut-list)).
 - **Validated** on 2026-10-21. On the 96 GB card, `maximum` gave measurement's 4-run
   composite and `enhanced` its 2-run composite, 45 of 45 frames each, bit for bit
   (cartoon-bright at 1080p, untiled, numz's draw and padding, no correction). On an RTX 5090,
@@ -2842,14 +2846,18 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
   characters' eyes, too small for their drawing, changed a little from frame to frame, as did
   the unreadable content of barrels in one scene, and kanji as they moved, as expected. What
   would hold them still is not for v0.1.0: a held drawing's frames packed into one latent
-  (parked, below), or the level chosen shot by shot (an idea, not studied).
+  (parked, below). What keeps that cost to the shots that need the level is the level marked
+  shot by shot in the cut list ([a level per shot](#a-level-per-shot-marked-in-the-cut-list),
+  decided on 2026-11-24, to build).
 - **The users' guidance for animation** (the user, 2026-11-19), in their documents: test the
   source on short clips first (a dark gradient, a fast scene, a held scene with fine details);
   start at `maximum` and keep it where the picture is clean; where terraces show, add
   `--deband`; where fast scenes still ghost, take `--quality deghost`, with `--deband` only if
-  terraces show there too. A level and the deband apply to a whole job: `maximum` runs a shot
-  four times, `deghost` takes about twice `standard`'s time, and `--plan` prints each level's
-  time on the user's card.
+  terraces show there too, or, once built, mark the shots of those scenes `deghost` in the cut
+  list, `maximum` kept for every other shot, as decided on 2026-11-24 ([a level per
+  shot](#a-level-per-shot-marked-in-the-cut-list)). The deband applies to a whole job, a level
+  to every shot the cut list doesn't mark: `maximum` runs a shot four times, `deghost` takes
+  about twice `standard`'s time, and `--plan` prints each level's time on the user's card.
 - **Live action,** by the measures alone (above): mixed, further from the ground truth than
   `standard` by SSIM-Y on all 11 clips and closer by VMAF on 8. The level is for animation's
   ghosts, and no eyes have judged it on live action: it stays advised for animation alone.
@@ -2865,6 +2873,53 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
   named by its goal, not by its technique; named for animation, it would be taken for every
   animated source, where the guidance above starts at `maximum` and takes this level only
   where fast scenes still ghost).
+
+### A level per shot, marked in the cut list
+
+Decided on 2026-11-24 (the user: an advanced user takes `deghost` for the fast scenes that
+ghost and `maximum`, with or without `--deband`, for the rest), to build in the command line
+before v0.1.0: a cut's line in the cut list may name a level, which the shot from that cut to
+the next runs at; `--quality` is the level of every shot with no mark.
+- **Why.** `deghost` ends the ghosts of fast scenes, but fine details that hold still change
+  from frame to frame there ([above](#each-frame-on-its-own---quality-deghost)), as the user
+  saw on two whole episodes: distant eyes and small text on the first (2026-11-22), textures
+  vibrating in the first scenes of the second (2026-11-24). At one level, a job pays that cost
+  on every shot, or keeps the ghosts of its fast ones.
+- **The mark.** A level's name after the frame number: `215 0.598 0:00:08.958 deghost` runs
+  the shot from frame 215 to the next cut at `deghost`. The first shot, which starts at no cut,
+  takes a line `0 LEVEL`, `0` alone staying refused. Any of the four levels may be marked. The
+  numbers and the time after the frame number stay ignored, so that an export carrying scores
+  stays readable; a word there that is no level, or a second level on a line, is refused,
+  naming the line, so that a misspelt level can't pass unseen. `--plan FILE`'s header says how
+  to mark a shot, and the list it writes carries the marks of a list given, none of a
+  detection.
+- **The job.** One job with its shots at their levels: one load of the models; one plan, made
+  for the shots as their levels plan them (a `deghost` shot as its frames, the others whole);
+  one finished file with every other stream of the source; a stop and a resume as any job's.
+  Each shot's frames are those of the same shot in a job at its level alone, under the same
+  plan. The plan's quality line names each level with its count of shots, its time counts each
+  shot at its own level, and `--plan` prints both before anything runs. `--deband` stays a
+  switch of the whole job. `--window` caps the windows of the shots that have any, refused only
+  where none has (every shot at `deghost`).
+- **The record and a resume.** The marks are among the job's settings: the cut list's plain
+  text, whose SHA-256 the record carries, holds each cut's number and its mark, a list with no
+  mark keeping today's text and hash. The record keeps `--quality` and names each marked level
+  with its count of shots. A changed mark is a change of the cut list: before a unit is made,
+  the plan is made again from the record, with no decode; after, it is another job, every shot
+  made again. So the marks are best chosen before the long run, on short clips (the users'
+  guidance, above). Remaking only the segments that hold a changed shot is an idea, not
+  studied.
+- **At a cut.** A level changes only at a cut, where the picture changes anyway: how the change
+  of look between two shots shows is for the eyes, not yet judged. Where the detector missed a
+  cut, most often in fast action anime ([Shot detection](#shot-detection)), a line added cuts
+  there: a false cut costs no fidelity, at most a low-frequency step on a continuous shot.
+- **Not a file a shot.** A split of the source into a lossless file a shot, each run on its own
+  and joined back, would take a lossless copy of the whole source (492 files for the RTX 5090's
+  episode), a load of the models and a calibration a file, and a join that keeps the audio, the
+  subtitles and the frame grid, which seedvr2x's assembly makes for one job ([Input](#input)).
+- **Not in the nodes** for now: their cut list is the Cuts node's, with no line to edit, and
+  Upscale Video's quality stays the clip's. Nor chosen by seedvr2x itself: nothing measures yet
+  which shots ghost.
 
 ## Colour correction
 
@@ -3363,7 +3418,10 @@ holds nothing personal.
     output made before with `flash_attn_2` says so);
   - for a video, its window cap in latents (0 for one window per shot), `--quality`,
     `--compile`, its cuts (the threshold they were detected at, or the SHA-256 of the list
-    `--cuts` named) and, with `--deband`, the filter its frames were read through.
+    `--cuts` named) and, with `--deband`, the filter its frames were read through; where the
+    list marks shots, each marked level with its count of shots, the list's SHA-256 saying
+    which ([a level per shot](#a-level-per-shot-marked-in-the-cut-list), decided on 2026-11-24,
+    to build).
 
   That is what changes the output's bits, so an output can be made again from it, the GPU and
   the libraries' versions aside (a video's manifest records those); the tiles' overlap is fixed
