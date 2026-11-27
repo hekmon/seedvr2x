@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from levels import levels
@@ -69,6 +70,15 @@ def test_png_is_bounded_by_its_raw_size() -> None:
     # 16-bit RGB, 6 bytes a pixel, PNG compressing it little: at most its raw size.
     got = masters([10, 5], [None, None], "png", (96, 128), False)
     assert got == Masters(0, 15 * 96 * 128 * 6, True)
+
+
+def test_a_format_with_no_figure_is_bounded_by_its_raw_size() -> None:
+    # No figure of its own (FIGURE): at most its raw size, 6 bytes a pixel for a format RAW_BYTES
+    # doesn't name either.
+    assert "png" not in disk.FIGURE
+    assert masters([10], [None], "gray16le", (96, 128), False) == Masters(
+        0, 10 * 96 * 128 * 6, True
+    )
 
 
 def test_a_resume_measures_the_segments_it_has() -> None:
@@ -144,6 +154,78 @@ def test_an_unknown_size_is_said_and_never_warned_of() -> None:
         " encoder deciding it; 0 MiB free on its disk"
     )
     assert unknown.warning(Path("film.mkv")) is None
+
+
+def recorded(
+    frames: list[int],
+    sizes: list[int | None],
+    output_format: str = "yuv420p10le",
+    size: tuple[int, int] = (1920, 1080),
+    command: str | None = None,
+) -> Any:
+    """A manifest as main._masters reads it: its segments' frames, the finished ones' bytes, the
+    output's format and size (width, height, as the record holds it) and its segment command."""
+    return SimpleNamespace(
+        segments=[SimpleNamespace(frames=count) for count in frames],
+        sizes=sizes,
+        finished=[taken is not None for taken in sizes],
+        output={"format": output_format, "size": list(size)},
+        settings={"segment_cmd": command},
+    )
+
+
+def test_the_joins_masters_before_any_is_written_are_the_disk_lines() -> None:
+    # DESIGN.md, Architecture, What it prints (decided on 2026-11-24): before any master is
+    # written, the assembly's estimate counts them as the plan's disk line does, at most the
+    # format's figure, at 1080p and at 4K, the figure multiplying the two sides; counted at their
+    # raw size, the plan of an episode said 216.6 GiB for 42.16 made.
+    from main import _masters
+
+    for width, height in ((1920, 1080), (3840, 2160), (1000, 562)):
+        line = masters(
+            [FRAMES // 2, FRAMES // 2], [None, None], "yuv420p10le", (height, width), False
+        )
+        total, basis = _masters(
+            recorded([FRAMES // 2, FRAMES // 2], [None, None], size=(width, height))
+        )
+        assert (
+            total == line.total == pytest.approx(HOURS * 135 * GIB * width * height / (1920 * 1080))
+        )
+        assert basis == (
+            "at most by the format's figure until one is written, as the plan's disk line counts"
+            " them"
+        )
+    assert _masters(recorded([FRAMES], [None], "gbrp16le"))[0] == pytest.approx(HOURS * 690 * GIB)
+    # A PNG directory (no join) and a format with no figure: their raw size, as the disk line.
+    assert _masters(recorded([10, 5], [None, None], "png", (128, 96))) == (
+        15 * 96 * 128 * 6,
+        "at most at their raw size until one is written",
+    )
+
+
+def test_the_joins_masters_of_a_segment_command_are_their_raw_size() -> None:
+    # Its encoder decides their size: the disk line gives no figure, the join's estimate keeps the
+    # raw size, 3 bytes a pixel in yuv420p10le, the upper bound of before; once one is written, the
+    # bytes a frame of those written.
+    from main import _masters
+
+    assert _masters(recorded([100, 50], [None, None], command="x {out}")) == (
+        3 * 1920 * 1080 * 150,
+        "at most at their raw size until one is written, the segment command's encoder deciding"
+        " their size",
+    )
+    assert _masters(recorded([100, 50], [700, None], command="x {out}")) == (
+        1050,
+        "by those written",
+    )
+
+
+def test_the_joins_masters_once_some_are_written_are_as_before() -> None:
+    # Those finished as recorded, the others at their bytes a frame; every one written: their sum.
+    from main import _masters
+
+    assert _masters(recorded([100, 100, 50], [1000, 3000, None])) == (5000, "by those written")
+    assert _masters(recorded([10, 10], [7, 9])) == (16, "by those written")
 
 
 @POSIX_CALLS

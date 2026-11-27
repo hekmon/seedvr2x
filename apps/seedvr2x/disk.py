@@ -18,7 +18,8 @@ from media.files import free_space
 # A master's bytes a frame before any is written, at most: its samples uncompressed, FFV1 being
 # lossless, at the bytes a sample each format takes (media/writer.py: yuv420p10le's 1.5 samples a
 # pixel at 2 bytes, gbrp16le's 3 at 2, PNG's rgb48be 3 at 2, a PNG compressing 16-bit noise
-# little). For a one-file output's assembly's estimate (main._masters) and a PNG directory's disk.
+# little). For a PNG directory's disk and a format with no figure (masters), and a segment
+# command's job's assembly estimate (main._masters), whose files' size no figure gives.
 RAW_BYTES = {"yuv420p10le": 3.0, "gbrp16le": 6.0, "png": 6.0}
 
 _GIB = 2**30

@@ -2104,37 +2104,57 @@ def _say_assembly_left(record: "Manifest", final: Path, until: datetime.datetime
         _say_until(Clock(), [], stopping.now(), until, (f"the assembly of {final}", seconds))
 
 
-def _masters(record: "Manifest") -> int:
-    """The bytes a job's masters take, those finished as recorded, the others by the finished
-    ones' bytes a frame, or at most at their raw size (disk.RAW_BYTES) before any is: a segment
-    command's encoder's compression is its own, a master's FFV1 the content's."""
-    sizes = [
-        (segment.frames, size)
-        for segment, size, done in zip(record.segments, record.sizes, record.finished, strict=True)
-        if done and size is not None
-    ]
-    written = sum(size for _, size in sizes)
-    frames = sum(segment.frames for segment in record.segments)
-    left = frames - sum(count for count, _ in sizes)
-    if sizes and sum(count for count, _ in sizes):
-        per_frame = written / sum(count for count, _ in sizes)
-    else:
-        width, height = record.output["size"]
-        per_frame = RAW_BYTES.get(str(record.output["format"]), 6.0) * width * height
-    return round(written + per_frame * left)
+def _masters(record: "Manifest") -> tuple[int, str]:
+    """The bytes a job's masters take, and what counted them (for the debug line): those finished
+    as recorded, the others by the finished ones' bytes a frame, or before any is written as the
+    plan's disk line counts them (disk.masters: at most the format's figure, a PNG's raw size),
+    and at most at their raw size (disk.RAW_BYTES) where it gives none, a segment command's job,
+    whose encoder's compression is its own (DESIGN.md, Architecture, What it prints, decided on
+    2026-11-24: counted at their raw size, the plan of an animated episode on the RTX 5090 said 1 h
+    28 min to join it, 216.6 GiB of masters, where the join took 17 min 32 s on 42.16 GiB)."""
+    from disk import FIGURE, masters
+
+    width, height = record.output["size"]
+    output_format = str(record.output["format"])
+    frames = [segment.frames for segment in record.segments]
+    counted = masters(
+        frames,
+        [
+            size if done and size is not None else None
+            for size, done in zip(record.sizes, record.finished, strict=True)
+        ],
+        output_format,
+        (int(height), int(width)),
+        record.settings.get("segment_cmd") is not None,
+    )
+    if counted.total is None:
+        raw = RAW_BYTES.get(output_format, 6.0) * int(width) * int(height) * sum(frames)
+        return round(raw), (
+            "at most at their raw size until one is written, the segment command's encoder"
+            " deciding their size"
+        )
+    if not counted.bound:
+        return counted.total, "by those written"
+    if output_format in FIGURE:
+        return counted.total, (
+            "at most by the format's figure until one is written, as the plan's disk line counts"
+            " them"
+        )
+    return counted.total, "at most at their raw size until one is written"
 
 
 def _say_assembly_basis(record: "Manifest", rate: float) -> None:
     """What the assembly's time is counted from, at debug (under --verbose): the rate its disk
-    writes at and the bytes of its masters, those finished as recorded, the others at most at
-    their raw size until one is written (_masters)."""
+    writes at and the bytes of its masters, and how they were counted (_masters)."""
     from seedvr2x.files import size_said
 
+    total, basis = _masters(record)
     logger.debug(
-        "time: the assembly counted at the rate its disk writes at, %s/s, its masters counted at"
-        " most at their raw size until one is written: %s",
+        "time: the assembly counted at the rate its disk writes at, %s/s, its masters counted %s:"
+        " %s",
         size_said(round(rate)),
-        size_said(_masters(record)),
+        basis,
+        size_said(total),
     )
 
 
@@ -2143,7 +2163,7 @@ def _assembly_estimate(record: "Manifest", rate: float) -> float:
     bytes (_masters), its source's, at the rate its disk writes at."""
     from timing import assembly_seconds
 
-    return assembly_seconds(rate, _masters(record), record.source.path.stat().st_size)
+    return assembly_seconds(rate, _masters(record)[0], record.source.path.stat().st_size)
 
 
 def _say_until(

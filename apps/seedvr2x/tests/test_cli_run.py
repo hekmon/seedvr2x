@@ -863,7 +863,8 @@ def test_what_a_user_does_nothing_with_is_said_under_verbose_only(
     assert level == "DEBUG"
     assert re.fullmatch(
         r"time: the assembly counted at the rate its disk writes at, [\d.]+ \w+/s, its masters"
-        r" counted at most at their raw size until one is written: [\d.]+ \w+",
+        r" counted at most by the format's figure until one is written, as the plan's disk line"
+        r" counts them: [\d.]+ \w+",
         basis,
     )
     # At the default level, none of the two debug lines.
