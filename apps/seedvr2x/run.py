@@ -355,6 +355,7 @@ def _sample(
         started = _started(models)
         # Its change of phase timed with it: the encode's model holds it (timing.ENTER).
         models.enter("encode")
+        _phase_entered(models)
         counted = not (progress.first_encode and inputs.seeks(shot.start))
         progress.first_encode = False
         read = inputs.reader(shot)
@@ -404,6 +405,7 @@ def _sample(
         logger.debug("%s: window %d/%d", name, number + 1, len(layout))
         started = _started(models)
         entering, term = _enter(models, "dit", progress, key)
+        _phase_entered(models)
         output = next(sampled)
         finite(output, unit)
         units.save_window(index, number, output)
@@ -473,6 +475,7 @@ def _sample_frames(
         logger.debug("%s: encoding each frame alone", name)
         started = _started(models)
         models.enter("encode")
+        _phase_entered(models)
         counted = not (progress.first_encode and inputs.seeks(shot.start))
         progress.first_encode = False
         read = inputs.reader(shot)
@@ -519,6 +522,7 @@ def _sample_frames(
         logger.debug("%s: frame %d/%d", name, frame + 1, frames)
         started = _started(models)
         entering, term = _enter(models, "dit", progress, key)
+        _phase_entered(models)
         # The frame's own latent, its noise drawn from it as a shot of one frame draws its own
         # (shot_pass.sample_windows), the shot's seed: the same noise for every frame.
         sampled = sample_windows(models, units.frame_latent(index, frame), [(0, 1)], run.seed(seed))
@@ -610,6 +614,7 @@ def _decode(
     logger.debug("%s: decoding", name)
     started = _started(models)
     entering, term = _enter(models, "decode", progress, key)
+    _phase_entered(models)
     merged = merge_windows(units.take_windows(index), units.manifest.layouts[index])
     correction = None
     if copies is not None:
@@ -683,6 +688,7 @@ def _decode_frames(
     logger.debug("%s: decoding each frame alone", name)
     started = _started(models)
     entering, term = _enter(models, "decode", progress, key)
+    _phase_entered(models)
     store = _scratch(units, index, plan.decode_tiles, plan.scratch_allowance)
 
     def decode_each(follow: Callable[[int], npt.NDArray[np.float32]] | None) -> None:
@@ -1053,8 +1059,22 @@ class Inputs:
 
 
 def _started(models: Models) -> float:
-    torch.cuda.reset_peak_memory_stats(models.device)
+    """A unit's start, its time counted from it, its change of phase among it (_made leaves the
+    change's own time out of its kind's); the VRAM peak is counted from the phase entered
+    (_phase_entered)."""
     return time.monotonic()
+
+
+def _phase_entered(models: Models) -> None:
+    """Count the unit's VRAM peak from here, once its phase is entered (Models.enter), so that its
+    line is its own: reset before the change, torch's peak began at what the phase before left
+    allocated, and the VAE units right after a DiT phase at deghost logged the DiT's resident
+    weights, 6,116,776,960 bytes (5.70 GiB), at 8 GB, 1080p, where the encode was planned at
+    5.02 GiB and the decode at 4.73, the last frame's peak less 637,944,832 bytes on two cards
+    (impl-box-14 and impl-wsl2-11, 2026-11-25).
+    Models.enter sends what leaves before what comes, so no moment holds both phases' weights
+    beyond the plan's."""
+    torch.cuda.reset_peak_memory_stats(models.device)
 
 
 def _spent(models: Models, started: float, unit: str) -> str:

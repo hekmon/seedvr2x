@@ -408,8 +408,8 @@ def on_the_device(
     (run._sample over the units a run keeps, units.Units in `directory`, made here, its windows
     capped at `cap` latents), its encode's latent given, random, to the units, in an encode's
     layout, which the steps read back as a resumed run does: what the device holds over them
-    (OnDevice). The figures are read where the run's own are: as a unit starts,
-    before the run resets the peak it logs (run._started), and as the window's output is given
+    (OnDevice). The figures are read where the run's own are: as a unit's phase is entered,
+    before the run resets the peak it logs (run._phase_entered), and as the window's output is given
     to the units, where the run reads that peak. With `tables`, what the vendored RoPE's tables
     hold once the shot's last window is kept, by both counts, is appended to it: the tables are
     cleared there to measure them (model.forget_rope_tables), as the run clears them right after,
@@ -417,7 +417,7 @@ def on_the_device(
     import run
 
     device = models.device
-    started = run._started  # pyright: ignore[reportPrivateUsage]
+    entered = run._phase_entered  # pyright: ignore[reportPrivateUsage]
     sample = run._sample  # pyright: ignore[reportPrivateUsage]
     starts: list[tuple[int, int | None]] = []
     peaks: list[tuple[int, int | None]] = []
@@ -426,12 +426,11 @@ def on_the_device(
     def asked(what: str = "current") -> int | None:
         return torch.cuda.memory_stats(device).get(f"requested_bytes.all.{what}")
 
-    def starting(models: model.Models) -> float:
+    def starting(models: model.Models) -> None:
         torch.cuda.synchronize(device)
         starts.append((torch.cuda.memory_allocated(device), asked()))
-        at = started(models)
+        entered(models)
         reset.append((torch.cuda.max_memory_allocated(device), asked("peak")))
-        return at
 
     class Kept(Units):
         def save_window(self, run: int, window: int, sampled: torch.Tensor) -> None:
@@ -459,7 +458,7 @@ def on_the_device(
     del values
     job_ = (shots, CARD_TARGET, 42, Plan(cap), kept, None, None)
     with monkeypatch.context() as patch:
-        patch.setattr(run, "_started", starting)
+        patch.setattr(run, "_phase_entered", starting)
         sample(0, models, cast(Any, None), *job_)
     torch.cuda.synchronize(device)
     left = (torch.cuda.memory_allocated(device), asked())
