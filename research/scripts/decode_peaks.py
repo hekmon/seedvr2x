@@ -17,8 +17,9 @@ or decode (tiling.TileStep, told the tiles done), every slice a decode hands on,
 end of the colour correction (colour.split), the end of a picture's transform (still._transformed:
 `resize` for the encoder's input, `reference` for the correction's).
 
-- A video's units: from run._started (the reset) to run._spent, `before` read just after the
-  reset, as the command logs a unit's peak; the record names the unit by its last mark's kind.
+- A video's units: from run._started to run._spent, the peak reset once the unit's phase is
+  entered (run._phase_entered), `before` read just after the reset, as the command logs a unit's
+  peak; the record names the unit by its last mark's kind.
 - A picture's decode (still.decoded): the command's own call, `before` read before it, in the
   DiT's phase (still.decoded enters the decode's: `entered` is what was allocated once it had);
   with `--sides`, the same latent, picture and target decoded again on the models the command
@@ -355,17 +356,20 @@ def main() -> int:
 
         still.decoded = picture_decoded
 
-        # A video's units, as the command measures them (run._started resets the peak, run._spent
-        # reads it).
+        # A video's units, as the command measures them (run._started begins the unit,
+        # run._phase_entered resets the peak once its phase is entered, run._spent reads it).
         import run as running
 
-        started, spent = running._started, running._spent
+        started, entered, spent = running._started, running._phase_entered, running._spent
 
         def unit_started(models: Any) -> Any:
             result = started(models)
             state["marks"], state["entered"] = [], None
-            state["before"] = torch().cuda.memory_allocated(models.device)
             return result
+
+        def unit_entered(models: Any) -> None:
+            entered(models)
+            state["before"] = torch().cuda.memory_allocated(models.device)
 
         def unit_spent(models: Any, began: Any) -> Any:
             cuda = torch().cuda
@@ -382,7 +386,8 @@ def main() -> int:
                 )
             return spent(models, began)
 
-        running._started, running._spent = unit_started, unit_spent
+        running._started, running._phase_entered = unit_started, unit_entered
+        running._spent = unit_spent
 
     emit({"step": "start", "argv": cli, "time": time.strftime("%Y-%m-%d %H:%M:%S")})
     status = command.main(cli)

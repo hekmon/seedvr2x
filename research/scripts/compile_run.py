@@ -21,8 +21,9 @@ How it hooks seedvr2x, never editing it (everything is patched at run time, in t
   from the module, so the module's attribute is the only binding that matters; every other
   binding found in seedvr2x's modules is replaced too).
 - run._started and run._made, which every encode, DiT window and decode part of a run calls
-  around its work (run.py: _sample, _decode): the unit's record begins in the first (peak reset by
-  seedvr2x itself, memory and compile counters snapshotted) and ends in the second, which has the
+  around its work (run.py: _sample, _decode): the unit's record begins in the first (compile
+  counters snapshotted), its memory before read once the unit's phase is entered
+  (run._phase_entered, where seedvr2x itself resets the peak), and ends in the second, which has the
   unit's key, kind, size, seconds' terms and the clock, so that the estimate is read before the
   clock corrects its model with the unit (Progress.made). A decode part of a shot with several runs
   gives one record per run, under the same segment key.
@@ -258,18 +259,27 @@ def install(options: argparse.Namespace, recorder: Recorder) -> None:
 
     # The run's units.
     started = run._started
+    entered = run._phase_entered
     made = run._made
+    last: list[float] = []  # the stamp of the unit begun last
 
     def begin(models: Any) -> float:
         device = device_of(models)
         synchronised(device)
-        stamp = started(models)  # resets the peak, takes the time
+        stamp = started(models)  # takes the time
         recorder.begins[stamp] = {
             "allocated_before": memory(device)[0],
             "snapshot": recorder.snapshot(),
             "device": device,
         }
+        last[:] = [stamp]
         return stamp
+
+    def phase_entered(models: Any) -> None:
+        entered(models)  # resets the peak
+        begun = recorder.begins.get(last[0]) if last else None
+        if begun is not None:
+            begun["allocated_before"] = memory(begun["device"])[0]
 
     def end(
         progress: Any,
@@ -339,6 +349,7 @@ def install(options: argparse.Namespace, recorder: Recorder) -> None:
         )
 
     run._started = begin
+    run._phase_entered = phase_entered
     run._made = end
 
     # The calibration's own steps.

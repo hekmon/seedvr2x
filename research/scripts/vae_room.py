@@ -61,9 +61,12 @@ The probes (run):
 - every unit (a shot's encode, a window, a decode), by run.py's own start and end of a unit:
   torch's peak (max_memory_allocated, the "VRAM peak" seedvr2x logs) and the pool's
   (max_memory_reserved: under cudaMallocAsync torch reads both from the driver's memory pool,
-  its used and its reserved memory), what was allocated and reserved before, the least memory
-  the card had free during the unit (NVML's figure, nvidia-smi's, sampled every 20 ms by a
-  thread of its own), and the driver's own (cudaMemGetInfo) at its start; and torch's
+  its used and its reserved memory), both counted from the unit's phase entered since seedvr2x
+  resets them there (run._phase_entered), the records made before that change counting from
+  before the change of phase, the phase before's resident weights among them; what was
+  allocated and reserved before, the least memory the card had free during the unit (NVML's
+  figure, nvidia-smi's, sampled every 20 ms by a thread of its own), and the driver's own
+  (cudaMemGetInfo) at its start; and torch's
   allocator counters at its start and end (memory_stats's num_ooms, num_alloc_retries,
   num_oom_rejections, num_sync_all_streams, num_device_alloc, num_device_free), which torch's
   own allocator moves when it refuses or retries a request, or asks the driver for memory or
