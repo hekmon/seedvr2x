@@ -45,6 +45,7 @@ from seedvr2x import waiting
 from seedvr2x.clock import sample, spent, spoken, taking, wall
 from seedvr2x.pull import DETECTOR, REPO
 from seedvr2x.shotcuts import POSSIBLE, THRESHOLD
+from seedvr2x.shotruns import planned_runs, shot_levels
 from stills import BARE_PLAN, PNG8
 from stop import Deadline, Stop, Stopped, Terminated, deadline, terminable
 
@@ -1044,15 +1045,105 @@ def _video_arguments(args: argparse.Namespace) -> None:
         args.format = DEFAULT_FORMAT
     if args.quality is None:
         args.quality = DEFAULT_QUALITY
-    if args.window is not None and each_frame(args.quality):
+    if args.window is not None and args.cuts is None and each_frame(args.quality):
         # A frame alone is one latent in the DiT (DESIGN.md, Each frame on its own): refused, as
-        # a picture refuses it (stills.REFUSED), before anything is read or made.
+        # a picture refuses it (stills.REFUSED), before anything is read or made. With a cut list,
+        # once it is read, where it marks no shot at a level with windows (_window_refused).
         raise JobError(
             f"--window: at --quality {args.quality} each frame is one latent in the DiT, with no"
             " windows to cap; run without --window"
         )
+    # The cut list's marks, each marked shot's level by the frame it starts at (job.read_cuts):
+    # not an option, read with --cuts' list (_run) and kept beside its path for the settings.
+    args.marks = {}
     if args.min_segment is None:
         args.min_segment = MIN_SEGMENT
+
+
+def _levels(args: argparse.Namespace, shots: "Sequence[Shot]") -> list[str]:
+    """Each shot's level, in order (DESIGN.md, A level per shot, marked in the cut list): its mark
+    in the cut list (args.marks), else --quality's (shotruns.shot_levels)."""
+    return shot_levels(shots, args.quality, args.marks)
+
+
+def _run_layouts(
+    shots: "Sequence[Shot]", levels: Sequence[str], window: int | None
+) -> list[list[tuple[int, int]]]:
+    """Each run's windows, in latents, under the plan's cap `window`: with one run a shot, each
+    shot's (DESIGN.md, Several runs of a shot); one a frame where its level takes each frame
+    alone (job.layout_of); each shot at its level (DESIGN.md, A level per shot)."""
+    from job import shot_runs
+
+    return [
+        layout_of(run.frames, window, level)
+        for shot, level in zip(shots, levels, strict=True)
+        for run in shot_runs(shot, QUALITY[level])
+    ]
+
+
+def _marked(args: argparse.Namespace, levels: list[str]) -> list[str] | None:
+    """Each shot's level where the cut list marks any, for the plan's lines (planner.said's
+    `levels`); None where it marks none, the lines then as before."""
+    return levels if args.marks else None
+
+
+def _unmarked(args: argparse.Namespace, shots: "Sequence[Shot]") -> int:
+    """The count of shots the cut list doesn't mark, at --quality's level, for the plan's lines
+    (planner.said's `unmarked`): a mark equal to --quality is a mark."""
+    return sum(1 for shot in shots if shot.start not in args.marks)
+
+
+def _listed(args: argparse.Namespace) -> list[int]:
+    """The cut list's cuts (--cuts; job.read_cuts), none without one, its marks kept in args.marks,
+    and --window refused where it marks no shot that has windows (_window_refused)."""
+    from job import read_cuts
+
+    if not args.cuts:
+        return []
+    cuts, args.marks = read_cuts(args.cuts)
+    _window_refused(args, cuts)
+    return cuts
+
+
+def _each_level(
+    args: argparse.Namespace,
+    shots: "Sequence[Shot]",
+    segments: "Sequence[OutputSegment]",
+    plan: "Plan",
+    target: tuple[int, int],
+) -> "dict[str, list[Unit]]":
+    """The units of the job, nothing made, at each --quality level, every shot at it
+    (_level_units), the job's plan a frame's where every shot takes each frame alone."""
+    frame_plan = all(each_frame(level) for level in _levels(args, shots))
+    return {
+        level: _level_units(shots, segments, level, frame_plan, plan, target) for level in QUALITY
+    }
+
+
+def _window_refused(args: argparse.Namespace, cuts: "Sequence[int]") -> None:
+    """Refuse --window where no shot of the cut list has windows to cap, every shot at a level
+    that takes each frame alone, --quality's or its mark (DESIGN.md, A level per shot: "`--window`
+    caps the windows of the shots that have any, refused only where none has (every shot at
+    `deghost`)"), before anything is read or made, as _video_arguments refuses it without a cut
+    list. The shots start at 0 and at each cut: a mark on a cut the source lacks is the cut list's
+    refusal, after the first pass (job.check_cuts)."""
+    from seedvr2x.errors import JobError
+
+    if args.window is None or args.cuts is None:
+        return
+    starts = [0, *cuts]
+    if not all(each_frame(args.marks.get(start, args.quality)) for start in starts):
+        return
+    if not args.marks:
+        # A list with no mark: refused in _video_arguments' words, as without a list.
+        raise JobError(
+            f"--window: at --quality {args.quality} each frame is one latent in the DiT, with no"
+            " windows to cap; run without --window"
+        )
+    raise JobError(
+        "--window: every shot is at deghost, each frame one latent in the DiT, with no windows to"
+        " cap; run without --window, or mark some shots at a level with windows in the cut list"
+    )
 
 
 def _say_default_smaller(args: argparse.Namespace, given: bool, declared: "Declared") -> None:
@@ -1070,7 +1161,7 @@ def _say_default_smaller(args: argparse.Namespace, given: bool, declared: "Decla
 
 def _run(args: argparse.Namespace) -> int:
     import planner
-    from job import check_seed, read_cuts, shot_runs, shots_from_cuts
+    from job import check_seed, shots_from_cuts
     from manifest import (
         ASSEMBLED,
         NAME,
@@ -1161,7 +1252,7 @@ def _run(args: argparse.Namespace) -> int:
         stream = declared.stream
         target = target_size(stream.width, stream.height, declared.sample_aspect, args.resolution)
         check_target(target, args.resolution)
-        cuts = read_cuts(args.cuts) if args.cuts else []
+        cuts = _listed(args)
         # The seed against the last shot known before the first pass, the cut list's, so that a
         # seed out of range is refused at once, before the model files and the first pass, whose
         # shot detector imports torch; against every shot after it (check_seed, below).
@@ -1411,7 +1502,8 @@ def _run(args: argparse.Namespace) -> int:
 
         # The shots the plan is made for: the job's, or a shot of one frame where the level
         # takes each frame alone (DESIGN.md, Each frame on its own), its plan a frame's.
-        planned_for = planned_shots(shots, args.quality)
+        levels = _levels(args, shots)
+        planned_for = planned_shots(shots, levels)
 
         def recorded_as(plan_record: dict[str, Any] | None, window: int | None) -> "Manifest":
             """The job's record with the plan's record, its runs laid out under `window`, the
@@ -1423,13 +1515,7 @@ def _run(args: argparse.Namespace) -> int:
                 identity.environment,
                 source,
                 shots,
-                # Each run's windows: with one run a shot, each shot's (DESIGN.md, Several runs
-                # of a shot); one a frame where the level takes each frame alone (job.layout_of).
-                [
-                    layout_of(run.frames, window, args.quality)
-                    for shot in shots
-                    for run in shot_runs(shot, QUALITY[args.quality])
-                ],
+                _run_layouts(shots, levels, window),
                 segments,
                 [path.name for path in paths],
                 {
@@ -1593,6 +1679,8 @@ def _run(args: argparse.Namespace) -> int:
             said = planner.said(
                 *(plan, peaks, card, target, shots, pins),
                 quality=args.quality,
+                levels=_marked(args, levels),
+                unmarked=_unmarked(args, shots),
                 deband=args.deband,
                 recorded=kept_plan is not None and reshaped is None,
                 layouts=None
@@ -1722,7 +1810,8 @@ def _run(args: argparse.Namespace) -> int:
         from manifest import COMPILE_CACHE
         from seedvr2x.passes import Compilation
 
-        shapes = planner.compile_shapes(plan, target, planned_for, QUALITY[args.quality])
+        runs = planned_runs(levels, len(shots))
+        shapes = planner.compile_shapes(plan, target, planned_for, runs)
         compilation = Compilation(shapes, directory / COMPILE_CACHE)
 
     def open_scratch(path: Path) -> Writer:
@@ -1759,20 +1848,15 @@ def _run(args: argparse.Namespace) -> int:
         planned_kept = "no time estimated; the plan and its cut list are kept"
         # Each level's time is said where nothing is made yet, deghost's from frames timed alone.
         every = planned(record.content())
-        alone = every or each_frame(args.quality)
-        calibrated = _calibrated(models, *calibrating, planned_kept, alone=alone)
+        calibrated = _calibrated(models, *calibrating, planned_kept, alone=every or None)
         if calibrated is None:
             return 1
         left = job_units(units, plan, target, start="decode")
-        levels = None
-        if every:
-            levels = {
-                level: _level_units(shots, segments, level, args.quality, plan, target)
-                for level in QUALITY
-            }
+        each_level = _each_level(args, shots, segments, plan, target) if every else None
         rate = None if final is None else _disk_rate(final.parent)
         assembly = None if rate is None else _assembly_estimate(record, rate)
-        _say_times(calibrated, left, args.quality, levels, loading, assembly, compilation)
+        said_times = (calibrated, left, args.quality, each_level, loading, assembly, compilation)
+        _say_times(*said_times, marked=bool(args.marks))
         if rate is not None:
             _say_assembly_basis(record, rate)
         if until is not None:
@@ -1817,7 +1901,7 @@ def _run(args: argparse.Namespace) -> int:
     made = "nothing of the job made" + _first_kept(kept_first)
     if kept_first is None and prior is not None:
         made = _kept(record, len(segments))
-    calibrated = _calibrated(models, *calibrating, made, alone=each_frame(args.quality))
+    calibrated = _calibrated(models, *calibrating, made)
     if calibrated is None:
         return 1
     clock = calibrated.clock
@@ -2496,7 +2580,7 @@ def _calibrated(
     directory: Path,
     kept: str,
     *,
-    alone: bool = False,
+    alone: bool | None = None,
 ) -> "Calibrated | None":
     """The job's time estimates calibrated (calibration.calibrate), through its own passes: the
     source's size, its colour correction, its writer (`writer`, the job's kind of output at a
@@ -2505,8 +2589,9 @@ def _calibrated(
     kill would leave them there, where a resume refuses what its manifest doesn't name); None once
     a failure is logged, with what is kept (`kept`); with `alone`, frames alone timed through each
     pass too (calibrate's `alone`), for a level that takes each frame alone, the job's or one whose
-    time --plan says; where the job's level takes each frame alone, its plan a frame's, the passes
-    that time the other levels keep their scratch in system memory (calibrate's `frame_plan`).
+    time --plan says (None: where any shot of the job takes each frame alone); where every shot's
+    level takes each frame alone, its plan a frame's, the passes that time the other levels keep
+    their scratch in system memory (calibrate's `frame_plan`). Each shot at its level (_levels).
     SIGTERM unwinds it, as it does the model files' fetch: its scratch removed, its ffmpeg
     processes stopped."""
     import numpy as np
@@ -2517,8 +2602,15 @@ def _calibrated(
     from job import shot_runs
     from seedvr2x.shot_pass import NonFinite
 
-    runs = [run for shot in shots for run in shot_runs(shot, QUALITY[args.quality])]
-    layouts = [layout_of(run.frames, plan.window, args.quality) for run in runs]
+    levels = _levels(args, shots)
+    runs = [
+        (run, level)
+        for shot, level in zip(shots, levels, strict=True)
+        for run in shot_runs(shot, QUALITY[level])
+    ]
+    layouts = [layout_of(run.frames, plan.window, level) for run, level in runs]
+    if alone is None:
+        alone = any(each_frame(level) for level in levels)
     longest = max(end - start for layout in layouts for start, end in layout)
     stream = source.stream
 
@@ -2557,16 +2649,17 @@ def _calibrated(
                 # was made for, nor than the source's frames left after the first two encodes: a
                 # reader opened again from the first frame inside that encode would put ffmpeg's
                 # start in its time, and in the encode's rate (a review's finding).
-                most=min(max(run.frames for run in runs), source.frames - FRAMES - FIRST),
+                most=min(max(run.frames for run, _ in runs), source.frames - FRAMES - FIRST),
                 source=(stream.height, stream.width),
                 frames=frames,
                 split=args.color_correction == "split",
                 writer=writer,
                 directory=directory.parent,
                 alone=alone,
-                # The job's own level, not `alone`, which every --plan sets: where its plan is a
-                # frame's, the passes that time the other levels keep their scratch in memory.
-                frame_plan=each_frame(args.quality),
+                # The job's own levels, not `alone`, which every --plan sets: where its plan is a
+                # frame's, every shot taking each frame alone, the passes that time the other
+                # levels keep their scratch in memory.
+                frame_plan=all(each_frame(level) for level in levels),
             )
     except (MediaError, NonFinite) as error:
         logger.error("%s, in the time estimates' calibration: %s", error, kept)
@@ -2581,21 +2674,21 @@ def _level_units(
     shots: "Sequence[Shot]",
     segments: "Sequence[OutputSegment]",
     level: str,
-    planned: str,
+    frame_plan: bool,
     plan: "Plan",
     target: tuple[int, int],
 ) -> "list[Unit]":
     """The units of a job of shots and segments with nothing made at the --quality level `level`
-    (timing.units_of): its runs a shot, and each frame alone where it takes them so; the job's
-    `plan` made at the level `planned`. A plan made where each frame goes alone is a frame's
-    (shotruns.planned_shots), its window a latent, which lays out no shot of a level that packs
-    them: there, each shot is counted in one window, uncapped, the time a plan of that level would
-    take not made here."""
+    (timing.units_of), every shot at it: its runs a shot, and each frame alone where it takes
+    them so; the job's `plan` a frame's where `frame_plan`, every shot of the job taking each
+    frame alone. A frame's plan (shotruns.planned_shots), its window a latent, lays out no shot of
+    a level that packs them: there, each shot is counted in one window, uncapped, the time a plan
+    of that level would take not made here."""
     from timing import tokens, units_of
 
     per_latent = tokens(target, 1)
     window = plan.window
-    if each_frame(planned) and not each_frame(level):
+    if frame_plan and not each_frame(level):
         window = None
     return units_of(
         shots, segments, QUALITY[level], window, per_latent, each_frame=each_frame(level)
@@ -2612,6 +2705,7 @@ def _say_times(
     compilation: "Compilation | None" = None,
     *,
     planning: bool = True,
+    marked: bool = False,
 ) -> None:
     """Say the time of the job's units left by a clock just calibrated (DESIGN.md, Memory planner:
     "the time per phase, the total, and the longest unit, which is how early --until may stop"),
@@ -2620,7 +2714,10 @@ def _say_times(
     the calibration. The VAE's compilation (`compilation`) is part of the load, paid once in a
     process, before the DiT loads: said as the part of it that it was, never added to it, and the
     run that follows pays it again in its own load (a resume pays it again at its start,
-    DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0")."""
+    DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0"). `marked`: the cut
+    list marks shots' levels, each level's time then every shot's at it, and this job's, as
+    marked, the units' own (DESIGN.md, A level per shot: "`--plan` prints both before anything
+    runs")."""
     from timing import job_times
 
     clock = calibrated.clock
@@ -2657,8 +2754,10 @@ def _say_times(
         for level, listed in levels.items():
             total = job_times(clock, listed)
             assert total is not None
-            mark = " (this job's)" if level == quality else ""
+            mark = " (this job's)" if level == quality and not marked else ""
             said.append(f"{level} about {spoken(wall(total.total))}{mark}")
+        if marked:
+            said.append(f"as marked in the cut list about {spoken(wall(times.total))} (this job's)")
         logger.info("time at each --quality: %s", ", ".join(said))
     again = ", which the run pays again before its first unit" if planning else ""
     compiled = ""
@@ -3695,6 +3794,7 @@ def _early_memory(
     where it judged nothing. PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md says "NVML only"
     and no more): the host's memory unchecked here."""
     import planner
+    from manifest import NAME, marks_of
     from seedvr2x import memory
     from seedvr2x.errors import Refusal
     from seedvr2x.passes import Plan
@@ -3710,9 +3810,11 @@ def _early_memory(
     try:
         known = Plan.recorded(recorded.get("plan"))
         shots = [Shot(int(shot["start"]), int(shot["end"])) for shot in recorded["shots"]]
-        # The recorded job's level, which a resume is held to (a frame's plan at deghost).
+        # The recorded job's levels, which a resume is held to (a frame's plan at deghost), each
+        # shot's its mark or the job's (manifest.MARKS).
         settings: dict[str, Any] = recorded.get("settings") or {}
-        shots = planned_shots(shots, str(settings.get("quality", "standard")))
+        level = str(settings.get("quality", "standard"))
+        shots = planned_shots(shots, shot_levels(shots, level, marks_of(settings, Path(NAME))))
         planner.check_recorded(known, shots, target)
         dit_model = _early_dit_model(args)
         if dit_model is None:
@@ -3979,7 +4081,7 @@ def _settings(
     """The settings a manifest records, those a resume must find again. Without model_files,
     those the command line alone gives, the records that take a hash left out (HASHED): what tells
     one job from another before any file is read (_assembled)."""
-    from manifest import code_sha256
+    from manifest import MARKS, code_sha256
 
     detects = args.cuts is None
     hashed: dict[str, object] = {}
@@ -4026,6 +4128,14 @@ def _settings(
         # as Python writes the float, which reads back exactly; the cuts it gives are the
         # layout's shots, compared after the first pass.
         "cuts": None if detects else cuts,
+        # The cut list's marks (manifest.MARKS), written only where it marks a shot, so that a
+        # list with no mark gives the settings of before, key for key (DESIGN.md, A level per
+        # shot, marked in the cut list).
+        **(
+            {MARKS: [[frame, args.marks[frame]] for frame in sorted(args.marks)]}
+            if args.marks
+            else {}
+        ),
         **({"cut_threshold": repr(_cut_threshold(args))} if detects else {}),
         "min_segment": str(args.min_segment),
         "input_matrix": args.input_matrix,
@@ -4687,7 +4797,7 @@ def _resume(
         len(record.finished),
         sum(record.encoded),
         len(record.encoded),
-        "shots" if record.runs_per_shot == 1 else "runs",
+        "shots" if len(record.runs) == len(record.shots) else "runs",
         sum(record.windows_done),
         _plural(len(discarded), "leftover"),
     )
@@ -5030,7 +5140,13 @@ def _own_layouts(
     if all(cap is None for cap in probe.window_caps):
         return None
     first = {shot: run for run, shot in reversed(list(enumerate(probe.run_shots)))}
-    return [[*probe.layouts[first[shot]]] for shot in range(len(probe.shots))]
+    # The shots with windows alone: a shot that takes each frame alone has a window a frame,
+    # which the plan's windows line doesn't count (planner.said's `levels`).
+    return [
+        [*probe.layouts[first[shot]]]
+        for shot in range(len(probe.shots))
+        if not probe.alone(first[shot])
+    ]
 
 
 def _reshape(record: "Manifest", prior: _Prior, old: "Plan", looking: bool = False) -> None:
@@ -5333,13 +5449,15 @@ def _job_record(content: dict[str, Any]) -> "Record":
     say the same: this command's name and version; the source's size as its stream stores it and
     its sample aspect as used (input), the output's size (output); from the settings the
     resolution, the model files by the names given and their SHA-256, the seed, the colour
-    correction, the level and the cuts (the threshold, or the list's SHA-256); from the plan the
+    correction, the level and the cuts (the threshold, or the list's SHA-256, its marks in it),
+    the levels the list marks shots with; from the plan the
     tiles (0 untiled), the window cap (0: each shot in one window) and --compile; and whether a
     resume planned it again (environment_changes: a change whose `after` holds a plan,
     resume.shape_change). A job planned again holds the new plan's values: each unit's own stay in
     the manifest (its runs' window_cap)."""
     from fractions import Fraction
 
+    from manifest import MARKS
     from seedvr2x.record import Model, Record, Video, cuts_sha256
 
     settings, plan, entry = content["settings"], content["plan"], content["input"]
@@ -5354,6 +5472,15 @@ def _job_record(content: dict[str, Any]) -> "Record":
     out_width, out_height = content["output"]["size"]
     cuts = settings["cuts"]
     replanned = any("plan" in change.get("after", {}) for change in content["environment_changes"])
+    # The levels the cut list marks shots with, each with its count of shots (DESIGN.md, A level
+    # per shot: "The record keeps `--quality` and names each marked level with its count of
+    # shots"), in --quality's order; none where it marks none.
+    marks = {int(frame): str(level) for frame, level in settings.get(MARKS, [])}
+    marked = tuple(
+        (level, count)
+        for level in QUALITY
+        if (count := sum(1 for each in marks.values() if each == level))
+    )
     return Record(
         app="seedvr2x",
         version=version("seedvr2x"),
@@ -5374,7 +5501,8 @@ def _job_record(content: dict[str, Any]) -> "Record":
             replanned,
             cut_threshold=None if cuts is not None else settings["cut_threshold"],
             deband=settings.get("deband"),
-            cuts_sha256=None if cuts is None else cuts_sha256(cuts),
+            cuts_sha256=None if cuts is None else cuts_sha256(cuts, marks),
+            marked=marked,
         ),
     )
 
@@ -5410,6 +5538,9 @@ class _Cuts:
     possible: "list[Cut]"
     threshold: str | None  # the detection's, None for a cut list's
     listed: Path | None  # the cut list given, None for a detection's
+    # The cut list's marks, each marked shot's level by the frame it starts at (job.read_cuts),
+    # which --plan FILE writes back on their lines; none for a detection's.
+    marks: Mapping[int, str] = field(default_factory=dict[int, str])
 
 
 def _source_cuts(args: argparse.Namespace, listed: list[int], source: "Source") -> _Cuts:
@@ -5420,7 +5551,7 @@ def _source_cuts(args: argparse.Namespace, listed: list[int], source: "Source") 
     from seedvr2x.shotcuts import Cut, detected, possible
 
     if args.cuts is not None:
-        return _Cuts([Cut(frame) for frame in listed], [], None, args.cuts)
+        return _Cuts([Cut(frame) for frame in listed], [], None, args.cuts, dict(args.marks))
     probabilities = None if source.index is None else source.index.probabilities
     if probabilities is None:
         # The detector runs in every first pass of a job detecting its shots, and a record
@@ -5631,17 +5762,30 @@ def _write_plan(
     lines = (
         "A line per cut: the frame it cuts at, the first frame of a shot, counted from zero;"
         f" {peak}the time of that frame from the source's start, H:MM:SS.mmm, as a player shows it."
-        f" seedvr2x reads the frame number alone.{possible if detected else ''}"
+        " seedvr2x reads the frame number, and a level's name after it, ignoring the numbers and"
+        f" times.{possible if detected else ''}"
     )
+    # How to mark a shot's level (DESIGN.md, A level per shot, marked in the cut list: "`--plan
+    # FILE`'s header says how to mark a shot"); the figures kept on the line of the word before
+    # them, so that no line of the header begins with a digit (cuts.cut_list), as places_note.
+    marking = (
+        f"A level's name ({', '.join(QUALITY)}) at the end of a cut's line runs the shot from that"
+        " cut at that level, every other shot at --quality's; a line `0 LEVEL` marks the first"
+        " shot. A mark changed is another job once a unit is made."
+    )
+    # The mark's form, `0 LEVEL`, kept on one line too.
+    joined = re.sub(r" (?=\d)", "\x00", marking).replace("`0 LEVEL`", "`0\x00LEVEL`")
+    wrapped = textwrap.wrap(joined, 86)
     usage = (
         "Uncomment a possible cut to keep it, delete a line to drop a cut"
         if detected
         else "Delete a line to drop a cut, add one to cut at its frame"
     )
     header += textwrap.wrap(lines, 86)
+    header += [line.replace("\x00", " ") for line in wrapped]
     header += places_note(source.index)
     header += textwrap.wrap(f"{usage}, then run with --cuts FILE, this file.", 86)
-    text = cut_list(header, source.index, found.cuts, found.possible)
+    text = cut_list(header, source.index, found.cuts, found.possible, found.marks)
     try:
         write_whole(args.plan, text.encode())
     except OSError as error:
@@ -5726,7 +5870,7 @@ def _room_on_disk(
     from units import KEPT
 
     gib = 1024**3
-    runs = QUALITY[args.quality]
+    levels = dict(zip(shots, _levels(args, shots), strict=True))
     done: list[tuple[int, int]] = []
     if prior is not None:
         done = [
@@ -5736,11 +5880,12 @@ def _room_on_disk(
     size = output_size(target)
 
     def parts(shot: "Shot") -> tuple[int, int]:
-        """What shot keeps of its frames, and its scratch's file, in bytes."""
+        """What shot keeps of its frames, and its scratch's file, in bytes, at its level."""
+        level = levels[shot]
         return (
-            kept_bytes(shot, runs, size),
+            kept_bytes(shot, QUALITY[level], size),
             # A frame's scratch where each frame goes alone (DESIGN.md, Each frame on its own).
-            scratch_file(plan, target, 1 if each_frame(args.quality) else shot.frames),
+            scratch_file(plan, target, 1 if each_frame(level) else shot.frames),
         )
 
     if not left or max(sum(parts(shot)) for shot in left) == 0:
@@ -5748,6 +5893,7 @@ def _room_on_disk(
     longest = max(left, key=lambda shot: sum(parts(shot)))
     kept, spilled = parts(longest)
     need = kept + spilled
+    runs = QUALITY[levels[longest]]
     place = directory
     while not place.exists():
         place = place.parent
@@ -5763,7 +5909,12 @@ def _room_on_disk(
     taken: list[str] = []
     if kept:
         taken.append(
-            f"{kept / gib:.2f} GiB of frames kept between its runs at --quality {args.quality}"
+            f"{kept / gib:.2f} GiB of frames kept between its runs at"
+            + (
+                f" its level, {levels[longest]}"
+                if longest.start in args.marks
+                else f" --quality {args.quality}"
+            )
         )
     if spilled:
         taken.append(
@@ -5775,14 +5926,30 @@ def _room_on_disk(
         "write the output to a disk with room (a new job, its first pass again)",
     ]
     if kept:
-        lower = [
-            f"{level} keeps {max(kept_bytes(shot, count, size) for shot in left) / gib:.2f} GiB"
-            if count > 1
-            else f"{level} none"
-            for level, count in QUALITY.items()
-            if count < runs and not each_frame(level)
-        ]
-        ways.append(f"take a lower level ({', '.join(lower)})")
+        # What the user changes (DESIGN.md, A level per shot): the mark of the shot that keeps the
+        # most where the list marks it, else --quality, which a marked shot doesn't follow; each
+        # level offered counted per shot at the level each shot would then take.
+        marked = longest.start in args.marks
+
+        def taking(level: str, shot: "Shot") -> str:
+            followed = shot is longest if marked else shot.start not in args.marks
+            return level if followed else levels[shot]
+
+        lower: list[str] = []
+        for level, count in QUALITY.items():
+            if count >= runs or each_frame(level):
+                continue
+            most = max(kept_bytes(shot, QUALITY[taking(level, shot)], size) for shot in left)
+            lower.append(f"{level} keeps {most / gib:.2f} GiB" if most else f"{level} none")
+        if not args.marks:
+            ways.append(f"take a lower level ({', '.join(lower)})")
+        elif marked:
+            ways.append(f"mark its shot at a lower level in the cut list ({', '.join(lower)})")
+        else:
+            ways.append(
+                f"take a lower --quality, which the shots the list marks don't follow"
+                f" ({', '.join(lower)})"
+            )
     if spilled:
         ways.append("free system memory, which the scratch takes first")
     said = (

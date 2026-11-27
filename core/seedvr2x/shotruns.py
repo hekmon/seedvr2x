@@ -6,7 +6,7 @@ clip.py runs a clip's shots by it, so that both choose the same frames. A module
 shots.py: shots.py is the shot and its windows, which every pass imports; this is the layer above it
 that a job's level reads."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from seedvr2x.shots import Shot
@@ -126,14 +126,36 @@ def frame_layout(frames: int) -> list[tuple[int, int]]:
     return [(frame, frame + 1) for frame in range(frames)]
 
 
-def planned_shots(shots: Sequence[Shot], level: str) -> list[Shot]:
-    """The shots a plan is made for at `level`: the shots themselves, or, where each frame is
-    taken alone (each_frame), a shot of one frame, which each of their frames is, so that the
-    plan's windows, passes and pins are a frame's (the longest shot decides a plan,
-    shot_plan.plan). The shots' own count and lengths still say the job's frames and time."""
-    if each_frame(level):
-        return [Shot(0, 1)]
-    return list(shots)
+def shot_levels(shots: Sequence[Shot], level: str, marks: Mapping[int, str]) -> list[str]:
+    """Each shot's level, in order (DESIGN.md, A level per shot, marked in the cut list, decided
+    on 2026-11-24): its mark, by the frame it starts at (a cut's, 0 for the first shot), else
+    `level`, every other shot's (--quality's). With no mark, `level` for every shot."""
+    return [marks.get(shot.start, level) for shot in shots]
+
+
+def planned_shots(shots: Sequence[Shot], level: str | Sequence[str]) -> list[Shot]:
+    """The shots a plan is made for at `level`, one level for every shot or each shot's in order
+    (shot_levels): the shots that pack their frames in latents as they are, and, where any shot
+    takes each frame alone (each_frame), a shot of one frame, which each of its frames is, so
+    that the plan's windows, passes and pins hold a frame's too (the longest shot decides a plan,
+    shot_plan.plan); at one level that takes each frame alone, that shot alone, the plan a
+    frame's. The shots' own count and lengths still say the job's frames and time."""
+    levels = [level] * len(shots) if isinstance(level, str) else list(level)
+    if len(levels) != len(shots):
+        raise ValueError(f"{len(levels)} levels for {len(shots)} shots")
+    packed = [shot for shot, each in zip(shots, levels, strict=True) if not each_frame(each)]
+    if any(each_frame(each) for each in levels):
+        return [*packed, Shot(0, 1)]
+    return packed
+
+
+def planned_runs(level: str | Sequence[str], shots: int) -> list[int]:
+    """The runs a shot of each of the shots planned_shots gives for `level` over `shots` shots,
+    in its order: a packed shot's level's (QUALITY), and 1 for the shot of one frame of the shots
+    that take each frame alone."""
+    levels = [level] * shots if isinstance(level, str) else list(level)
+    runs = [QUALITY[each] for each in levels if not each_frame(each)]
+    return [*runs, 1] if any(each_frame(each) for each in levels) else runs
 
 
 def kept_frames(shot: Shot, runs: int) -> int:
@@ -167,8 +189,10 @@ __all__ = [
     "kept_bytes",
     "kept_frames",
     "place",
+    "planned_runs",
     "planned_shots",
     "run_of",
+    "shot_levels",
     "shot_runs",
     "taken_from",
 ]

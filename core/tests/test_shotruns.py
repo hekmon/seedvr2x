@@ -48,6 +48,35 @@ def test_a_level_that_takes_each_frame_alone_is_planned_as_a_shot_of_one_frame()
     assert shotruns.planned_shots(shots, "deghost") == [Shot(0, 1)]
 
 
+def test_each_shot_takes_its_mark_else_the_jobs_level() -> None:
+    # DESIGN.md, A level per shot, marked in the cut list: a mark by the frame its shot starts at,
+    # 0 for the first; --quality for every shot with none.
+    shots = [Shot(0, 10), Shot(10, 300), Shot(300, 301)]
+    assert shotruns.shot_levels(shots, "maximum", {}) == ["maximum"] * 3
+    assert shotruns.shot_levels(shots, "maximum", {0: "deghost", 300: "standard"}) == [
+        "deghost",
+        "maximum",
+        "standard",
+    ]
+
+
+def test_shots_of_several_levels_are_planned_as_their_levels_plan_them() -> None:
+    # The packed shots as they are, and a frame's shot where any takes each frame alone; one level
+    # for every shot, given as a list, planned as that level is; the runs of each planned shot.
+    shots = [Shot(0, 10), Shot(10, 300), Shot(300, 301)]
+    mixed = ["maximum", "deghost", "enhanced"]
+    assert shotruns.planned_shots(shots, mixed) == [Shot(0, 10), Shot(300, 301), Shot(0, 1)]
+    assert shotruns.planned_runs(mixed, 3) == [4, 2, 1]
+    assert shotruns.planned_shots(shots, ["deghost"] * 3) == [Shot(0, 1)]
+    assert shotruns.planned_runs(["deghost"] * 3, 3) == [1]
+    for level in shotruns.QUALITY:
+        assert shotruns.planned_shots(shots, [level] * 3) == shotruns.planned_shots(shots, level)
+        assert shotruns.planned_runs([level] * 3, 3) == shotruns.planned_runs(level, 3)
+    assert shotruns.planned_runs("maximum", 3) == [4, 4, 4]
+    with pytest.raises(ValueError, match="2 levels for 3 shots"):
+        shotruns.planned_shots(shots, ["standard", "deghost"])
+
+
 def test_a_runs_place_counts_from_its_first_frame() -> None:
     assert [shotruns.place(i) for i in range(10)] == [-1, 0, 1, 2, 3, 0, 1, 2, 3, 0]
     with pytest.raises(ValueError):

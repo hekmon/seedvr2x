@@ -21,7 +21,7 @@ from job import QUALITY, OutputSegment, Run, each_frame, shot_runs
 from media.files import write_whole
 from media.source import Source
 from seedvr2x.errors import JobError
-from seedvr2x.shotruns import frame_layout
+from seedvr2x.shotruns import frame_layout, shot_levels
 from seedvr2x.shots import Shot, window_layout
 
 # The CLI's own code, which code_sha256 hashes and the environment record imports: its top-level
@@ -95,6 +95,12 @@ FIRST_PASS = ("ffmpeg", "conversions")
 # DESIGN.md, Several runs of a shot): standard, one run, for a manifest recorded before it, which
 # code before it wrote (its settings.code another job's anyway).
 LEVEL = "quality"
+# The setting of the cut list's marks (DESIGN.md, A level per shot, marked in the cut list, decided
+# on 2026-11-24): each marked shot's level, [frame, level] pairs in the order of the frames, the
+# first shot's at 0 (job.read_cuts), beside the cuts; written only where the list marks a shot, so
+# that a list with no mark gives the settings of before, key for key. A cut setting
+# (resume.CUT_SETTINGS): a mark changed is the cut list changed.
+MARKS = "cut_levels"
 # A shot's record of its runs after the first, with more than one run a shot: their own windows
 # and how far each went, the first run being the shot's own fields (Manifest.content). With one
 # run a shot, the shots' record is what it was before the option, byte for byte (the settings
@@ -124,6 +130,21 @@ REHEARSAL = "rehearsal"
 # bumps only where older code would misread a field, which this one it can't: DESIGN.md, Pause and
 # resume, Manifest). A job never planned again records none, byte for byte as before.
 WINDOW_CAP = "window_cap"
+
+
+def marks_of(settings: dict[str, Any], path: Path) -> dict[int, str]:
+    """The marks of a job's settings (MARKS): each marked shot's level by the frame it starts at,
+    empty where the cut list marks none. A hand-edited record's marks refused, as its level is."""
+    recorded: Any = settings.get(MARKS, [])
+    marks: dict[int, str] = {}
+    try:
+        for frame, level in recorded:
+            if not isinstance(frame, int) or not isinstance(level, str) or level not in QUALITY:
+                raise TypeError
+            marks[frame] = level
+    except (TypeError, ValueError):
+        raise JobError(f"{path}: {MARKS} {json.dumps(recorded)}: not a cut list's marks") from None
+    return marks
 
 
 def write_content(path: Path, content: dict[str, Any]) -> None:
@@ -341,12 +362,19 @@ class Manifest:
             *others, last = QUALITY
             levels = f"{', '.join(others)} and {last}"
             raise JobError(f"{self.path}: quality {json.dumps(level)}, where seedvr2x has {levels}")
-        count = self.runs_per_shot
+        # Each shot's level: its mark, else the job's (MARKS; shotruns.shot_levels).
+        self.levels: list[str] = shot_levels(self.shots, level, marks_of(self.settings, self.path))
         # The job's runs, the units its encodes and windows are (DESIGN.md, Several runs of a
-        # shot): each shot's in turn, and the shot each is of.
-        self.runs: list[Run] = [run for shot in self.shots for run in shot_runs(shot, count)]
+        # shot): each shot's in turn, at its level, and the shot each is of.
+        self.runs: list[Run] = [
+            run
+            for index, shot in enumerate(self.shots)
+            for run in shot_runs(shot, self.runs_of(index))
+        ]
         self.run_shots: list[int] = [
-            index for index, shot in enumerate(self.shots) for _ in shot_runs(shot, count)
+            index
+            for index, shot in enumerate(self.shots)
+            for _ in shot_runs(shot, self.runs_of(index))
         ]
         # Each shot's runs, their indices in runs, in order (shot_runs).
         self._shot_runs: list[list[int]] = [[] for _ in self.shots]
@@ -368,16 +396,14 @@ class Manifest:
             self.hashes = [None] * len(self.segments)
         self._input = _input(self.source, self.rehearsal)
 
-    @property
-    def runs_per_shot(self) -> int:
-        """The runs of each shot, its level's (LEVEL, job.QUALITY): 1, 2 or 4."""
-        return QUALITY[self.settings.get(LEVEL, "standard")]
+    def runs_of(self, shot: int) -> int:
+        """The runs of shot `shot`, its level's (levels, job.QUALITY): 1, 2 or 4."""
+        return QUALITY[self.levels[shot]]
 
-    @property
-    def each_frame(self) -> bool:
-        """Whether the job's level takes each frame of a shot alone (shotruns.each_frame:
-        deghost), its runs' windows one latent a frame."""
-        return each_frame(self.settings.get(LEVEL, "standard"))
+    def alone(self, run: int) -> bool:
+        """Whether run `run`'s shot's level takes each frame alone (shotruns.each_frame: deghost),
+        its windows one latent a frame."""
+        return each_frame(self.levels[self.run_shots[run]])
 
     def shot_of(self, run: int) -> int:
         """The index of the shot run `run` is of."""
@@ -467,7 +493,7 @@ class Manifest:
             first, *others = self.shot_runs(index)
             entry: dict[str, Any] = {"start": shot.start, "end": shot.end, "seed": shot.seed(seed)}
             entry.update(self._run(first))
-            if self.runs_per_shot > 1:
+            if self.runs_of(index) > 1:
                 entry[SHOT_RUNS] = [
                     {"from": self.runs[run].offset, **self._run(run)} for run in others
                 ]
@@ -511,7 +537,7 @@ class Manifest:
         # manifest written after every unit is 1.74 MB with them listed against 0.11 MB, 11 ms a
         # write against 5 on Linux's disk, 60 GB written over the episode (impl-anim-1,
         # 2026-11-17).
-        if not self.each_frame:
+        if not self.alone(run):
             record["windows"] = [list(window) for window in layout]
         record["encoded"] = self.encoded[run]
         record["windows_done"] = self.windows_done[run]

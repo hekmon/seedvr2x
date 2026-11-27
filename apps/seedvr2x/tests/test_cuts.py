@@ -154,9 +154,9 @@ def test_places_said_in_the_header(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert ": 1 frame missing after frame 8, 27 places for 26 frames decoded. " in single
     path = tmp_path / "plan.txt"
     path.write_text(cut_list(["of in.mkv", *places_note(several)], several, [Cut(7), Cut(2001)]))
-    assert read_cuts(path) == [7, 2001]
+    assert read_cuts(path) == ([7, 2001], {})
     path.write_text(re.sub(r"(?m)^# (?=\d)", "", path.read_text()))
-    assert read_cuts(path) == [7, 2001]
+    assert read_cuts(path) == ([7, 2001], {})
     # No line of it begins with a digit, whatever its figures' lengths bring to the wrap: a
     # header line that does is refused, since uncommented with the possible cuts it would be a
     # cut (cut_list). Figures of 1 to 9 digits each, in place of the index's own: wrapped at any
@@ -201,14 +201,14 @@ def test_cut_list_read_back(tmp_path: Path) -> None:
     assert text.endswith("\n")
     path = tmp_path / "plan.txt"
     path.write_text(text)
-    assert read_cuts(path) == [6]
+    assert read_cuts(path) == ([6], {})
     path.write_text(text.replace("# 3 ", "3 ").replace("# 9 ", "9 "))
-    assert read_cuts(path) == [3, 6, 9]
+    assert read_cuts(path) == ([3, 6, 9], {})
     # A cut list's own cuts: no probability.
     listed = cut_list([], index, [Cut(4), Cut(7)])
     assert listed == "4 0:00:00.160\n7 0:00:00.280\n"
     path.write_text(listed)
-    assert read_cuts(path) == [4, 7]
+    assert read_cuts(path) == ([4, 7], {})
 
 
 # The comments a playlist begins with (playlist).
@@ -601,11 +601,11 @@ def test_header_lines_stay_comments(tmp_path: Path) -> None:
     ]
     path = tmp_path / "plan.txt"
     path.write_text(text)
-    assert read_cuts(path) == [6]
+    assert read_cuts(path) == ([6], {})
     # Every "# <digit>" line uncommented, as a search over the file keeps every possible cut:
     # the cuts and the possible cuts, and nothing of the header's.
     path.write_text(re.sub(r"(?m)^# (?=\d)", "", text))
-    assert read_cuts(path) == [3, 6, 9]
+    assert read_cuts(path) == ([3, 6, 9], {})
     # So no header line may begin with a digit: a seedvr2x bug, refused.
     for line in ("61 cuts at 0.3 (62 shots)", "0; the time"):
         with pytest.raises(ValueError, match="a cut list's header line begins with a digit"):

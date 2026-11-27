@@ -102,11 +102,11 @@ def run_job(
     A shot's units run in order: its encode, then its windows, each kept by `units` as it is
     done, then its decode. A segment's shots are all encoded and sampled before the first of them
     is decoded: the segment's decode and write is then a unit of its own, and units never
-    interleave. With several runs a shot (units.manifest.runs_per_shot; DESIGN.md, Several runs
+    interleave. With several runs a shot (units.manifest.runs_of; DESIGN.md, Several runs
     of a shot), each run is a whole run of the shot fed from its first frame, its encode and its
     windows units of their own, in turn; the shot's decode decodes its runs in turn, each giving
     the frames job.run_of takes from it, and writes the shot's frames in their order
-    (_decode_runs). At a level that takes each frame alone (units.manifest.each_frame; DESIGN.md,
+    (_decode_runs). At a level that takes each frame alone (units.manifest.alone; DESIGN.md,
     Each frame on its own), a shot's one run encodes each of its frames alone, the shot's frames
     a unit, then samples each frame's latent in a window of its own, a unit a frame, and its
     decode decodes each frame's alone, in order (_sample_frames, _decode_frames).
@@ -176,14 +176,14 @@ def job_units(
     models in phase `start` before the first (None: unknown)."""
     manifest = units.manifest
     return units_of(
-        *(manifest.shots, manifest.segments, manifest.runs_per_shot, plan.window),
+        *(manifest.shots, manifest.segments, 1, plan.window),
         tokens(target, 1),
         encoded=manifest.encoded,
         windows_done=manifest.windows_done,
         finished=manifest.finished,
         start=start,
         layouts=manifest.layouts,
-        each_frame=manifest.each_frame,
+        levels=manifest.levels,
     )
 
 
@@ -327,7 +327,7 @@ def _sample(
     the CPU."""
     if progress is None:
         progress = Progress(Clock(), [], stopping.now)
-    if units.manifest.each_frame:
+    if units.manifest.alone(index):
         _sample_frames(
             index, models, inputs, shots, target, seed, plan, units, stop, copies, progress
         )
@@ -552,7 +552,7 @@ def _name(units: Units, shots: Sequence[Shot], index: int) -> str:
     manifest = units.manifest
     shot = manifest.shot_of(index)
     run, runs = manifest.runs[index], manifest.shot_runs(shot)
-    per_shot = manifest.runs_per_shot
+    per_shot = manifest.runs_of(shot)
     return run_name(shot, len(shots), runs.index(index), len(runs), run.offset, per_shot)
 
 
@@ -604,7 +604,7 @@ def _decode(
     of unit `key`, its segment's decode and write, its time given to progress (_made)."""
     run = units.manifest.runs[index]
     name = _name(units, shots, index)
-    if units.manifest.each_frame:
+    if units.manifest.alone(index):
         _decode_frames(index, name, models, target, plan, units, write, copies, progress, key)
         return
     logger.debug("%s: decoding", name)
@@ -754,7 +754,7 @@ def _decode_runs(
     manifest = units.manifest
     runs = manifest.shot_runs(index)
     shot = shots[index]
-    count = manifest.runs_per_shot
+    count = manifest.runs_of(index)
     taken = [run_of(count, frame) for frame in range(shot.frames)]
     last = manifest.runs[runs[-1]].offset
     kept = [frame for frame in range(shot.frames) if taken[frame] != last]

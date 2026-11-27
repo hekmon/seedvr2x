@@ -37,7 +37,8 @@ from job import OutputSegment, shot_runs
 from seedvr2x.clock import spoken, wall
 from seedvr2x.frames import padded_length, padded_size
 from seedvr2x.passes import Phase
-from seedvr2x.shotruns import frame_layout
+from seedvr2x.shotruns import QUALITY, frame_layout
+from seedvr2x.shotruns import each_frame as is_each_frame
 from seedvr2x.shots import Shot, shot_layout
 from stop import late
 
@@ -232,6 +233,7 @@ def units_of(
     start: Phase | None = None,
     layouts: Sequence[Sequence[tuple[int, int]]] | None = None,
     each_frame: bool = False,
+    levels: Sequence[str] | None = None,
 ) -> list[Unit]:
     """The units a job has left, in the order the run makes them (run.run_job): its shots, each
     run `per_shot` times (job.shot_runs), their windows capped at `window` latents
@@ -254,24 +256,32 @@ def units_of(
     on its own): a run's encode is its frames', each alone, and each frame a window of one latent
     of its own, a unit named for the frame ("shot 3/12's frame 5/206"), which draws a latent's
     noise, its frame's (run._sample_frames); its decode, its frames' one at a time; each part of
-    a frame alone's kind (ALONE), priced by the frames the calibration timed alone."""
+    a frame alone's kind (ALONE), priced by the frames the calibration timed alone.
+
+    levels: each shot's level, in order (DESIGN.md, A level per shot, marked in the cut list), its
+    runs and whether it takes each frame alone in place of `per_shot` and `each_frame`, which
+    then say nothing: a segment may hold shots of several levels, its decode each run's at its
+    shot's."""
     units: list[Unit] = []
     run = 0  # the runs' index across the job, as the manifest's
-    # A frame alone's parts are of their own kinds (ALONE), the packed frames' of the passes'.
-    encoding: Kind = ALONE["encode"] if each_frame else "encode"
-    windowing: Kind = ALONE["window"] if each_frame else "window"
-    decoding: Kind = ALONE["decode"] if each_frame else "decode"
     for number, segment in enumerate(segments):
         group = [i for i, shot in enumerate(shots) if segment.start <= shot.start < segment.end]
         first_run = run
         decodes: list[tuple[Kind, int]] = []
         for index in group:
-            runs = shot_runs(shots[index], per_shot)
+            alone = each_frame if levels is None else is_each_frame(levels[index])
+            count = per_shot if levels is None else QUALITY[levels[index]]
+            # A frame alone's parts are of their own kinds (ALONE), the packed frames' of the
+            # passes'.
+            encoding: Kind = ALONE["encode"] if alone else "encode"
+            windowing: Kind = ALONE["window"] if alone else "window"
+            decoding: Kind = ALONE["decode"] if alone else "decode"
+            runs = shot_runs(shots[index], count)
             for position, each in enumerate(runs):
-                name = run_name(index, len(shots), position, len(runs), each.offset, per_shot)
+                name = run_name(index, len(shots), position, len(runs), each.offset, count)
                 if layouts is not None:
                     layout = layouts[run]
-                elif each_frame:
+                elif alone:
                     layout = frame_layout(each.frames)
                 else:
                     layout = shot_layout(each.frames, window)
@@ -283,13 +293,13 @@ def units_of(
                 for k in range(done, len(layout)):
                     first, end = layout[k]
                     parts: tuple[tuple[Kind, int], ...] = ((windowing, (end - first) * per_latent),)
-                    if each_frame or k == done:
+                    if alone or k == done:
                         # A run's first window left draws the run's noise; each frame alone draws
                         # its own latent's, the shot's seed's.
-                        latents = 1 if each_frame else layout[-1][1]
+                        latents = 1 if alone else layout[-1][1]
                         drawn: tuple[Kind, int] = ("draw", latents * per_latent)
                         parts += (drawn,)
-                    said = f"{name}'s {'frame' if each_frame else 'window'} {k + 1}/{len(layout)}"
+                    said = f"{name}'s {'frame' if alone else 'window'} {k + 1}/{len(layout)}"
                     units.append(Unit(("window", run, k), said, parts))
                 decodes.append((decoding, each.frames))
                 run += 1

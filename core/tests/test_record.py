@@ -106,6 +106,45 @@ def test_a_cut_lists_hash_is_that_of_its_plain_file() -> None:
     assert record.cuts_sha256([]) == hashlib.sha256(b"").hexdigest()
 
 
+def test_a_marked_cut_lists_hash_holds_its_marks_and_an_unmarked_one_keeps_its_hash() -> None:
+    # DESIGN.md, A level per shot, marked in the cut list: the plain text holds each cut's number
+    # and its mark, the first shot's as `0 LEVEL` first; a list with no mark keeps today's text.
+    marked = record.cuts_sha256([120, 250, 300], {0: "maximum", 250: "deghost"})
+    assert marked == hashlib.sha256(b"0 maximum\n120\n250 deghost\n300\n").hexdigest()
+    assert record.cuts_sha256([120, 250], {}) == record.cuts_sha256([120, 250])
+    assert record.cuts_sha256([120, 250], None) == hashlib.sha256(b"120\n250\n").hexdigest()
+    # A mark changed is another hash.
+    assert marked != record.cuts_sha256([120, 250, 300], {0: "maximum", 250: "enhanced"})
+
+
+def test_the_marked_levels_are_one_field_after_the_cuts_only_where_the_list_marks_a_shot() -> None:
+    # The record keeps --quality and names each marked level with its count of shots.
+    digest = record.cuts_sha256([24, 96], {24: "deghost"})
+    video = Video(
+        0, "maximum", False, False, cuts_sha256=digest, marked=(("enhanced", 1), ("deghost", 3))
+    )
+    fields = dataclasses.replace(PICTURE, video=video).fields()
+    assert fields[-3:] == [
+        ("replanned", "false"),
+        ("cuts_sha256", digest),
+        ("marked_levels", "enhanced:1,deghost:3"),
+    ]
+    tags = dict(dataclasses.replace(PICTURE, video=video).tags())
+    assert tags["seedvr2x_marked_levels"] == "enhanced:1,deghost:3"
+    assert tags["seedvr2x_quality"] == "maximum"
+    # None marked: no field, the record of before.
+    plain = Video(0, "maximum", False, False, cuts_sha256=digest)
+    assert "marked_levels" not in dict(dataclasses.replace(PICTURE, video=plain).fields())
+    # Refused: no level's name, no shot, and marks with a detection's threshold.
+    for wrong in (
+        Video(0, "maximum", False, False, cuts_sha256=digest, marked=(("Deghost", 1),)),
+        Video(0, "maximum", False, False, cuts_sha256=digest, marked=(("deghost", 0),)),
+        Video(0, "maximum", False, False, cut_threshold="0.3", marked=(("deghost", 1),)),
+    ):
+        with pytest.raises(ValueError, match="marked"):
+            dataclasses.replace(PICTURE, video=wrong)
+
+
 def test_the_sample_aspect_is_written_as_ffprobe_writes_it() -> None:
     anamorphic = dataclasses.replace(PICTURE, sample_aspect=Fraction(32, 27))
     assert dict(anamorphic.fields())["sample_aspect"] == "32:27"
@@ -147,6 +186,7 @@ def test_the_tags_hold_the_same_fields_prefixed() -> None:
     assert record.tag_names() == {name for name, _ in MOVIE.tags()} | {
         "seedvr2x_cuts_sha256",
         "seedvr2x_deband",
+        "seedvr2x_marked_levels",
     }
 
 

@@ -249,7 +249,7 @@ def latents_of(frames: int) -> int:
 @pytest.mark.parametrize("runs", [1, None])
 def test_one_run_a_shot_is_the_record_as_it_was(tmp_path: Path, runs: int | None) -> None:
     record = job_of(tmp_path, LENGTHS_OF_SHOTS, runs)
-    assert record.runs_per_shot == 1
+    assert [record.runs_of(i) for i in range(4)] == [1] * 4
     assert len(record.runs) == 4 and record.run_shots == [0, 1, 2, 3]
     for entry in record.content()["shots"]:
         assert list(entry) == SHOT_KEYS

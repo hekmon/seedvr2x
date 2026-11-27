@@ -359,6 +359,48 @@ def test_units_of_a_resumed_run_s_first_window_draws_the_whole_run() -> None:
     assert draws == [("window", 0, 0), ("window", 1, 0), ("window", 2, 0)]
 
 
+def test_units_of_shots_at_their_own_levels() -> None:
+    # DESIGN.md, A level per shot, marked in the cut list: each shot's runs, units and kinds at its
+    # level; the first segment holds shots 1 and 2 of two levels, its decode each run's at its
+    # shot's. One level for every shot, as a list, gives the units of that level.
+    for level, runs in (("standard", 1), ("enhanced", 2), ("maximum", 4)):
+        assert units_of(SHOTS, SEGMENTS, 1, 5, 100, levels=[level] * 3) == units_of(
+            SHOTS, SEGMENTS, runs, 5, 100
+        )
+    assert units_of(SHOTS, SEGMENTS, 1, 5, 100, levels=["deghost"] * 3) == units_of(
+        SHOTS, SEGMENTS, 1, 5, 100, each_frame=True
+    )
+    mixed = units_of(SHOTS, SEGMENTS, 1, 5, 100, levels=["maximum", "deghost", "standard"])
+    alone = units_of(SHOTS, SEGMENTS, 1, 5, 100, each_frame=True)
+    four = units_of(SHOTS, SEGMENTS, 4, 5, 100)
+    one = units_of(SHOTS, SEGMENTS, 1, 5, 100)
+    # Shot 1 (3 frames) at maximum: its 3 runs, as at maximum; shot 2 (1 frame) alone, as at
+    # deghost, its run the 4th of the job; shot 3 (21 frames) one run, the 5th.
+    assert [unit.name for unit in mixed if unit.phase == "encode"] == [
+        *(unit.name for unit in four if unit.phase == "encode" and int(unit.key[1]) < 3),
+        "shot 2/3's encode",
+        "shot 3/3's encode",
+    ]
+    assert [unit.parts for unit in mixed if unit.key[:2] == ("encode", 3)] == [
+        (("encode-alone", 1),)
+    ]
+    assert [unit.name for unit in mixed if unit.key[:2] == ("window", 3)] == [
+        unit.name for unit in alone if unit.key[:2] == ("window", 1)
+    ]
+    assert [unit.name for unit in mixed if unit.key[:2] == ("window", 4)] == [
+        unit.name for unit in one if unit.key[:2] == ("window", 2)
+    ]
+    # The first segment's decode: shot 1's three runs, of 3, 2 and 1 frames, then shot 2's frame
+    # alone; the second's shot 3's one run of 21 frames.
+    [first] = [unit for unit in mixed if unit.key == ("decode", 0)]
+    assert [part for part in first.parts if part[0] != "enter-decode"] == [
+        *(("decode", frames) for frames in (3, 2, 1)),
+        ("decode-alone", 1),
+    ]
+    assert mixed[-1].key == ("decode", 1)
+    assert [part for part in mixed[-1].parts if part[0] != "enter-decode"] == [("decode", 21)]
+
+
 def test_units_of_several_runs_a_shot() -> None:
     units = units_of(SHOTS, SEGMENTS, 4, 5, 100)
     # A shot of 3 frames has runs from its frames 0, 1 and 2; one of 1 frame has one; one of 21

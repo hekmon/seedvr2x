@@ -4,6 +4,7 @@ torch: a bad cut list is refused before the models load."""
 
 import math
 import re
+from codecs import BOM_UTF8
 from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
@@ -159,24 +160,89 @@ def check_seed(seed: int, shots: Sequence[Shot]) -> None:
         )
 
 
-def read_cuts(path: Path) -> list[int]:
+# What may follow a cut's frame number on its line, ignored (DESIGN.md, Input: "Numbers and times
+# after the frame number are ignored, so an export carrying scores stays readable"): a number,
+# a probability as --plan FILE writes it (cuts.probability) or any other decimal, and a time,
+# H:MM:SS.mmm as --plan FILE writes it (shotcuts.timecode), its hours and fraction any length.
+_NUMBER = re.compile(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
+_TIME = re.compile(r"\d+:[0-5]\d:[0-5]\d(\.\d+)?")
+
+
+def read_cuts(path: Path) -> tuple[list[int], dict[int, str]]:
     """A cut list (DESIGN.md, Input): the first frame of each shot but the first, one frame number
     per line, counted from 0 in the source, no timestamps; blank lines and # comments are ignored.
-    So are the fields after the frame number, separated by blanks, so that an export carrying
-    scores (sptenc's, once it has one) stays readable."""
+    So are the numbers and times after the frame number, separated by blanks, so that an export
+    carrying scores (sptenc's, once it has one) stays readable. A level's name there, one of
+    --quality's as it spells them (QUALITY), marks the shot that starts at that cut, and a line
+    `0 LEVEL` the first shot (DESIGN.md, A level per shot, marked in the cut list, decided on
+    2026-11-24); any other word, or a second level on a line, is refused naming the line, so that
+    a misspelt level can't pass unseen. `0` alone stays a cut at frame 0, refused (check_cuts).
+
+    The file is read as UTF-8 on every platform, a byte order mark at its start taken (a
+    Windows editor's; the locale's codec read it as part of the first frame number there), as
+    --plan FILE writes it (UTF-8, no mark); a file that isn't is refused naming its line. A
+    frame cut twice is refused naming both lines; check_cuts refuses cuts out of order.
+
+    Returns the cuts and the marks: each marked shot's level, by the frame it starts at (0 for
+    the first), empty for a list with no mark."""
     try:
-        text = path.read_text()
+        raw = path.read_bytes()
     except OSError as error:
         raise JobError(f"{path}: {error.strerror}") from None
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        # The position counts from after the mark utf-8-sig took.
+        start = error.start + (len(BOM_UTF8) if raw.startswith(BOM_UTF8) else 0)
+        raise JobError(
+            f"{path}:{raw[:start].count(b'\n') + 1}: a cut list that can't be read: not UTF-8"
+            f" text ({error.reason})"
+        ) from None
     cuts: list[int] = []
+    marks: dict[int, str] = {}
+    lines: dict[int, int] = {}
     for number, line in enumerate(text.splitlines(), 1):
         fields = line.split("#", 1)[0].split()
         if not fields:
             continue
         if not re.fullmatch(r"\d+", fields[0]):
             raise JobError(f"{path}:{number}: {fields[0]!r} is not a frame number")
-        cuts.append(int(fields[0]))
-    return cuts
+        frame = int(fields[0])
+        levels: list[str] = []
+        for field in fields[1:]:
+            if field in QUALITY:
+                levels.append(field)
+            elif not (_NUMBER.fullmatch(field) or _TIME.fullmatch(field)):
+                raise JobError(
+                    f"{path}:{number}: {field!r} is neither a level ({_levels_said()}) nor a"
+                    " number or a time, which are ignored"
+                )
+        if len(levels) > 1:
+            raise JobError(
+                f"{path}:{number}: two levels on one line, {levels[0]} and {levels[1]}: a shot"
+                " runs at one"
+            )
+        if levels and frame == 0 and 0 in marks:
+            raise JobError(f"{path}:{number}: the first shot marked again, {marks[0]} before")
+        if levels:
+            marks[frame] = levels[0]
+        if not (levels and frame == 0):
+            # Frame 0 is check_cuts' to refuse, its words saying how to mark the first shot.
+            if frame in lines and frame != 0:
+                raise JobError(
+                    f"{path}:{number}: frame {frame} cut again, line {lines[frame]} cutting there"
+                    " already: each cut starts one shot"
+                )
+            lines[frame] = number
+            cuts.append(frame)
+    return cuts, marks
+
+
+def _levels_said() -> str:
+    """The levels a cut list may mark, as a refusal names them: "standard, enhanced, maximum or
+    deghost"."""
+    *others, last = QUALITY
+    return f"{', '.join(others)} or {last}"
 
 
 def shots_from_cuts(cuts: list[int], frames: int) -> list[Shot]:
@@ -192,7 +258,10 @@ def check_cuts(cuts: Sequence[int], frames: int) -> None:
     previous = 0
     for cut in cuts:
         if cut == 0:
-            raise JobError("a cut at frame 0: the first shot starts there without one")
+            raise JobError(
+                "a cut at frame 0: the first shot starts there without one; a line `0 LEVEL`, a"
+                f" level's name after the 0 ({_levels_said()}), marks the first shot's level"
+            )
         if cut <= previous:
             raise JobError(f"cut at frame {cut} after one at {previous}: cuts must increase")
         previous = cut

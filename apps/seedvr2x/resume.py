@@ -78,15 +78,17 @@ UNIT_FILE = re.compile(
     rf"|{'|'.join(map(re.escape, (COPY, CHECKSUMS, SCRATCH, KEPT)))}"
 )
 
-# The settings that say how a job's source is cut (main._settings): the cut list given, or the
-# detection's threshold and the shot detector's file, which a cut list drops. A plan, a job that
+# The settings that say how a job's source is cut (main._settings): the cut list given and its
+# marks (manifest.MARKS: a mark changed is the cut list changed, DESIGN.md, A level per shot,
+# marked in the cut list), or the detection's threshold and the shot detector's file, which a cut
+# list drops. A plan, a job that
 # has made no unit yet (manifest.planned), is taken up with them changed, its cuts derived again
 # from the first pass's record, or taken from the new list (main._prior, main._replan), as it is
 # with any other setting its first pass doesn't read (FIRST_PASS_SETTINGS). DESIGN.md, Pause and
 # resume, A plan: "A run whose settings differ only in its cuts (the cut list, the threshold, the
 # detector's file) plans it again from its record, with no decode". Named here for that rule,
 # which FIRST_PASS_SETTINGS's covers.
-CUT_SETTINGS = frozenset({"cuts", "cut_threshold", "detector_model"})
+CUT_SETTINGS = frozenset({"cuts", "cut_levels", "cut_threshold", "detector_model"})
 
 # The settings a plan can't change (DESIGN.md, Pause and resume, A plan, decided on 2026-10-21: "A
 # difference in what the first pass reads (the source, the frame rate), in the code, or a unit
@@ -229,7 +231,7 @@ def adopt(manifest: Manifest, recorded: dict[str, Any]) -> None:
     if len(runs) != len(manifest.runs):
         raise JobError(
             f"{manifest.path}: {len(runs)} runs recorded, for the {len(manifest.runs)} of its"
-            f" {len(manifest.shots)} shots at {manifest.runs_per_shot} a shot"
+            f" {len(manifest.shots)} shots at their levels"
         )
     manifest.encoded = [run["encoded"] for run in runs]
     manifest.windows_done = [run["windows_done"] for run in runs]
@@ -644,7 +646,7 @@ def _kept(manifest: Manifest, index: int) -> set[str]:
         offset = manifest.runs[run].offset
         done = manifest.windows_done[run]
         kept.update(run_file(offset, window_file(window)) for window in range(done))
-        if manifest.encoded[run] and manifest.each_frame:
+        if manifest.encoded[run] and manifest.alone(run):
             # Each frame's latent until its window is kept (units.frame_latent).
             frames = len(manifest.layouts[run])
             kept.update(run_file(offset, frame_latent(frame)) for frame in range(done, frames))

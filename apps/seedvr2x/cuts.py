@@ -14,7 +14,7 @@ import math
 import os
 import re
 import textwrap
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 from fractions import Fraction
@@ -73,7 +73,11 @@ def probability(value: float) -> str:
 
 
 def cut_list(
-    header: Sequence[str], index: FrameIndex, cuts: Sequence[Cut], possible: Sequence[Cut] = ()
+    header: Sequence[str],
+    index: FrameIndex,
+    cuts: Sequence[Cut],
+    possible: Sequence[Cut] = (),
+    marks: Mapping[int, str] | None = None,
 ) -> str:
     """The cut list --plan writes (DESIGN.md, Shot detection), in the cut list format, so that
     --cuts reads it back (job.read_cuts: a frame number per line, # comments, the fields after the
@@ -82,7 +86,10 @@ def cut_list(
     <probability> <time>`, so that keeping one is uncommenting its line; a cut list's own cut
     `<frame> <time>`. The probability is its run's peak, on the frame before (probability); the
     time the cut frame's, as a player shows it (time_of, timecode), a jump to it in a player
-    checking the cut.
+    checking the cut. A cut list's marks (`marks`, each marked shot's level by the frame it starts
+    at: job.read_cuts) are written back on their cuts' lines, `<frame> <time> <level>`, the first
+    shot's as a line `0 <level>` before the cuts (DESIGN.md, A level per shot, marked in the cut
+    list: "the list it writes carries the marks of a list given, none of a detection").
 
     The header's lines hold names, the source's and a cut list's: whatever in them isn't
     printable is written escaped (a line break, which would start a line of the name's own, read
@@ -98,12 +105,17 @@ def cut_list(
         if escaped[:1].isdigit():
             raise ValueError(f"a cut list's header line begins with a digit: {escaped!r}")
         lines.append(f"# {escaped}" if escaped else "#")
+    marks = marks or {}
+    if 0 in marks:
+        lines.append(f"0 {marks[0]}")
     found = [(cut, False) for cut in cuts] + [(cut, True) for cut in possible]
     for cut, commented in sorted(found, key=lambda item: item[0].frame):
         fields = [str(cut.frame)]
         if cut.probability is not None:
             fields.append(probability(cut.probability))
         fields.append(timecode(time_of(index, cut.frame)))
+        if not commented and cut.frame in marks:
+            fields.append(marks[cut.frame])
         lines.append(("# " if commented else "") + " ".join(fields))
     return "\n".join(lines) + "\n"
 

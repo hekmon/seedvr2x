@@ -617,9 +617,11 @@ class Steps:
     """The stand-in's steps, each call recorded: "encode S", "window S:K", "decode S", S the
     shot's first frame; each encode's frames, summed up, by S. The call named `stop` raises
     KeyboardInterrupt from inside, after an encode's reads, before a window's output, after a
-    decode's first frame, as a stop at once would. The call named `poison` makes NaN: in an
-    encode's latent, a window's output, or the frames of a decode's last latent. The decode named
-    `damage` flips a byte of the shot's input copy first (damage)."""
+    decode's first frame, as a stop at once would; `stop` as "NAME#N" stops at that name's Nth
+    call, the names repeating a frame at a time where a shot takes each frame alone. The call
+    named `poison` makes NaN: in an encode's latent, a window's output, or the frames of a
+    decode's last latent. The decode named `damage` flips a byte of the shot's input copy first
+    (damage)."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -630,7 +632,7 @@ class Steps:
 
     def _call(self, name: str) -> None:
         self.calls.append(name)
-        if name == self.stop:
+        if self.stop in (name, f"{name}#{self.calls.count(name)}"):
             raise KeyboardInterrupt
 
     def encode(
@@ -821,6 +823,16 @@ def kept(directory: Path) -> str:
         f"; the first pass is kept in {directory}: the same command takes it up, or one changing"
         " what is named here, without decoding the source again"
     )
+
+
+# How the cut list --plan FILE writes says to mark a shot's level, after the line on what is read
+# (DESIGN.md, A level per shot, marked in the cut list: "`--plan FILE`'s header says how to mark a
+# shot").
+MARKING = (
+    "# A level's name (standard, enhanced, maximum, deghost) at the end of a cut's line runs",
+    "# the shot from that cut at that level, every other shot at --quality's; a line",
+    "# `0 LEVEL` marks the first shot. A mark changed is another job once a unit is made.",
+)
 
 
 def plan_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -8067,18 +8079,19 @@ def test_plan_then_run(
         "# A line per cut: the frame it cuts at, the first frame of a shot, counted from zero;",
         "# the shot detector's peak probability, on the frame before it; the time of that frame",
         "# from the source's start, H:MM:SS.mmm, as a player shows it. seedvr2x reads the frame",
-        "# number alone. A possible cut is a commented line: checking it is a jump to its time in",
-        "# a player.",
+        "# number, and a level's name after it, ignoring the numbers and times. A possible cut is",
+        "# a commented line: checking it is a jump to its time in a player.",
+        *MARKING,
         "# Uncomment a possible cut to keep it, delete a line to drop a cut, then run with --cuts",
         "# FILE, this file.",
         *PLANNED,
     ]
-    assert read_cuts(plan) == [5, 15, 22]
+    assert read_cuts(plan) == ([5, 15, 22], {})
     # Every "# <digit>" line uncommented, as a search over the file keeps every possible cut: the
     # cuts and the possible cuts, nothing of the header's (its counts begin with a word).
     every = tmp_path / "every.txt"
     every.write_text(re.sub(r"(?m)^# (?=\d)", "", plan.read_text()))
-    assert read_cuts(every) == [5, 10, 15, 19, 22]
+    assert read_cuts(every) == ([5, 10, 15, 19, 22], {})
     passes.clear()
     caplog.clear()
     assert upscale(tmp_path, source_path, "out", *CUT) == 0
@@ -8138,8 +8151,9 @@ def test_plan_and_run_of_a_source_with_missing_frames(
         "# A line per cut: the frame it cuts at, the first frame of a shot, counted from zero;",
         "# the shot detector's peak probability, on the frame before it; the time of that frame",
         "# from the source's start, H:MM:SS.mmm, as a player shows it. seedvr2x reads the frame",
-        "# number alone. A possible cut is a commented line: checking it is a jump to its time in",
-        "# a player.",
+        "# number, and a level's name after it, ignoring the numbers and times. A possible cut is",
+        "# a commented line: checking it is a jump to its time in a player.",
+        *MARKING,
         "# Frame numbers count places, the missing frames' filled ones among them: 2 frames",
         "# missing after frame 4, 27 places for 25 frames decoded. A list numbered by a tool that",
         "# counts the decoded frames is off by the holes before each cut, its number lower by the",
@@ -8203,7 +8217,7 @@ def test_replanned(
     assert (out / "frame_index.bin").read_bytes() == index
     assert cut_lines(second) == [*PLANNED[:3], "# 19 0.119 0:00:00.760", "# 22 0.300 0:00:00.880"]
     second.write_text(second.read_text().replace("# 10 ", "10 "))
-    assert read_cuts(second) == [5, 10, 15]
+    assert read_cuts(second) == ([5, 10, 15], {})
     caplog.clear()
     assert upscale(tmp_path, source_path, "out", *CUT, "--cuts", str(second)) == 0
     assert passes == [] and len(StandInDetector.built) == 1
@@ -8300,7 +8314,7 @@ def test_one_file_plan_kept_in_its_work_directory(
     assert sorted(os.listdir(tmp_path)) == sorted([*before, *made])
     work = tmp_path / "one.mkv.work"
     assert sorted(os.listdir(work)) == ["frame_index.bin", "manifest.json"]
-    assert cut_lines(plan) == PLANNED and read_cuts(plan) == [5, 15, 22]
+    assert cut_lines(plan) == PLANNED and read_cuts(plan) == ([5, 15, 22], {})
     assert scripted.calls == []
 
 
@@ -8639,7 +8653,7 @@ def test_plan_of_a_cut_list(
 
     levels(caplog, logging.INFO)
     source_path = job(tmp_path, monkeypatch)
-    (tmp_path / "cuts.txt").write_text("# mine\n4 a score\n\n12  # a flash\n")
+    (tmp_path / "cuts.txt").write_text("# mine\n4 0.7 0:00:00.160\n\n12  # a flash\n")
     plan = tmp_path / "plan.txt"
     assert upscale(tmp_path, source_path, "out", "--cuts", "cuts.txt", "--plan", str(plan)) == 0
     assert StandInDetector.built == []
@@ -8650,13 +8664,15 @@ def test_plan_of_a_cut_list(
         "#",
         "# A line per cut: the frame it cuts at, the first frame of a shot, counted from zero;",
         "# the time of that frame from the source's start, H:MM:SS.mmm, as a player shows it.",
-        "# seedvr2x reads the frame number alone.",
+        "# seedvr2x reads the frame number, and a level's name after it, ignoring the numbers and",
+        "# times.",
+        *MARKING,
         "# Delete a line to drop a cut, add one to cut at its frame, then run with --cuts FILE,",
         "# this file.",
         "4 0:00:00.160",
         "12 0:00:00.480",
     ]
-    assert read_cuts(plan) == [4, 12]
+    assert read_cuts(plan) == ([4, 12], {})
     assert json.loads((tmp_path / "out" / "manifest.json").read_text())["settings"]["cuts"] == [
         4,
         12,
@@ -8695,7 +8711,7 @@ def test_plan_cut_by_a_list_detected_again(
     entry = json.loads((out / "manifest.json").read_text())["input"]["index"]
     assert entry["sha256"] == hashlib.sha256(index.read_bytes()).hexdigest()
     assert shots_of(out) == [(0, 5), (5, 15), (15, 22), (22, 25)]
-    assert read_cuts(plan) == [5, 15, 22]
+    assert read_cuts(plan) == ([5, 15, 22], {})
     passes.clear()
     # What a stop in shot 22's encode leaves: one leftover, said as one.
     left = out / "resume" / "shot_000022"
@@ -9118,7 +9134,7 @@ def test_real_detection_cuts(
     )
     assert said in caplog.text
     assert "3 cuts at 0.3 (4 shots), 0 possible cuts from 0.1 up to 0.3" in caplog.text
-    assert read_cuts(plan) == CUTS
+    assert read_cuts(plan) == (CUTS, {})
     lines = cut_lines(plan)
     assert [line.split()[2] for line in lines] == ["0:00:02.920", "0:00:06.000", "0:00:08.480"]
     assert all(float(line.split()[1]) > 0.5 for line in lines)

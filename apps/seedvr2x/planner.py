@@ -43,7 +43,7 @@ from seedvr2x.shot_plan import (
     _resident_said,  # pyright: ignore[reportPrivateUsage]
     plan,
 )
-from seedvr2x.shotruns import planned_shots
+from seedvr2x.shotruns import planned_runs, planned_shots
 from seedvr2x.shots import SHARED, Shot
 from seedvr2x.weights import Architecture
 
@@ -106,11 +106,12 @@ def compile_shapes(
     plan: Plan,
     target: tuple[int, int],
     shots: Sequence[Shot],
-    runs: int,
+    runs: int | Sequence[int],
 ) -> Shapes:
     """The shapes the plan's VAE passes meet, for the compiled VAE to be warmed with before the
     DiT loads (seedvr2x/compiling.py): one per distinct tile of each pass (tile_shapes), the whole
-    padded frame untiled, and the slice kinds of the job's runs, `runs` a shot (job.QUALITY):
+    padded frame untiled, and the slice kinds of the job's runs, `runs` a shot (job.QUALITY), or
+    each shot's in order (shotruns.planned_runs, for planned_shots' shots at their levels):
     a run of 1 latent is a slice of 1 frame, of 2 a slice of 5, of 3 or more a first slice of 5
     and the next ones of 4 (model.encode_slices, model.latent_slices), so that the shortest of
     each kind, up to COMPILE_LATENTS, shows them all. A compiled pass compiles once for each
@@ -130,13 +131,14 @@ def compile_shapes(
     def cut(tiles: Tiles | None) -> tuple[tuple[int, int], ...]:
         return (padded,) if tiles is None else peaks.tile_shapes(padded, tiles)
 
+    counts = [runs] * len(shots) if isinstance(runs, int) else list(runs)
     latents = sorted(
         {
             *COMPILE_CALIBRATED,
             *(
                 min(_latents(run.frames), COMPILE_LATENTS)
-                for shot in shots
-                for run in shot_runs(shot, runs)
+                for shot, count in zip(shots, counts, strict=True)
+                for run in shot_runs(shot, count)
             ),
         }
     )
@@ -437,7 +439,13 @@ def _deband_said() -> str:
     )
 
 
-def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) -> str:
+def _quality_said(
+    shots: Sequence[Shot],
+    target: tuple[int, int],
+    quality: str,
+    levels: Sequence[str] | None = None,
+    unmarked: int | None = None,
+) -> str:
     """The plan's line of the --quality level (said), at every level, standard's too (DESIGN.md,
     Memory planner, Every choice of the plan is said): the runs a shot and in all, how a frame
     is taken, the GPU time against standard's one run, the memory one run's, the disk the frames
@@ -448,7 +456,16 @@ def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) 
     the level that takes each frame alone says no multiple: about twice standard's time over an
     episode's first segments on the 96 GB card and on the RTX 5090 (DESIGN.md, Each frame on its
     own, Cost); its time is the calibration's too, from frames timed alone (calibration.calibrate's
-    `alone`)."""
+    `alone`).
+
+    levels: each shot's level where the cut list marks any (DESIGN.md, A level per shot, marked in
+    the cut list: "The plan's quality line names each level with its count of shots"), None
+    where it marks none, the line then as before (_marked_said); unmarked, the count of shots the
+    list doesn't mark, None taking those at `quality` for them."""
+    if levels is not None:
+        if unmarked is None:
+            unmarked = sum(1 for level in levels if level == quality)
+        return _marked_said(shots, target, quality, levels, unmarked)
     runs_per_shot = QUALITY[quality]
     # The level that takes each frame alone, said where another level is, and what it is for
     # (DESIGN.md, Each frame on its own: the guidance takes it where fast scenes still ghost).
@@ -471,20 +488,66 @@ def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) 
     # until its last run's decode (run.Kept): the most a shot keeps, said so that a user sees the
     # room it takes before anything runs.
     kept = max(kept_bytes(shot, runs_per_shot, output_size(target)) for shot in shots)
-    levels = [
+    packed = [
         (level, count)
         for level, count in QUALITY.items()
         if level != quality and not each_frame(level)
     ]
     others = (
-        f"{' or '.join(level for level, _ in levels)}:"
-        f" {' or '.join(str(count) for _, count in levels)} runs"
+        f"{' or '.join(level for level, _ in packed)}:"
+        f" {' or '.join(str(count) for _, count in packed)} runs"
     )
     return (
         f"quality: {quality}, {runs_per_shot} runs a shot, {runs} in all, each frame from its best"
         f" run: about {runs_per_shot} times standard's GPU time, one run's memory;"
         f" {kept / 2**30:.2f} GiB of frames on disk for the longest shot; --quality {others};"
         f" {deghost}"
+    )
+
+
+def _marked_said(
+    shots: Sequence[Shot],
+    target: tuple[int, int],
+    quality: str,
+    levels: Sequence[str],
+    unmarked: int,
+) -> str:
+    """The quality line of a job whose cut list marks shots (_quality_said): each level with its
+    count of shots, --quality's named as the unmarked shots' where `unmarked` (their count) are
+    any, a mark equal to --quality being a mark, what each level does, the runs in all and the
+    most a shot keeps on disk between its runs, where one keeps any."""
+    counts = Counter(levels)
+    parts: list[str] = []
+    for level, runs_per_shot in QUALITY.items():
+        if not counts[level]:
+            continue
+        if each_frame(level):
+            does = "each frame on its own"
+        elif runs_per_shot == 1:
+            does = "one run a shot"
+        else:
+            does = f"{runs_per_shot} runs a shot, each frame from its best run"
+        whose = (
+            ", --quality's, every shot the list doesn't mark"
+            if level == quality and unmarked
+            else ""
+        )
+        parts.append(f"{level} for {_count(counts[level], 'shot')} ({does}{whose})")
+    runs = sum(
+        len(shot_runs(shot, QUALITY[level])) for shot, level in zip(shots, levels, strict=True)
+    )
+    kept = max(
+        kept_bytes(shot, QUALITY[level], output_size(target))
+        for shot, level in zip(shots, levels, strict=True)
+    )
+    disk = (
+        f"; {kept / 2**30:.2f} GiB of frames on disk for the shot that keeps the most"
+        if kept
+        else ""
+    )
+    return (
+        f"quality: by the cut list's marks, {', '.join(parts)}: {runs} runs in all, each shot's at"
+        f" its level{disk}"
     )
 
 
@@ -602,6 +665,8 @@ def said(
     pins: Pins,
     *,
     quality: str = "standard",
+    levels: Sequence[str] | None = None,
+    unmarked: int | None = None,
     deband: bool = False,
     recorded: bool = False,
     layouts: Sequence[Sequence[tuple[int, int]]] | None = None,
@@ -652,14 +717,29 @@ def said(
     smaller: the line of the smaller DiT files (smaller_swaps) that plan the job better than this
     plan's, after the swapped blocks' line; None says none.
 
+    levels: each shot's level where the cut list marks any (DESIGN.md, A level per shot, marked in
+    the cut list), None where it marks none, every shot at `quality`: the plan made for the shots
+    at their levels (shotruns.planned_shots), the windows line of the shots that have windows,
+    those at a level that takes each frame alone said beside it, a frame each, and the quality
+    line naming each level with its count of shots (_quality_said). `layouts`, given, are those
+    shots' alone (main._own_layouts). unmarked: the count of shots the list doesn't mark, at
+    --quality's level; None takes those at `quality` for them.
+
     The line of the compiled VAE is the plan's own (plan.compile_vae, the setting's, always: a
     job outside the shapes measured is refused, plan)."""
     from seedvr2x.shots import shot_layout
 
     # Where the level takes each frame alone, the plan is a frame's (shotruns.planned_shots): its
-    # windows, passes and scratch said for a shot of one frame, the shots line the job's.
-    each = each_frame(quality)
-    planned = planned_shots(shots, quality)
+    # windows, passes and scratch said for a shot of one frame, the shots line the job's. Where the
+    # cut list marks levels, the plan holds the packed shots and, where any shot takes each frame
+    # alone, a frame's shot too.
+    shot_levels = [quality] * len(shots) if levels is None else list(levels)
+    each = all(each_frame(level) for level in shot_levels)
+    planned = planned_shots(shots, shot_levels)
+    windowed = [
+        shot for shot, level in zip(shots, shot_levels, strict=True) if not each_frame(level)
+    ]
+    alone = len(shots) - len(windowed)
     job = _job(
         *(predicted.reading, target, planned, False),
         plan.compile_vae,
@@ -667,11 +747,11 @@ def said(
     )
     height, width = job.padded
     out_height, out_width = output_size(target)
-    frames = Counter(shot.frames for shot in planned)
+    windowed_frames = Counter(shot.frames for shot in windowed)
     if layouts is None:
-        windows = {count: len(shot_layout(count, plan.window)) for count in frames}
-        whole = sum(number for count, number in frames.items() if windows[count] == 1)
-        joins = sum((windows[count] - 1) * number for count, number in frames.items())
+        windows = {count: len(shot_layout(count, plan.window)) for count in windowed_frames}
+        whole = sum(number for count, number in windowed_frames.items() if windows[count] == 1)
+        joins = sum((windows[count] - 1) * number for count, number in windowed_frames.items())
     else:
         whole = sum(1 for layout in layouts if len(layout) == 1)
         joins = sum(len(layout) - 1 for layout in layouts)
@@ -686,18 +766,33 @@ def said(
         lines.append(_gguf_said(job.dit_model))
     if each:
         longest = max(shot.frames for shot in shots)
+        if levels is None:
+            whose = "--quality deghost"
+        elif unmarked == 0 or (unmarked is None and quality not in levels):
+            whose = "each marked deghost in the cut list"
+        else:
+            whose = "--quality deghost and the cut list's marks"
         lines.append(
             f"shots: {len(shots)}, the longest of {_count(longest, 'frame')}, each frame a latent"
-            " of its own (--quality deghost)"
+            f" of its own ({whose})"
         )
         lines.append("windows: one a frame, of its one latent, the frame's own DiT step")
     else:
+        longest = max(shot.frames for shot in windowed)
         lines.append(
-            f"shots: {len(shots)}, the longest of {_count(job.frames, 'frame')}"
+            f"shots: {len(shots)}, the longest with windows of {_count(longest, 'frame')}"
+            f" ({_count(_latents(longest), 'latent')})"
+            if alone
+            else f"shots: {len(shots)}, the longest of {_count(job.frames, 'frame')}"
             f" ({_count(job.lengths[-1], 'latent')})"
         )
-        lines.append(_windows_said(job, plan, predicted, pins, recorded, whole, joins, len(shots)))
-    lines.append(_quality_said(shots, target, quality))
+        said = _windows_said(job, plan, predicted, pins, recorded, whole, joins, len(windowed))
+        if alone:
+            # The shots marked to take each frame alone have no window to cap (DESIGN.md, A level
+            # per shot: "--window caps the windows of the shots that have any").
+            said += f"; the {_count(alone, 'shot')} at deghost one a frame, of its one latent"
+        lines.append(said)
+    lines.append(_quality_said(shots, target, quality, levels, unmarked))
     if deband:
         lines.append(_deband_said())
     lines.append(_swap_said(plan, pins))
@@ -750,8 +845,12 @@ def said(
         # A scratch over the allowance goes whole to its file (scratch.Scratch).
         allowed = plan.scratch_allowance
         over = sum(
-            number for count, number in frames.items() if peaks.scratch(job.padded, count) > allowed
+            number
+            for count, number in windowed_frames.items()
+            if peaks.scratch(job.padded, count) > allowed
         )
+        if alone and peaks.scratch(job.padded, 1) > allowed:
+            over += alone  # each frame's pass of the shots that take each frame alone
         where = (
             f"over it, the scratch of {over} of {_count(len(shots), 'shot')} goes whole to a"
             " memory-mapped file"
@@ -759,6 +858,8 @@ def said(
             else "which holds every shot's"
         )
         whose = "the longest tiled shot"
+        if alone and not each:
+            whose = "the longest tiled shot, or a frame where each frame's pass goes alone"
         if each:
             # Each frame's pass is a shot of one frame's (shotruns.planned_shots).
             whose = "a frame, each frame's pass alone"
@@ -778,7 +879,7 @@ def said(
         f" {_gib(predicted.budget - predicted.need(predicted.bound))} GiB under the budget"
     )
     if plan.compile_vae:
-        shapes = compile_shapes(plan, target, planned, QUALITY[quality])
+        shapes = compile_shapes(plan, target, planned, planned_runs(shot_levels, len(shots)))
         compiling = _compile_time_said(
             compile_cache, recorded, len(shapes.encode) + len(shapes.decode)
         )

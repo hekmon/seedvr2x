@@ -3,7 +3,8 @@ nothing of the source's but its size. The app that made it, its version and seed
 source's and the output's sizes, the short side asked and the sample aspect used, the DiT's and the
 VAE's files with their SHA-256, the seed, the colour correction, the encode's and the decode's
 tiles, the attention kernel, and for a video its window cap, --quality, --compile, whether it was
-planned again on a resume, its cuts, and the deband its frames were read through, when they were:
+planned again on a resume, its cuts, the levels its cut list marks shots with, when it marks any,
+and the deband its frames were read through, when they were:
 what changes the output's bits, the GPU and the libraries' versions aside. With them, IPTC's
 digital source type as the AI mark. Always written, no option.
 
@@ -15,7 +16,7 @@ time, nor anything of the machine: the bytes of a record are a function of its f
 
 import hashlib
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from xml.sax.saxutils import escape
@@ -60,6 +61,8 @@ _NOT_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
 _SHA256 = re.compile("[0-9a-f]{64}")
 # An app's name in the creator's line: a distribution's name as PyPI normalises it.
 _APP = re.compile("[a-z0-9]+(-[a-z0-9]+)*")
+# A level's name, as --quality spells it (shotruns.QUALITY), for the marked levels.
+_LEVEL = re.compile("[a-z]+")
 
 
 @dataclass(frozen=True)
@@ -84,7 +87,10 @@ class Video:
     (cuts_sha256()), one of the two; and deband, the filter the frames were read through
     (--deband: "deband=1thr=0.012:2thr=0.012:3thr=0.012:4thr=0.012:blur=0",
     the CLI's DEBAND), None for frames read as they are, the field then not written, as in every
-    record before it."""
+    record before it; and marked, the levels the cut list marks shots with, each with its count of
+    shots so marked, in order (DESIGN.md, A level per shot, marked in the cut list: "The record
+    keeps `--quality` and names each marked level with its count of shots"), empty where it marks
+    none, the field then not written; `quality` stays the level of every shot not marked."""
 
     window: int
     quality: str
@@ -93,6 +99,7 @@ class Video:
     cut_threshold: str | None = None
     cuts_sha256: str | None = None
     deband: str | None = None
+    marked: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -144,6 +151,13 @@ class Record:
                 raise ValueError(f"not a SHA-256 in lower-case hex: {self.video.cuts_sha256!r}")
             if self.video.deband is not None and not self.video.deband:
                 raise ValueError("a video's deband is a filter, or None for none")
+            for level, count in self.video.marked:
+                if _LEVEL.fullmatch(level) is None or count < 1:
+                    raise ValueError(
+                        f"a marked level is a level's name and 1 shot or more: {level}"
+                    )
+            if self.video.marked and self.video.cuts_sha256 is None:
+                raise ValueError("a video's shots are marked by a cut list's, never by a detection")
 
     @property
     def creator(self) -> str:
@@ -189,6 +203,11 @@ class Record:
                 found.append(("cuts_sha256", self.video.cuts_sha256))
             if self.video.deband is not None:
                 found.append(("deband", self.video.deband))
+            if self.video.marked:
+                # "maximum:1,deghost:3": each level and its count of shots, as the sample aspect's
+                # N:D pairs two numbers.
+                said = ",".join(f"{level}:{count}" for level, count in self.video.marked)
+                found.append(("marked_levels", said))
         return found
 
     def xmp(self) -> bytes:
@@ -241,20 +260,27 @@ def tag_names() -> frozenset[str]:
     names: set[str] = set()
     for video in (
         Video(0, "", False, False, "0", deband="deband"),
-        Video(0, "", False, False, None, "0" * 64),
+        Video(0, "", False, False, None, "0" * 64, marked=(("a", 1),)),
     ):
         sample = Record("a", "0", (1, 1), (1, 1), 1, Fraction(1), model, model, 0, "", 0, 0, video)
         names.update(name for name, _ in sample.tags())
     return frozenset(names)
 
 
-def cuts_sha256(cuts: Sequence[int]) -> str:
-    """The SHA-256 of a cut list as a video's record holds it: of its text one frame number per
-    line, each line ended by a line feed, which is the file --cuts read where it holds the numbers
-    alone (job.read_cuts ignores blank lines, comments and fields after the number, so a file
-    holding them has another hash and the same cuts). Made from the cuts, not the file: the job
-    records the cuts, and a job resumed reads its file again."""
-    return hashlib.sha256("".join(f"{cut}\n" for cut in cuts).encode()).hexdigest()
+def cuts_sha256(cuts: Sequence[int], marks: Mapping[int, str] | None = None) -> str:
+    """The SHA-256 of a cut list as a video's record holds it: of its text one cut a line, each
+    line ended by a line feed, which is the file --cuts read where it holds the numbers alone
+    (job.read_cuts ignores blank lines, comments, and the numbers and times after the number, so a
+    file holding them has another hash and the same cuts). A shot's mark, its level (`marks`, by
+    the frame it starts at), follows its cut's number, `{cut} {level}`, and the first shot's
+    comes first as a line `0 {level}` (DESIGN.md, A level per shot, marked in the cut list: "the
+    cut list's plain text ... holds each cut's number and its mark, a list with no mark keeping
+    today's text and hash"). Made from the cuts and marks, not the file: the job records them,
+    and a job resumed reads its file again."""
+    marks = marks or {}
+    lines = [f"0 {marks[0]}\n"] if 0 in marks else []
+    lines += [f"{cut} {marks[cut]}\n" if cut in marks else f"{cut}\n" for cut in cuts]
+    return hashlib.sha256("".join(lines).encode()).hexdigest()
 
 
 def _flag(value: bool) -> str:
