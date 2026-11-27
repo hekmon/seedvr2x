@@ -1020,10 +1020,12 @@ under `--verbose`, and the plan's lines stay, in plain words:
   night's work;
 - the assembly's time: about how long joining the segments will take, its rate and its count
   of the masters under `--verbose`; before any master is written, the masters counted by the
-  format's figure, as the plan's disk line counts them (decided on 2026-11-24, to build:
-  counted at their raw size, the plan of an animated episode on the RTX 5090 said 1 h 28 min
-  to join it, 216.6 GiB of masters, where the join took 17 min 32 s on the 42.16 GiB its FFV1
-  made; the run's own estimate, from the masters written, 15 min 31 s);
+  format's figure, at most, as the plan's disk line counts them, and at their raw size where
+  the format has no figure (a segment command's) (decided on 2026-11-24, built on 2026-11-25
+  by impl-levels-1: counted at their raw size, the plan of an animated episode on the RTX 5090
+  said 1 h 28 min to join it, 216.6 GiB of masters, where the join took 17 min 32 s on the
+  42.16 GiB its FFV1 made; by the figure, 58.5 GiB, about 25 min from the same log; the run's
+  own estimate, from the masters written, 15 min 31 s);
 - the memory line: what the run holds to and why, what is free less the margin, the driver's
   own figure under `--verbose` (its warnings already say what it lends), as on the plan's card
   line since 2026-10-31;
@@ -1668,7 +1670,7 @@ from a cut list.
   first, `#` comments, no timestamps. Frame numbers are exact on the frame grid.
 - Numbers and times after the frame number are ignored, so an export carrying scores
   (sptenc's, once it has one) stays readable. A level's name there runs the shot from that cut
-  at that level, and any other word is refused (decided on 2026-11-24, to build:
+  at that level, and any other word is refused (decided on 2026-11-24, built on 2026-11-25:
   [a level per shot](#a-level-per-shot-marked-in-the-cut-list)).
 - A directory of segments is no input (the user's decision, 2026-10-05). The source is the only
   gateway, so every cut and every output segment comes from seedvr2x's own detection and
@@ -2614,7 +2616,11 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   failure (the user, 2026-10-23).
 - **Cost.** Every phase runs as many times: 4× the GPU time. A run takes the memory a single
   run takes. The time estimate (`--plan`, `--until`) counts the runs, and a job's units are
-  its shots' runs (see [Pause and resume](#pause-and-resume)).
+  its shots' runs (see [Pause and resume](#pause-and-resume)). At 4K on the 96 GB card each
+  run's units took 0.97 to 1.00 times its estimate (17 clips, impl-box-14, 2026-11-25); on
+  the RTX 5090 a clip of fast action came out 17% short, 51 min 41 s planned against 62 min
+  9 s run (799 frames in 10 shots, 720p to 1080p with `--deband`, the job on a Windows drive
+  under WSL2; impl-wsl2-11, the same night), the cause not isolated.
 - **Two runs**, from frames 0 and 2, each frame from the run where its place is 3 or 2: half
   the GPU time, 37–47% of the measured gain. Offered (the user, 2026-10-20): blind, two runs
   beat one on 7 of 8 stills ("a bit better", the eighth too close to call) and in 1 of 2
@@ -2625,7 +2631,8 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   `enhanced`, 2 runs; `maximum`, 4 runs; and since 2026-11-17 `deghost` (named `animation`
   until 2026-11-19), each frame on its own ([below](#each-frame-on-its-own---quality-deghost)).
   A shot's own level may be marked in the cut list, `--quality` being every other shot's
-  (decided on 2026-11-24, to build: [a level per shot](#a-level-per-shot-marked-in-the-cut-list)).
+  (decided on 2026-11-24, built on 2026-11-25: [a level per
+  shot](#a-level-per-shot-marked-in-the-cut-list)).
 - **Validated** on 2026-10-21. On the 96 GB card, `maximum` gave measurement's 4-run
   composite and `enhanced` its 2-run composite, 45 of 45 frames each, bit for bit
   (cartoon-bright at 1080p, untiled, numz's draw and padding, no correction). On an RTX 5090,
@@ -2646,8 +2653,10 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
   cards** (2026-11-18): its GPU test passed on the 96 GB card under Linux's driver and on the
   RTX 5090 natively and under WSL2; on the six shots below, its frames were the research
   renders' bit for bit (673 of 673, each shot at its seed, impl-box-9), a second run of one
-  shot the same. `--window` is refused at the level, as a picture refuses it: each frame is one
-  latent in the DiT, with no windows to cap.
+  shot the same. `--window` is refused where every shot is at the level, as a picture refuses
+  it: each frame is one latent in the DiT, with no windows to cap; where the cut list gives
+  shots of a job other levels, it caps the windows of the shots that have any ([a level per
+  shot](#a-level-per-shot-marked-in-the-cut-list)).
 - **In the nodes** since 2026-11-20 (impl-anim-3, built and tested on the CPU): Upscale
   Video's quality offers the four levels, `standard` by default; its tooltip and the nodes'
   README say when to take `deghost` and what it costs, as the command line's documents do (the
@@ -2675,7 +2684,12 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
   luma), its third 0.05. The VAE alone, each latent decoded as encoded, made none (within
   0.013), so the DiT's step blends them. A frame alone in its latent measured within 0.005,
   `maximum`'s choice of run within 0.011; the eyes still saw ghosts at `maximum` when played,
-  and none with each frame on its own.
+  and none with each frame on its own. On another animated episode's ten fastest scenes, 799
+  frames (720p to 1080p, the RTX 5090, 2026-11-25), `maximum` with `--deband` showed no
+  ghosting at all to the user's eyes, beside the same frames at `deghost` and the original.
+  The user's guess: that episode's fast animation follows each movement frame by frame, where
+  the first's fast scenes move a drawing back and forth between two positions, again and
+  again, a way of drawing fewer pictures; not measured.
 - **The noise.** Each frame made a shot of its own, seeded as a shot is, by its first frame,
   flickered where the picture holds still: its mean change from frame to frame 0.11 to 0.30
   8-bit codes over `standard`'s, 1.0 on a vertical pan. With the same noise for every frame,
@@ -2780,8 +2794,14 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
     on a Windows drive) said 19 h 27 min against the 21.0 h it took (2.021 s a frame; the
     first nights' 2.10 gave 21.8 h, above), 7% short, its DiT 0.706 s a frame against 0.775
     run; its calibration's rate a token, 0.092 ms, was among the lowest of five on that card
-    (0.086 to 0.106, 2026-11-22 to 24), so a plan's times there move by about a tenth from one
-    calibration to the next.
+    (0.086 to 0.106, 2026-11-22 to 24), so a plan's times there moved by about a tenth from
+    one day's calibration to another's. Within a night they hold: seven plans of the same job
+    one after another (2026-11-25, impl-wsl2-11, main's code of 2026-11-22), whether the card
+    had stood idle for 15 min before or not, gave 0.083 to 0.084 ms a token, under all five
+    before, and 19 h 19 min to 20 h 1 min, within 1.8% of their mean and 5 to 8% short of the
+    21.0 h; the spread followed the frames alone's decode, 0.716 to 0.772 s a frame, not the
+    DiT's rate or the card's clock (3,075 to 3,090 MHz). What moves the rate from one day to
+    another is not isolated.
   - **The other levels' times in its plan** were off where the job is on a Windows drive
     under WSL2. The plan at `deghost` prices the packed levels by the calibration's encodes
     and decodes of 5 and 13 frames, made on the frame's plan, whose scratch allowance is a
@@ -2796,8 +2816,8 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
     their scratch in system memory (0.15 GiB at 13 frames of 1080p, four times that at 4K,
     given back with the calibration), as a packed level's plan keeps a short shot's, so that
     each level is timed as its own plan would run it. Built on 2026-11-22 (impl-fix-5):
-    `calibrate`'s `frame_plan`, set by `main._calibrated` where the job's level takes each
-    frame alone, allows those passes at least 13 padded frames' scratch (165,335,040 bytes
+    `calibrate`'s `frame_plan`, set by `main._calibrated` where every shot's level takes
+    each frame alone, allows those passes at least 13 padded frames' scratch (165,335,040 bytes
     at 1080p, 656,547,840 at 4K), the frames alone keeping the plan's; no plan moves.
     Measured on 2026-11-24 (impl-wsl2-10, main's `--plan` at `deghost` on the RTX 5090, the
     job on a Windows drive): every tiled decode of the calibration in system memory, its 13
@@ -2848,16 +2868,17 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
   would hold them still is not for v0.1.0: a held drawing's frames packed into one latent
   (parked, below). What keeps that cost to the shots that need the level is the level marked
   shot by shot in the cut list ([a level per shot](#a-level-per-shot-marked-in-the-cut-list),
-  decided on 2026-11-24, to build).
+  decided on 2026-11-24, built on 2026-11-25).
 - **The users' guidance for animation** (the user, 2026-11-19), in their documents: test the
   source on short clips first (a dark gradient, a fast scene, a held scene with fine details);
   start at `maximum` and keep it where the picture is clean; where terraces show, add
   `--deband`; where fast scenes still ghost, take `--quality deghost`, with `--deband` only if
-  terraces show there too, or, once built, mark the shots of those scenes `deghost` in the cut
-  list, `maximum` kept for every other shot, as decided on 2026-11-24 ([a level per
+  terraces show there too, or mark the shots of those scenes `deghost` in the cut list and
+  keep `maximum` for every other shot ([a level per
   shot](#a-level-per-shot-marked-in-the-cut-list)). The deband applies to a whole job, a level
   to every shot the cut list doesn't mark: `maximum` runs a shot four times, `deghost` takes
-  about twice `standard`'s time, and `--plan` prints each level's time on the user's card.
+  about twice `standard`'s time, and `--plan` prints each level's time on the user's card, and
+  the job's own as its cut list marks it.
 - **Live action,** by the measures alone (above): mixed, further from the ground truth than
   `standard` by SSIM-Y on all 11 clips and closer by VMAF on 8. The level is for animation's
   ghosts, and no eyes have judged it on live action: it stays advised for animation alone.
@@ -2877,9 +2898,9 @@ latent of its own, every frame from the shot's noise (its source debanded from 2
 ### A level per shot, marked in the cut list
 
 Decided on 2026-11-24 (the user: an advanced user takes `deghost` for the fast scenes that
-ghost and `maximum`, with or without `--deband`, for the rest), to build in the command line
-before v0.1.0: a cut's line in the cut list may name a level, which the shot from that cut to
-the next runs at; `--quality` is the level of every shot with no mark.
+ghost and `maximum`, with or without `--deband`, for the rest), and built in the command line
+on 2026-11-25 (impl-levels-1, below): a cut's line in the cut list may name a level, which the
+shot from that cut to the next runs at; `--quality` is the level of every shot with no mark.
 - **Why.** `deghost` ends the ghosts of fast scenes, but fine details that hold still change
   from frame to frame there ([above](#each-frame-on-its-own---quality-deghost)), as the user
   saw on two whole episodes: distant eyes and small text on the first (2026-11-22), textures
@@ -2920,6 +2941,20 @@ the next runs at; `--quality` is the level of every shot with no mark.
 - **Not in the nodes** for now: their cut list is the Cuts node's, with no line to edit, and
   Upscale Video's quality stays the clip's. Nor chosen by seedvr2x itself: nothing measures yet
   which shots ghost.
+- **Built** on 2026-11-25 (impl-levels-1), tested on the CPU's stand-ins, not yet run on a
+  card. The marks are the settings' `cut_levels` (each marked cut's frame and level, the first
+  shot's at 0), written only where the list marks a shot, and the record's `marked_levels`
+  (`maximum:1,deghost:3`, in `--quality`'s order). A mark equal to `--quality` is a mark all
+  the same: the list's text and hash are another list's, and the job another job. The plan's
+  quality line names each level with its count of shots and the runs in all, and its time at
+  each `--quality` ends with the job's own as marked. Each shot's masters are those of the same
+  shot in a job at its level alone, the tiles pinned in both, runs merged from two windows
+  among them: at `maximum` with shots marked `deghost`, at `deghost` with shots marked
+  `maximum`, at `standard` with shots marked `enhanced` and `maximum`, a segment holding two
+  levels among them; a job stopped inside such a segment, in a `deghost` shot's frames, resumes
+  to the uninterrupted job's masters. Where the disk is short, the way out names what the user
+  changes: the mark of the shot that keeps the most, or `--quality` where that shot has no mark.
+  The list is read as UTF-8, a byte-order mark taken. No case of the plan matrix moved.
 
 ## Colour correction
 
@@ -3421,7 +3456,7 @@ holds nothing personal.
     `--cuts` named) and, with `--deband`, the filter its frames were read through; where the
     list marks shots, each marked level with its count of shots, the list's SHA-256 saying
     which ([a level per shot](#a-level-per-shot-marked-in-the-cut-list), decided on 2026-11-24,
-    to build).
+    built on 2026-11-25).
 
   That is what changes the output's bits, so an output can be made again from it, the GPU and
   the libraries' versions aside (a video's manifest records those); the tiles' overlap is fixed
@@ -4553,7 +4588,8 @@ first pass, whose shots are its input, and before the models load:
     disk, 287 GiB short")
   - each phase's predicted peak, and which one bounds the plan
   - the calibration's cost, the time per phase, the total, the longest unit, which is how early
-    `--until` may stop, and each `--quality` level's time on a job not yet run
+    `--until` may stop, and each `--quality` level's time on a job not yet run, with the job's
+    own as its cut list marks it where it marks any
   - what was pinned
 - **Every choice of the plan is said, at every run, in plain words** (the user, 2026-10-20:
   most users learn seedvr2x by watching its runs and logs, not by reading the manual; built on
@@ -5531,8 +5567,8 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     lost, `ffmpeg` or the conversions changed and accepted, a cut list dropped) writes the new
     pass the same way, at once, in the run's environment.
     - The same command without `--plan` runs it, with no second first pass.
-    - A run whose settings differ only in its cuts (the cut list, the threshold, the
-      detector's file) plans it again from its record, with no decode: the cuts are derived
+    - A run whose settings differ only in its cuts (the cut list and its marks, the threshold,
+      the detector's file) plans it again from its record, with no decode: the cuts are derived
       again and the manifest rewritten at once, in the run's environment. A plan cut by a list
       and planned again without one costs a first pass, no probabilities having been kept.
     - A run whose settings differ in what the first pass doesn't read (the quality level, the
@@ -6336,6 +6372,24 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   the desktop (0.69 to 1.13 GiB free at the least), nothing held again; and in bytes, the
   960-px decodes are 5.00 MiB over their plan, every other side under (Memory planner,
   decided and built that day). int8 at every size on both drivers: Weights.
+  At `deghost`, and at `standard` again, on main's code of 2026-11-22 (2026-11-24 to 25, the
+  same jobs: impl-box-14 headless, from 8 to 48 GB at 1080p and 16 to 48 at 4K; impl-wsl2-11
+  beside the desktop, from 8 to 32 GB at 1080p and 16 to 32 at 4K): every job ran but
+  `standard` at 4K on 16 GB beside the desktop, refused at its start 0.15 GiB short as on
+  2026-11-15 (14.68 GiB free), where `deghost` ran with 12 blocks swapped. `standard`'s plans
+  and peaks were those of impl-box-4 and impl-wsl2-1 within 0.03 GiB where the free memory was
+  the same, and every DiT window was within 0.08 GiB of its plan, never over, at both levels.
+  Every other step was at or under its plan but `deghost`'s VAE units that follow a frame's
+  window, which logged peaks over theirs on 8 to 16 GB (5.70 GiB against 5.02 and 4.73 at
+  8 GB, 1080p): the DiT's weights, their reading begun before the change of phase took the
+  DiT off the card. The units read in their own phase allocated 2.10 GiB to encode and 2.38
+  to decode there. Decided and built on 2026-11-25 (impl-levels-1): a unit's peak is read from
+  its phase entered; whether `deghost`'s VAE plans are high is judged once its units are read
+  so. Over these short jobs, the load and the calibration in both, `deghost` took 1.49 to 1.80
+  times `standard`'s time on the 96 GB card (its units 1.67 to 2.11) and 1.34 to 1.57 at 1080p
+  and 1.42 to 1.44 at 4K on the RTX 5090; on the 96 GB card its DiT took the same time a frame
+  whatever the blocks swapped, 0.500 to 0.505 s at 1080p from 0 to 25 and 1.902 to 1.905 at 4K
+  from 0 to 10.
 - **`torch.compile` on the 96 GB card** (see [Memory planner](#memory-planner)). The study ran
   on an RTX 5090 alone: the 96 GB card died before its part
   ([compile.md](research/docs/compile.md)). Left for it:
