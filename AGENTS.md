@@ -45,8 +45,9 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
                          maximum and deghost, and the nodes' quality, each run's first frame,
                          the run each frame is taken from, the frames kept between runs; the
                          level that takes each frame alone, `EACH_FRAME`, deghost; a frame
-                         alone's windows, `frame_layout`, and the shots a plan is made for,
-                         `planned_shots`),
+                         alone's windows, `frame_layout`; each shot's level by the cut list's
+                         marks, `shot_levels`, and the shots a plan is made for at one level or
+                         at each shot's, `planned_shots`, with their runs, `planned_runs`),
                          plain Python; the CLI's job.py imports it, clip.py runs a clip by it
     shotcuts.py          the cuts drawn from the shot detector's probabilities (Cut, detections,
                          detected, possible, the default and the possible cuts' thresholds) and a
@@ -932,6 +933,69 @@ marker. The image server, Linux's alone by its lock, has no such line.
   run and for `--plan`, nothing made; a stop inside a shot's frames and its resume, the files kept
   named and the masters the uninterrupted job's; every level's time in its `--plan`; the unit
   files past 9,999 windows; the help.
+- A level per shot, marked in the cut list (DESIGN.md, A level per shot, marked in the cut list,
+  decided on 2026-11-24): `job.read_cuts` gives the cuts and the marks, a level's name after a cut's
+  frame number (the four `QUALITY` spells), a line `0 LEVEL` the first shot's, the numbers and times
+  after the number ignored (`_NUMBER`, `_TIME`), any other word, a second level on a line and the
+  first shot marked twice refused naming the line, a frame cut twice refused naming both lines
+  (`check_cuts` refusing cuts out of order), `0` alone refused by `check_cuts` with how to mark the
+  first shot; the file read as UTF-8 on every platform, a byte order mark at its start taken
+  (Windows' locale codec read it as part of the first number), one that isn't UTF-8 refused naming
+  its line, `--plan FILE` writing UTF-8 with no mark. The marks are `args.marks` (set where the list
+  is read, `main._listed`), the settings' `cut_levels` (`manifest.MARKS`, `[frame, level]` pairs,
+  written only where the list marks a shot, among `resume.CUT_SETTINGS`), each shot's level
+  `shotruns.shot_levels` of them and `--quality` (`main._levels`, `Manifest.levels`): its runs
+  (`Manifest.runs_of`), its frames alone (`Manifest.alone(run)`, a run's), its windows and units
+  (`timing.units_of`'s `levels`, a segment's decode each run's at its shot's), its kept frames and
+  scratch in the disk's check (`main._room_on_disk`, whose way out names what the user changes: the
+  mark of the shot that keeps the most where the list marks it, else `--quality`, each level offered
+  counted per shot at the level each would then take); the plan made for `planned_shots` of the
+  shots' levels (the packed shots, and a frame's shot where any takes each frame alone), the
+  calibration's frames alone where any shot takes them and its `frame_plan` where every shot does,
+  `--window` refused where no shot has windows (`main._window_refused`, before the first pass). The
+  record: `record.cuts_sha256(cuts, marks)` (`{cut} {level}`, the first shot's `0 {level}` first; a
+  list with no mark keeps its hash) and `Video.marked`, the field `marked_levels`
+  (`maximum:1,deghost:3`, in `QUALITY`'s order, only where the list marks a shot). `--plan FILE`
+  writes a list given back with its marks (`cuts.cut_list`'s `marks`), its header saying how to mark
+  a shot. The plan's quality line names each level with its count of shots (`planner._marked_said`,
+  `--quality`'s named as the unmarked shots' where any is, a mark equal to `--quality` being a mark:
+  `main._unmarked`), its windows line the shots with windows and the deghost ones after it, its
+  shots line, where every shot is at deghost, saying whether by `--quality` or by the marks;
+  `--plan`'s time at each `--quality` adds this job's as marked. `core/tests/ test_shotruns.py`
+  holds `shot_levels`, `planned_shots` and `planned_runs` at mixed levels and one level for every
+  shot as before; `test_record.py` the hash and the field; the CLI's `tests/test_job.py` the reading
+  and each refusal (the encodings and a frame cut twice too), `tests/test_timing.py` the units at
+  mixed levels, and `tests/test_levels_cli.py` a job with marks on a source of 37 frames, each
+  shot's masters and `--dump-frames` equal frame for frame to the same shot in a job at its level
+  alone (the window and tiles pinned in both, a reference job at deghost unwindowed), at `maximum`
+  with a shot marked `deghost`, at `deghost` with the first and the last shot marked `maximum`, at
+  `standard` with shots marked `enhanced` and `maximum`, each first segment holding shots of two
+  levels, the last shot's runs merged from two windows each at `--window 5`, the marked shots
+  differing from the job at `--quality` alone (on the stand-in, a shot of up to 4 frames is the same
+  at `maximum` and `deghost`); the settings, the record and the plan's lines, where every shot is
+  marked too; a list with no mark giving the settings of before key for key and its hash; `--plan
+  FILE`'s list read back with its marks and planned again from it; `--window` with marks, and
+  refused where every shot is at deghost, nothing made; a stop inside a marked shot and its resume,
+  and one inside a segment of two levels, at a deghost shot's third frame's window after the packed
+  shot's runs (`Steps`' `NAME#N`, a name's Nth call), the resume making nothing again; a mark
+  changed before any unit (planned again, no first pass) and after one (another job, its line naming
+  `settings.cut_levels`); the disk's check at a mark's level and its way out, the shot that keeps
+  the most marked and unmarked; the calibration's switches. The plan matrix holds no mark: its text
+  unmoved.
+- A unit's VRAM peak (`run._phase_entered`): torch's peak counter is reset once the unit's phase
+  is entered (`Models.enter`, which sends what leaves before what comes), `run._started` the
+  unit's time alone, so that each unit's line is its own: reset before the change, the VAE units
+  right after a DiT phase at deghost logged the DiT's resident weights, 6,116,776,960 bytes
+  (5.70 GiB), the encode planned at 5.02 GiB and the decode at 4.73, at 8 GB, 1080p (impl-box-14,
+  impl-wsl2-11, 2026-11-25). `tests/test_unit_peaks.py` holds every unit's peak, at standard,
+  deghost and maximum, to its own phase's resident bytes on a fake card, the DiT's over the VAE's
+  and under them (blocks swapped), so that both directions of a change are held (on the code
+  before, the units after a change of phase read the phase before's); `tests/test_shot_cli.py`'s
+  `on_the_device` reads the card around `_phase_entered`. The research scripts that read a unit's
+  peak: `research/scripts/decode_peaks.py` reads its `before` after `run._phase_entered`'s reset,
+  its marks reset with `run._started`; `compile_run.py` its `allocated_before` there, on the unit
+  begun last; `vae_room.py` hooks `run._started` alone, its records counted from the phase
+  entered since the change and from before it until then.
 - The time of a job at deghost (DESIGN.md, Each frame on its own, "The plan's time is off at this
   level": priced at a window's frames' rate, the plan said 10 h 8 min for an episode that took
   15 h 26 min on the 96 GB card, 25 h for one that took 21.8 h on the RTX 5090): a frame alone's
@@ -1581,7 +1645,14 @@ marker. The image server, Linux's alone by its lock, has no such line.
 - `tests/test_disk.py` holds the disk a job takes beside its output (`disk.py`): the
   estimate of the masters at 1080p, at 4K and at an odd size, from the segments a resume has
   written, a segment command's unknown and then measured, the room free to a user, and the line
-  among `--plan`'s and a run's warning, which never refuses.
+  among `--plan`'s and a run's warning, which never refuses; and the assembly's masters
+  (`main._masters`, on `disk.masters`, DESIGN.md, Architecture, What it prints, decided on
+  2026-11-24): before any is written the disk line's figure at 1080p and at 4K, a PNG's and a format
+  with no figure their raw size, a segment command's job its raw size (`disk.RAW_BYTES`, where
+  `disk.masters` gives none), the written ones' bytes a frame once there are some, and what counted
+  them, said in the debug line (`main._say_assembly_basis`). Counted at their raw size, an episode's
+  plan on the RTX 5090 said 1 h 28 min to join 216.6 GiB; by the figure the same log's rate gives
+  about 25 min, for a join that took 17 min 32 s.
 - `--compile` is held on the CPU by `tests/test_compile.py` (`seedvr2x/compiling.py`, `peaks.py`'s
   range of shapes) for the library's side and by `test_compile_cli.py` (the compiled
   passes of `seedvr2x/shot_plan.py`'s plan, `planner.py`'s shapes, the job's plan and record)
@@ -1744,8 +1815,10 @@ marker. The image server, Linux's alone by its lock, has no such line.
   URI in full; the app named in the creator (`seedvr2x`, `seedvr2x-imgserver`); the resolution
   asked and the sample aspect as `N:D`; a video's tags, the same fields prefixed `seedvr2x_`, with
   its window cap, level, compile, `replanned` and cuts (a threshold, or `cuts_sha256`, the hash of
-  the plain list's text); the bytes the fields' alone; a field out of range refused; a model's
-  name that XML can't hold, or a path, written so that it parses, as its file name.
+  the plain list's text, its marks in it), and the levels a cut list marks with their counts
+  (`marked_levels`, only where it marks any); the bytes the fields' alone; a field out of range
+  refused; a model's name that XML can't hold, or a path, written so that it parses, as its file
+  name.
   `tests/test_still.py` holds `seedvr2x/still.py` on `stand_ins.cpu_models`' VAE cast to bfloat16
   and a stand-in DiT: one latent, the two seeds, nothing loaded, the phases in order, tiled
   passes in memory, the correction against the picture, NaN refused. `tests/

@@ -475,8 +475,11 @@ at 0.2, with no decode, 76 and 24. The list of its 960×540 copy, which this man
 # A line per cut: the frame it cuts at, the first frame of a shot, counted from zero;
 # the shot detector's peak probability, on the frame before it; the time of that frame
 # from the source's start, H:MM:SS.mmm, as a player shows it. seedvr2x reads the frame
-# number alone. A possible cut is a commented line: checking it is a jump to its time in
-# a player.
+# number, and a level's name after it, ignoring the numbers and times. A possible cut is
+# a commented line: checking it is a jump to its time in a player.
+# A level's name (standard, enhanced, maximum, deghost) at the end of a cut's line runs
+# the shot from that cut at that level, every other shot at --quality's; a line
+# `0 LEVEL` marks the first shot. A mark changed is another job once a unit is made.
 # Uncomment a possible cut to keep it, delete a line to drop a cut, then run with --cuts
 # FILE, this file.
 215 0.598 0:00:08.958
@@ -491,14 +494,22 @@ at 0.2, with no decode, 76 and 24. The list of its 960×540 copy, which this man
   rounded up to the millisecond (here at 24 frames per second).
 - A possible cut is a commented line. Uncomment it to keep it; delete a line to drop a cut;
   add a line to cut somewhere else.
-- seedvr2x reads the frame number alone: the first frame of each shot except the first, one
-  per line, `#` for comments, anything after the number ignored. A list from another tool
-  needs nothing more. Times aren't read: only a frame number is exact.
+- seedvr2x reads the frame number: the first frame of each shot except the first, one per line,
+  `#` for comments, the numbers and times after it ignored. A list from another tool needs
+  nothing more. Times aren't read: only a frame number is exact.
+- A level's name after the number marks the shot from that cut to the next: it runs at that
+  level, and every shot with no mark at `--quality`'s ([a level per
+  shot](#a-level-per-shot-marked-in-the-cut-list)).
 - The probability is cut to 3 decimals, never rounded up: a cut that shows 0.300 reached the
   threshold.
-- A list is refused for a first field that isn't a whole number, naming the line, and for a cut
-  at frame 0, cuts that don't increase, or a cut past the source's last frame, naming the frame.
-  An empty list is one shot.
+- The file is read as UTF-8, whatever the system's language, a byte order mark at its start
+  taken, as some Windows editors write one; a file in another encoding is refused naming the
+  line.
+- A list is refused for a first field that isn't a whole number, for a word after it that is
+  neither a level nor a number or a time (a misspelt level among them), and for two levels on a
+  line, naming the line; for a frame cut twice, naming both lines; and for a cut at frame 0, cuts
+  that don't increase, or a cut past the source's last frame, naming the frame. An empty list is
+  one shot.
 - Where the source has frames missing, frame numbers count their filled places too
   ([missing frames](#missing-frames)), and the list's header says so.
 
@@ -746,7 +757,9 @@ the shot's grid of latents shifted by a frame, and keeps each frame from the run
 it best. It costs 2
 or 4 times the GPU time, and no more memory. `deghost` upscales each frame on its own
 ([below](#each-frame-on-its-own---quality-deghost)), at about twice `standard`'s time, for
-animation whose fast scenes still ghost ([animation](#animation)).
+animation whose fast scenes still ghost ([animation](#animation)). `--quality` is the level of
+every shot; a shot may take another, marked in the cut list ([a level per
+shot](#a-level-per-shot-marked-in-the-cut-list)).
 
 ### Why one run isn't the best the model can do
 
@@ -894,10 +907,48 @@ A stream copy cuts at a keyframe, so the extract may start a little before 0:12:
 uv run seedvr2x film.mkv -o film.1080p.mkv --plan film.cuts.txt
 ```
 
+### A level per shot, marked in the cut list
+
+A level can be given to a shot alone: its name at the end of its cut's line runs that shot at
+that level, and `--quality` is the level of every shot the list doesn't mark. So one job takes
+`deghost` for the fast scenes that ghost and `maximum` for the rest, with one load of the models,
+one plan and one finished file:
+
+```
+# the first shot, which starts at no cut, takes a line 0 LEVEL
+0 maximum
+215 0.598 0:00:08.958 deghost
+454 0.863 0:00:18.917
+467 0.331 0:00:19.458 deghost
+519 0.920 0:00:21.625
+```
+
+```
+uv run seedvr2x episode.mkv -o episode.1080p.mkv --cuts episode.cuts.txt --quality maximum
+```
+
+- **What a mark is:** one of the four levels, `standard`, `enhanced`, `maximum` or `deghost`,
+  spelt as `--quality` takes them, after the frame number, the probability and the time around it
+  ignored. A word that is no level, and two levels on a line, are refused naming the line, so that
+  a misspelt level can't pass unseen. `0` alone is still refused: the first shot is marked by a
+  line `0 LEVEL`.
+- **What each shot gets:** its frames are those of the same shot in a job at its level alone,
+  with the same plan's tiles. `--deband` stays the whole job's. `--window` caps the windows of the
+  shots that have some, and is refused only where every shot is at `deghost`.
+- **What the plan says:** its quality line names each level with its count of shots, and its
+  time counts each shot at its own level; `--plan` prints both before anything runs, beside each
+  level's time for the whole job. `--plan FILE` writes a list given back with its marks.
+- **A mark changed** is a changed cut list: before the job's first unit, its plan is made again
+  from its record, with no decode; once a unit is made, it is another job, every shot made again.
+  Choose the marks on short clips before the long run ([animation](#choosing-on-short-clips)).
+- The record in each output keeps `--quality`, and names each level the list marks with its count
+  of shots ([the record](#the-record-in-each-output)).
+
 ## Animation
 
-An animated source meets three things the model does, and seedvr2x has an answer to each. A
-level and the deband apply to a whole job, so try them on short clips of your source first.
+An animated source meets three things the model does, and seedvr2x has an answer to each. The
+deband applies to a whole job and `--quality` to every shot the cut list doesn't mark, so try
+them on short clips of your source first.
 
 ### What the model does to it
 
@@ -943,12 +994,17 @@ level and the deband apply to a whole job, so try them on short clips of your so
    or thin lines.
 2. Run them at `--quality maximum`. Where the picture is clean, keep it.
 3. Where terraces show, add `--deband`.
-4. Where fast scenes still ghost, take `--quality deghost`, with `--deband` only if terraces
-   show there too.
+4. Where fast scenes still ghost, mark their shots `deghost` in the cut list and keep `maximum`
+   for every other shot ([a level per shot](#a-level-per-shot-marked-in-the-cut-list)); or, where
+   most of the source ghosts, take `--quality deghost`. `--deband` only if terraces show there
+   too.
 
-The level and the deband you settle on then run the whole job: `maximum` runs every shot four
-times and `deghost` takes about twice `standard`'s time, and `--plan` prints each level's time
-on your card before anything runs. `deghost` was not measured on live action and is for
+Then `--plan FILE` on the whole source writes its cut list: mark the fast scenes' shots there,
+and run with it. The marks and the deband you settle on run the whole job: a mark changed once
+the job has made a unit is another job, every shot made again, so settle them on the clips
+first. `maximum` runs a shot four times and `deghost` takes about twice `standard`'s time, and
+`--plan` prints each level's time on your card, and this job's as marked, before anything
+runs. `deghost` was not measured on live action and is for
 animation until it is; on live action, the eyes found that `--deband` took detail from dark
 scenes.
 
@@ -1226,7 +1282,10 @@ with their SHA-256, the seed, the colour correction, the tiles and the attention
 says what made it), and for
 a video its window cap, `--quality`, `--compile`, its cuts (the threshold they were detected
 at, or, for a list given with `--cuts`, the SHA-256 of its cuts written one frame number a line,
-not of the file) and, with `--deband`, the filter its frames were read through. That
+a marked cut's level after its number and the first shot's mark first as `0 LEVEL`, not of the
+file), the levels the list marks shots with, each with its count of shots (`marked_levels`,
+`deghost:4`, only where it marks any) and, with `--deband`, the filter its frames were read
+through. That
 is what changes the output's bits, so an output can be made again from it, on the same GPU and
 libraries. It is always written, with no option to leave it out, and
 holds nothing personal: no path, no date, no machine. Beside it is the mark platforms read to
@@ -2544,7 +2603,13 @@ why it was taken, what it costs, and the option that changes it ([GPU memory](#g
 - **windows:** the longest window the budget holds, 7 latents: the biggest lever on quality.
   The two short shots fit whole; the long one runs in two windows, 1 join.
 - **quality:** the level, and what the others would cost ([several runs of a
-  shot](#several-runs-of-a-shot---quality)).
+  shot](#several-runs-of-a-shot---quality)). Where the cut list marks shots, the line begins
+  `quality: by the cut list's marks,` and names each level with its count of shots and what it
+  does, `--quality`'s said as every shot the list doesn't mark where some are unmarked, then the
+  runs in all, each shot's at its level, and the frames on disk for the shot that keeps the most
+  between its runs, where one keeps any ([a level per
+  shot](#a-level-per-shot-marked-in-the-cut-list)). The windows line then counts the shots that
+  have windows, the `deghost` ones said after it, one a frame.
 - **deband:** with `--deband` alone, after the quality line: the filter, where it runs, and the
   shot detection reading the source as it is ([banded sources](#banded-sources---deband)).
 - **blocks swapped:** 33 of the DiT's 36 wait in system memory, so that the window gets their
@@ -2603,8 +2668,10 @@ give the longest shot windows of 91 latents.
 - **The job's time,** by phase, then the assembly's, estimated cautiously.
 - **The longest unit,** the segment's decode here: how early `--until` may stop.
 
-`--plan` says more, before a job has made a unit: each `--quality` level's time, and with
-`--until` whether the job ends by then. The Sol Levante short, 4.4 minutes, planned to 1080p on
+`--plan` says more, before a job has made a unit: each `--quality` level's time, every shot at
+it, and with `--until` whether the job ends by then. Where the cut list marks shots, the job's
+own time is its shots' each at its level, said last on that line, `as marked in the cut list
+about … (this job's)`. The Sol Levante short, 4.4 minutes, planned to 1080p on
 that RTX 5090 by a build before 0.1.0, beside its desktop,
 `--until 07:30`, its assembly line left out (0.1.0 words it otherwise):
 

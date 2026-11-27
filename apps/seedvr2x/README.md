@@ -175,9 +175,12 @@ says where the line falls).
 
 For animation, try short clips of the source first (a dark gradient, a fast scene, a held scene
 with fine details): `--quality maximum` where the picture is clean; `--deband` where gradients
-come out in terraces; `--quality deghost` where fast scenes still ghost, each frame upscaled on
-its own at about twice `standard`'s time, its fine details that hold still free to change from
-frame to frame ([the manual's animation](MANUAL.md#animation) says why and how).
+come out in terraces; `deghost` where fast scenes still ghost, each frame upscaled on its own at
+about twice `standard`'s time, its fine details that hold still free to change from frame to
+frame ([the manual's animation](MANUAL.md#animation) says why and how). `--quality` is the level
+of every shot the cut list doesn't mark: a level's name at the end of a cut's line runs that shot
+at that level, so that one job takes `deghost` for the fast scenes alone and `maximum` for the
+rest ([the manual](MANUAL.md#a-level-per-shot-marked-in-the-cut-list)).
 
 A source whose smooth gradients come in fine steps, most often dark shaded animation and
 near-black haze, can come out with those steps drawn as contour lines across the sky or the
